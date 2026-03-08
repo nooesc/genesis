@@ -263,6 +263,39 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::memory::MemoryRecallTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "search_files".to_owned(),
+                description: "Searches file contents recursively using grep, returning matching lines with file paths and line numbers.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "The text pattern to search for (supports basic regex)." },
+                        "path": { "type": "string", "description": "Directory to search in (defaults to current directory)." }
+                    },
+                    "required": ["pattern"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::search::SearchFilesTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "web_request".to_owned(),
+                description: "Makes an HTTP request to a URL and returns the response status, headers, and body.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL to request." },
+                        "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD). Defaults to GET." },
+                        "body": { "type": "string", "description": "Optional request body (sent as JSON content-type)." }
+                    },
+                    "required": ["url"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::web::WebRequestTool,
         );
     registry
 }
@@ -342,7 +375,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 8);
+        assert_eq!(definitions.len(), 10);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -351,6 +384,8 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "list_dir"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_store"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_recall"));
+        assert!(definitions.iter().any(|tool| tool.name == "search_files"));
+        assert!(definitions.iter().any(|tool| tool.name == "web_request"));
     }
 
     #[test]
