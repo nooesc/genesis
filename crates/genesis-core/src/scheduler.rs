@@ -110,6 +110,39 @@ impl CronField {
     }
 }
 
+/// A schedule that is due for execution at the current time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueSchedule {
+    pub id: String,
+    pub destination: String,
+    pub prompt: String,
+}
+
+/// Check which schedules from the given list are due at `now`.
+///
+/// Schedules with unparseable cron expressions are silently skipped.
+pub fn check_due_schedules(
+    schedules: &[genesis_storage::StoredSchedule],
+    now: &CronTime,
+) -> Vec<DueSchedule> {
+    schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .filter_map(|s| {
+            let expr = CronExpr::parse(&s.cron_expression).ok()?;
+            if expr.matches(now) {
+                Some(DueSchedule {
+                    id: s.id.clone(),
+                    destination: s.destination.clone(),
+                    prompt: s.prompt.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +225,63 @@ mod tests {
         assert!(!expr.matches(&CronTime {
             minute: 0, hour: 9, day_of_month: 11, month: 3, day_of_week: 2,
         }));
+    }
+
+    #[test]
+    fn check_due_schedules_returns_matching() {
+        let schedules = vec![
+            genesis_storage::StoredSchedule {
+                id: "s1".to_owned(),
+                cron_expression: "*/5 * * * *".to_owned(),
+                destination: "cli".to_owned(),
+                prompt: "check status".to_owned(),
+                enabled: true,
+                created_at: "2026-03-08".to_owned(),
+            },
+            genesis_storage::StoredSchedule {
+                id: "s2".to_owned(),
+                cron_expression: "0 9 * * *".to_owned(),
+                destination: "cli".to_owned(),
+                prompt: "morning report".to_owned(),
+                enabled: true,
+                created_at: "2026-03-08".to_owned(),
+            },
+            genesis_storage::StoredSchedule {
+                id: "s3".to_owned(),
+                cron_expression: "*/5 * * * *".to_owned(),
+                destination: "cli".to_owned(),
+                prompt: "disabled job".to_owned(),
+                enabled: false,
+                created_at: "2026-03-08".to_owned(),
+            },
+        ];
+
+        let now = CronTime {
+            minute: 10, hour: 14, day_of_month: 8, month: 3, day_of_week: 6,
+        };
+
+        let due = check_due_schedules(&schedules, &now);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "s1");
+        assert_eq!(due[0].prompt, "check status");
+    }
+
+    #[test]
+    fn check_due_schedules_skips_invalid_cron() {
+        let schedules = vec![genesis_storage::StoredSchedule {
+            id: "bad".to_owned(),
+            cron_expression: "not-valid".to_owned(),
+            destination: "cli".to_owned(),
+            prompt: "broken".to_owned(),
+            enabled: true,
+            created_at: "2026-03-08".to_owned(),
+        }];
+
+        let now = CronTime {
+            minute: 0, hour: 0, day_of_month: 1, month: 1, day_of_week: 0,
+        };
+
+        let due = check_due_schedules(&schedules, &now);
+        assert!(due.is_empty());
     }
 }
