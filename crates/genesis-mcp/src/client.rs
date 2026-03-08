@@ -11,7 +11,7 @@ use crate::protocol::{
     InitializeParams, InitializeResult, ClientCapabilities, Implementation,
     McpToolDef, ToolCallParams, ToolCallResult, ToolsListResult,
 };
-use crate::transport::StdioTransport;
+use crate::transport::{HttpTransport, McpTransport, StdioTransport};
 use crate::McpError;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -20,19 +20,52 @@ const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Configuration for connecting to a single MCP server.
 #[derive(Debug, Clone)]
-pub struct McpServerConfig {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub env: HashMap<String, String>,
-    pub connect_timeout: Duration,
-    pub call_timeout: Duration,
+pub enum McpServerConfig {
+    /// Stdio transport: spawn a subprocess and communicate via stdin/stdout.
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+        connect_timeout: Duration,
+        call_timeout: Duration,
+    },
+    /// HTTP transport: communicate via JSON-RPC over HTTP POST.
+    Http {
+        name: String,
+        url: String,
+        headers: HashMap<String, String>,
+        connect_timeout: Duration,
+        call_timeout: Duration,
+    },
+}
+
+impl McpServerConfig {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stdio { name, .. } | Self::Http { name, .. } => name,
+        }
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        match self {
+            Self::Stdio { connect_timeout, .. } | Self::Http { connect_timeout, .. } => {
+                *connect_timeout
+            }
+        }
+    }
+
+    pub fn call_timeout(&self) -> Duration {
+        match self {
+            Self::Stdio { call_timeout, .. } | Self::Http { call_timeout, .. } => *call_timeout,
+        }
+    }
 }
 
 /// A connected MCP client for a single server.
 pub struct McpClient {
     name: String,
-    transport: StdioTransport,
+    transport: Box<dyn McpTransport>,
     call_timeout: Duration,
     tools: Vec<McpToolDef>,
 }
@@ -40,13 +73,32 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server, perform the initialize handshake, and discover tools.
     pub async fn connect(config: McpServerConfig) -> Result<Self, McpError> {
-        info!(
-            server = config.name.as_str(),
-            command = config.command.as_str(),
-            "connecting to MCP server"
-        );
+        let name = config.name().to_owned();
+        let connect_timeout = config.connect_timeout();
+        let call_timeout = config.call_timeout();
 
-        let transport = StdioTransport::spawn(&config.command, &config.args, &config.env).await?;
+        let transport: Box<dyn McpTransport> = match &config {
+            McpServerConfig::Stdio {
+                command, args, env, ..
+            } => {
+                info!(
+                    server = name.as_str(),
+                    command = command.as_str(),
+                    "connecting to MCP server via stdio"
+                );
+                Box::new(StdioTransport::spawn(command, args, env).await?)
+            }
+            McpServerConfig::Http {
+                url, headers, ..
+            } => {
+                info!(
+                    server = name.as_str(),
+                    url = url.as_str(),
+                    "connecting to MCP server via HTTP"
+                );
+                Box::new(HttpTransport::new(url, headers)?)
+            }
+        };
 
         // Initialize handshake
         let init_params = InitializeParams {
@@ -64,7 +116,7 @@ impl McpClient {
                 Some(serde_json::to_value(&init_params).map_err(|e| {
                     McpError::Protocol(format!("failed to serialize init params: {e}"))
                 })?),
-                config.connect_timeout,
+                connect_timeout,
             )
             .await?;
 
@@ -84,7 +136,7 @@ impl McpClient {
             })?;
 
         debug!(
-            server = config.name.as_str(),
+            server = name.as_str(),
             protocol_version = init_result.protocol_version.as_str(),
             server_name = init_result.server_info.as_ref().map(|s| s.name.as_str()),
             "MCP server initialized"
@@ -96,7 +148,7 @@ impl McpClient {
         // Discover tools
         let tools = if init_result.capabilities.tools.is_some() {
             let tools_resp = transport
-                .request("tools/list", Some(json!({})), config.connect_timeout)
+                .request("tools/list", Some(json!({})), connect_timeout)
                 .await?;
 
             if let Some(err) = tools_resp.error {
@@ -115,23 +167,23 @@ impl McpClient {
                 })?;
 
             info!(
-                server = config.name.as_str(),
+                server = name.as_str(),
                 count = tools_result.tools.len(),
                 "discovered MCP tools"
             );
             tools_result.tools
         } else {
             debug!(
-                server = config.name.as_str(),
+                server = name.as_str(),
                 "server does not advertise tool capabilities"
             );
             Vec::new()
         };
 
         Ok(Self {
-            name: config.name,
+            name,
             transport,
-            call_timeout: config.call_timeout,
+            call_timeout,
             tools,
         })
     }
@@ -255,5 +307,34 @@ mod tests {
         assert_eq!(defs[0].name, "mcp_filesystem_read_file");
         assert_eq!(defs[0].description, "Read a file");
         assert!(defs[0].parameters.is_some());
+    }
+
+    #[test]
+    fn stdio_config_accessors() {
+        let config = McpServerConfig::Stdio {
+            name: "fs".to_owned(),
+            command: "npx".to_owned(),
+            args: vec![],
+            env: HashMap::new(),
+            connect_timeout: Duration::from_secs(30),
+            call_timeout: Duration::from_secs(60),
+        };
+        assert_eq!(config.name(), "fs");
+        assert_eq!(config.connect_timeout(), Duration::from_secs(30));
+        assert_eq!(config.call_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn http_config_accessors() {
+        let config = McpServerConfig::Http {
+            name: "remote".to_owned(),
+            url: "https://example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            connect_timeout: Duration::from_secs(10),
+            call_timeout: Duration::from_secs(120),
+        };
+        assert_eq!(config.name(), "remote");
+        assert_eq!(config.connect_timeout(), Duration::from_secs(10));
+        assert_eq!(config.call_timeout(), Duration::from_secs(120));
     }
 }

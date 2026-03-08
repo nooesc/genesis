@@ -46,7 +46,7 @@ impl McpManager {
         let mut clients = HashMap::new();
 
         for config in configs {
-            let name = config.name.clone();
+            let name = config.name().to_owned();
             match McpClient::connect(config).await {
                 Ok(client) => {
                     info!(
@@ -135,46 +135,42 @@ fn parse_mcp_tool_name(prefixed: &str) -> Result<(&str, &str), McpError> {
 
 /// Build MCP server configs from a map of name → raw config.
 ///
-/// This is the bridge between genesis-config's `McpServerConfig` (serde) and
-/// the runtime `McpServerConfig` used by the client.
+/// This is the bridge between genesis-config's serde-friendly `McpServerConfig`
+/// and the runtime `McpServerConfig` enum used by the client. Supports both
+/// stdio (command-based) and HTTP (url-based) transports.
 pub fn build_server_configs(
-    servers: &HashMap<String, McpServerEntry>,
+    servers: &HashMap<String, genesis_config::McpServerConfig>,
 ) -> Vec<McpServerConfig> {
     servers
         .iter()
         .filter_map(|(name, entry)| {
-            // Only stdio transport supported for now
-            let command = entry.command.as_ref()?;
-            Some(McpServerConfig {
-                name: name.clone(),
-                command: command.clone(),
-                args: entry.args.clone().unwrap_or_default(),
-                env: entry.env.clone().unwrap_or_default(),
-                connect_timeout: Duration::from_secs(
-                    entry.connect_timeout.unwrap_or(60),
-                ),
-                call_timeout: Duration::from_secs(entry.timeout.unwrap_or(120)),
-            })
+            let connect_timeout = Duration::from_secs(entry.connect_timeout.unwrap_or(60));
+            let call_timeout = Duration::from_secs(entry.timeout.unwrap_or(120));
+
+            if let Some(command) = &entry.command {
+                // Stdio transport
+                Some(McpServerConfig::Stdio {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: entry.args.clone().unwrap_or_default(),
+                    env: entry.env.clone().unwrap_or_default(),
+                    connect_timeout,
+                    call_timeout,
+                })
+            } else if let Some(url) = &entry.url {
+                // HTTP transport
+                Some(McpServerConfig::Http {
+                    name: name.clone(),
+                    url: url.clone(),
+                    headers: entry.headers.clone().unwrap_or_default(),
+                    connect_timeout,
+                    call_timeout,
+                })
+            } else {
+                None
+            }
         })
         .collect()
-}
-
-/// Raw MCP server entry from config file (serde-friendly).
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct McpServerEntry {
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connect_timeout: Option<u64>,
 }
 
 #[cfg(test)]
@@ -207,13 +203,16 @@ mod tests {
     }
 
     #[test]
-    fn build_server_configs_filters_stdio_only() {
+    fn build_server_configs_handles_both_transports() {
         let mut servers = HashMap::new();
         servers.insert(
             "fs".to_owned(),
-            McpServerEntry {
+            genesis_config::McpServerConfig {
                 command: Some("npx".to_owned()),
-                args: Some(vec!["-y".to_owned(), "@modelcontextprotocol/server-filesystem".to_owned()]),
+                args: Some(vec![
+                    "-y".to_owned(),
+                    "@modelcontextprotocol/server-filesystem".to_owned(),
+                ]),
                 env: None,
                 url: None,
                 headers: None,
@@ -223,11 +222,45 @@ mod tests {
         );
         servers.insert(
             "remote".to_owned(),
-            McpServerEntry {
+            genesis_config::McpServerConfig {
                 command: None,
                 args: None,
                 env: None,
                 url: Some("https://example.com/mcp".to_owned()),
+                headers: Some(HashMap::from([(
+                    "Authorization".to_owned(),
+                    "Bearer sk-xxx".to_owned(),
+                )])),
+                timeout: None,
+                connect_timeout: None,
+            },
+        );
+
+        let configs = build_server_configs(&servers);
+        assert_eq!(configs.len(), 2);
+
+        // Find stdio config
+        let stdio = configs.iter().find(|c| c.name() == "fs").unwrap();
+        assert_eq!(stdio.call_timeout(), Duration::from_secs(180));
+        assert_eq!(stdio.connect_timeout(), Duration::from_secs(60));
+        assert!(matches!(stdio, McpServerConfig::Stdio { .. }));
+
+        // Find HTTP config
+        let http = configs.iter().find(|c| c.name() == "remote").unwrap();
+        assert_eq!(http.call_timeout(), Duration::from_secs(120));
+        assert!(matches!(http, McpServerConfig::Http { .. }));
+    }
+
+    #[test]
+    fn build_server_configs_skips_entries_without_command_or_url() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "empty".to_owned(),
+            genesis_config::McpServerConfig {
+                command: None,
+                args: None,
+                env: None,
+                url: None,
                 headers: None,
                 timeout: None,
                 connect_timeout: None,
@@ -235,11 +268,7 @@ mod tests {
         );
 
         let configs = build_server_configs(&servers);
-        assert_eq!(configs.len(), 1);
-        assert_eq!(configs[0].name, "fs");
-        assert_eq!(configs[0].command, "npx");
-        assert_eq!(configs[0].call_timeout, Duration::from_secs(180));
-        assert_eq!(configs[0].connect_timeout, Duration::from_secs(60));
+        assert!(configs.is_empty());
     }
 
     #[test]
@@ -247,7 +276,7 @@ mod tests {
         let mut servers = HashMap::new();
         servers.insert(
             "test".to_owned(),
-            McpServerEntry {
+            genesis_config::McpServerConfig {
                 command: Some("echo".to_owned()),
                 args: None,
                 env: None,
@@ -259,40 +288,8 @@ mod tests {
         );
 
         let configs = build_server_configs(&servers);
-        assert_eq!(configs[0].call_timeout, Duration::from_secs(120));
-        assert_eq!(configs[0].connect_timeout, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn mcp_server_entry_deserializes_stdio() {
-        let yaml = r#"
-            command: npx
-            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-            env:
-              TOKEN: abc123
-            timeout: 180
-        "#;
-        let entry: McpServerEntry = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(entry.command.as_deref(), Some("npx"));
-        assert_eq!(entry.args.as_ref().unwrap().len(), 3);
-        assert_eq!(
-            entry.env.as_ref().unwrap().get("TOKEN").unwrap(),
-            "abc123"
-        );
-        assert_eq!(entry.timeout, Some(180));
-    }
-
-    #[test]
-    fn mcp_server_entry_deserializes_http() {
-        let yaml = r#"
-            url: https://mcp.example.com/db
-            headers:
-              Authorization: Bearer sk-xxx
-        "#;
-        let entry: McpServerEntry = serde_yaml::from_str(yaml).unwrap();
-        assert!(entry.command.is_none());
-        assert_eq!(entry.url.as_deref(), Some("https://mcp.example.com/db"));
-        assert!(entry.headers.is_some());
+        assert_eq!(configs[0].call_timeout(), Duration::from_secs(120));
+        assert_eq!(configs[0].connect_timeout(), Duration::from_secs(60));
     }
 
     #[tokio::test]

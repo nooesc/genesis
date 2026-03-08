@@ -65,26 +65,7 @@ impl<'a> SessionExecutionService<'a> {
     /// Create a service with MCP servers connected.
     pub async fn with_mcp(loaded: &'a LoadedConfig) -> Self {
         let mcp = if !loaded.config.mcp_servers.is_empty() {
-            let configs: Vec<genesis_mcp::McpServerConfig> = loaded
-                .config
-                .mcp_servers
-                .iter()
-                .filter_map(|(name, cfg)| {
-                    let command = cfg.command.as_ref()?;
-                    Some(genesis_mcp::McpServerConfig {
-                        name: name.clone(),
-                        command: command.clone(),
-                        args: cfg.args.clone().unwrap_or_default(),
-                        env: cfg.env.clone().unwrap_or_default(),
-                        connect_timeout: std::time::Duration::from_secs(
-                            cfg.connect_timeout.unwrap_or(60),
-                        ),
-                        call_timeout: std::time::Duration::from_secs(
-                            cfg.timeout.unwrap_or(120),
-                        ),
-                    })
-                })
-                .collect();
+            let configs = genesis_mcp::build_server_configs(&loaded.config.mcp_servers);
 
             if configs.is_empty() {
                 None

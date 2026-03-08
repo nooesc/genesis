@@ -1,10 +1,12 @@
 //! MCP transport implementations.
 //!
-//! Currently supports stdio transport (subprocess via stdin/stdout).
+//! Supports stdio transport (subprocess via stdin/stdout) and HTTP transport
+//! (Streamable HTTP via JSON-RPC over POST requests).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -14,7 +16,26 @@ use tracing::{debug, error, warn};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::McpError;
 
-/// A running MCP transport that can send requests and receive responses.
+/// Trait for MCP transport implementations.
+///
+/// Both stdio and HTTP transports implement this, allowing the client to be
+/// transport-agnostic.
+pub trait McpTransport: Send + Sync {
+    /// Send a JSON-RPC request and wait for the response.
+    fn request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<JsonRpcResponse, McpError>> + Send + '_>,
+    >;
+
+    /// Send a JSON-RPC notification (no response expected).
+    fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError>;
+}
+
+/// Stdio transport — spawns a subprocess and communicates via stdin/stdout.
 #[allow(dead_code)]
 pub struct StdioTransport {
     /// Channel to send outgoing messages to the writer task.
@@ -123,49 +144,48 @@ impl StdioTransport {
             _child: Arc::new(Mutex::new(child)),
         })
     }
+}
 
-    /// Send a JSON-RPC request and wait for the response.
-    pub async fn request(
+impl McpTransport for StdioTransport {
+    fn request(
         &self,
         method: &str,
         params: Option<serde_json::Value>,
-        timeout: std::time::Duration,
-    ) -> Result<JsonRpcResponse, McpError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::new(id, method, params);
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<JsonRpcResponse, McpError>> + Send + '_>,
+    > {
+        let method = method.to_owned();
+        Box::pin(async move {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let request = JsonRpcRequest::new(id, &method, params);
 
-        let json = serde_json::to_string(&request)
-            .map_err(|e| McpError::Protocol(format!("failed to serialize request: {e}")))?;
+            let json = serde_json::to_string(&request)
+                .map_err(|e| McpError::Protocol(format!("failed to serialize request: {e}")))?;
 
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut map = self.pending.lock().await;
-            map.insert(id, tx);
-        }
-
-        self.outgoing_tx
-            .send(json)
-            .map_err(|_| McpError::Transport("writer channel closed".into()))?;
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(_)) => Err(McpError::Transport("response channel dropped".into())),
-            Err(_) => {
-                // Clean up pending entry on timeout
+            let (tx, rx) = oneshot::channel();
+            {
                 let mut map = self.pending.lock().await;
-                map.remove(&id);
-                Err(McpError::Timeout)
+                map.insert(id, tx);
             }
-        }
+
+            self.outgoing_tx
+                .send(json)
+                .map_err(|_| McpError::Transport("writer channel closed".into()))?;
+
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(resp)) => Ok(resp),
+                Ok(Err(_)) => Err(McpError::Transport("response channel dropped".into())),
+                Err(_) => {
+                    let mut map = self.pending.lock().await;
+                    map.remove(&id);
+                    Err(McpError::Timeout)
+                }
+            }
+        })
     }
 
-    /// Send a JSON-RPC notification (no response expected).
-    pub fn notify(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<(), McpError> {
-        // Notifications use id: null, but we'll send without id field
+    fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError> {
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -177,6 +197,118 @@ impl StdioTransport {
         self.outgoing_tx
             .send(json)
             .map_err(|_| McpError::Transport("writer channel closed".into()))?;
+
+        Ok(())
+    }
+}
+
+/// HTTP transport — communicates with MCP servers via HTTP POST (Streamable HTTP).
+///
+/// Each JSON-RPC request is sent as a POST to the server URL with
+/// `Content-Type: application/json`. The server responds with a JSON-RPC
+/// response in the body.
+pub struct HttpTransport {
+    http: reqwest::Client,
+    url: String,
+    next_id: AtomicU64,
+}
+
+impl HttpTransport {
+    /// Create a new HTTP transport for the given MCP server URL.
+    pub fn new(url: &str, headers: &HashMap<String, String>) -> Result<Self, McpError> {
+        let mut header_map = reqwest::header::HeaderMap::new();
+        header_map.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json"
+                .parse()
+                .map_err(|e| McpError::Transport(format!("invalid content-type header: {e}")))?,
+        );
+        for (key, value) in headers {
+            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                .map_err(|e| McpError::Transport(format!("invalid header name `{key}`: {e}")))?;
+            let val = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|e| McpError::Transport(format!("invalid header value for `{key}`: {e}")))?;
+            header_map.insert(name, val);
+        }
+
+        let http = reqwest::Client::builder()
+            .default_headers(header_map)
+            .user_agent("genesis-mcp/0.1")
+            .build()
+            .map_err(|e| McpError::Transport(format!("failed to create HTTP client: {e}")))?;
+
+        Ok(Self {
+            http,
+            url: url.to_owned(),
+            next_id: AtomicU64::new(1),
+        })
+    }
+}
+
+impl McpTransport for HttpTransport {
+    fn request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<JsonRpcResponse, McpError>> + Send + '_>,
+    > {
+        let method = method.to_owned();
+        Box::pin(async move {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let request = JsonRpcRequest::new(id, &method, params);
+
+            let response = self
+                .http
+                .post(&self.url)
+                .timeout(timeout)
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        McpError::Timeout
+                    } else {
+                        McpError::Transport(format!("HTTP request failed: {e}"))
+                    }
+                })?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(McpError::Transport(format!(
+                    "HTTP {status}: {body}"
+                )));
+            }
+
+            let resp: JsonRpcResponse = response.json().await.map_err(|e| {
+                McpError::Protocol(format!("failed to parse JSON-RPC response: {e}"))
+            })?;
+
+            Ok(resp)
+        })
+    }
+
+    fn notify(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), McpError> {
+        // For HTTP transport, notifications are fire-and-forget POSTs.
+        // We spawn a background task since the trait method is sync.
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+
+        let http = self.http.clone();
+        let url = self.url.clone();
+        tokio::spawn(async move {
+            let _ = http
+                .post(&url)
+                .json(&msg)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+        });
 
         Ok(())
     }
@@ -207,5 +339,27 @@ mod tests {
         let result = StdioTransport::spawn("cat", &[], &HashMap::new()).await;
         // Just verify the transport can be created — cat is available on macOS/Linux
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn http_transport_creates_with_empty_headers() {
+        let transport = HttpTransport::new("http://localhost:8080/mcp", &HashMap::new());
+        assert!(transport.is_ok());
+    }
+
+    #[test]
+    fn http_transport_creates_with_custom_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_owned(), "Bearer sk-test".to_owned());
+        let transport = HttpTransport::new("http://localhost:8080/mcp", &headers);
+        assert!(transport.is_ok());
+    }
+
+    #[test]
+    fn http_transport_rejects_invalid_header_name() {
+        let mut headers = HashMap::new();
+        headers.insert("invalid header\x00name".to_owned(), "value".to_owned());
+        let transport = HttpTransport::new("http://localhost:8080/mcp", &headers);
+        assert!(transport.is_err());
     }
 }
