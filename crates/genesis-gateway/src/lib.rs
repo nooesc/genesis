@@ -239,6 +239,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
+        .route("/chat/batch", post(chat_batch_handler))
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/purge", delete(purge_sessions_handler))
         .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
@@ -997,6 +998,188 @@ async fn chat_stream_handler(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+// ---------------------------------------------------------------------------
+// Batch chat endpoint
+// ---------------------------------------------------------------------------
+
+/// A single prompt within a batch request.
+#[derive(Debug, Deserialize)]
+pub struct BatchItem {
+    pub message: String,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub images: Vec<ImageInput>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub response_format: Option<genesis_provider::ResponseFormat>,
+}
+
+/// Request body for the `/chat/batch` endpoint.
+#[derive(Debug, Deserialize)]
+pub struct BatchRequest {
+    pub items: Vec<BatchItem>,
+    /// Maximum concurrent executions (default: 4, max: 16).
+    #[serde(default = "default_batch_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_batch_concurrency() -> usize {
+    4
+}
+
+/// Result of a single item in a batch.
+#[derive(Debug, Serialize)]
+pub struct BatchItemResult {
+    pub index: usize,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub turns_used: usize,
+    pub tool_calls_made: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
+}
+
+/// Response body for the `/chat/batch` endpoint.
+#[derive(Debug, Serialize)]
+pub struct BatchResponse {
+    pub results: Vec<BatchItemResult>,
+    pub total_items: usize,
+    pub successful: usize,
+    pub failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_estimated_cost: Option<f64>,
+}
+
+const MAX_BATCH_CONCURRENCY: usize = 16;
+const MAX_BATCH_SIZE: usize = 100;
+
+async fn chat_batch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BatchRequest>,
+) -> Result<Json<BatchResponse>, (StatusCode, String)> {
+    if request.items.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "batch must contain at least one item".to_owned()));
+    }
+    if request.items.len() > MAX_BATCH_SIZE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("batch exceeds maximum size of {MAX_BATCH_SIZE} items"),
+        ));
+    }
+
+    let concurrency = request.concurrency.min(MAX_BATCH_CONCURRENCY).max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let state = Arc::clone(&state);
+
+    let mut handles = Vec::with_capacity(request.items.len());
+
+    for (index, item) in request.items.into_iter().enumerate() {
+        let state = Arc::clone(&state);
+        let sem = Arc::clone(&semaphore);
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
+
+            let mut service = SessionExecutionService::new(&state.loaded);
+            if let Some(mcp) = &state.mcp {
+                service.set_mcp(std::sync::Arc::clone(mcp));
+            }
+            if let Some(system_prompt) = item.system_prompt {
+                service.set_system_prompt_override(system_prompt);
+            }
+            if let Some(response_format) = item.response_format {
+                service.set_response_format(response_format);
+            }
+
+            let session_id = item.session_id.unwrap_or_else(default_api_session_id);
+            let images: Vec<genesis_provider::ImageUrl> = item
+                .images
+                .iter()
+                .map(|img| genesis_provider::ImageUrl {
+                    url: img.url.clone(),
+                    detail: img.detail.clone(),
+                })
+                .collect();
+
+            match service
+                .run_turn(SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: &item.platform,
+                    delivery_platform: delivery_platform_from_str(&item.platform),
+                    prompt: &item.message,
+                    title: None,
+                    images,
+                })
+                .await
+            {
+                Ok(outcome) => BatchItemResult {
+                    index,
+                    session_id: outcome.session_id,
+                    response: Some(outcome.result.response),
+                    error: None,
+                    turns_used: outcome.result.turns_used,
+                    tool_calls_made: outcome.result.tool_calls_made,
+                    estimated_cost: outcome.result.estimated_cost,
+                    total_input_tokens: outcome.result.total_input_tokens,
+                    total_output_tokens: outcome.result.total_output_tokens,
+                },
+                Err(e) => BatchItemResult {
+                    index,
+                    session_id,
+                    response: None,
+                    error: Some(e.to_string()),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    estimated_cost: None,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                },
+            }
+        }));
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                error!(error = %e, "batch task panicked");
+            }
+        }
+    }
+
+    // Sort by index to preserve original order
+    results.sort_by_key(|r| r.index);
+
+    let total_items = results.len();
+    let successful = results.iter().filter(|r| r.error.is_none()).count();
+    let failed = total_items - successful;
+    let total_estimated_cost: f64 = results
+        .iter()
+        .filter_map(|r| r.estimated_cost)
+        .sum();
+
+    Ok(Json(BatchResponse {
+        results,
+        total_items,
+        successful,
+        failed,
+        total_estimated_cost: if total_estimated_cost > 0.0 {
+            Some(total_estimated_cost)
+        } else {
+            None
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1325,5 +1508,103 @@ mod tests {
             }
             other => panic!("expected JsonSchema variant, got {:?}", other),
         }
+    }
+
+    // --- Batch endpoint tests ---
+
+    #[test]
+    fn batch_request_deserializes_minimal() {
+        let json = r#"{
+            "items": [
+                {"message": "hello"},
+                {"message": "world"}
+            ]
+        }"#;
+        let req: BatchRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.items.len(), 2);
+        assert_eq!(req.items[0].message, "hello");
+        assert_eq!(req.items[1].message, "world");
+        assert_eq!(req.concurrency, 4); // default
+    }
+
+    #[test]
+    fn batch_request_deserializes_with_concurrency() {
+        let json = r#"{
+            "items": [{"message": "hi"}],
+            "concurrency": 8
+        }"#;
+        let req: BatchRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.concurrency, 8);
+    }
+
+    #[test]
+    fn batch_item_deserializes_full() {
+        let json = r#"{
+            "message": "analyze this",
+            "platform": "telegram",
+            "session_id": "batch-1",
+            "system_prompt": "Be concise.",
+            "response_format": {"type": "json_object"}
+        }"#;
+        let item: BatchItem = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(item.message, "analyze this");
+        assert_eq!(item.platform, "telegram");
+        assert_eq!(item.session_id.as_deref(), Some("batch-1"));
+        assert!(item.system_prompt.is_some());
+        assert!(item.response_format.is_some());
+    }
+
+    #[test]
+    fn batch_response_serializes() {
+        let resp = BatchResponse {
+            results: vec![
+                BatchItemResult {
+                    index: 0,
+                    session_id: "s-1".to_owned(),
+                    response: Some("Hello!".to_owned()),
+                    error: None,
+                    turns_used: 1,
+                    tool_calls_made: 0,
+                    estimated_cost: Some(0.001),
+                    total_input_tokens: 100,
+                    total_output_tokens: 20,
+                },
+                BatchItemResult {
+                    index: 1,
+                    session_id: "s-2".to_owned(),
+                    response: None,
+                    error: Some("timeout".to_owned()),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    estimated_cost: None,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                },
+            ],
+            total_items: 2,
+            successful: 1,
+            failed: 1,
+            total_estimated_cost: Some(0.001),
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(json.contains("\"total_items\":2"));
+        assert!(json.contains("\"successful\":1"));
+        assert!(json.contains("\"failed\":1"));
+        assert!(json.contains("\"response\":\"Hello!\""));
+        assert!(json.contains("\"error\":\"timeout\""));
+        assert!(!json.contains("\"response\":null")); // skip_serializing_if
+    }
+
+    #[test]
+    fn batch_response_omits_cost_when_zero() {
+        let resp = BatchResponse {
+            results: vec![],
+            total_items: 0,
+            successful: 0,
+            failed: 0,
+            total_estimated_cost: None,
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(!json.contains("total_estimated_cost"));
     }
 }
