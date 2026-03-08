@@ -534,6 +534,25 @@ impl ToolRuntime {
             return self.execute_moa(call).await;
         }
 
+        // PTC: execute_code with tool RPC access via Unix domain socket
+        if call.name == "execute_code" {
+            if let Some(code) = call.arguments.get("code") {
+                let code = code.clone();
+                let registry = self.registry.clone();
+                let context = self.context.clone();
+                return tokio::task::spawn_blocking(move || {
+                    genesis_tools::builtins::code_execution::execute_code_ptc(
+                        &code, &registry, &context,
+                    )
+                })
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "execute_code".to_owned(),
+                    reason: format!("PTC task panicked: {e}"),
+                });
+            }
+        }
+
         self.registry.execute(call, &self.context)
     }
 

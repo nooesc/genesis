@@ -14,8 +14,9 @@ reqwest = { workspace = true, features = ["blocking"] }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true

@@ -905,14 +905,30 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
-                name: "code_execution".to_owned(),
-                description: "Executes code in a sandboxed subprocess with no access to host environment variables or secrets. Use for computation, data analysis, and scripting. Supports Python (default), Node.js, and Ruby.".to_owned(),
+                name: "execute_code".to_owned(),
+                description: "Run a Python script that can call Genesis tools programmatically via RPC. \
+                    Use when you need 3+ tool calls with processing logic between them, \
+                    need to filter/reduce large outputs before they enter your context, \
+                    need conditional branching, or need to loop (fetch N pages, process N files). \
+                    Use normal tool calls instead for single calls or when you need to reason about the full result.\n\n\
+                    Available via `from genesis_tools import ...`:\n\
+                    terminal(command, timeout=None, workdir=None) \u{2014} run shell commands\n\
+                    read_file(path, offset=1, limit=500) \u{2014} read file contents\n\
+                    write_file(path, content) \u{2014} write to a file\n\
+                    search_files(pattern, target=\"content\", path=\".\") \u{2014} search files\n\
+                    patch(path, old_string, new_string, replace_all=False) \u{2014} find-and-replace\n\
+                    web_search(query, limit=5) \u{2014} search the web\n\
+                    browse(url) \u{2014} extract web page content\n\n\
+                    Also available: json_parse(text), shell_quote(s), retry(fn, max_attempts=3)\n\
+                    Limits: 5min timeout, 50KB stdout, max 50 tool calls per script.\n\
+                    Print your final result to stdout.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
-                        "code": { "type": "string", "description": "The source code to execute." },
-                        "language": { "type": "string", "description": "Programming language: 'python' (default), 'node', or 'ruby'." },
-                        "timeout_secs": { "type": "string", "description": "Timeout in seconds (default: 30). The process is killed if it exceeds this." }
+                        "code": {
+                            "type": "string",
+                            "description": "Python code to execute. Import tools with `from genesis_tools import terminal, read_file, ...` and print your final result to stdout."
+                        }
                     },
                     "required": ["code"]
                 })),
