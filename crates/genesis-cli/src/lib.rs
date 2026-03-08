@@ -239,6 +239,8 @@ pub enum Command {
         max_turns: Option<usize>,
         #[arg(long, help = "Maximum number of prompts to run concurrently")]
         concurrency: Option<usize>,
+        #[arg(long, help = "Toolset distribution name (e.g. full, development, research, safe, minimal, creative, ops, home-assistant, coding-agent, random)")]
+        toolset: Option<String>,
     },
     #[command(about = "Compress a trajectory JSON file for training/export")]
     Compress {
@@ -977,7 +979,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             model,
             max_turns,
             concurrency,
-        } => run_batch(cli.config, input, output, model, max_turns, concurrency).await,
+            toolset,
+        } => run_batch(cli.config, input, output, model, max_turns, concurrency, toolset).await,
         Command::Compress {
             input,
             output,
@@ -2021,9 +2024,23 @@ async fn run_batch(
     model_override: Option<String>,
     max_turns: Option<usize>,
     concurrency: Option<usize>,
+    toolset: Option<String>,
 ) -> Result<String, CliError> {
     let loaded = std::sync::Arc::new(load(config_path.as_deref())?);
     bootstrap(&loaded.config.storage.database_path)?;
+
+    let distribution = match &toolset {
+        Some(name) => {
+            let dist = genesis_core::toolset::builtin_distribution(name).ok_or_else(|| {
+                CliError::Other(format!(
+                    "unknown toolset distribution '{name}'. Available: {}",
+                    genesis_core::toolset::builtin_distribution_names().join(", ")
+                ))
+            })?;
+            Some(std::sync::Arc::new(dist))
+        }
+        None => None,
+    };
 
     let input_file = std::fs::File::open(&input)
         .map_err(|e| CliError::Other(format!("failed to open {input}: {e}")))?;
@@ -2079,6 +2096,7 @@ async fn run_batch(
         let output_dir = output.clone();
         let model_override = model_override.clone();
         let completed = completed.clone();
+        let distribution = distribution.clone();
 
         tasks.spawn(async move {
             let _permit = permit;
@@ -2089,6 +2107,7 @@ async fn run_batch(
                 &output_dir,
                 model_override.as_deref(),
                 max_turns,
+                distribution.as_ref().map(|d| d.as_ref()),
             )
             .await;
 
@@ -2122,6 +2141,7 @@ async fn run_batch_item(
     output_dir: &str,
     model_override: Option<&str>,
     max_turns: Option<usize>,
+    distribution: Option<&genesis_core::toolset::ToolsetDistribution>,
 ) -> Result<(), CliError> {
     let session_store = SessionStore::new(&loaded.config.storage.database_path);
     let _ = session_store.create_session(session_id, "batch", None);
@@ -2131,7 +2151,14 @@ async fn run_batch_item(
         session_id.to_owned(),
         DeliveryPlatform::Cli,
     );
-    let tool_runtime = genesis_core::build_default_tool_runtime(&execution_context);
+    let mut tool_runtime = genesis_core::build_default_tool_runtime(&execution_context);
+
+    // Apply toolset distribution filtering if specified.
+    if let Some(dist) = distribution {
+        let mut rng = rand::rng();
+        let selected = dist.sample(&mut rng);
+        tool_runtime.retain(&selected);
+    }
     let skills_section = genesis_core::skills::load_skills_prompt_for_prompt(
         &loaded.config.storage.database_path,
         &item.prompt,
@@ -5466,12 +5493,14 @@ storage:
                 model,
                 max_turns,
                 concurrency,
+                toolset,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
                 assert!(model.is_none());
                 assert!(max_turns.is_none());
                 assert!(concurrency.is_none());
+                assert!(toolset.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5502,12 +5531,36 @@ storage:
                 model,
                 max_turns,
                 concurrency,
+                toolset,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
                 assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
                 assert_eq!(max_turns, Some(12));
                 assert_eq!(concurrency, Some(8));
+                assert!(toolset.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_command_with_toolset() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "batch",
+            "--input",
+            "prompts.jsonl",
+            "--output",
+            "trajectories",
+            "--toolset",
+            "development",
+        ])
+        .expect("batch with toolset should parse");
+
+        match cli.command {
+            Command::Batch { toolset, .. } => {
+                assert_eq!(toolset.as_deref(), Some("development"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

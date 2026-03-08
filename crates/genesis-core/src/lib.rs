@@ -10,6 +10,7 @@ pub mod replay;
 pub mod sanitize;
 pub mod scheduler;
 pub mod skills;
+pub mod toolset;
 pub mod trajectory;
 
 use std::path::Path;
@@ -461,6 +462,11 @@ fn infer_backend(model: &str) -> (&'static str, &'static str) {
 }
 
 impl ToolRuntime {
+    /// Filter the tool registry to only include tools in the given set.
+    pub fn retain(&mut self, names: &std::collections::HashSet<String>) {
+        self.registry.retain(names);
+    }
+
     /// Returns built-in tool definitions only (sync).
     /// Use `definitions_async()` to include MCP tools.
     pub fn definitions(&self) -> Vec<genesis_types::ToolDefinition> {
