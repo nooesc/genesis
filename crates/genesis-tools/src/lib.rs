@@ -676,6 +676,23 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "code_execution".to_owned(),
+                description: "Executes code in a sandboxed subprocess with no access to host environment variables or secrets. Use for computation, data analysis, and scripting. Supports Python (default), Node.js, and Ruby.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "code": { "type": "string", "description": "The source code to execute." },
+                        "language": { "type": "string", "description": "Programming language: 'python' (default), 'node', or 'ruby'." },
+                        "timeout_secs": { "type": "string", "description": "Timeout in seconds (default: 30). The process is killed if it exceeds this." }
+                    },
+                    "required": ["code"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::code_execution::CodeExecutionTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "session_export".to_owned(),
                 description: "Exports a conversation session to Markdown or JSON format. Can write to a file or return the content directly.".to_owned(),
                 parameters: Some(json!({
@@ -770,7 +787,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 30);
+        assert_eq!(definitions.len(), 31);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

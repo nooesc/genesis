@@ -1,4 +1,5 @@
 pub mod clarify;
+pub mod code_execution;
 pub mod docker;
 pub mod export;
 pub mod fs;
