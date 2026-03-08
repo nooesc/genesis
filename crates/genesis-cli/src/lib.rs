@@ -452,6 +452,15 @@ pub enum EvalCommand {
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
     },
+    #[command(about = "Validate trajectory files for structural integrity")]
+    Validate {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Delete invalid files")]
+        remove: bool,
+    },
     #[command(about = "Random sample of trajectories from a directory")]
     Sample {
         #[arg(help = "Source directory containing trajectory JSON files")]
@@ -985,6 +994,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 seed,
                 recursive,
             } => run_eval_split(&dir, &train, &test, ratio, seed, recursive),
+            EvalCommand::Validate {
+                dir,
+                recursive,
+                remove,
+            } => run_eval_validate(&dir, recursive, remove),
             EvalCommand::Sample {
                 dir,
                 output,
@@ -3945,6 +3959,83 @@ fn run_eval_sample(
         "sampled {actual_count}/{} trajectories into {output}",
         files.len()
     ))
+}
+
+fn run_eval_validate(
+    dir: &str,
+    recursive: bool,
+    remove: bool,
+) -> Result<String, CliError> {
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut valid = 0usize;
+    let mut invalid = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for path in &files {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("{}: read error: {e}", path.display()));
+                invalid += 1;
+                continue;
+            }
+        };
+
+        match serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw) {
+            Ok(traj) => {
+                // Validate required fields
+                let mut issues = Vec::new();
+                if traj.session_id.is_empty() {
+                    issues.push("empty session_id");
+                }
+                if traj.model.is_empty() {
+                    issues.push("empty model");
+                }
+                if traj.started_at.is_empty() {
+                    issues.push("empty started_at");
+                }
+                if traj.steps.is_empty() {
+                    issues.push("no steps");
+                }
+
+                if issues.is_empty() {
+                    valid += 1;
+                } else {
+                    errors.push(format!(
+                        "{}: {}",
+                        path.display(),
+                        issues.join(", ")
+                    ));
+                    invalid += 1;
+                    if remove {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{}: invalid JSON: {e}", path.display()));
+                invalid += 1;
+                if remove {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    let mut lines = vec![format!(
+        "validated {} files: {valid} valid, {invalid} invalid",
+        files.len()
+    )];
+    for err in errors.iter().take(20) {
+        lines.push(format!("  {err}"));
+    }
+    if errors.len() > 20 {
+        lines.push(format!("  ... and {} more", errors.len() - 20));
+    }
+    if remove && invalid > 0 {
+        lines.push(format!("removed {invalid} invalid files"));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn run_eval_deduplicate(
@@ -9449,6 +9540,78 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_eval_validate_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "validate", "src", "--remove",
+        ])
+        .expect("validate should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Validate { dir, remove, .. }) => {
+                assert_eq!(dir, "src");
+                assert!(remove);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_validate_detects_valid_and_invalid() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        // Valid trajectory
+        let t1 = serde_json::json!({
+            "session_id": "s1", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
+            "tags": []
+        });
+        std::fs::write(src.join("valid.json"), serde_json::to_string(&t1).unwrap()).unwrap();
+
+        // Invalid JSON
+        std::fs::write(src.join("broken.json"), "not json at all").unwrap();
+
+        // Valid JSON but empty steps
+        let t3 = serde_json::json!({
+            "session_id": "s3", "model": "m", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [], "tags": []
+        });
+        std::fs::write(src.join("empty.json"), serde_json::to_string(&t3).unwrap()).unwrap();
+
+        let result = crate::run_eval_validate(
+            src.to_str().unwrap(), false, false,
+        ).expect("validate should succeed");
+
+        assert!(result.contains("1 valid"));
+        assert!(result.contains("2 invalid"));
+    }
+
+    #[test]
+    fn run_eval_validate_remove_deletes_invalid() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        std::fs::write(src.join("bad.json"), "invalid").unwrap();
+        let t = serde_json::json!({
+            "session_id": "ok", "model": "m", "system_prompt_hash": "h",
+            "started_at": "t",
+            "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
+            "tags": []
+        });
+        std::fs::write(src.join("good.json"), serde_json::to_string(&t).unwrap()).unwrap();
+
+        let result = crate::run_eval_validate(
+            src.to_str().unwrap(), false, true,
+        ).expect("validate with remove should succeed");
+
+        assert!(result.contains("removed 1 invalid"));
+        assert!(!src.join("bad.json").exists());
+        assert!(src.join("good.json").exists());
     }
 
     #[test]
