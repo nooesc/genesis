@@ -11,7 +11,7 @@ const DEFAULT_PROVIDER_BACKEND: &str = "openai";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_DATABASE_FILE: &str = "genesis.db";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GenesisConfig {
     pub schema_version: u32,
     pub profile: String,
@@ -69,7 +69,7 @@ pub struct StorageConfig {
     pub database_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub max_concurrency: usize,
     pub allow_destructive_tools: bool,
@@ -78,6 +78,10 @@ pub struct RuntimeConfig {
     /// Max conversation messages kept in context. Oldest messages are pruned
     /// with a summary when exceeded. `None` means unlimited.
     pub max_context_messages: Option<usize>,
+    /// Optional per-session budget limit in USD. When exceeded, the agent
+    /// loop stops early. `None` means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_limit: Option<f64>,
     /// Terminal backend for shell_exec. Defaults to local shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<TerminalConfig>,
@@ -118,7 +122,7 @@ pub struct AppPaths {
     pub database_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoadedConfig {
     pub config: GenesisConfig,
     pub paths: AppPaths,
@@ -172,6 +176,8 @@ struct FileRuntimeConfig {
     max_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_context_messages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal: Option<TerminalConfig>,
 }
@@ -244,6 +250,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             allow_destructive_tools: false,
             max_turns: 20,
             max_context_messages: None,
+            budget_limit: None,
             terminal: None,
         },
     })
@@ -377,6 +384,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.max_context_messages),
+        budget_limit: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.budget_limit),
         terminal: file_config
             .runtime
             .as_ref()

@@ -273,6 +273,7 @@ impl<'a> SessionExecutionService<'a> {
                 system_prompt: Some(system_prompt),
                 max_turns: self.loaded.config.runtime.max_turns,
                 max_context_messages: self.loaded.config.runtime.max_context_messages,
+                budget_limit: self.loaded.config.runtime.budget_limit,
                 ..AgentLoopConfig::default()
             },
             history,
@@ -846,6 +847,7 @@ mod tests {
                     allow_destructive_tools: false,
                     max_turns: 20,
                     max_context_messages: None,
+                    budget_limit: None,
                     terminal: None,
                 },
             },

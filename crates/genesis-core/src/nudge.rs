@@ -167,6 +167,7 @@ mod tests {
                     allow_destructive_tools: false,
                     max_turns: 20,
                     max_context_messages: None,
+                    budget_limit: None,
                     terminal: None,
                 },
             },
