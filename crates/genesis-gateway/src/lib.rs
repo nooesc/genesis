@@ -212,6 +212,7 @@ pub struct HealthResponse {
     pub uptime_seconds: u64,
     pub model: String,
     pub mcp_servers: usize,
+    pub active_schedules: usize,
 }
 
 /// Detailed MCP server status response.
@@ -269,6 +270,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Skill usage stats
         .route("/skills/{name}/usage", get(skill_usage_stats_handler))
         .route("/skills/{name}/usage/recent", get(skill_usage_recent_handler))
+        // Tool introspection
+        .route("/tools", get(list_tools_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -384,6 +387,10 @@ async fn health_handler(
         Some(mcp) => mcp.server_count().await,
         None => 0,
     };
+    let active_schedules = ScheduleStore::new(&state.loaded.config.storage.database_path)
+        .list_enabled()
+        .map(|s| s.len())
+        .unwrap_or(0);
     Json(HealthResponse {
         status: "ok".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -394,6 +401,7 @@ async fn health_handler(
             state.loaded.config.provider.model
         ),
         mcp_servers: mcp_count,
+        active_schedules,
     })
 }
 
@@ -1059,6 +1067,55 @@ async fn skill_usage_recent_handler(
     })))
 }
 
+// ── Tool introspection ───────────────────────────────────────────────
+
+async fn list_tools_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let registry = genesis_tools::default_registry();
+    let definitions = registry.definitions();
+
+    let tools: Vec<serde_json::Value> = definitions
+        .iter()
+        .map(|def| {
+            serde_json::json!({
+                "name": def.name,
+                "description": def.description,
+                "parameters": def.parameters,
+            })
+        })
+        .collect();
+
+    let count = tools.len();
+
+    // Also include MCP tools if available
+    let mcp_tools: Vec<serde_json::Value> = if let Some(mcp) = &state.mcp {
+        mcp.tool_definitions()
+            .await
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "source": "mcp",
+                })
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let mcp_count = mcp_tools.len();
+
+    Ok(Json(serde_json::json!({
+        "builtin_tools": tools,
+        "builtin_count": count,
+        "mcp_tools": mcp_tools,
+        "mcp_count": mcp_count,
+        "total": count + mcp_count,
+    })))
+}
+
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
@@ -1470,6 +1527,7 @@ mod tests {
             uptime_seconds: 42,
             model: "openai/gpt-4.1-mini".to_owned(),
             mcp_servers: 0,
+            active_schedules: 0,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"status\":\"ok\""));
