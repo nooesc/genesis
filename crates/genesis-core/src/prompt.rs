@@ -19,6 +19,17 @@ pub fn build_system_prompt_with_skills(
     custom_identity: Option<&str>,
     skills_section: Option<&str>,
 ) -> String {
+    build_system_prompt_full(profile, tools, custom_identity, skills_section, None)
+}
+
+/// Build a system prompt with all optional sections.
+pub fn build_system_prompt_full(
+    profile: &str,
+    tools: &[ToolDefinition],
+    custom_identity: Option<&str>,
+    skills_section: Option<&str>,
+    user_model_section: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
 
     // Identity section
@@ -30,6 +41,13 @@ pub fn build_system_prompt_with_skills(
 
     // Profile
     parts.push(format!("Current profile: {profile}"));
+
+    // User model section (what the agent knows about the user)
+    if let Some(user_model) = user_model_section {
+        parts.push(format!(
+            "## What you know about the user\n\nUse these observations to personalize your responses. Update them with user_observe when you learn something new.\n\n{user_model}"
+        ));
+    }
 
     // Tool listing
     if !tools.is_empty() {
@@ -126,5 +144,20 @@ mod tests {
         let prompt = build_system_prompt_with_skills("default", &[], None, None);
         assert!(prompt.contains("skill_create"));
         assert!(prompt.contains("learn new skills"));
+    }
+
+    #[test]
+    fn prompt_with_user_model_includes_observations() {
+        let user_model = "- **prefers_rust**: User strongly prefers Rust (confidence: 80%, 4 observations)";
+        let prompt = build_system_prompt_full("default", &[], None, None, Some(user_model));
+        assert!(prompt.contains("What you know about the user"));
+        assert!(prompt.contains("prefers_rust"));
+        assert!(prompt.contains("personalize"));
+    }
+
+    #[test]
+    fn prompt_without_user_model_omits_section() {
+        let prompt = build_system_prompt_full("default", &[], None, None, None);
+        assert!(!prompt.contains("What you know about the user"));
     }
 }

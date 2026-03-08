@@ -3,13 +3,13 @@ use std::time::Instant;
 
 use genesis_config::LoadedConfig;
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
-use genesis_storage::{bootstrap, SessionStore, StorageError, StoredMessage};
+use genesis_storage::{bootstrap, SessionStore, StorageError, StoredMessage, UserModelStore};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult};
-use crate::prompt::build_system_prompt;
+use crate::prompt::build_system_prompt_full;
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
 pub struct SessionExecutionService<'a> {
@@ -157,6 +157,37 @@ impl<'a> SessionExecutionService<'a> {
         Ok(outcome)
     }
 
+    /// Load high-confidence user traits and format them for prompt injection.
+    fn load_user_model_section(&self) -> Option<String> {
+        let db_path = &self.loaded.config.storage.database_path;
+        let store = UserModelStore::new(db_path);
+        let traits = store.confident_traits(0.5).ok()?;
+        if traits.is_empty() {
+            return None;
+        }
+
+        let mut lines = Vec::new();
+        let mut current_category = String::new();
+
+        for t in &traits {
+            if t.category != current_category {
+                if !current_category.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(format!("### {}", t.category));
+                current_category.clone_from(&t.category);
+            }
+            lines.push(format!(
+                "- **{}**: {} (confidence: {:.0}%)",
+                t.trait_key,
+                t.value,
+                t.confidence * 100.0,
+            ));
+        }
+
+        Some(lines.join("\n"))
+    }
+
     fn session_store(&self) -> SessionStore {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
@@ -170,10 +201,16 @@ impl<'a> SessionExecutionService<'a> {
         let execution_context =
             build_execution_context_from_loaded(self.loaded, session_id, platform);
         let tool_runtime = build_default_tool_runtime(&execution_context);
-        let system_prompt = build_system_prompt(
+
+        // Load user model for prompt personalization
+        let user_model_section = self.load_user_model_section();
+
+        let system_prompt = build_system_prompt_full(
             &execution_context.plan.profile,
             &tool_runtime.definitions(),
             None,
+            None,
+            user_model_section.as_deref(),
         );
         let client = client_from_config(
             &self.loaded.config.provider.backend,
