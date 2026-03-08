@@ -670,7 +670,7 @@ pub fn default_registry() -> ToolRegistry {
                     "required": []
                 })),
             },
-            ApprovalPolicy::Never,
+            ApprovalPolicy::Destructive,
             builtins::export::SessionExportTool,
         );
     registry

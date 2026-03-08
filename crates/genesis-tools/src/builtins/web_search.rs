@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
@@ -6,10 +7,22 @@ use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 const MAX_RESULTS: usize = 10;
 const TIMEOUT_SECS: u64 = 15;
 
+/// Shared blocking HTTP client for web search requests.
+fn search_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .user_agent("genesis-agent/0.1")
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
+
 /// Web search tool using Brave Search API.
 ///
 /// Requires BRAVE_API_KEY environment variable. Falls back to a DuckDuckGo
-/// HTML scrape if no API key is available.
+/// Instant Answer API if no API key is available.
 pub struct WebSearchTool;
 
 impl ToolHandler for WebSearchTool {
@@ -58,10 +71,7 @@ impl ToolHandler for WebSearchTool {
 }
 
 fn search_brave(query: &str, count: usize, api_key: &str) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = search_client();
 
     let response = client
         .get("https://api.search.brave.com/res/v1/web/search")
@@ -99,11 +109,7 @@ fn search_brave(query: &str, count: usize, api_key: &str) -> Result<String, Stri
 }
 
 fn search_ddg(query: &str, count: usize) -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(TIMEOUT_SECS))
-        .user_agent("genesis-agent/0.1")
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = search_client();
 
     // DuckDuckGo Instant Answer API (JSON, no API key required)
     let response = client

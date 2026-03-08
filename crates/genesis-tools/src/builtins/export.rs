@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
+
+use genesis_storage::{bootstrap, SessionStore};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -22,55 +25,36 @@ impl ToolHandler for SessionExportTool {
 
         let output_path = call.arguments.get("path");
 
-        let db_path = format!("{}/genesis.db", context.data_dir);
-        let connection =
-            rusqlite::Connection::open(&db_path).map_err(|e| ToolError::ExecutionFailed {
+        let db_path = Path::new(&context.data_dir).join("genesis.db");
+        let _ = bootstrap(&db_path);
+        let store = SessionStore::new(&db_path);
+
+        // Load session title
+        let session_title = store
+            .get_session(&session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.title);
+
+        // Load messages via storage layer
+        let stored_messages = store.load_messages(&session_id).map_err(|e| {
+            ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!("failed to open database: {e}"),
-            })?;
+                reason: format!("failed to load messages: {e}"),
+            }
+        })?;
 
-        // Load session info
-        let session_title: Option<String> = connection
-            .query_row(
-                "SELECT title FROM sessions WHERE id = ?1",
-                [&session_id],
-                |row| row.get(0),
-            )
-            .ok();
-
-        // Load messages
-        let mut stmt = connection
-            .prepare(
-                "SELECT role, content, tool_calls_json, created_at \
-                 FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
-            )
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to query messages: {e}"),
-            })?;
-
-        let messages: Vec<(String, Option<String>, Option<String>, String)> = stmt
-            .query_map([&session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to read messages: {e}"),
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        if messages.is_empty() {
+        if stored_messages.is_empty() {
             return Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!("no messages found for session '{session_id}'"),
             });
         }
+
+        let messages: Vec<(String, Option<String>, Option<String>, String)> = stored_messages
+            .into_iter()
+            .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+            .collect();
 
         let content = match format.as_str() {
             "json" => export_json(&session_id, session_title.as_deref(), &messages),
@@ -85,7 +69,7 @@ impl ToolHandler for SessionExportTool {
 
         // Write to file or return inline
         if let Some(path) = output_path {
-            if let Some(parent) = std::path::Path::new(path).parent() {
+            if let Some(parent) = Path::new(path).parent() {
                 let _ = fs::create_dir_all(parent);
             }
             fs::write(path, &content).map_err(|e| ToolError::ExecutionFailed {
@@ -93,7 +77,10 @@ impl ToolHandler for SessionExportTool {
                 reason: format!("failed to write export file: {e}"),
             })?;
             Ok(ToolOutput {
-                content: format!("Session '{session_id}' exported to {path} ({} messages)", messages.len()),
+                content: format!(
+                    "Session '{session_id}' exported to {path} ({} messages)",
+                    messages.len()
+                ),
                 metadata: BTreeMap::from([
                     ("tool".to_owned(), call.name.clone()),
                     ("path".to_owned(), path.clone()),
@@ -263,7 +250,6 @@ mod tests {
 
     #[test]
     fn export_tool_requires_no_arguments_uses_context_session() {
-        // The tool should use context.session_id if no session_id argument provided
         let tool = SessionExportTool;
         let call = ToolCall {
             name: "session_export".to_owned(),
@@ -281,7 +267,10 @@ mod tests {
         let err = tool.run(&call, &ctx).unwrap_err();
         match err {
             ToolError::ExecutionFailed { reason, .. } => {
-                assert!(reason.contains("database") || reason.contains("open"));
+                assert!(
+                    reason.contains("messages") || reason.contains("database") || reason.contains("open"),
+                    "unexpected error: {reason}"
+                );
             }
             other => panic!("expected ExecutionFailed, got: {other:?}"),
         }

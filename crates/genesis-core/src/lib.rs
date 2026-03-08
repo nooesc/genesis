@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
 use genesis_provider::resolve;
-use genesis_storage::{
-    bootstrap, inspect, ScheduleStore, SessionStore, SkillStore, StorageHealth,
-};
+use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
 use genesis_mcp::McpManager;
 use genesis_tools::{default_registry, ToolCall, ToolContext, ToolError, ToolOutput, ToolRegistry};
 use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent};
@@ -264,13 +262,21 @@ fn check_tool_registry() -> DoctorCheck {
 
 /// Gather storage statistics: session, skill, and schedule counts.
 fn check_storage_stats(db_path: &Path) -> DoctorCheck {
-    let session_store = SessionStore::new(db_path);
-    let skill_store = SkillStore::new(db_path);
-    let schedule_store = ScheduleStore::new(db_path);
+    let sessions = SessionStore::new(db_path).count_sessions().unwrap_or(0);
 
-    let sessions = session_store.count_sessions().unwrap_or(0);
-    let skills = skill_store.list_all().map(|v| v.len()).unwrap_or(0);
-    let schedules = schedule_store.list_all().map(|v| v.len()).unwrap_or(0);
+    // Use direct COUNT(*) queries to avoid loading full rows
+    let (skills, schedules) = match rusqlite::Connection::open(db_path) {
+        Ok(conn) => {
+            let skills: i64 = conn
+                .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+                .unwrap_or(0);
+            let schedules: i64 = conn
+                .query_row("SELECT COUNT(*) FROM schedules", [], |r| r.get(0))
+                .unwrap_or(0);
+            (skills as u64, schedules as u64)
+        }
+        Err(_) => (0, 0),
+    };
 
     DoctorCheck {
         name: "storage_stats".to_owned(),
@@ -321,11 +327,11 @@ fn check_mcp_servers(loaded: &LoadedConfig) -> DoctorCheck {
             detail: "none configured".to_owned(),
         }
     } else {
-        let names: Vec<&String> = servers.keys().collect();
+        let names: String = servers.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
         DoctorCheck {
             name: "mcp_servers".to_owned(),
             status: CheckStatus::Pass,
-            detail: format!("{} configured: {}", names.len(), names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+            detail: format!("{} configured: {}", servers.len(), names),
         }
     }
 }
