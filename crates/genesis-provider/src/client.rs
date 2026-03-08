@@ -1,7 +1,9 @@
 use std::pin::Pin;
+use std::time::Instant;
 
 use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use tracing::{error, info, warn};
 
 use crate::api_types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 use crate::error::ProviderError;
@@ -57,6 +59,7 @@ impl ChatClient {
         &self,
         mut request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ProviderError> {
+        let started_at = Instant::now();
         // Ensure the model is set from the client's resolved provider
         if request.model.is_empty() {
             request.model = self.model.clone();
@@ -76,22 +79,81 @@ impl ChatClient {
             }
         }
 
-        let response = self.http.post(&self.endpoint).json(&body).send().await?;
+        let response = match self.http.post(&self.endpoint).json(&body).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                error!(
+                    endpoint = self.endpoint.as_str(),
+                    model = request.model.as_str(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "chat completion request failed"
+                );
+                return Err(error.into());
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                status = status.as_u16(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "chat completion request returned API error"
+            );
             return Err(ProviderError::ApiError {
                 status: status.as_u16(),
                 body,
             });
         }
 
-        let completion: ChatCompletionResponse = response.json().await?;
+        let completion: ChatCompletionResponse = match response.json().await {
+            Ok(completion) => completion,
+            Err(error) => {
+                error!(
+                    endpoint = self.endpoint.as_str(),
+                    model = request.model.as_str(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "chat completion response decode failed"
+                );
+                return Err(error.into());
+            }
+        };
 
         if completion.choices.is_empty() {
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "chat completion returned no choices"
+            );
             return Err(ProviderError::EmptyChoices);
         }
+
+        let (prompt_tokens, completion_tokens, total_tokens) = completion
+            .usage
+            .as_ref()
+            .map(|usage| {
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens,
+                )
+            })
+            .unwrap_or((0, 0, 0));
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            token_counts_available = completion.usage.is_some(),
+            "chat completion request succeeded"
+        );
 
         Ok(completion)
     }
@@ -100,6 +162,7 @@ impl ChatClient {
         &self,
         mut request: ChatCompletionRequest,
     ) -> Result<ChatCompletionChunkStream, ProviderError> {
+        let started_at = Instant::now();
         if request.model.is_empty() {
             request.model = self.model.clone();
         }
@@ -116,20 +179,54 @@ impl ChatClient {
             }
         }
 
-        let response = self.http.post(&self.endpoint).json(&body).send().await?;
+        let response = match self.http.post(&self.endpoint).json(&body).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                error!(
+                    endpoint = self.endpoint.as_str(),
+                    model = request.model.as_str(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "streaming chat completion request failed"
+                );
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                status = status.as_u16(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "streaming chat completion request returned API error"
+            );
             return Err(ProviderError::ApiError {
                 status: status.as_u16(),
                 body,
             });
         }
 
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens = 0u32,
+            completion_tokens = 0u32,
+            total_tokens = 0u32,
+            token_counts_available = false,
+            "streaming chat completion request accepted"
+        );
+
+        let endpoint = self.endpoint.clone();
+        let model = request.model.clone();
         let byte_stream = response.bytes_stream();
         let stream = async_stream::try_stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buffer = String::new();
+            let stream_started_at = Instant::now();
+            let mut chunk_count = 0usize;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk?;
@@ -140,17 +237,46 @@ impl ChatClient {
 
                 while let Some(event) = take_next_sse_event(&mut buffer) {
                     match parse_sse_event(&event)? {
-                        Some(parsed) => yield parsed,
-                        None => return,
+                        Some(parsed) => {
+                            chunk_count += 1;
+                            yield parsed;
+                        }
+                        None => {
+                            info!(
+                                endpoint = endpoint.as_str(),
+                                model = model.as_str(),
+                                elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                                prompt_tokens = 0u32,
+                                completion_tokens = 0u32,
+                                total_tokens = 0u32,
+                                token_counts_available = false,
+                                chunk_count,
+                                "streaming chat completion finished"
+                            );
+                            return;
+                        }
                     }
                 }
             }
 
             if !buffer.trim().is_empty() {
                 if let Some(parsed) = parse_sse_event(buffer.trim())? {
+                    chunk_count += 1;
                     yield parsed;
                 }
             }
+
+            info!(
+                endpoint = endpoint.as_str(),
+                model = model.as_str(),
+                elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                prompt_tokens = 0u32,
+                completion_tokens = 0u32,
+                total_tokens = 0u32,
+                token_counts_available = false,
+                chunk_count,
+                "streaming chat completion stream closed"
+            );
         };
 
         Ok(Box::pin(stream))
