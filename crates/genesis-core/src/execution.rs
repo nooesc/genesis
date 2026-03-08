@@ -108,6 +108,11 @@ impl<'a> SessionExecutionService<'a> {
         Self { loaded, mcp }
     }
 
+    /// Return the MCP manager if connected, for sharing with other subsystems.
+    pub fn mcp_manager(&self) -> Option<Arc<McpManager>> {
+        self.mcp.clone()
+    }
+
     pub fn ensure_session(
         &self,
         session_id: &str,

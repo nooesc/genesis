@@ -645,10 +645,7 @@ async fn run_serve(
     // Connect MCP servers if configured
     let mcp = if !loaded.config.mcp_servers.is_empty() {
         let service = genesis_core::execution::SessionExecutionService::with_mcp(&loaded).await;
-        // Extract the MCP manager — it's stored in the service internals.
-        // For now, just log that MCP is configured.
-        let _ = service;
-        None // TODO: extract MCP manager from service
+        service.mcp_manager()
     } else {
         None
     };
