@@ -107,6 +107,27 @@ pub fn build_system_prompt_complete(
     user_model_section: Option<&str>,
     context_section: Option<&str>,
 ) -> String {
+    build_system_prompt_with_memories(
+        profile,
+        tools,
+        custom_identity,
+        skills_section,
+        user_model_section,
+        context_section,
+        None,
+    )
+}
+
+/// Build a system prompt with all optional sections including recalled memories.
+pub fn build_system_prompt_with_memories(
+    profile: &str,
+    tools: &[ToolDefinition],
+    custom_identity: Option<&str>,
+    skills_section: Option<&str>,
+    user_model_section: Option<&str>,
+    context_section: Option<&str>,
+    memories_section: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
 
     // Identity section
@@ -133,6 +154,13 @@ pub fn build_system_prompt_complete(
     if let Some(user_model) = user_model_section {
         parts.push(format!(
             "## What you know about the user\n\nUse these observations to personalize your responses. Update them with user_observe when you learn something new.\n\n{user_model}"
+        ));
+    }
+
+    // Recalled memories relevant to the current conversation
+    if let Some(memories) = memories_section {
+        parts.push(format!(
+            "## Recalled Memories\n\nThe following memories were automatically recalled as potentially relevant to this conversation. Use them to inform your response.\n\n{memories}"
         ));
     }
 
@@ -452,6 +480,21 @@ mod tests {
         let content = "x".repeat(300 * 1024);
         let warnings = scan_context_security(&content);
         assert!(warnings.iter().any(|w| w.contains("very large")));
+    }
+
+    #[test]
+    fn prompt_with_memories_includes_recalled_section() {
+        let memories = "- [project_goal] Build Genesis in Rust\n- [user_preference] Prefers concise responses";
+        let prompt = build_system_prompt_with_memories("default", &[], None, None, None, None, Some(memories));
+        assert!(prompt.contains("## Recalled Memories"));
+        assert!(prompt.contains("project_goal"));
+        assert!(prompt.contains("automatically recalled"));
+    }
+
+    #[test]
+    fn prompt_without_memories_omits_section() {
+        let prompt = build_system_prompt_with_memories("default", &[], None, None, None, None, None);
+        assert!(!prompt.contains("Recalled Memories"));
     }
 
     #[test]

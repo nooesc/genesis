@@ -15,7 +15,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
-use crate::prompt::{build_system_prompt_complete, load_context_file};
+use crate::prompt::{build_system_prompt_with_memories, load_context_file};
 use crate::skills::load_skills_prompt;
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
@@ -166,7 +166,7 @@ impl<'a> SessionExecutionService<'a> {
         let images = input.images.clone();
 
         let outcome = self.run_turn_with_runner(input, |history| async move {
-            let mut agent = self.build_agent_loop(session_id, platform, history)?;
+            let mut agent = self.build_agent_loop(session_id, platform, history, Some(&prompt))?;
             let start_index = agent.messages().len();
             let result = agent.run_turn_with_images(&prompt, images).await?;
             Ok(ExecutedTurn {
@@ -203,7 +203,7 @@ impl<'a> SessionExecutionService<'a> {
         let images = input.images.clone();
 
         let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
-            let mut agent = self.build_agent_loop(session_id, platform, history)?;
+            let mut agent = self.build_agent_loop(session_id, platform, history, Some(&prompt))?;
             let start_index = agent.messages().len();
             let result = agent.run_turn_streaming_with_images(&prompt, images, on_chunk).await?;
             Ok(ExecutedTurn {
@@ -228,6 +228,30 @@ impl<'a> SessionExecutionService<'a> {
         format_user_traits(&traits)
     }
 
+    /// Search stored memories for content relevant to the user's prompt.
+    /// Returns a formatted section or None if no matches found.
+    fn recall_memories(&self, prompt: &str) -> Option<String> {
+        let db_path = &self.loaded.config.storage.database_path;
+        let store = genesis_storage::MemoryStore::new(db_path);
+
+        // Extract meaningful search terms: skip very short prompts that won't
+        // produce useful FTS matches.
+        if prompt.split_whitespace().count() < 2 {
+            return None;
+        }
+
+        let memories = store.search(prompt, 5).ok()?;
+        if memories.is_empty() {
+            return None;
+        }
+
+        let mut section = String::new();
+        for mem in &memories {
+            section.push_str(&format!("- [{}] {}\n", mem.kind, mem.content));
+        }
+        Some(section)
+    }
+
     fn session_store(&self) -> SessionStore {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
@@ -237,6 +261,7 @@ impl<'a> SessionExecutionService<'a> {
         session_id: String,
         platform: DeliveryPlatform,
         history: Vec<ChatMessage>,
+        user_prompt: Option<&str>,
     ) -> Result<AgentLoop, SessionExecutionError> {
         let execution_context =
             build_execution_context_from_loaded(self.loaded, session_id, platform);
@@ -257,19 +282,21 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
         }
 
-        // Load skills, user model, and project context for prompt personalization
+        // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
         let skills_section = load_skills_prompt(db_path);
         let user_model_section = self.load_user_model_section();
         let context_section = load_context_file(std::path::Path::new("."));
+        let memories_section = user_prompt.and_then(|prompt| self.recall_memories(prompt));
 
-        let system_prompt = build_system_prompt_complete(
+        let system_prompt = build_system_prompt_with_memories(
             &execution_context.plan.profile,
             &tool_runtime.definitions(),
             self.system_prompt_override.as_deref(),
             skills_section.as_deref(),
             user_model_section.as_deref(),
             context_section.as_deref(),
+            memories_section.as_deref(),
         );
         let client = client_from_config(
             &self.loaded.config.provider.backend,
