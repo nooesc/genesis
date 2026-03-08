@@ -334,6 +334,22 @@ pub enum EvalCommand {
         #[arg(long, help = "Directory to write trajectory JSON files into")]
         output: String,
     },
+    #[command(about = "Import ShareGPT JSONL and create trajectory JSON files")]
+    ImportSharegpt {
+        #[arg(help = "Path to a ShareGPT JSONL file")]
+        file: String,
+        #[arg(long, help = "Directory to write trajectory JSON files into")]
+        output: String,
+    },
+    #[command(about = "Merge trajectory directories into a single output directory")]
+    Merge {
+        #[arg(help = "Source directories containing trajectory JSON files")]
+        sources: Vec<String>,
+        #[arg(long, help = "Output directory to merge into")]
+        output: String,
+        #[arg(long, help = "Deduplicate by session_id, keeping first occurrence")]
+        dedup: bool,
+    },
     #[command(about = "Convert between trajectory JSON, ChatML JSONL, and ShareGPT JSONL")]
     Convert {
         #[arg(long, help = "Input file to convert")]
@@ -368,6 +384,22 @@ pub enum EvalCommand {
         min_score: Option<f64>,
         #[arg(long, help = "Sort by score ascending (worst first) instead of descending")]
         worst_first: bool,
+    },
+    #[command(about = "Automatically tag trajectory files using genesis_core::tagger::auto_tag")]
+    AutoTag {
+        #[arg(long, help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Only print the tags that would be added without writing files")]
+        dry_run: bool,
+    },
+    #[command(about = "Show tag frequency distribution across trajectory files")]
+    TagStats {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
     },
     #[command(about = "Find near-duplicate trajectories by system prompt and first user message")]
     Deduplicate {
@@ -807,6 +839,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             EvalCommand::ImportChatml { file, output } => {
                 run_eval_import_chatml(&file, &output)
             }
+            EvalCommand::ImportSharegpt { file, output } => {
+                run_eval_import_sharegpt(&file, &output)
+            }
+            EvalCommand::Merge { sources, output, dedup } => {
+                run_eval_merge(&sources, &output, dedup)
+            }
             EvalCommand::Convert { input, output, format } => {
                 run_eval_convert(&input, &output, &format)
             }
@@ -839,6 +877,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 worst_first,
             } => {
                 run_eval_quality(&dir, recursive, min_score, worst_first, cli.json)
+            }
+            EvalCommand::AutoTag { dir, recursive, dry_run } => {
+                run_eval_auto_tag(&dir, recursive, dry_run, cli.json)
+            }
+            EvalCommand::TagStats { dir, recursive } => {
+                run_eval_tag_stats(&dir, recursive, cli.json)
             }
             EvalCommand::Deduplicate { dir, recursive, remove } => {
                 run_eval_deduplicate(&dir, recursive, remove, cli.json)
@@ -2848,6 +2892,96 @@ fn run_eval_export_chatml(dir: &str, recursive: bool) -> Result<String, CliError
     Ok(lines.join("\n"))
 }
 
+fn run_eval_import_sharegpt(file: &str, output_dir: &str) -> Result<String, CliError> {
+    let contents = std::fs::read_to_string(file)
+        .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| CliError::Other(format!("failed to create {output_dir}: {e}")))?;
+
+    let mut imported = 0usize;
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| CliError::Other(format!("invalid JSONL line {}: {e}", index + 1)))?;
+        let trajectory = trajectory_from_sharegpt_entry(&entry, index)?;
+        let session_id = sanitize_session_id_for_filename(&trajectory.session_id);
+        let output_path = std::path::Path::new(output_dir).join(format!("{session_id}.json"));
+        let json = serde_json::to_string_pretty(&trajectory)?;
+        std::fs::write(&output_path, json).map_err(|e| {
+            CliError::Other(format!("failed to write {}: {e}", output_path.display()))
+        })?;
+        imported += 1;
+    }
+
+    Ok(format!("imported {imported} trajectories into {output_dir}"))
+}
+
+fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> Result<String, CliError> {
+    std::fs::create_dir_all(output)
+        .map_err(|e| CliError::Other(format!("failed to create {output}: {e}")))?;
+
+    let mut copied = 0usize;
+    let mut skipped = 0usize;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+
+    for source in sources {
+        let source_path = PathBuf::from(source);
+        if !source_path.is_dir() {
+            return Err(CliError::Other(format!("{source} is not a directory")));
+        }
+
+        for entry in std::fs::read_dir(&source_path).map_err(|e| {
+            CliError::Other(format!("failed to read directory {source}: {e}"))
+        })? {
+            let entry = entry.map_err(|e| {
+                CliError::Other(format!("failed to read entry in {source}: {e}"))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+
+            if dedup {
+                let raw = std::fs::read_to_string(&path).map_err(|e| {
+                    CliError::Other(format!("failed to read {}: {e}", path.display()))
+                })?;
+                if let Ok(traj) =
+                    serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw)
+                {
+                    if !seen_ids.insert(traj.session_id.clone()) {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
+            let dest = std::path::Path::new(output).join(&filename);
+            if dest.exists() {
+                skipped += 1;
+                continue;
+            }
+
+            std::fs::copy(&path, &dest).map_err(|e| {
+                CliError::Other(format!(
+                    "failed to copy {} -> {}: {e}",
+                    path.display(),
+                    dest.display()
+                ))
+            })?;
+            copied += 1;
+        }
+    }
+
+    Ok(format!(
+        "merged {copied} trajectories into {output} (skipped {skipped})"
+    ))
+}
+
 fn run_eval_export_sharegpt(dir: &str, recursive: bool) -> Result<String, CliError> {
     let mut lines = Vec::new();
 
@@ -3347,6 +3481,132 @@ fn run_eval_quality(
 
         Ok(lines.join("\n"))
     }
+}
+
+fn run_eval_auto_tag(
+    dir: &str,
+    recursive: bool,
+    dry_run: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut updated = Vec::<(String, Vec<String>)>::new();
+
+    for path in files {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+        let mut trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "invalid trajectory JSON in {}: {e}",
+                    path.display()
+                ))
+            })?;
+
+        let suggested = genesis_core::tagger::auto_tag(&trajectory);
+        let existing = trajectory.tags.iter().cloned().collect::<HashSet<_>>();
+        let mut additions = suggested
+            .into_iter()
+            .filter(|tag| !existing.contains(tag))
+            .collect::<Vec<_>>();
+        additions.sort();
+
+        if additions.is_empty() {
+            continue;
+        }
+
+        if !dry_run {
+            trajectory.tags.extend(additions.clone());
+            trajectory.tags.sort();
+            trajectory.tags.dedup();
+            let serialized = serde_json::to_string_pretty(&trajectory)?;
+            std::fs::write(&path, serialized).map_err(|e| {
+                CliError::Other(format!("failed to write {}: {e}", path.display()))
+            })?;
+        }
+
+        updated.push((path.display().to_string(), additions));
+    }
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "directory": dir,
+            "recursive": recursive,
+            "dry_run": dry_run,
+            "updated": updated.iter().map(|(file, tags)| {
+                serde_json::json!({
+                    "file": file,
+                    "added_tags": tags,
+                })
+            }).collect::<Vec<_>>(),
+            "files_changed": updated.len(),
+        }))?);
+    }
+
+    if updated.is_empty() {
+        return Ok("No new tags to apply.".to_owned());
+    }
+
+    let mut lines = Vec::new();
+    lines.push("genesis eval auto-tag".to_owned());
+    lines.push(format!("directory:    {dir}"));
+    lines.push(format!("recursive:    {recursive}"));
+    lines.push(format!("dry run:      {dry_run}"));
+    lines.push(format!("files changed: {}", updated.len()));
+    for (file, tags) in &updated {
+        lines.push(format!("{file}: {}", tags.join(", ")));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn run_eval_tag_stats(dir: &str, recursive: bool, json: bool) -> Result<String, CliError> {
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut counts = BTreeMap::<String, usize>::new();
+
+    for path in files {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "invalid trajectory JSON in {}: {e}",
+                    path.display()
+                ))
+            })?;
+        for tag in trajectory.tags {
+            *counts.entry(tag).or_default() += 1;
+        }
+    }
+
+    let mut tags = counts.into_iter().collect::<Vec<_>>();
+    tags.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "directory": dir,
+            "recursive": recursive,
+            "tags": tags.iter().map(|(tag, count)| {
+                serde_json::json!({
+                    "tag": tag,
+                    "count": count,
+                })
+            }).collect::<Vec<_>>(),
+        }))?);
+    }
+
+    if tags.is_empty() {
+        return Ok("No trajectory tags found.".to_owned());
+    }
+
+    let mut lines = Vec::new();
+    lines.push("genesis eval tag-stats".to_owned());
+    lines.push(format!("directory: {dir}"));
+    lines.push(format!("recursive: {recursive}"));
+    for (tag, count) in &tags {
+        lines.push(format!("{tag}: {count}"));
+    }
+    Ok(lines.join("\n"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6990,6 +7250,47 @@ storage:
     }
 
     #[test]
+    fn parses_eval_auto_tag_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "auto-tag",
+            "--dir",
+            "trajectories",
+            "--recursive",
+            "--dry-run",
+        ])
+        .expect("auto-tag should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::AutoTag { dir, recursive, dry_run }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+                assert!(dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_tag_stats_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "tag-stats",
+            "trajectories",
+            "--recursive",
+        ])
+        .expect("tag-stats should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::TagStats { dir, recursive }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_eval_deduplicate_command() {
         let cli = Cli::try_parse_from([
             "genesis",
@@ -7176,6 +7477,80 @@ storage:
         assert!(output.contains("removed files:    1"));
         assert!(dir.path().join("unique.json").exists());
         assert!(!(dir.path().join("a.json").exists() && dir.path().join("b.json").exists()));
+    }
+
+    #[test]
+    fn run_eval_auto_tag_dry_run_and_writeback() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("trajectory.json");
+        let trajectory = serde_json::json!({
+            "session_id": "auto-tag",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "please fix this bug"},
+                {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "tool_call", "content": "tool_call: shell_exec", "tool_name": "shell_exec", "tool_arguments": "{\"cmd\":\"pwd\"}"},
+                {"step_index": 2, "timestamp": "2026-03-08T12:00:02Z", "action_type": "tool_result", "content": "tool_result: shell_exec", "tool_name": "shell_exec", "tool_result": "/tmp"},
+                {"step_index": 3, "timestamp": "2026-03-08T12:00:03Z", "action_type": "assistant_message", "content": "fixed"}
+            ],
+            "outcome": {"type": "success"},
+            "tags": ["existing"]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
+
+        let dry_run = crate::run_eval_auto_tag(
+            dir.path().to_str().unwrap(),
+            false,
+            true,
+            false,
+        )
+        .expect("dry run should succeed");
+        assert!(dry_run.contains("files changed: 1"));
+
+        let unchanged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(unchanged["tags"], serde_json::json!(["existing"]));
+
+        crate::run_eval_auto_tag(dir.path().to_str().unwrap(), false, false, false)
+            .expect("writeback should succeed");
+        let updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let tags = updated["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|tag| tag == "existing"));
+        assert!(tags.iter().any(|tag| tag == "success"));
+        assert!(tags.iter().any(|tag| tag == "shell"));
+        assert!(tags.iter().any(|tag| tag == "debugging"));
+    }
+
+    #[test]
+    fn run_eval_tag_stats_reports_frequency() {
+        let dir = tempdir().expect("tempdir");
+        let write = |name: &str, tags: &[&str]| {
+            let path = dir.path().join(name);
+            let trajectory = serde_json::json!({
+                "session_id": name,
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": "hash",
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [],
+                "outcome": {"type": "success"},
+                "tags": tags
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
+        };
+
+        write("a.json", &["shell", "success"]);
+        write("b.json", &["success"]);
+        write("c.json", &["shell"]);
+
+        let output = crate::run_eval_tag_stats(dir.path().to_str().unwrap(), false, false)
+            .expect("tag stats should succeed");
+
+        assert!(output.contains("shell: 2"));
+        assert!(output.contains("success: 2"));
     }
 
     #[test]
@@ -8212,6 +8587,156 @@ storage:
         assert_eq!(parsed["steps"][0]["action_type"], "system_message");
         assert_eq!(parsed["steps"][1]["action_type"], "user_message");
         assert_eq!(parsed["steps"][2]["action_type"], "assistant_message");
+    }
+
+    #[test]
+    fn run_eval_import_sharegpt_creates_trajectory_files() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("dataset.jsonl");
+        let output_dir = dir.path().join("out");
+        let line = serde_json::json!({
+            "session_id": "sharegpt-session",
+            "model": "claude-sonnet-4-6",
+            "tags": ["imported"],
+            "outcome": { "type": "success" },
+            "sharegpt": [
+                {"from": "human", "value": "hello"},
+                {"from": "gpt", "value": "hi there"}
+            ]
+        });
+        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
+            .expect("write jsonl");
+
+        let result = crate::run_eval_import_sharegpt(
+            input.to_str().unwrap(),
+            output_dir.to_str().unwrap(),
+        )
+        .expect("sharegpt import should succeed");
+
+        assert!(result.contains("imported 1 trajectories"));
+        let imported_path = output_dir.join("sharegpt-session.json");
+        assert!(imported_path.exists());
+
+        let raw = std::fs::read_to_string(imported_path).expect("read imported trajectory");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid trajectory");
+        assert_eq!(parsed["session_id"], "sharegpt-session");
+        assert_eq!(parsed["model"], "claude-sonnet-4-6");
+        assert_eq!(parsed["tags"][0], "imported");
+        assert_eq!(parsed["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["steps"][0]["action_type"], "user_message");
+        assert_eq!(parsed["steps"][1]["action_type"], "assistant_message");
+    }
+
+    #[test]
+    fn run_eval_merge_combines_directories() {
+        let dir = tempdir().expect("tempdir");
+        let src1 = dir.path().join("src1");
+        let src2 = dir.path().join("src2");
+        let output = dir.path().join("merged");
+        std::fs::create_dir_all(&src1).unwrap();
+        std::fs::create_dir_all(&src2).unwrap();
+
+        let traj1 = serde_json::json!({
+            "session_id": "s1",
+            "model": "gpt-4",
+            "system_prompt_hash": "h1",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [],
+            "tags": []
+        });
+        let traj2 = serde_json::json!({
+            "session_id": "s2",
+            "model": "gpt-4",
+            "system_prompt_hash": "h2",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [],
+            "tags": []
+        });
+        std::fs::write(src1.join("s1.json"), serde_json::to_string(&traj1).unwrap()).unwrap();
+        std::fs::write(src2.join("s2.json"), serde_json::to_string(&traj2).unwrap()).unwrap();
+
+        let result = crate::run_eval_merge(
+            &[
+                src1.to_str().unwrap().to_owned(),
+                src2.to_str().unwrap().to_owned(),
+            ],
+            output.to_str().unwrap(),
+            false,
+        )
+        .expect("merge should succeed");
+
+        assert!(result.contains("merged 2"));
+        assert!(output.join("s1.json").exists());
+        assert!(output.join("s2.json").exists());
+    }
+
+    #[test]
+    fn run_eval_merge_dedup_by_session_id() {
+        let dir = tempdir().expect("tempdir");
+        let src1 = dir.path().join("src1");
+        let src2 = dir.path().join("src2");
+        let output = dir.path().join("merged");
+        std::fs::create_dir_all(&src1).unwrap();
+        std::fs::create_dir_all(&src2).unwrap();
+
+        let traj = serde_json::json!({
+            "session_id": "duplicate-id",
+            "model": "gpt-4",
+            "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [],
+            "tags": []
+        });
+        std::fs::write(src1.join("a.json"), serde_json::to_string(&traj).unwrap()).unwrap();
+        std::fs::write(src2.join("b.json"), serde_json::to_string(&traj).unwrap()).unwrap();
+
+        let result = crate::run_eval_merge(
+            &[
+                src1.to_str().unwrap().to_owned(),
+                src2.to_str().unwrap().to_owned(),
+            ],
+            output.to_str().unwrap(),
+            true,
+        )
+        .expect("merge with dedup should succeed");
+
+        assert!(result.contains("merged 1"));
+        assert!(result.contains("skipped 1"));
+    }
+
+    #[test]
+    fn parses_eval_import_sharegpt_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "import-sharegpt", "data.jsonl", "--output", "out",
+        ])
+        .expect("import-sharegpt should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::ImportSharegpt { file, output }) => {
+                assert_eq!(file, "data.jsonl");
+                assert_eq!(output, "out");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_merge_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "merge", "dir1", "dir2", "--output", "merged", "--dedup",
+        ])
+        .expect("merge should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Merge {
+                sources,
+                output,
+                dedup,
+            }) => {
+                assert_eq!(sources, vec!["dir1", "dir2"]);
+                assert_eq!(output, "merged");
+                assert!(dedup);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
