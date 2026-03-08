@@ -91,6 +91,14 @@ pub enum Command {
     Bootstrap(BootstrapCommand),
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
+    #[command(subcommand, about = "Inspect configured MCP servers")]
+    Mcp(McpCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    #[command(about = "List configured MCP servers")]
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -426,6 +434,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Update => run_update().await,
+        Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json),
     }
 }
 
@@ -750,6 +759,52 @@ async fn run_update() -> Result<String, CliError> {
     steps.push(format!("[ok] Updated to: {}", version_out.trim()));
 
     Ok(steps.join("\n"))
+}
+
+fn run_mcp(
+    config_path: Option<PathBuf>,
+    command: McpCommand,
+    json: bool,
+) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+
+    match command {
+        McpCommand::List => {
+            let servers = &loaded.config.mcp_servers;
+            if servers.is_empty() {
+                return Ok("no MCP servers configured".to_owned());
+            }
+
+            if json {
+                return Ok(serde_json::to_string_pretty(servers)?);
+            }
+
+            let mut lines = Vec::new();
+            for (name, cfg) in servers {
+                let transport = if cfg.command.is_some() {
+                    "stdio"
+                } else if cfg.url.is_some() {
+                    "http"
+                } else {
+                    "unknown"
+                };
+
+                let endpoint = cfg
+                    .command
+                    .as_deref()
+                    .or(cfg.url.as_deref())
+                    .unwrap_or("-");
+
+                let timeout = cfg.timeout.unwrap_or(120);
+                let connect_timeout = cfg.connect_timeout.unwrap_or(60);
+
+                lines.push(format!(
+                    "{name}  [{transport}]  {endpoint}  timeout={timeout}s connect={connect_timeout}s"
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+    }
 }
 
 fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
@@ -1183,8 +1238,8 @@ mod tests {
         default_session_id, delivery_platform_from_str, format_schedule_list, format_session_list,
         format_session_messages, format_skill, format_skill_list, format_subagent,
         format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command,
-        ContextCommand, ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand,
-        StorageCommand, SubagentsCommand,
+        ContextCommand, McpCommand, ModelCommand, ScheduleCommand, SessionsCommand,
+        SkillsCommand, StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -1788,6 +1843,13 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "update"])
             .expect("update command should parse");
         assert!(matches!(cli.command, Command::Update));
+    }
+
+    #[test]
+    fn parses_mcp_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "mcp", "list"])
+            .expect("mcp list command should parse");
+        assert!(matches!(cli.command, Command::Mcp(McpCommand::List)));
     }
 
     #[test]
