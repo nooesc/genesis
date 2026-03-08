@@ -203,7 +203,21 @@ impl AgentLoop {
         loop {
             turns_used += 1;
             if turns_used > self.config.max_turns {
-                return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
+                warn!(max_turns = self.config.max_turns, "agent loop reached turn limit");
+                return Ok(AgentResult {
+                    response: format!(
+                        "I've reached the maximum of {} turns for this request. \
+                         The work so far has been saved. You can continue by sending another message.",
+                        self.config.max_turns
+                    ),
+                    turns_used: turns_used - 1,
+                    tool_calls_made,
+                    finished_naturally: false,
+                    total_input_tokens,
+                    total_output_tokens,
+                    estimated_cost: Some(self.cost.total_cost),
+                    pending_clarification: None,
+                });
             }
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
@@ -332,7 +346,23 @@ impl AgentLoop {
         loop {
             turns_used += 1;
             if turns_used > self.config.max_turns {
-                return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
+                warn!(max_turns = self.config.max_turns, "agent loop reached turn limit (streaming)");
+                let msg = format!(
+                    "I've reached the maximum of {} turns for this request. \
+                     The work so far has been saved. You can continue by sending another message.",
+                    self.config.max_turns
+                );
+                on_event(StreamEvent::Chunk(&msg));
+                return Ok(AgentResult {
+                    response: msg,
+                    turns_used: turns_used - 1,
+                    tool_calls_made,
+                    finished_naturally: false,
+                    total_input_tokens,
+                    total_output_tokens,
+                    estimated_cost: Some(self.cost.total_cost),
+                    pending_clarification: None,
+                });
             }
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
