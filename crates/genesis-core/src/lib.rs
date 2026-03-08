@@ -9,7 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
-use genesis_storage::{bootstrap, inspect, StorageHealth};
+use genesis_provider::resolve;
+use genesis_storage::{
+    bootstrap, inspect, ScheduleStore, SessionStore, SkillStore, StorageHealth,
+};
 use genesis_mcp::McpManager;
 use genesis_tools::{default_registry, ToolCall, ToolContext, ToolError, ToolOutput, ToolRegistry};
 use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent};
@@ -159,6 +162,13 @@ fn build_doctor_report(
         },
     ];
 
+    // Check API key resolution
+    checks.push(check_api_key(&loaded));
+
+    // Check tool registry
+    checks.push(check_tool_registry());
+
+    // Storage check
     checks.push(match storage.database_exists {
         true => DoctorCheck {
             name: "storage".to_owned(),
@@ -174,6 +184,15 @@ fn build_doctor_report(
             detail: "database not bootstrapped yet; rerun with --bootstrap-storage".to_owned(),
         },
     });
+
+    // Storage stats (sessions, skills, schedules) when DB exists
+    if storage.database_exists {
+        checks.push(check_storage_stats(&loaded.config.storage.database_path));
+        checks.push(check_database_integrity(&loaded.config.storage.database_path));
+    }
+
+    // MCP servers
+    checks.push(check_mcp_servers(&loaded));
 
     Ok(DoctorReport {
         profile: loaded.config.profile,
@@ -193,6 +212,120 @@ fn build_doctor_report(
             session_id: "eve-bootstrap-preview".to_owned(),
         },
     })
+}
+
+/// Check whether the configured API key resolves to a non-empty value.
+fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let resolved = resolve(
+        &loaded.config.provider.backend,
+        &loaded.config.provider.model,
+        loaded.config.provider.base_url.as_deref(),
+        loaded.config.provider.api_key_env.as_deref(),
+        &env,
+    );
+
+    if resolved.api_key.is_empty() {
+        DoctorCheck {
+            name: "api_key".to_owned(),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "no API key found for backend '{}'; set the appropriate env var",
+                loaded.config.provider.backend
+            ),
+        }
+    } else {
+        // Show masked key (first 8 chars + ...)
+        let masked = if resolved.api_key.len() > 8 {
+            format!("{}...", &resolved.api_key[..8])
+        } else {
+            "****".to_owned()
+        };
+        DoctorCheck {
+            name: "api_key".to_owned(),
+            status: CheckStatus::Pass,
+            detail: format!("resolved ({})", masked),
+        }
+    }
+}
+
+/// Verify the tool registry loads successfully and report tool count.
+fn check_tool_registry() -> DoctorCheck {
+    let registry = default_registry();
+    let count = registry.definitions().len();
+    DoctorCheck {
+        name: "tools".to_owned(),
+        status: CheckStatus::Pass,
+        detail: format!("{count} builtin tools registered"),
+    }
+}
+
+/// Gather storage statistics: session, skill, and schedule counts.
+fn check_storage_stats(db_path: &Path) -> DoctorCheck {
+    let session_store = SessionStore::new(db_path);
+    let skill_store = SkillStore::new(db_path);
+    let schedule_store = ScheduleStore::new(db_path);
+
+    let sessions = session_store.count_sessions().unwrap_or(0);
+    let skills = skill_store.list_all().map(|v| v.len()).unwrap_or(0);
+    let schedules = schedule_store.list_all().map(|v| v.len()).unwrap_or(0);
+
+    DoctorCheck {
+        name: "storage_stats".to_owned(),
+        status: CheckStatus::Pass,
+        detail: format!("{sessions} sessions, {skills} skills, {schedules} schedules"),
+    }
+}
+
+/// Run PRAGMA integrity_check on the database.
+fn check_database_integrity(db_path: &Path) -> DoctorCheck {
+    match rusqlite::Connection::open(db_path) {
+        Ok(conn) => {
+            match conn.query_row("PRAGMA integrity_check", [], |row| {
+                row.get::<_, String>(0)
+            }) {
+                Ok(result) if result == "ok" => DoctorCheck {
+                    name: "db_integrity".to_owned(),
+                    status: CheckStatus::Pass,
+                    detail: "integrity check passed".to_owned(),
+                },
+                Ok(result) => DoctorCheck {
+                    name: "db_integrity".to_owned(),
+                    status: CheckStatus::Fail,
+                    detail: format!("integrity issue: {result}"),
+                },
+                Err(e) => DoctorCheck {
+                    name: "db_integrity".to_owned(),
+                    status: CheckStatus::Fail,
+                    detail: format!("integrity check failed: {e}"),
+                },
+            }
+        }
+        Err(e) => DoctorCheck {
+            name: "db_integrity".to_owned(),
+            status: CheckStatus::Fail,
+            detail: format!("cannot open database: {e}"),
+        },
+    }
+}
+
+/// Report configured MCP servers.
+fn check_mcp_servers(loaded: &LoadedConfig) -> DoctorCheck {
+    let servers = &loaded.config.mcp_servers;
+    if servers.is_empty() {
+        DoctorCheck {
+            name: "mcp_servers".to_owned(),
+            status: CheckStatus::Pass,
+            detail: "none configured".to_owned(),
+        }
+    } else {
+        let names: Vec<&String> = servers.keys().collect();
+        DoctorCheck {
+            name: "mcp_servers".to_owned(),
+            status: CheckStatus::Pass,
+            detail: format!("{} configured: {}", names.len(), names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+        }
+    }
 }
 
 impl SessionPlan {
