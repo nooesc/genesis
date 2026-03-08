@@ -5,7 +5,7 @@
 //! was handled, or `None` to pass through to the agent.
 
 use chrono::{Local, NaiveDateTime};
-use genesis_config::{GatewayConfig, GenesisConfig, ProviderConfig, RuntimeConfig, StorageConfig};
+use genesis_config::{GatewayConfig, GenesisConfig};
 use genesis_storage::SessionStore;
 use tracing::{info, warn};
 
@@ -188,6 +188,7 @@ pub fn check_session_expiry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genesis_config::{ProviderConfig, RuntimeConfig, StorageConfig};
     use genesis_storage::{bootstrap, SessionStore};
     use tempfile::tempdir;
 
