@@ -279,6 +279,7 @@ impl<'a> SessionExecutionService<'a> {
                 max_turns: self.loaded.config.runtime.max_turns,
                 max_context_messages: self.loaded.config.runtime.max_context_messages,
                 budget_limit: self.loaded.config.runtime.budget_limit,
+                max_concurrency: self.loaded.config.runtime.max_concurrency,
                 ..AgentLoopConfig::default()
             },
             history,

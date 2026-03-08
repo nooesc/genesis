@@ -61,6 +61,8 @@ pub struct AgentLoopConfig {
     pub max_context_messages: Option<usize>,
     /// Optional budget limit in USD. When exceeded, the agent loop stops early.
     pub budget_limit: Option<f64>,
+    /// Maximum number of tool calls to execute concurrently (default: 4).
+    pub max_concurrency: usize,
 }
 
 impl Default for AgentLoopConfig {
@@ -72,6 +74,7 @@ impl Default for AgentLoopConfig {
             max_tokens: None,
             max_context_messages: None,
             budget_limit: None,
+            max_concurrency: 4,
         }
     }
 }
@@ -231,11 +234,18 @@ impl AgentLoop {
                         tool_calls.clone(),
                     ));
 
-                    // Execute each tool call and append results
+                    // Execute tool calls in parallel (up to max_concurrency).
+                    tool_calls_made += tool_calls.len();
+                    let results = execute_tool_calls_parallel(
+                        &self.tools,
+                        &self.subagent_spawner,
+                        tool_calls,
+                        self.config.max_concurrency,
+                    )
+                    .await?;
+
                     let mut clarification = None;
-                    for tc in tool_calls {
-                        tool_calls_made += 1;
-                        let (result, requires_input) = self.execute_tool_call(tc).await?;
+                    for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
                         if requires_input {
                             clarification = Some(result.clone());
                         }
@@ -376,11 +386,25 @@ impl AgentLoop {
                             streamed_tool_calls.clone(),
                         ));
 
-                        let mut clarification = None;
+                        // Emit start events for all tool calls.
                         for tc in &streamed_tool_calls {
-                            tool_calls_made += 1;
                             on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
-                            let (result, requires_input) = self.execute_tool_call(tc).await?;
+                        }
+
+                        // Execute tool calls in parallel.
+                        tool_calls_made += streamed_tool_calls.len();
+                        let results = execute_tool_calls_parallel(
+                            &self.tools,
+                            &self.subagent_spawner,
+                            &streamed_tool_calls,
+                            self.config.max_concurrency,
+                        )
+                        .await?;
+
+                        let mut clarification = None;
+                        for (tc, (result, requires_input)) in
+                            streamed_tool_calls.iter().zip(results)
+                        {
                             on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
@@ -440,11 +464,25 @@ impl AgentLoop {
                                 tool_calls.clone(),
                             ));
 
-                            let mut clarification = None;
-                            for tc in tool_calls {
-                                tool_calls_made += 1;
+                            // Emit start events for all tool calls.
+                            for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
-                                let (result, requires_input) = self.execute_tool_call(tc).await?;
+                            }
+
+                            // Execute tool calls in parallel.
+                            tool_calls_made += tool_calls.len();
+                            let results = execute_tool_calls_parallel(
+                                &self.tools,
+                                &self.subagent_spawner,
+                                tool_calls,
+                                self.config.max_concurrency,
+                            )
+                            .await?;
+
+                            let mut clarification = None;
+                            for (tc, (result, requires_input)) in
+                                tool_calls.iter().zip(results)
+                            {
                                 on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded { question: &result });
@@ -486,103 +524,6 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     });
-                }
-            }
-        }
-    }
-
-    /// After executing a tool call, check if it was a subagent spawn and
-    /// trigger the spawner if configured.
-    fn maybe_spawn_subagent(&self, output: &genesis_tools::ToolOutput) {
-        let spawner = match &self.subagent_spawner {
-            Some(s) => s,
-            None => return,
-        };
-
-        if output.metadata.get("__subagent_spawn").map(String::as_str) != Some("true") {
-            return;
-        }
-
-        let child_session_id = match output.metadata.get("child_session_id") {
-            Some(id) => id,
-            None => return,
-        };
-        let subagent_id = match output.metadata.get("subagent_id") {
-            Some(id) => id,
-            None => return,
-        };
-        let task = match output.metadata.get("task") {
-            Some(t) => t,
-            None => return,
-        };
-
-        info!(
-            subagent_id = subagent_id.as_str(),
-            child_session_id = child_session_id.as_str(),
-            "spawning subagent workstream"
-        );
-        spawner.spawn(child_session_id, subagent_id, task);
-    }
-
-    /// Execute a single tool call from the LLM response.
-    ///
-    /// Returns `(content, requires_input)` — the content string for the LLM
-    /// and whether the tool is requesting user input (e.g., clarification).
-    async fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<(String, bool), AgentError> {
-        let span = info_span!(
-            "agent.tool_call",
-            tool_name = tc.function.name.as_str(),
-            tool_call_id = tc.id.as_str()
-        );
-        let started_at = Instant::now();
-        let arguments = {
-            let _entered = span.enter();
-            let args = parse_tool_arguments(&tc.function.arguments)?;
-            debug!(argument_count = args.len(), "parsed tool arguments");
-            args
-        };
-
-        let call = ToolCall {
-            name: tc.function.name.clone(),
-            arguments,
-        };
-
-        match self.tools.execute_async(&call).await {
-            Ok(output) => {
-                info!(
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    output_bytes = output.content.len(),
-                    "tool call succeeded"
-                );
-                self.maybe_spawn_subagent(&output);
-                let requires_input = output
-                    .metadata
-                    .get("requires_input")
-                    .map(|v| v == "true")
-                    .unwrap_or(false);
-                Ok((output.content, requires_input))
-            }
-            Err(err) => {
-                // Return tool errors as content so the LLM can see what went wrong
-                // and potentially retry or adjust. Only propagate if the tool is
-                // completely not found.
-                match &err {
-                    ToolError::ToolNotFound(_) => {
-                        error!(
-                            elapsed_ms = started_at.elapsed().as_millis() as u64,
-                            error = %err,
-                            "tool call failed with missing tool"
-                        );
-                        Err(err.into())
-                    }
-                    _ => {
-                        warn!(
-                            elapsed_ms = started_at.elapsed().as_millis() as u64,
-                            error = %err,
-                            "tool call returned recoverable error content"
-                        );
-                        Ok((format!("Error: {err}"), false))
-                    }
                 }
             }
         }
@@ -774,6 +715,124 @@ fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
 ///
 /// LLM tool call arguments come as a JSON string like `{"message":"hello"}`.
 /// We flatten all values to their string representation for the ToolCall struct.
+/// Execute multiple tool calls concurrently up to the given concurrency limit.
+///
+/// Results are returned in the same order as the input `tool_calls`, preserving
+/// the tool-call-to-result correspondence required by the LLM message format.
+/// If any tool call fails with a hard error (e.g., tool not found), that error
+/// is propagated and the remaining results are discarded.
+async fn execute_tool_calls_parallel(
+    tools: &ToolRuntime,
+    subagent_spawner: &Option<Arc<dyn SubagentSpawner>>,
+    tool_calls: &[ToolCallEntry],
+    max_concurrency: usize,
+) -> Result<Vec<(String, bool)>, AgentError> {
+    if tool_calls.len() == 1 {
+        // Fast path: avoid semaphore overhead for single tool calls.
+        let result = execute_single_tool(tools, subagent_spawner, &tool_calls[0]).await?;
+        return Ok(vec![result]);
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency.max(1)));
+    let futs: Vec<_> = tool_calls
+        .iter()
+        .map(|tc| {
+            let sem = Arc::clone(&semaphore);
+            async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                execute_single_tool(tools, subagent_spawner, tc).await
+            }
+        })
+        .collect();
+
+    let results = futures_util::future::join_all(futs).await;
+
+    // Collect results, short-circuiting on the first hard error.
+    results.into_iter().collect()
+}
+
+/// Execute a single tool call against the provided runtime, returning the
+/// content string for the LLM and whether the tool requests user input.
+///
+/// This is a free function (not a method) so it can be used for concurrent
+/// execution from `&mut self` methods via field-level borrow splitting.
+async fn execute_single_tool(
+    tools: &ToolRuntime,
+    subagent_spawner: &Option<Arc<dyn SubagentSpawner>>,
+    tc: &ToolCallEntry,
+) -> Result<(String, bool), AgentError> {
+    let span = info_span!(
+        "agent.tool_call",
+        tool_name = tc.function.name.as_str(),
+        tool_call_id = tc.id.as_str()
+    );
+    let started_at = Instant::now();
+    let arguments = {
+        let _entered = span.enter();
+        let args = parse_tool_arguments(&tc.function.arguments)?;
+        debug!(argument_count = args.len(), "parsed tool arguments");
+        args
+    };
+
+    let call = ToolCall {
+        name: tc.function.name.clone(),
+        arguments,
+    };
+
+    match tools.execute_async(&call).await {
+        Ok(output) => {
+            info!(
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                output_bytes = output.content.len(),
+                "tool call succeeded"
+            );
+            // Check for subagent spawn metadata.
+            if let Some(spawner) = subagent_spawner {
+                if output.metadata.get("__subagent_spawn").map(String::as_str) == Some("true") {
+                    if let (Some(child_session_id), Some(subagent_id), Some(task)) = (
+                        output.metadata.get("child_session_id"),
+                        output.metadata.get("subagent_id"),
+                        output.metadata.get("task"),
+                    ) {
+                        info!(
+                            subagent_id = subagent_id.as_str(),
+                            child_session_id = child_session_id.as_str(),
+                            "spawning subagent workstream"
+                        );
+                        spawner.spawn(child_session_id, subagent_id, task);
+                    }
+                }
+            }
+            let requires_input = output
+                .metadata
+                .get("requires_input")
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            Ok((output.content, requires_input))
+        }
+        Err(err) => {
+            match &err {
+                ToolError::ToolNotFound(_) => {
+                    error!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        error = %err,
+                        "tool call failed with missing tool"
+                    );
+                    Err(err.into())
+                }
+                _ => {
+                    warn!(
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        error = %err,
+                        "tool call returned recoverable error content"
+                    );
+                    Ok((format!("Error: {err}"), false))
+                }
+            }
+        }
+    }
+}
+
 fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentError> {
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| AgentError::ArgumentParse(format!("{raw}: {e}")))?;
@@ -925,14 +984,18 @@ mod tests {
     #[tokio::test]
     async fn execute_tool_call_propagates_missing_tool() {
         let agent = test_agent();
-        let result = agent.execute_tool_call(&ToolCallEntry {
-            id: "tool-1".to_owned(),
-            call_type: "function".to_owned(),
-            function: genesis_provider::FunctionCall {
-                name: "does_not_exist".to_owned(),
-                arguments: "{}".to_owned(),
+        let result = execute_single_tool(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &ToolCallEntry {
+                id: "tool-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "does_not_exist".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
             },
-        }).await;
+        ).await;
 
         assert!(matches!(result, Err(AgentError::Tool(ToolError::ToolNotFound(_)))));
     }
@@ -940,20 +1003,117 @@ mod tests {
     #[tokio::test]
     async fn execute_tool_call_returns_error_content_for_recoverable_tool_error() {
         let agent = test_agent();
-        let result = agent
-            .execute_tool_call(&ToolCallEntry {
+        let result = execute_single_tool(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &ToolCallEntry {
                 id: "tool-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
                     name: "echo".to_owned(),
                     arguments: "{}".to_owned(),
                 },
-            })
-            .await
-            .expect("recoverable tool errors should return content");
+            },
+        )
+        .await
+        .expect("recoverable tool errors should return content");
 
         assert!(result.0.starts_with("Error:"));
         assert!(!result.1, "error results should not require input");
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_execution_preserves_order() {
+        let agent = test_agent();
+        let tool_calls = vec![
+            ToolCallEntry {
+                id: "call-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: r#"{"message":"first"}"#.to_owned(),
+                },
+            },
+            ToolCallEntry {
+                id: "call-2".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: r#"{"message":"second"}"#.to_owned(),
+                },
+            },
+        ];
+
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+        )
+        .await
+        .expect("parallel execution should succeed");
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].0.contains("first"), "first result should contain 'first'");
+        assert!(results[1].0.contains("second"), "second result should contain 'second'");
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_execution_single_item_fast_path() {
+        let agent = test_agent();
+        let tool_calls = vec![ToolCallEntry {
+            id: "call-1".to_owned(),
+            call_type: "function".to_owned(),
+            function: genesis_provider::FunctionCall {
+                name: "echo".to_owned(),
+                arguments: r#"{"message":"solo"}"#.to_owned(),
+            },
+        }];
+
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+        )
+        .await
+        .expect("single-item parallel should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].0.contains("solo"));
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_execution_propagates_first_error() {
+        let agent = test_agent();
+        let tool_calls = vec![
+            ToolCallEntry {
+                id: "call-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: r#"{"message":"ok"}"#.to_owned(),
+                },
+            },
+            ToolCallEntry {
+                id: "call-2".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "nonexistent_tool".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            },
+        ];
+
+        let result = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+        )
+        .await;
+
+        assert!(result.is_err(), "should propagate ToolNotFound error");
     }
 
     #[tokio::test]
