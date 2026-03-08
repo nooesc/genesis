@@ -157,6 +157,7 @@ mod tests {
                     api_key_env: None,
                 },
                 tool_provider: None,
+                mcp_servers: std::collections::HashMap::new(),
                 storage: StorageConfig {
                     data_dir: data_dir.clone(),
                     database_path: database_path.clone(),

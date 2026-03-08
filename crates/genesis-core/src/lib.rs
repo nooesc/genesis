@@ -346,6 +346,7 @@ mod tests {
                     api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
                 },
                 tool_provider: None,
+                mcp_servers: std::collections::HashMap::new(),
                 storage: StorageConfig {
                     data_dir: PathBuf::from("/tmp/genesis"),
                     database_path: PathBuf::from("/tmp/genesis/genesis.db"),

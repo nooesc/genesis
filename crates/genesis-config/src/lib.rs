@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,8 +21,38 @@ pub struct GenesisConfig {
     /// reserves the primary provider for reasoning turns (after user messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_provider: Option<ProviderConfig>,
+    /// MCP (Model Context Protocol) server definitions. Each entry maps a
+    /// server name to its connection config (stdio or HTTP transport).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
+}
+
+/// Configuration for a single MCP server.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerConfig {
+    /// Command to spawn for stdio transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Arguments for the stdio command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Environment variables passed to the subprocess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+    /// URL for HTTP transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// HTTP headers for URL transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Tool call timeout in seconds (default: 120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Connection/initialization timeout in seconds (default: 60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +98,8 @@ struct FileConfig {
     provider: Option<FileProviderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_provider: Option<FileProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_servers: Option<HashMap<String, McpServerConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<FileStorageConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +192,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
         },
         tool_provider: None,
+        mcp_servers: HashMap::new(),
         storage: StorageConfig {
             data_dir: paths.data_dir.clone(),
             database_path: paths.database_path,
@@ -288,12 +321,15 @@ pub fn load_from_map(
         )?,
     };
 
+    let mcp_servers = file_config.mcp_servers.unwrap_or_default();
+
     Ok(LoadedConfig {
         config: GenesisConfig {
             schema_version: file_config.schema_version.unwrap_or(1),
             profile,
             provider,
             tool_provider,
+            mcp_servers,
             storage: StorageConfig {
                 data_dir: data_dir.clone(),
                 database_path: database_path.clone(),
@@ -594,5 +630,60 @@ tool_provider:
     fn tool_provider_absent_when_not_configured() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.tool_provider.is_none());
+    }
+
+    #[test]
+    fn mcp_servers_parsed_from_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openai
+  model: gpt-4.1-mini
+mcp_servers:
+  filesystem:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  github:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: ghp_xxx
+  remote_db:
+    url: https://mcp.example.com/db
+    headers:
+      Authorization: Bearer sk-xxx
+    timeout: 180
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        assert_eq!(loaded.config.mcp_servers.len(), 3);
+
+        let fs_server = &loaded.config.mcp_servers["filesystem"];
+        assert_eq!(fs_server.command.as_deref(), Some("npx"));
+        assert_eq!(fs_server.args.as_ref().unwrap().len(), 3);
+
+        let gh_server = &loaded.config.mcp_servers["github"];
+        assert_eq!(
+            gh_server.env.as_ref().unwrap().get("GITHUB_TOKEN").unwrap(),
+            "ghp_xxx"
+        );
+
+        let db_server = &loaded.config.mcp_servers["remote_db"];
+        assert_eq!(db_server.url.as_deref(), Some("https://mcp.example.com/db"));
+        assert_eq!(db_server.timeout, Some(180));
+        assert!(db_server.command.is_none());
+    }
+
+    #[test]
+    fn mcp_servers_empty_when_not_configured() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.mcp_servers.is_empty());
     }
 }

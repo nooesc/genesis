@@ -12,6 +12,8 @@ use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
+use genesis_mcp::McpManager;
+
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::{build_system_prompt_complete, load_context_file};
 use crate::skills::load_skills_prompt;
@@ -19,6 +21,7 @@ use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
 pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
+    mcp: Option<Arc<McpManager>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +59,53 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded }
+        Self { loaded, mcp: None }
+    }
+
+    /// Create a service with MCP servers connected.
+    pub async fn with_mcp(loaded: &'a LoadedConfig) -> Self {
+        let mcp = if !loaded.config.mcp_servers.is_empty() {
+            let configs: Vec<genesis_mcp::McpServerConfig> = loaded
+                .config
+                .mcp_servers
+                .iter()
+                .filter_map(|(name, cfg)| {
+                    let command = cfg.command.as_ref()?;
+                    Some(genesis_mcp::McpServerConfig {
+                        name: name.clone(),
+                        command: command.clone(),
+                        args: cfg.args.clone().unwrap_or_default(),
+                        env: cfg.env.clone().unwrap_or_default(),
+                        connect_timeout: std::time::Duration::from_secs(
+                            cfg.connect_timeout.unwrap_or(60),
+                        ),
+                        call_timeout: std::time::Duration::from_secs(
+                            cfg.timeout.unwrap_or(120),
+                        ),
+                    })
+                })
+                .collect();
+
+            if configs.is_empty() {
+                None
+            } else {
+                let manager = McpManager::connect_all(configs).await;
+                if manager.tool_count().await > 0 {
+                    info!(
+                        servers = manager.server_count().await,
+                        tools = manager.tool_count().await,
+                        "MCP tools registered"
+                    );
+                    Some(Arc::new(manager))
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Self { loaded, mcp }
     }
 
     pub fn ensure_session(
@@ -182,7 +231,12 @@ impl<'a> SessionExecutionService<'a> {
     ) -> Result<AgentLoop, SessionExecutionError> {
         let execution_context =
             build_execution_context_from_loaded(self.loaded, session_id, platform);
-        let tool_runtime = build_default_tool_runtime(&execution_context);
+        let mut tool_runtime = build_default_tool_runtime(&execution_context);
+
+        // Attach MCP manager if we connected any servers at service creation
+        if let Some(mcp) = &self.mcp {
+            tool_runtime.set_mcp(Arc::clone(mcp));
+        }
 
         // Load skills, user model, and project context for prompt personalization
         let db_path = &self.loaded.config.storage.database_path;
@@ -696,6 +750,7 @@ mod tests {
                     api_key_env: None,
                 },
                 tool_provider: None,
+                mcp_servers: std::collections::HashMap::new(),
                 storage: StorageConfig {
                     data_dir: data_dir.clone(),
                     database_path: database_path.clone(),
