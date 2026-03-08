@@ -67,8 +67,12 @@ impl ChatClient {
     }
 
     /// Prepare a request body from a `ChatCompletionRequest`, merging
-    /// `extra_body` fields into the top-level JSON object.
-    fn prepare_body(request: &mut ChatCompletionRequest) -> Result<serde_json::Value, ProviderError> {
+    /// `extra_body` fields into the top-level JSON object and applying
+    /// backend-specific optimizations like prompt caching.
+    fn prepare_body(
+        request: &mut ChatCompletionRequest,
+        backend: &str,
+    ) -> Result<serde_json::Value, ProviderError> {
         let mut body = serde_json::to_value(&*request)?;
         if let Some(extra) = request.extra_body.take() {
             if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
@@ -78,6 +82,11 @@ impl ChatClient {
                 }
             }
         }
+
+        if supports_prompt_caching(backend) {
+            inject_cache_control(&mut body);
+        }
+
         Ok(body)
     }
 
@@ -179,7 +188,7 @@ impl ChatClient {
             request.model = self.model.clone();
         }
 
-        let body = Self::prepare_body(&mut request)?;
+        let body = Self::prepare_body(&mut request, &self.backend)?;
         let response = self.send_with_retry(&body, &request.model).await?;
 
         let completion: ChatCompletionResponse = match response.json().await {
@@ -242,7 +251,7 @@ impl ChatClient {
         request.stream = Some(true);
         request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
 
-        let body = Self::prepare_body(&mut request)?;
+        let body = Self::prepare_body(&mut request, &self.backend)?;
         let response = self.send_with_retry(&body, &request.model).await?;
 
         info!(
@@ -335,6 +344,52 @@ impl ChatClient {
     }
 }
 
+/// Backends that support Anthropic-style prompt caching via cache_control.
+fn supports_prompt_caching(backend: &str) -> bool {
+    matches!(backend, "anthropic" | "openrouter")
+}
+
+/// Inject `cache_control: {"type": "ephemeral"}` into the request body for
+/// prompt caching on supported backends.
+///
+/// Targets:
+/// - System messages: converted from string content to content-block array
+///   with cache_control on the text block.
+/// - Last tool definition: receives cache_control at the tool level.
+fn inject_cache_control(body: &mut serde_json::Value) {
+    let cache_marker = serde_json::json!({"type": "ephemeral"});
+
+    // Cache system messages
+    if let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            let is_system = msg
+                .get("role")
+                .and_then(|r| r.as_str())
+                .map(|r| r == "system")
+                .unwrap_or(false);
+
+            if is_system {
+                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                    // Convert string content → content-block array with cache_control
+                    let content_block = serde_json::json!([{
+                        "type": "text",
+                        "text": content,
+                        "cache_control": cache_marker
+                    }]);
+                    msg["content"] = content_block;
+                }
+            }
+        }
+    }
+
+    // Cache last tool definition
+    if let Some(tools) = body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+        if let Some(last_tool) = tools.last_mut() {
+            last_tool["cache_control"] = cache_marker;
+        }
+    }
+}
+
 /// Whether an HTTP status code is transient and worth retrying.
 fn is_retryable_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
@@ -390,6 +445,7 @@ fn parse_sse_event(event: &str) -> Result<Option<ChatCompletionChunk>, ProviderE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_types::{ChatCompletionRequest, ChatMessage};
     use crate::resolve::ResolvedProvider;
 
     #[test]
@@ -496,5 +552,101 @@ mod tests {
     fn backoff_delay_caps_at_max() {
         let d10 = backoff_delay(10);
         assert!(d10.as_millis() <= MAX_DELAY.as_millis() as u128 + MAX_DELAY.as_millis() as u128 / 4);
+    }
+
+    #[test]
+    fn supports_prompt_caching_for_anthropic_and_openrouter() {
+        assert!(supports_prompt_caching("anthropic"));
+        assert!(supports_prompt_caching("openrouter"));
+        assert!(!supports_prompt_caching("openai"));
+        assert!(!supports_prompt_caching("ollama"));
+        assert!(!supports_prompt_caching("vllm"));
+    }
+
+    #[test]
+    fn inject_cache_control_converts_system_message_to_content_blocks() {
+        let mut body = serde_json::json!({
+            "model": "claude-3",
+            "messages": [
+                {"role": "system", "content": "You are Eve."},
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        inject_cache_control(&mut body);
+
+        let system_msg = &body["messages"][0];
+        let content = system_msg["content"].as_array().expect("content should be array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "You are Eve.");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+
+        // User message should remain unchanged
+        let user_msg = &body["messages"][1];
+        assert_eq!(user_msg["content"], "Hello");
+    }
+
+    #[test]
+    fn inject_cache_control_adds_cache_to_last_tool() {
+        let mut body = serde_json::json!({
+            "model": "claude-3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "function": {"name": "echo", "description": "Echo"}},
+                {"type": "function", "function": {"name": "search", "description": "Search"}}
+            ]
+        });
+
+        inject_cache_control(&mut body);
+
+        let tools = body["tools"].as_array().unwrap();
+        // First tool should NOT have cache_control
+        assert!(tools[0].get("cache_control").is_none());
+        // Last tool should have cache_control
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn inject_cache_control_noop_without_messages_or_tools() {
+        let mut body = serde_json::json!({"model": "test"});
+        inject_cache_control(&mut body); // should not panic
+        assert_eq!(body, serde_json::json!({"model": "test"}));
+    }
+
+    #[test]
+    fn prepare_body_applies_caching_for_anthropic_backend() {
+        let mut request = ChatCompletionRequest::new(
+            "claude-3",
+            vec![
+                ChatMessage::system("System prompt"),
+                ChatMessage::user("Hello"),
+            ],
+        );
+
+        let body = ChatClient::prepare_body(&mut request, "anthropic")
+            .expect("should prepare body");
+
+        // System message should have content blocks with cache_control
+        let system_content = &body["messages"][0]["content"];
+        assert!(system_content.is_array(), "system content should be array for anthropic");
+        assert_eq!(system_content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn prepare_body_skips_caching_for_openai_backend() {
+        let mut request = ChatCompletionRequest::new(
+            "gpt-4",
+            vec![
+                ChatMessage::system("System prompt"),
+                ChatMessage::user("Hello"),
+            ],
+        );
+
+        let body = ChatClient::prepare_body(&mut request, "openai")
+            .expect("should prepare body");
+
+        // System message content should remain a string for openai
+        assert!(body["messages"][0]["content"].is_string());
     }
 }
