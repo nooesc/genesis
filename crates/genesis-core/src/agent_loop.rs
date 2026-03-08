@@ -10,7 +10,7 @@ use genesis_provider::{
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, error, info, info_span, warn};
+use tracing::{debug, info, info_span, warn};
 
 use std::sync::Arc;
 

@@ -143,6 +143,108 @@ pub fn check_due_schedules(
         .collect()
 }
 
+/// Callback trait for schedule execution.
+///
+/// The scheduler runtime calls this when a schedule fires. The implementor
+/// is responsible for actually executing the prompt (e.g., running it
+/// through `SessionExecutionService`).
+pub trait ScheduleExecutor: Send + Sync + 'static {
+    /// Execute a due schedule. The `schedule` contains the destination and prompt.
+    fn execute(
+        &self,
+        schedule: DueSchedule,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>;
+}
+
+/// Background scheduler that polls every minute and fires due schedules.
+///
+/// Spawned as a `tokio::spawn` task. Cancellation is cooperative via an
+/// `AtomicBool` flag.
+pub struct SchedulerRuntime {
+    database_path: std::path::PathBuf,
+    executor: std::sync::Arc<dyn ScheduleExecutor>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SchedulerRuntime {
+    pub fn new(
+        database_path: std::path::PathBuf,
+        executor: std::sync::Arc<dyn ScheduleExecutor>,
+    ) -> Self {
+        Self {
+            database_path,
+            executor,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Returns a handle that can be used to stop the scheduler.
+    pub fn cancellation_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.cancelled)
+    }
+
+    /// Run the scheduler loop. This blocks until cancelled.
+    pub async fn run(self) {
+        tracing::info!("scheduler runtime started");
+        loop {
+            if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!("scheduler runtime cancelled");
+                return;
+            }
+
+            self.tick().await;
+
+            // Sleep until the next minute boundary
+            let now = chrono::Local::now();
+            let secs_until_next_minute = 60 - now.second();
+            tokio::time::sleep(std::time::Duration::from_secs(secs_until_next_minute as u64))
+                .await;
+        }
+    }
+
+    /// Check for due schedules and execute them.
+    async fn tick(&self) {
+        let store = genesis_storage::ScheduleStore::new(&self.database_path);
+        let schedules = match store.list_enabled() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load schedules");
+                return;
+            }
+        };
+
+        if schedules.is_empty() {
+            return;
+        }
+
+        let now = chrono::Local::now();
+        let cron_now = CronTime {
+            minute: now.minute(),
+            hour: now.hour(),
+            day_of_month: now.day(),
+            month: now.month(),
+            day_of_week: now.weekday().num_days_from_sunday(),
+        };
+
+        let due = check_due_schedules(&schedules, &cron_now);
+        if due.is_empty() {
+            return;
+        }
+
+        tracing::info!(count = due.len(), "executing due schedules");
+        for schedule in due {
+            let id = schedule.id.clone();
+            match self.executor.execute(schedule).await {
+                Ok(()) => tracing::info!(schedule_id = id.as_str(), "schedule executed"),
+                Err(e) => tracing::warn!(schedule_id = id.as_str(), error = e.as_str(), "schedule execution failed"),
+            }
+        }
+    }
+}
+
+use chrono::Timelike;
+use chrono::Datelike;
+
 #[cfg(test)]
 mod tests {
     use super::*;

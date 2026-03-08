@@ -1833,12 +1833,22 @@ async fn run_serve(
         .and_then(|v| v.parse::<u32>().ok())
         .or_else(|| loaded.config.gateway.as_ref().and_then(|g| g.rate_limit_rpm));
     let state = std::sync::Arc::new(AppState::new(loaded, api_key, mcp, rate_limit_rpm));
-    let router = build_router(state);
+    let router = build_router(std::sync::Arc::clone(&state));
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         CliError::Io(e)
     })?;
+
+    // Start background scheduler
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let sched_loaded = std::sync::Arc::clone(&state);
+    let executor = std::sync::Arc::new(GatewayScheduleExecutor {
+        loaded: sched_loaded,
+    });
+    let scheduler = genesis_core::scheduler::SchedulerRuntime::new(db_path, executor);
+    let sched_cancel = scheduler.cancellation_handle();
+    tokio::spawn(scheduler.run());
 
     println!("genesis gateway listening on {addr}");
     axum::serve(listener, router)
@@ -1849,7 +1859,47 @@ async fn run_serve(
         .await
         .map_err(|e| CliError::Io(e))?;
 
+    // Stop the scheduler
+    sched_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+
     Ok("server stopped".to_owned())
+}
+
+/// Schedule executor that runs prompts through SessionExecutionService.
+struct GatewayScheduleExecutor {
+    loaded: std::sync::Arc<genesis_gateway::AppState>,
+}
+
+impl genesis_core::scheduler::ScheduleExecutor for GatewayScheduleExecutor {
+    fn execute(
+        &self,
+        schedule: genesis_core::scheduler::DueSchedule,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        Box::pin(async move {
+            let mut service =
+                genesis_core::execution::SessionExecutionService::new(&self.loaded.loaded);
+            if let Some(mcp) = &self.loaded.mcp {
+                service.set_mcp(std::sync::Arc::clone(mcp));
+            }
+            let session_id = format!("schedule-{}", schedule.id);
+            let title = format!("Schedule: {}", schedule.id);
+            let platform =
+                genesis_core::execution::delivery_platform_from_str(&schedule.destination);
+            let input = genesis_core::execution::SessionTurnInput {
+                session_id: &session_id,
+                session_platform: &schedule.destination,
+                delivery_platform: platform,
+                prompt: &schedule.prompt,
+                images: Vec::new(),
+                title: Some(&title),
+            };
+            service
+                .run_turn(input)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("{e}"))
+        })
+    }
 }
 
 async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
