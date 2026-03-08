@@ -205,7 +205,8 @@ pub fn default_registry() -> ToolRegistry {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "The shell command to execute." },
-                        "working_dir": { "type": "string", "description": "Optional working directory for the command." }
+                        "working_dir": { "type": "string", "description": "Optional working directory for the command." },
+                        "timeout": { "type": "string", "description": "Timeout in seconds (default: 120). The command is killed if it exceeds this." }
                     },
                     "required": ["command"]
                 })),

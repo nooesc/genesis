@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// Patterns that indicate potentially dangerous commands.
 /// Each entry is (pattern, description) for clear reporting.
@@ -110,6 +112,11 @@ impl ToolHandler for ShellExecTool {
         }
 
         let working_dir = call.arguments.get("working_dir");
+        let timeout_secs: u64 = call
+            .arguments
+            .get("timeout")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
@@ -118,10 +125,38 @@ impl ToolHandler for ShellExecTool {
             cmd.current_dir(dir);
         }
 
-        let output = cmd.output().map_err(|e| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: format!("failed to spawn shell: {e}"),
-        })?;
+        // Use a thread + channel for timeout enforcement
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to spawn shell: {e}"),
+            })?;
+
+        let tool_name = call.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = child.wait_with_output();
+            let _ = tx.send(result);
+        });
+
+        let output = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+            Ok(result) => result.map_err(|e| ToolError::ExecutionFailed {
+                tool: tool_name.clone(),
+                reason: format!("error collecting output: {e}"),
+            })?,
+            Err(_) => {
+                return Err(ToolError::ExecutionFailed {
+                    tool: tool_name,
+                    reason: format!(
+                        "command timed out after {timeout_secs}s. Use the `timeout` argument \
+                         to increase the limit."
+                    ),
+                });
+            }
+        };
 
         let stdout = truncate_output(&output.stdout);
         let stderr = truncate_output(&output.stderr);
@@ -297,5 +332,40 @@ mod tests {
         assert!(check_dangerous(":(){:|:&};:").is_some());
         assert!(check_dangerous("dd if=/dev/zero of=/dev/sda").is_some());
         assert!(check_dangerous("mkfs.ext4 /dev/sda1").is_some());
+    }
+
+    #[test]
+    fn shell_exec_times_out() {
+        let tool = ShellExecTool;
+        let call = ToolCall {
+            name: "shell_exec".to_owned(),
+            arguments: BTreeMap::from([
+                ("command".to_owned(), "sleep 60".to_owned()),
+                ("timeout".to_owned(), "1".to_owned()),
+            ]),
+        };
+
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("timed out"), "expected timeout, got: {reason}");
+            }
+            _ => panic!("expected ExecutionFailed, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn shell_exec_completes_within_timeout() {
+        let tool = ShellExecTool;
+        let call = ToolCall {
+            name: "shell_exec".to_owned(),
+            arguments: BTreeMap::from([
+                ("command".to_owned(), "echo fast".to_owned()),
+                ("timeout".to_owned(), "10".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(output.content.trim(), "fast");
     }
 }
