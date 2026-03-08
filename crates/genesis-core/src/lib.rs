@@ -6,9 +6,11 @@ pub mod scheduler;
 pub mod skills;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
 use genesis_storage::{bootstrap, inspect, StorageHealth};
+use genesis_mcp::McpManager;
 use genesis_tools::{default_registry, ToolCall, ToolContext, ToolError, ToolOutput, ToolRegistry};
 use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent};
 use serde::{Deserialize, Serialize};
@@ -64,6 +66,7 @@ pub struct ExecutionContext {
 pub struct ToolRuntime {
     registry: ToolRegistry,
     context: ToolContext,
+    mcp: Option<Arc<McpManager>>,
 }
 
 #[derive(Debug, Error)]
@@ -126,6 +129,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             data_dir: execution_context.data_dir.clone(),
             allow_destructive_tools: execution_context.allow_destructive_tools,
         },
+        mcp: None,
     }
 }
 
@@ -241,12 +245,60 @@ fn provider_kind(raw: &str) -> ModelProviderKind {
 }
 
 impl ToolRuntime {
+    /// Returns built-in tool definitions only (sync).
+    /// Use `definitions_async()` to include MCP tools.
     pub fn definitions(&self) -> Vec<genesis_types::ToolDefinition> {
         self.registry.definitions()
     }
 
+    /// Returns tool definitions including MCP tools (async-safe).
+    pub async fn definitions_async(&self) -> Vec<genesis_types::ToolDefinition> {
+        let mut defs = self.registry.definitions();
+        if let Some(mcp) = &self.mcp {
+            defs.extend(mcp.tool_definitions().await);
+        }
+        defs
+    }
+
     pub fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         self.registry.execute(call, &self.context)
+    }
+
+    /// Execute a tool call, routing MCP-prefixed tools to the MCP manager.
+    pub async fn execute_async(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
+        if call.name.starts_with("mcp_") {
+            if let Some(mcp) = &self.mcp {
+                // Convert BTreeMap<String,String> arguments to JSON Value
+                let args = if call.arguments.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_value(&call.arguments).unwrap_or_default())
+                };
+
+                let content = mcp.call_tool(&call.name, args).await.map_err(|e| {
+                    ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+
+                return Ok(ToolOutput {
+                    content,
+                    metadata: std::collections::BTreeMap::from([(
+                        "tool".to_owned(),
+                        call.name.clone(),
+                    )]),
+                });
+            }
+            return Err(ToolError::ToolNotFound(call.name.clone()));
+        }
+
+        self.registry.execute(call, &self.context)
+    }
+
+    /// Attach an MCP manager for external tool support.
+    pub fn set_mcp(&mut self, mcp: Arc<McpManager>) {
+        self.mcp = Some(mcp);
     }
 
     /// Create a new ToolRuntime with a different session ID.
@@ -258,6 +310,7 @@ impl ToolRuntime {
                 session_id: session_id.into(),
                 ..self.context.clone()
             },
+            mcp: self.mcp.clone(),
         }
     }
 }

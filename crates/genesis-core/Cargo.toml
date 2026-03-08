@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 futures-util.workspace = true
 genesis-config = { path = "../genesis-config" }
+genesis-mcp = { path = "../genesis-mcp" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-tools = { path = "../genesis-tools" }

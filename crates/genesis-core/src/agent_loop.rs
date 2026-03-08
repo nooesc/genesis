@@ -147,7 +147,7 @@ impl AgentLoop {
     pub async fn run_turn(&mut self, user_message: &str) -> Result<AgentResult, AgentError> {
         self.messages.push(ChatMessage::user(user_message));
 
-        let tool_defs: Vec<ChatTool> = self.tools.definitions().iter().map(ChatTool::from).collect();
+        let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
         let mut turns_used = 0;
         let mut tool_calls_made = 0;
@@ -190,7 +190,7 @@ impl AgentLoop {
                     // Execute each tool call and append results
                     for tc in tool_calls {
                         tool_calls_made += 1;
-                        let result = self.execute_tool_call(tc)?;
+                        let result = self.execute_tool_call(tc).await?;
                         self.messages
                             .push(ChatMessage::tool_result(&tc.id, result));
                     }
@@ -229,7 +229,7 @@ impl AgentLoop {
     {
         self.messages.push(ChatMessage::user(user_message));
 
-        let tool_defs: Vec<ChatTool> = self.tools.definitions().iter().map(ChatTool::from).collect();
+        let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
         let mut turns_used = 0;
         let mut tool_calls_made = 0;
@@ -284,7 +284,7 @@ impl AgentLoop {
 
                         for tc in &streamed_tool_calls {
                             tool_calls_made += 1;
-                            let result = self.execute_tool_call(tc)?;
+                            let result = self.execute_tool_call(tc).await?;
                             self.messages.push(ChatMessage::tool_result(&tc.id, result));
                         }
 
@@ -325,7 +325,7 @@ impl AgentLoop {
 
                             for tc in tool_calls {
                                 tool_calls_made += 1;
-                                let result = self.execute_tool_call(tc)?;
+                                let result = self.execute_tool_call(tc).await?;
                                 self.messages.push(ChatMessage::tool_result(&tc.id, result));
                             }
 
@@ -386,23 +386,26 @@ impl AgentLoop {
     ///
     /// Returns the content string for the LLM and triggers subagent spawning
     /// if the tool call was `spawn_subagent`.
-    fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
-        let _span = info_span!(
+    async fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
+        let span = info_span!(
             "agent.tool_call",
             tool_name = tc.function.name.as_str(),
             tool_call_id = tc.id.as_str()
-        )
-        .entered();
+        );
         let started_at = Instant::now();
-        let arguments = parse_tool_arguments(&tc.function.arguments)?;
-        debug!(argument_count = arguments.len(), "parsed tool arguments");
+        let arguments = {
+            let _entered = span.enter();
+            let args = parse_tool_arguments(&tc.function.arguments)?;
+            debug!(argument_count = args.len(), "parsed tool arguments");
+            args
+        };
 
         let call = ToolCall {
             name: tc.function.name.clone(),
             arguments,
         };
 
-        match self.tools.execute(&call) {
+        match self.tools.execute_async(&call).await {
             Ok(output) => {
                 info!(
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
@@ -719,8 +722,8 @@ mod tests {
         assert_eq!(agent.messages()[2].role, "assistant");
     }
 
-    #[test]
-    fn execute_tool_call_propagates_missing_tool() {
+    #[tokio::test]
+    async fn execute_tool_call_propagates_missing_tool() {
         let agent = test_agent();
         let result = agent.execute_tool_call(&ToolCallEntry {
             id: "tool-1".to_owned(),
@@ -729,13 +732,13 @@ mod tests {
                 name: "does_not_exist".to_owned(),
                 arguments: "{}".to_owned(),
             },
-        });
+        }).await;
 
         assert!(matches!(result, Err(AgentError::Tool(ToolError::ToolNotFound(_)))));
     }
 
-    #[test]
-    fn execute_tool_call_returns_error_content_for_recoverable_tool_error() {
+    #[tokio::test]
+    async fn execute_tool_call_returns_error_content_for_recoverable_tool_error() {
         let agent = test_agent();
         let result = agent
             .execute_tool_call(&ToolCallEntry {
@@ -746,6 +749,7 @@ mod tests {
                     arguments: "{}".to_owned(),
                 },
             })
+            .await
             .expect("recoverable tool errors should return content");
 
         assert!(result.starts_with("Error:"));
