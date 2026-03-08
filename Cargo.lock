@@ -480,10 +480,12 @@ dependencies = [
 name = "genesis-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
  "clap",
  "genesis-config",
  "genesis-core",
+ "genesis-gateway",
  "genesis-provider",
  "genesis-storage",
  "genesis-types",

@@ -5,10 +5,12 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+axum.workspace = true
 chrono = { version = "0.4.40", features = ["clock"] }
 clap.workspace = true
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
+genesis-gateway = { path = "../genesis-gateway" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }

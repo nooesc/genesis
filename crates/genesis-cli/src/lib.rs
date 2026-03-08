@@ -15,6 +15,7 @@ use genesis_storage::{
     bootstrap, ScheduleStore, SessionStore, SessionSummary, StorageError, StoredMessage,
     StoredSchedule,
 };
+use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 
@@ -51,6 +52,13 @@ pub enum Command {
     Sessions(SessionsCommand),
     #[command(subcommand, about = "Manage scheduled prompts")]
     Schedule(ScheduleCommand),
+    #[command(about = "Start the HTTP API server")]
+    Serve {
+        #[arg(long, default_value = "0.0.0.0", help = "Host to bind")]
+        host: String,
+        #[arg(long, default_value = "3000", help = "Port to listen on")]
+        port: u16,
+    },
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -216,6 +224,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
+        Command::Serve { host, port } => run_serve(cli.config, &host, port).await,
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
@@ -342,6 +351,30 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
 
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
+}
+
+async fn run_serve(
+    config_path: Option<PathBuf>,
+    host: &str,
+    port: u16,
+) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    bootstrap(&loaded.config.storage.database_path)?;
+
+    let state = std::sync::Arc::new(AppState { loaded });
+    let router = build_router(state);
+
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        CliError::Io(e)
+    })?;
+
+    println!("genesis gateway listening on {addr}");
+    axum::serve(listener, router).await.map_err(|e| {
+        CliError::Io(e)
+    })?;
+
+    Ok("server stopped".to_owned())
 }
 
 fn build_agent_loop(
@@ -936,5 +969,33 @@ storage:
         assert!(output.contains("genesis storage bootstrap"));
         assert!(output.contains(&database_path.display().to_string()));
         assert!(output.contains("[ok] storage"));
+    }
+
+    #[test]
+    fn parses_serve_command_with_defaults() {
+        let cli = Cli::try_parse_from(["genesis", "serve"])
+            .expect("serve command should parse");
+
+        match cli.command {
+            Command::Serve { host, port } => {
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, 3000);
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_serve_command_with_custom_host_port() {
+        let cli = Cli::try_parse_from(["genesis", "serve", "--host", "127.0.0.1", "--port", "8080"])
+            .expect("serve command should parse");
+
+        match cli.command {
+            Command::Serve { host, port } => {
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(port, 8080);
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
     }
 }
