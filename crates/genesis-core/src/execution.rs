@@ -387,6 +387,9 @@ impl<'a> SessionExecutionService<'a> {
         ) {
             warn!(error = %e, "failed to persist token usage");
         }
+        // Inject skill creation nudge after complex turns
+        maybe_inject_skill_nudge(&store, input.session_id, &executed.result);
+
         info!(
             created_session,
             emitted_messages = executed.emitted_messages.len(),
@@ -438,6 +441,9 @@ impl<'a> SessionExecutionService<'a> {
         ) {
             warn!(error = %e, "failed to persist token usage");
         }
+        // Inject skill creation nudge after complex turns
+        maybe_inject_skill_nudge(&store, input.session_id, &executed.result);
+
         info!(
             created_session,
             emitted_messages = executed.emitted_messages.len(),
@@ -617,6 +623,50 @@ pub fn restore_chat_history(
 
 /// Generate a short title from the first user prompt.
 ///
+/// Minimum tool calls in a turn before injecting a skill creation nudge.
+const SKILL_NUDGE_TOOL_THRESHOLD: usize = 5;
+/// Minimum turns used before injecting a skill creation nudge.
+const SKILL_NUDGE_TURN_THRESHOLD: usize = 3;
+
+/// Nudge message injected after complex turns to encourage autonomous skill
+/// creation. Stored as a system message in the session so the agent sees it
+/// at the start of the next turn.
+const SKILL_CREATION_NUDGE: &str = "\
+[Skill creation opportunity] The task you just completed was multi-step and \
+complex. Consider whether the approach you used could be distilled into a \
+reusable skill. If so, call `skill_create` with a descriptive name, clear \
+instructions for how to handle this type of task, and relevant tags. Good \
+skills capture durable patterns — not one-off details.";
+
+/// After a complex turn (many tool calls, multiple turns), inject a system
+/// message nudging the agent to create a skill from the pattern. The nudge
+/// is persisted so it appears when the next turn loads history.
+fn maybe_inject_skill_nudge(
+    store: &SessionStore,
+    session_id: &str,
+    result: &AgentResult,
+) {
+    if result.tool_calls_made >= SKILL_NUDGE_TOOL_THRESHOLD
+        && result.turns_used >= SKILL_NUDGE_TURN_THRESHOLD
+        && result.finished_naturally
+    {
+        debug!(
+            tool_calls_made = result.tool_calls_made,
+            turns_used = result.turns_used,
+            "injecting skill creation nudge"
+        );
+        if let Err(e) = store.append_message(
+            session_id,
+            "system",
+            Some(SKILL_CREATION_NUDGE),
+            None,
+            None,
+        ) {
+            warn!(error = %e, "failed to persist skill creation nudge");
+        }
+    }
+}
+
 /// Takes up to 60 characters, truncated at a word boundary, with "..." appended
 /// if truncated. Strips leading/trailing whitespace and collapses internal
 /// whitespace.
@@ -677,8 +727,9 @@ fn terminal_config_to_backend(config: &TerminalConfig) -> genesis_tools::Termina
 #[cfg(test)]
 mod tests {
     use super::{
-        delivery_platform_from_str, generate_session_title, persist_new_messages,
-        restore_chat_history, ExecutedTurn, SessionExecutionService, SessionTurnInput,
+        delivery_platform_from_str, generate_session_title, maybe_inject_skill_nudge,
+        persist_new_messages, restore_chat_history, ExecutedTurn, SessionExecutionService,
+        SessionTurnInput,
     };
     use crate::agent_loop::AgentResult;
     use genesis_provider::MessageContent;
@@ -947,5 +998,82 @@ mod tests {
     #[test]
     fn generate_title_empty_prompt() {
         assert_eq!(generate_session_title(""), "");
+    }
+
+    #[test]
+    fn skill_nudge_injects_after_complex_turn() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "cli", None).unwrap();
+
+        let result = AgentResult {
+            response: "done".to_owned(),
+            turns_used: 4,
+            tool_calls_made: 6,
+            finished_naturally: true,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost: None,
+            pending_clarification: None,
+        };
+
+        maybe_inject_skill_nudge(&store, "s1", &result);
+
+        let messages = store.load_messages("s1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.as_deref().unwrap().contains("skill_create"));
+    }
+
+    #[test]
+    fn skill_nudge_skips_simple_turn() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "cli", None).unwrap();
+
+        let result = AgentResult {
+            response: "done".to_owned(),
+            turns_used: 1,
+            tool_calls_made: 2,
+            finished_naturally: true,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost: None,
+            pending_clarification: None,
+        };
+
+        maybe_inject_skill_nudge(&store, "s1", &result);
+
+        let messages = store.load_messages("s1").unwrap();
+        assert!(messages.is_empty(), "no nudge for simple turns");
+    }
+
+    #[test]
+    fn skill_nudge_skips_unfinished_turn() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "cli", None).unwrap();
+
+        let result = AgentResult {
+            response: "hit turn limit".to_owned(),
+            turns_used: 5,
+            tool_calls_made: 10,
+            finished_naturally: false,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost: None,
+            pending_clarification: None,
+        };
+
+        maybe_inject_skill_nudge(&store, "s1", &result);
+
+        let messages = store.load_messages("s1").unwrap();
+        assert!(messages.is_empty(), "no nudge for unfinished turns");
     }
 }
