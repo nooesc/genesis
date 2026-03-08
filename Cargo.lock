@@ -704,6 +704,7 @@ dependencies = [
  "genesis-storage",
  "genesis-tools",
  "genesis-types",
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",

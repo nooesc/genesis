@@ -2,34 +2,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
-
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+use crate::{truncate_output, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_owned();
-    }
-
-    let mut end = MAX_OUTPUT_BYTES;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    if let Some(last_nl) = output[..end].rfind('\n') {
-        let mut truncated = output[..=last_nl].to_string();
-        truncated.push_str("... (output truncated)");
-        truncated
-    } else {
-        let mut truncated = output[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    }
-}
 
 fn require_arg<'a>(call: &'a ToolCall, name: &'static str) -> Result<&'a str, ToolError> {
     call.arguments
@@ -270,8 +247,8 @@ impl ToolHandler for GitLogTool {
 pub struct GitCommitTool;
 
 impl ToolHandler for GitCommitTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        check_destructive(call, _context)?;
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        check_destructive(call, context)?;
 
         let path = resolve_path(call);
         validate_path(call, path)?;
@@ -317,7 +294,7 @@ impl ToolHandler for GitCommitTool {
 pub struct GitBranchTool;
 
 impl ToolHandler for GitBranchTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let path = resolve_path(call);
         validate_path(call, path)?;
 
@@ -399,7 +376,7 @@ impl ToolHandler for GitBranchTool {
                 })
             }
             "delete" => {
-                check_destructive(call, _context)?;
+                check_destructive(call, context)?;
 
                 let name = branch_name.ok_or_else(|| ToolError::MissingArgument {
                     tool: call.name.clone(),
@@ -445,6 +422,7 @@ impl ToolHandler for GitBranchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_OUTPUT_BYTES;
     use std::fs;
     use std::process::Command;
     use tempfile::tempdir;

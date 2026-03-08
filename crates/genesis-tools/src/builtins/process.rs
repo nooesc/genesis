@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+use crate::{truncate_output, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const DEFAULT_LIMIT: usize = 20;
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // ListProcessesTool
@@ -463,27 +462,6 @@ fn summarize_interfaces(raw: &str) -> String {
     }
 }
 
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_owned();
-    }
-
-    let mut end = MAX_OUTPUT_BYTES;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    if let Some(last_nl) = output[..end].rfind('\n') {
-        let mut truncated = output[..=last_nl].to_string();
-        truncated.push_str("... (output truncated)");
-        truncated
-    } else {
-        let mut truncated = output[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    }
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -491,6 +469,7 @@ fn truncate_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_OUTPUT_BYTES;
 
     fn ctx() -> ToolContext {
         ToolContext {

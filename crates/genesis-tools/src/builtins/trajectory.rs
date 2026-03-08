@@ -191,13 +191,19 @@ impl TrajectoryTool {
                     }
                 })?
             }
-            "json" | _ => {
+            "json" => {
                 serde_json::to_string_pretty(&trajectory).map_err(|e| {
                     ToolError::ExecutionFailed {
                         tool: call.name.clone(),
                         reason: format!("failed to serialize trajectory: {e}"),
                     }
                 })?
+            }
+            other => {
+                return Err(ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("unknown format: {other}. Use 'json' or 'sharegpt'."),
+                });
             }
         };
 

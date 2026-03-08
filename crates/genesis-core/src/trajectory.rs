@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const MAX_TRAJECTORY_STEPS: usize = 10_000;
+const MAX_STEP_CONTENT: usize = 8 * 1024; // 8 KiB per field
+
 /// A single step in a trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrajectoryStep {
@@ -72,7 +75,17 @@ fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
-    result.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(result)
+}
+
+fn truncate_field(s: &str) -> String {
+    if s.len() <= MAX_STEP_CONTENT {
+        s.to_owned()
+    } else {
+        let mut t = s[..MAX_STEP_CONTENT].to_string();
+        t.push_str("... (truncated)");
+        t
+    }
 }
 
 impl TrajectoryRecorder {
@@ -278,15 +291,18 @@ impl TrajectoryRecorder {
         tool_result: Option<&str>,
         tokens: Option<TokenUsage>,
     ) {
+        if !self.enabled || self.trajectory.steps.len() >= MAX_TRAJECTORY_STEPS {
+            return;
+        }
         let step_index = self.trajectory.steps.len();
         self.trajectory.steps.push(TrajectoryStep {
             step_index,
             timestamp: now_rfc3339(),
             action_type,
-            content: content.to_owned(),
+            content: truncate_field(content),
             tool_name: tool_name.map(|s| s.to_owned()),
-            tool_arguments: tool_arguments.map(|s| s.to_owned()),
-            tool_result: tool_result.map(|s| s.to_owned()),
+            tool_arguments: tool_arguments.map(|s| truncate_field(s)),
+            tool_result: tool_result.map(|s| truncate_field(s)),
             tokens,
         });
     }

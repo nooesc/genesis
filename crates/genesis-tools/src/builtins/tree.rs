@@ -2,23 +2,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput, NOISE_DIRS};
 
 /// Maximum number of entries before the output is truncated.
 const MAX_ENTRIES: usize = 2000;
-
-/// Directories that are almost always noise and should be skipped by default.
-const NOISE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".tox",
-    "dist",
-    "build",
-];
 
 pub struct ListTreeTool;
 
@@ -70,7 +57,6 @@ impl ToolHandler for ListTreeTool {
         walk_dir(
             root,
             "",
-            true,
             max_depth,
             0,
             show_hidden,
@@ -114,49 +100,11 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
     }
 }
 
-/// Returns `true` if the subtree rooted at `dir` contains at least one file
-/// that matches `pattern`. This allows us to prune directories that have no
-/// matching descendants so the tree stays tidy.
-fn subtree_has_match(dir: &Path, pattern: &str, show_hidden: bool, max_depth: usize) -> bool {
-    if max_depth == 0 {
-        return false;
-    }
-
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        if NOISE_DIRS.contains(&name.as_str()) {
-            continue;
-        }
-
-        let path = entry.path();
-        if path.is_dir() {
-            if subtree_has_match(&path, pattern, show_hidden, max_depth - 1) {
-                return true;
-            }
-        } else if matches_pattern(&name, pattern) {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Recursively walks `dir` and appends tree-formatted lines.
 #[allow(clippy::too_many_arguments)]
 fn walk_dir(
     dir: &Path,
     prefix: &str,
-    _is_last: bool,
     max_depth: usize,
     current_depth: usize,
     show_hidden: bool,
@@ -203,13 +151,10 @@ fn walk_dir(
     dirs.sort_by(|a, b| a.0.cmp(&b.0));
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // If a pattern filter is active, only include files that match and
-    // directories that contain matching descendants.
+    // If a pattern filter is active, only include matching files.
+    // Directories are kept for now -- we recurse eagerly and prune empty ones.
     if let Some(pat) = pattern {
         files.retain(|(name, _)| matches_pattern(name, pat));
-        dirs.retain(|(_, path)| {
-            subtree_has_match(path, pat, show_hidden, max_depth - current_depth - 1)
-        });
     }
 
     let total = dirs.len() + files.len();
@@ -235,38 +180,69 @@ fn walk_dir(
             name.clone()
         };
 
-        lines.push(format!("{prefix}{connector} {display_name}"));
-
         if is_dir {
-            *dir_count += 1;
+            // When pattern-filtering, recurse eagerly and only emit the
+            // directory line if the subtree produced output. This avoids
+            // a separate `subtree_has_match` pre-scan (double traversal).
+            let child_prefix = if is_last_entry {
+                format!("{prefix}    ")
+            } else {
+                format!("{prefix}\u{2502}   ")
+            };
+
+            if pattern.is_some() {
+                let before = lines.len();
+                let dir_before = *dir_count;
+                let file_before = *file_count;
+                walk_dir(
+                    path,
+                    &child_prefix,
+                    max_depth,
+                    current_depth + 1,
+                    show_hidden,
+                    pattern,
+                    lines,
+                    dir_count,
+                    file_count,
+                    truncated,
+                );
+                // Only emit the directory line if the subtree had content.
+                if lines.len() > before {
+                    lines.insert(before, format!("{prefix}{connector} {display_name}"));
+                    *dir_count = dir_before + 1 + (*dir_count - dir_before);
+                } else {
+                    // Subtree was empty -- skip this directory entirely.
+                    *dir_count = dir_before;
+                    *file_count = file_before;
+                }
+            } else {
+                lines.push(format!("{prefix}{connector} {display_name}"));
+                *dir_count += 1;
+                if lines.len() >= MAX_ENTRIES {
+                    *truncated = true;
+                    return;
+                }
+                walk_dir(
+                    path,
+                    &child_prefix,
+                    max_depth,
+                    current_depth + 1,
+                    show_hidden,
+                    pattern,
+                    lines,
+                    dir_count,
+                    file_count,
+                    truncated,
+                );
+            }
         } else {
+            lines.push(format!("{prefix}{connector} {display_name}"));
             *file_count += 1;
         }
 
         if lines.len() >= MAX_ENTRIES {
             *truncated = true;
             return;
-        }
-
-        if is_dir {
-            let child_prefix = if is_last_entry {
-                format!("{prefix}    ")
-            } else {
-                format!("{prefix}\u{2502}   ")
-            };
-            walk_dir(
-                path,
-                &child_prefix,
-                is_last_entry,
-                max_depth,
-                current_depth + 1,
-                show_hidden,
-                pattern,
-                lines,
-                dir_count,
-                file_count,
-                truncated,
-            );
         }
     }
 }

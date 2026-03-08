@@ -8,6 +8,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
+/// Directories that are typically noise and should be skipped by file traversal tools.
+pub const NOISE_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", "__pycache__", ".venv", "venv",
+    ".tox", "dist", "build", ".hg", ".svn", ".mypy_cache",
+    ".pytest_cache", ".next", ".nuxt",
+];
+
+/// Maximum output size for tool results (64 KiB).
+pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Truncate output to MAX_OUTPUT_BYTES, cutting at a newline boundary
+/// and ensuring safe UTF-8 boundaries.
+pub fn truncate_output(output: &str) -> String {
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return output.to_owned();
+    }
+
+    let mut end = MAX_OUTPUT_BYTES;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    if let Some(last_nl) = output[..end].rfind('\n') {
+        let mut truncated = output[..=last_nl].to_string();
+        truncated.push_str("... (output truncated)");
+        truncated
+    } else {
+        let mut truncated = output[..end].to_string();
+        truncated.push_str("\n... (output truncated)");
+        truncated
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolContext {
     pub session_id: String,

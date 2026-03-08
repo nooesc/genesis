@@ -3,25 +3,9 @@ use std::path::Path;
 
 use glob::glob as glob_match;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput, NOISE_DIRS};
 
 const DEFAULT_LIMIT: usize = 100;
-
-/// Directories that are skipped by default to reduce noise.
-const NOISE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    ".hg",
-    ".svn",
-    "__pycache__",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    "dist",
-    ".next",
-    ".nuxt",
-];
 
 pub struct GlobSearchTool;
 

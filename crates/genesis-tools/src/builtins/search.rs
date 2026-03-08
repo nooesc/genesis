@@ -1,11 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+use crate::{truncate_output, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const MAX_RESULTS: usize = 100;
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+static RG_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+fn rg_available() -> bool {
+    *RG_AVAILABLE.get_or_init(|| which_exists("rg"))
+}
 
 pub struct SearchFilesTool;
 
@@ -47,7 +53,7 @@ impl ToolHandler for SearchFilesTool {
             .unwrap_or(0);
 
         // Prefer ripgrep (rg), fall back to grep.
-        let use_rg = which_exists("rg");
+        let use_rg = rg_available();
 
         let output = if use_rg {
             run_ripgrep(
@@ -153,32 +159,10 @@ fn which_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_owned();
-    }
-
-    // Find a safe UTF-8 boundary.
-    let mut end = MAX_OUTPUT_BYTES;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    // Try to end at a newline for cleaner output.
-    if let Some(last_nl) = output[..end].rfind('\n') {
-        let mut truncated = output[..=last_nl].to_string();
-        truncated.push_str("... (output truncated)");
-        truncated
-    } else {
-        let mut truncated = output[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MAX_OUTPUT_BYTES;
     use std::fs;
     use tempfile::tempdir;
 
