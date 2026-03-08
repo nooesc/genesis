@@ -68,6 +68,10 @@ pub struct ProviderConfig {
     pub model: String,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    /// Extra body fields merged into every request. Useful for OpenRouter
+    /// provider preferences (e.g. `{"provider": {"sort": "price"}}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +217,8 @@ struct FileProviderConfig {
     base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra_body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -301,6 +307,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             model: DEFAULT_MODEL.to_owned(),
             base_url: None,
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
+            extra_body: None,
         },
         tool_provider: None,
         mcp_servers: HashMap::new(),
@@ -392,6 +399,10 @@ pub fn load_from_map(
                 .as_ref()
                 .and_then(|provider| provider.api_key_env.clone())
         }),
+        extra_body: file_config
+            .provider
+            .as_ref()
+            .and_then(|p| p.extra_body.clone()),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -417,6 +428,7 @@ pub fn load_from_map(
                 .cloned()
                 .or_else(|| tp.api_key_env.clone())
                 .or_else(|| provider.api_key_env.clone()),
+            extra_body: tp.extra_body.clone(),
         }
     });
 

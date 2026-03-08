@@ -708,6 +708,7 @@ mod tests {
                     model: "moonshotai/kimi-k2".to_owned(),
                     base_url: Some("https://openrouter.ai/api/v1".to_owned()),
                     api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+                    extra_body: None,
                 },
                 tool_provider: None,
                 mcp_servers: std::collections::HashMap::new(),

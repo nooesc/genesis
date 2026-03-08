@@ -215,6 +215,7 @@ mod tests {
                     model: "gpt-4.1-mini".to_owned(),
                     base_url: Some("http://localhost:8000/v1".to_owned()),
                     api_key_env: None,
+                    extra_body: None,
                 },
                 tool_provider: None,
                 mcp_servers: std::collections::HashMap::new(),
