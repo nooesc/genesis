@@ -848,13 +848,22 @@ async fn run_oneshot(
         let mut output = outcome.result.response.clone();
         let r = &outcome.result;
         if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
-            let cost_str = genesis_provider::pricing::estimate_cost(
-                &loaded.config.provider.model,
-                r.total_input_tokens,
-                r.total_output_tokens,
-            )
-            .map(|c| format!(", ~{c}"))
-            .unwrap_or_default();
+            let cost_str = match r.estimated_cost {
+                Some(c) if c > 0.0 => {
+                    if c < 0.01 {
+                        format!(", ~${c:.4}")
+                    } else {
+                        format!(", ~${c:.2}")
+                    }
+                }
+                _ => genesis_provider::pricing::estimate_cost(
+                    &loaded.config.provider.model,
+                    r.total_input_tokens,
+                    r.total_output_tokens,
+                )
+                .map(|c| format!(", ~{c}"))
+                .unwrap_or_default(),
+            };
             output.push_str(&format!(
                 "\n\n[{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
                 r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
@@ -1608,13 +1617,22 @@ async fn run_streaming_turn(
             }
             let r = &outcome.result;
             if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
-                let cost_str = genesis_provider::pricing::estimate_cost(
-                    model,
-                    r.total_input_tokens,
-                    r.total_output_tokens,
-                )
-                .map(|c| format!(", ~{c}"))
-                .unwrap_or_default();
+                let cost_str = match r.estimated_cost {
+                    Some(c) if c > 0.0 => {
+                        if c < 0.01 {
+                            format!(", ~${c:.4}")
+                        } else {
+                            format!(", ~${c:.2}")
+                        }
+                    }
+                    _ => genesis_provider::pricing::estimate_cost(
+                        model,
+                        r.total_input_tokens,
+                        r.total_output_tokens,
+                    )
+                    .map(|c| format!(", ~{c}"))
+                    .unwrap_or_default(),
+                };
                 println!(
                     "     [{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
                     r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made

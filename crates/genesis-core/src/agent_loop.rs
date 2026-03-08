@@ -13,6 +13,7 @@ use tracing::{debug, error, info, info_span, warn};
 
 use std::sync::Arc;
 
+use crate::cost::{BudgetStatus, SessionCost};
 use crate::ToolRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
@@ -37,6 +38,9 @@ pub struct AgentResult {
     pub finished_naturally: bool,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    /// Estimated cost in USD for this turn, if pricing is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
 }
 
 /// Configuration for the agent loop.
@@ -50,6 +54,8 @@ pub struct AgentLoopConfig {
     /// the system prompt). When the history exceeds this limit, the oldest
     /// non-system messages are dropped. Set to `None` for unlimited.
     pub max_context_messages: Option<usize>,
+    /// Optional budget limit in USD. When exceeded, the agent loop stops early.
+    pub budget_limit: Option<f64>,
 }
 
 impl Default for AgentLoopConfig {
@@ -60,6 +66,7 @@ impl Default for AgentLoopConfig {
             temperature: None,
             max_tokens: None,
             max_context_messages: None,
+            budget_limit: None,
         }
     }
 }
@@ -74,6 +81,8 @@ pub enum AgentError {
     ArgumentParse(String),
     #[error("agent loop exceeded maximum of {0} turns")]
     MaxTurnsExceeded(usize),
+    #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
+    BudgetExceeded { used: f64, limit: f64 },
 }
 
 /// Callback for spawning subagent workstreams. Called when the agent
@@ -95,6 +104,7 @@ pub struct AgentLoop {
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
     subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    cost: SessionCost,
 }
 
 impl AgentLoop {
@@ -116,6 +126,8 @@ impl AgentLoop {
 
         messages.extend(history);
 
+        let cost = SessionCost::new(config.budget_limit);
+
         Self {
             client,
             tool_client: None,
@@ -123,6 +135,7 @@ impl AgentLoop {
             config,
             messages,
             subagent_spawner: None,
+            cost,
         }
     }
 
@@ -184,6 +197,7 @@ impl AgentLoop {
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
+                self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
             }
 
             let choice = &response.choices[0];
@@ -226,6 +240,7 @@ impl AgentLoop {
                 finished_naturally: choice.finish_reason.as_deref() != Some("length"),
                 total_input_tokens,
                 total_output_tokens,
+                estimated_cost: Some(self.cost.total_cost),
             });
         }
     }
@@ -266,6 +281,8 @@ impl AgentLoop {
                     let mut response_text = String::new();
                     let mut streamed_tool_calls = Vec::new();
                     let mut finished_naturally = true;
+                    let mut turn_input_tokens = 0u32;
+                    let mut turn_output_tokens = 0u32;
 
                     while let Some(chunk) = stream.next().await {
                         let chunk = chunk?;
@@ -281,12 +298,16 @@ impl AgentLoop {
                         }
 
                         if let Some(usage) = update.usage {
-                            total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
-                            total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
+                            turn_input_tokens = turn_input_tokens.saturating_add(usage.prompt_tokens);
+                            turn_output_tokens = turn_output_tokens.saturating_add(usage.completion_tokens);
                         }
 
                         streamed_tool_calls.extend(update.tool_calls);
                     }
+
+                    total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
+                    total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
+                    self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)?;
 
                     if !streamed_tool_calls.is_empty() {
                         self.messages.push(ChatMessage::assistant_with_tool_calls(
@@ -318,6 +339,7 @@ impl AgentLoop {
                         finished_naturally,
                         total_input_tokens,
                         total_output_tokens,
+                        estimated_cost: Some(self.cost.total_cost),
                     });
                 }
                 Err(_) => {
@@ -329,6 +351,7 @@ impl AgentLoop {
                             total_input_tokens.saturating_add(usage.prompt_tokens);
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
+                        self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
                     }
 
                     let choice = &response.choices[0];
@@ -363,6 +386,7 @@ impl AgentLoop {
                         finished_naturally: choice.finish_reason.as_deref() != Some("length"),
                         total_input_tokens,
                         total_output_tokens,
+                        estimated_cost: Some(self.cost.total_cost),
                     });
                 }
             }
@@ -464,6 +488,36 @@ impl AgentLoop {
     /// Access the full conversation history.
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
+    }
+
+    /// Access the accumulated cost tracker.
+    pub fn cost(&self) -> &SessionCost {
+        &self.cost
+    }
+
+    /// Record token usage from an LLM turn and check the budget.
+    fn record_usage(&mut self, turn: usize, input_tokens: u32, output_tokens: u32) -> Result<(), AgentError> {
+        self.cost.record_turn(
+            self.client.model(),
+            turn,
+            input_tokens,
+            output_tokens,
+        );
+
+        match self.cost.check_budget() {
+            BudgetStatus::Exceeded { used, limit } => {
+                Err(AgentError::BudgetExceeded { used, limit })
+            }
+            BudgetStatus::Warning { used, limit } => {
+                warn!(
+                    used = format!("${used:.4}"),
+                    limit = format!("${limit:.4}"),
+                    "approaching budget limit"
+                );
+                Ok(())
+            }
+            BudgetStatus::Ok => Ok(()),
+        }
     }
 
     /// Prune messages to stay within `max_context_messages`, preserving the
@@ -917,6 +971,7 @@ mod tests {
             finished_naturally: true,
             total_input_tokens: 100,
             total_output_tokens: 50,
+            estimated_cost: Some(0.001),
         };
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(json.contains("\"response\":\"Hello!\""));
@@ -986,5 +1041,79 @@ mod tests {
         // No tool client set — should always use primary
         agent.messages.push(ChatMessage::tool_result("call-1", "result"));
         assert_eq!(agent.active_client().endpoint(), "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn record_usage_tracks_cost() {
+        let mut agent = test_agent();
+        agent.record_usage(1, 1000, 500).expect("should succeed without budget");
+        assert_eq!(agent.cost().total_input_tokens, 1000);
+        assert_eq!(agent.cost().total_output_tokens, 500);
+        assert_eq!(agent.cost().turns.len(), 1);
+    }
+
+    #[test]
+    fn record_usage_returns_budget_exceeded() {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "gpt-4.1-mini".to_owned(),
+            backend: "openai".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "s".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "gpt-4.1-mini".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp".to_owned(),
+            database_path: "/tmp/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let mut agent = AgentLoop::new(
+            client,
+            tools,
+            AgentLoopConfig {
+                budget_limit: Some(0.001), // very tight budget
+                ..AgentLoopConfig::default()
+            },
+        );
+
+        // gpt-4.1-mini: $0.40/M input, $1.60/M output
+        // 1M input = $0.40, way over $0.001 budget
+        let result = agent.record_usage(1, 1_000_000, 0);
+        assert!(matches!(result, Err(AgentError::BudgetExceeded { .. })));
+    }
+
+    #[test]
+    fn cost_accessor_returns_session_cost() {
+        let agent = test_agent();
+        assert_eq!(agent.cost().total_input_tokens, 0);
+        assert_eq!(agent.cost().total_cost, 0.0);
+        assert!(agent.cost().budget_limit.is_none());
+    }
+
+    #[test]
+    fn agent_result_skips_none_cost_in_json() {
+        let result = AgentResult {
+            response: "Hi".to_owned(),
+            turns_used: 1,
+            tool_calls_made: 0,
+            finished_naturally: true,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost: None,
+        };
+        let json = serde_json::to_string(&result).expect("should serialize");
+        assert!(!json.contains("estimated_cost"));
     }
 }
