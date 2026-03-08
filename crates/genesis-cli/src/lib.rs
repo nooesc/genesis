@@ -568,6 +568,23 @@ pub enum SkillsCommand {
         #[arg(help = "Path to JSON file containing skills array")]
         file: PathBuf,
     },
+    #[command(about = "Scan a directory of SKILL.md files and show available skills")]
+    Scan {
+        #[arg(help = "Directory containing skill subdirectories with SKILL.md files")]
+        dir: String,
+    },
+    #[command(about = "Search skills by name, description, or tags")]
+    Search {
+        #[arg(help = "Search query")]
+        query: String,
+        #[arg(long, help = "Also search SKILL.md files in this directory")]
+        dir: Option<String>,
+    },
+    #[command(about = "Install a skill from a SKILL.md directory into the database")]
+    InstallLocal {
+        #[arg(help = "Path to a directory containing a SKILL.md file")]
+        path: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1034,6 +1051,15 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     }
 
                     Ok(format!("imported {imported} skill(s) from {}", file.display()))
+                }
+                SkillsCommand::Scan { dir } => {
+                    run_skills_scan(&dir, cli.json)
+                }
+                SkillsCommand::Search { query, dir } => {
+                    run_skills_search(&store, &query, dir.as_deref(), cli.json)
+                }
+                SkillsCommand::InstallLocal { path } => {
+                    run_skills_install_local(&store, &path)
                 }
             }
         }
@@ -5662,6 +5688,109 @@ fn format_skill(skill: &genesis_storage::StoredSkill) -> String {
     lines.join("\n")
 }
 
+fn run_skills_scan(dir: &str, json: bool) -> Result<String, CliError> {
+    let entries = genesis_core::skill_manifest::scan_skills_dir(std::path::Path::new(dir))
+        .map_err(|e| CliError::Other(format!("failed to scan skills directory: {e}")))?;
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&entries)?);
+    }
+
+    if entries.is_empty() {
+        return Ok(format!("no SKILL.md files found in {dir}"));
+    }
+
+    let mut lines = vec![format!("found {} skill(s) in {dir}", entries.len())];
+    for entry in &entries {
+        let tags = if entry.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", entry.tags.join(", "))
+        };
+        lines.push(format!(
+            "  {} v{}: {}{}",
+            entry.name, entry.version, entry.description, tags
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn run_skills_search(
+    store: &SkillStore,
+    query: &str,
+    dir: Option<&str>,
+    json: bool,
+) -> Result<String, CliError> {
+    // Search stored skills
+    let stored = store.find_matching(query, 50).unwrap_or_default();
+
+    // Optionally search SKILL.md files on disk
+    let disk_entries = if let Some(dir) = dir {
+        let all = genesis_core::skill_manifest::scan_skills_dir(std::path::Path::new(dir))
+            .unwrap_or_default();
+        genesis_core::skill_manifest::search_entries(&all, query)
+    } else {
+        vec![]
+    };
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "stored": stored,
+            "disk": disk_entries,
+        }))?);
+    }
+
+    let mut lines = Vec::new();
+    if !stored.is_empty() {
+        lines.push(format!("stored skills matching \"{}\":", query));
+        for s in &stored {
+            lines.push(format!("  {} v{}: {}", s.name, s.version, s.description));
+        }
+    }
+    if !disk_entries.is_empty() {
+        lines.push(format!("SKILL.md files matching \"{}\":", query));
+        for e in &disk_entries {
+            lines.push(format!(
+                "  {} v{}: {} ({})",
+                e.name,
+                e.version,
+                e.description,
+                e.path.display()
+            ));
+        }
+    }
+    if lines.is_empty() {
+        return Ok(format!("no skills matching \"{query}\""));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn run_skills_install_local(store: &SkillStore, path: &str) -> Result<String, CliError> {
+    let skill_file = std::path::Path::new(path).join("SKILL.md");
+    let parsed = genesis_core::skill_manifest::parse_skill_file(&skill_file)
+        .map_err(|e| CliError::Other(format!("failed to parse SKILL.md: {e}")))?;
+
+    let tags: Vec<&str> = parsed.frontmatter.tags.iter().map(|s| s.as_str()).collect();
+    let trigger = if parsed.frontmatter.description.is_empty() {
+        None
+    } else {
+        Some(parsed.frontmatter.description.as_str())
+    };
+
+    store.upsert(
+        &parsed.frontmatter.name,
+        &parsed.frontmatter.description,
+        &parsed.instructions,
+        trigger,
+        &tags,
+    )?;
+
+    Ok(format!(
+        "installed skill '{}' v{} from {}",
+        parsed.frontmatter.name, parsed.frontmatter.version, path
+    ))
+}
+
 fn format_subagent_list(subs: &[genesis_storage::StoredSubagent]) -> String {
     if subs.is_empty() {
         return "no subagents found".to_owned();
@@ -6955,6 +7084,88 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_skills_scan_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "scan", "/tmp/skills"])
+            .expect("skills scan should parse");
+        match cli.command {
+            Command::Skills(SkillsCommand::Scan { dir }) => {
+                assert_eq!(dir, "/tmp/skills");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_skills_search_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "search", "deploy"])
+            .expect("skills search should parse");
+        match cli.command {
+            Command::Skills(SkillsCommand::Search { query, dir }) => {
+                assert_eq!(query, "deploy");
+                assert!(dir.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_skills_install_local_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "install-local", "/tmp/my-skill"])
+            .expect("skills install-local should parse");
+        match cli.command {
+            Command::Skills(SkillsCommand::InstallLocal { path }) => {
+                assert_eq!(path, "/tmp/my-skill");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_skills_scan_finds_skill_files() {
+        let dir = tempdir().expect("tempdir");
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: A test skill\nversion: \"1.0\"\ntags:\n  - test\n---\nDo things.",
+        )
+        .expect("write skill");
+
+        let result = crate::run_skills_scan(dir.path().to_str().unwrap(), false)
+            .expect("scan should succeed");
+        assert!(result.contains("my-skill"));
+        assert!(result.contains("A test skill"));
+        assert!(result.contains("1 skill(s)"));
+    }
+
+    #[test]
+    fn run_skills_install_local_stores_skill() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let skill_dir = dir.path().join("review");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: review\ndescription: Review code\nversion: \"2.0\"\ntags:\n  - dev\n  - quality\n---\nReview all code carefully.",
+        )
+        .expect("write skill");
+
+        let store = genesis_storage::SkillStore::new(&db_path);
+        let result = crate::run_skills_install_local(&store, skill_dir.to_str().unwrap())
+            .expect("install should succeed");
+
+        assert!(result.contains("installed skill 'review'"));
+        assert!(result.contains("v2.0"));
+
+        let stored = store.get("review").expect("db lookup").expect("skill exists");
+        assert_eq!(stored.description, "Review code");
+        assert!(stored.instructions.contains("Review all code carefully"));
+        assert_eq!(stored.tags, vec!["dev", "quality"]);
     }
 
     #[test]
