@@ -41,6 +41,8 @@ pub enum Command {
         session_id: Option<String>,
         #[arg(long, help = "Resume an existing session instead of creating a new one")]
         resume: Option<String>,
+        #[arg(short, long, help = "Send an initial prompt before entering interactive mode")]
+        prompt: Option<String>,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -263,7 +265,9 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume } => run_chat(cli.config, session_id, resume).await,
+        Command::Chat { session_id, resume, prompt } => {
+            run_chat(cli.config, session_id, resume, prompt).await
+        }
         Command::Doctor { bootstrap_storage } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
             if cli.json {
@@ -475,6 +479,7 @@ async fn run_chat(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
     resume: Option<String>,
+    initial_prompt: Option<String>,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -509,6 +514,43 @@ async fn run_chat(
 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
+
+    // Process initial prompt if provided
+    if let Some(initial) = initial_prompt {
+        println!("you> {initial}");
+        let mut streamed = false;
+        let outcome = service
+            .run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: "cli",
+                    delivery_platform: DeliveryPlatform::Cli,
+                    prompt: &initial,
+                    title: None,
+                },
+                |chunk| {
+                    if !streamed {
+                        print!("eve> ");
+                        streamed = true;
+                    }
+                    print!("{chunk}");
+                    let _ = io::stdout().flush();
+                },
+            )
+            .await?;
+        if streamed {
+            println!();
+        } else {
+            println!("eve> {}", outcome.result.response);
+        }
+        let r = &outcome.result;
+        if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+            println!(
+                "     [{} in / {} out tokens, {} turns, {} tool calls]",
+                r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+            );
+        }
+    }
 
     loop {
         let input = match read_user_input(&mut rl, "you> ") {
@@ -1454,9 +1496,10 @@ mod tests {
             .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id, resume } => {
+            Command::Chat { session_id, resume, prompt } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
                 assert_eq!(resume.as_deref(), Some("session-1"));
+                assert!(prompt.is_none());
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
