@@ -1954,8 +1954,7 @@ impl SkillFileStore {
                 "INSERT INTO skill_files (skill_name, file_path, content, created_at)
                  VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
                  ON CONFLICT(skill_name, file_path) DO UPDATE SET
-                    content = excluded.content,
-                    created_at = CURRENT_TIMESTAMP",
+                    content = excluded.content",
                 params![skill_name, file_path, content],
             )
             .map_err(|source| StorageError::Sqlite {

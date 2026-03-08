@@ -4,6 +4,12 @@ use genesis_storage::{bootstrap, SkillFileStore};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
+fn file_store(context: &ToolContext) -> SkillFileStore {
+    let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+    let _ = bootstrap(&db_path);
+    SkillFileStore::new(&db_path)
+}
+
 /// Tool that returns the content of a supporting file attached to a skill.
 pub struct SkillViewFileTool;
 
@@ -25,9 +31,7 @@ impl ToolHandler for SkillViewFileTool {
                 argument: "file_path",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
-        let _ = bootstrap(&db_path);
-        let store = SkillFileStore::new(&db_path);
+        let store = file_store(context);
 
         let content = store
             .get_file(skill_name, file_path)
@@ -82,9 +86,7 @@ impl ToolHandler for SkillStoreFileTool {
                 argument: "content",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
-        let _ = bootstrap(&db_path);
-        let store = SkillFileStore::new(&db_path);
+        let store = file_store(context);
 
         store
             .store_file(skill_name, file_path, content)
@@ -117,9 +119,7 @@ impl ToolHandler for SkillListFilesTool {
                 argument: "skill_name",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
-        let _ = bootstrap(&db_path);
-        let store = SkillFileStore::new(&db_path);
+        let store = file_store(context);
 
         let files = store
             .list_files(skill_name)
@@ -171,9 +171,7 @@ impl ToolHandler for SkillDeleteFileTool {
                 argument: "file_path",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
-        let _ = bootstrap(&db_path);
-        let store = SkillFileStore::new(&db_path);
+        let store = file_store(context);
 
         let deleted = store
             .delete_file(skill_name, file_path)
