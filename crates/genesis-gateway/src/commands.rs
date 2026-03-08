@@ -347,6 +347,7 @@ mod tests {
                 context_security: genesis_config::ContextSecurityPolicy::default(),
             },
             gateway: None,
+            toolsets: std::collections::HashMap::new(),
         }
     }
 

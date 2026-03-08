@@ -30,6 +30,10 @@ pub struct GenesisConfig {
     /// Gateway-specific settings (session policies, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayConfig>,
+    /// Custom toolset distributions for batch training. Each entry maps a
+    /// distribution name to a map of tool name -> inclusion probability (0.0-1.0).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub toolsets: HashMap<String, HashMap<String, f64>>,
 }
 
 /// Configuration for a single MCP server.
@@ -195,6 +199,8 @@ struct FileConfig {
     runtime: Option<FileRuntimeConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<GatewayConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    toolsets: Option<HashMap<String, HashMap<String, f64>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -314,6 +320,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             context_security: ContextSecurityPolicy::default(),
         },
         gateway: None,
+        toolsets: HashMap::new(),
     })
 }
 
@@ -483,6 +490,7 @@ pub fn load_from_map(
             },
             runtime,
             gateway: file_config.gateway,
+            toolsets: file_config.toolsets.unwrap_or_default(),
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -777,7 +785,7 @@ fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), Config
 
 #[cfg(test)]
 mod tests {
-    use super::load_from_map;
+    use super::{load, load_from_map};
     use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
@@ -1119,5 +1127,47 @@ gateway:
     fn gateway_config_absent_when_not_configured() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.gateway.is_none());
+    }
+
+    #[test]
+    fn toolsets_parsed_from_yaml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("genesis.yaml");
+        std::fs::write(
+            &config_path,
+            r#"
+profile: default
+provider:
+  backend: openai
+  model: gpt-4
+  api_key_env: OPENAI_API_KEY
+storage:
+  data_dir: /tmp/genesis-data
+  database_path: /tmp/genesis-data/genesis.db
+runtime:
+  max_concurrency: 4
+  allow_destructive_tools: false
+  max_turns: 20
+toolsets:
+  my-custom:
+    shell_exec: 1.0
+    read_file: 0.8
+    write_file: 0.5
+"#,
+        )
+        .unwrap();
+
+        let loaded = load(Some(&config_path)).expect("should load");
+        assert_eq!(loaded.config.toolsets.len(), 1);
+        let custom = loaded.config.toolsets.get("my-custom").unwrap();
+        assert_eq!(custom.get("shell_exec"), Some(&1.0));
+        assert_eq!(custom.get("read_file"), Some(&0.8));
+        assert_eq!(custom.get("write_file"), Some(&0.5));
+    }
+
+    #[test]
+    fn toolsets_default_empty() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.toolsets.is_empty());
     }
 }

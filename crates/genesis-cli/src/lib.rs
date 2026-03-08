@@ -241,6 +241,8 @@ pub enum Command {
         concurrency: Option<usize>,
         #[arg(long, help = "Toolset distribution name (e.g. full, development, research, safe, minimal, creative, ops, home-assistant, coding-agent, random)")]
         toolset: Option<String>,
+        #[arg(long, help = "Discard generated trajectories whose quality score is below this threshold (0.0-1.0)")]
+        quality_filter: Option<f64>,
     },
     #[command(about = "Compress a trajectory JSON file for training/export")]
     Compress {
@@ -355,6 +357,15 @@ pub enum EvalCommand {
         min_score: Option<f64>,
         #[arg(long, help = "Sort by score ascending (worst first) instead of descending")]
         worst_first: bool,
+    },
+    #[command(about = "Find near-duplicate trajectories by system prompt and first user message")]
+    Deduplicate {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Delete duplicate files, keeping the first file in each group")]
+        remove: bool,
     },
 }
 
@@ -815,6 +826,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             } => {
                 run_eval_quality(&dir, recursive, min_score, worst_first, cli.json)
             }
+            EvalCommand::Deduplicate { dir, recursive, remove } => {
+                run_eval_deduplicate(&dir, recursive, remove, cli.json)
+            }
         },
         Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1088,7 +1102,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             max_turns,
             concurrency,
             toolset,
-        } => run_batch(cli.config, input, output, model, max_turns, concurrency, toolset).await,
+            quality_filter,
+        } => {
+            run_batch(
+                cli.config,
+                input,
+                output,
+                model,
+                max_turns,
+                concurrency,
+                toolset,
+                quality_filter,
+            )
+            .await
+        }
         Command::Compress {
             input,
             output,
@@ -2406,16 +2433,34 @@ async fn run_batch(
     max_turns: Option<usize>,
     concurrency: Option<usize>,
     toolset: Option<String>,
+    quality_filter: Option<f64>,
 ) -> Result<String, CliError> {
+    if let Some(score) = quality_filter {
+        if !(0.0..=1.0).contains(&score) {
+            return Err(CliError::Other(format!(
+                "quality filter must be between 0.0 and 1.0, got {score}"
+            )));
+        }
+    }
+
     let loaded = std::sync::Arc::new(load(config_path.as_deref())?);
     bootstrap(&loaded.config.storage.database_path)?;
 
     let distribution = match &toolset {
         Some(name) => {
-            let dist = genesis_core::toolset::builtin_distribution(name).ok_or_else(|| {
+            let dist = genesis_core::toolset::resolve_distribution(
+                name,
+                &loaded.config.toolsets,
+            )
+            .ok_or_else(|| {
+                let mut available: Vec<String> = genesis_core::toolset::builtin_distribution_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                available.extend(loaded.config.toolsets.keys().cloned());
                 CliError::Other(format!(
                     "unknown toolset distribution '{name}'. Available: {}",
-                    genesis_core::toolset::builtin_distribution_names().join(", ")
+                    available.join(", ")
                 ))
             })?;
             Some(std::sync::Arc::new(dist))
@@ -2489,6 +2534,7 @@ async fn run_batch(
                 model_override.as_deref(),
                 max_turns,
                 distribution.as_ref().map(|d| d.as_ref()),
+                quality_filter,
             )
             .await;
 
@@ -2523,6 +2569,7 @@ async fn run_batch_item(
     model_override: Option<&str>,
     max_turns: Option<usize>,
     distribution: Option<&genesis_core::toolset::ToolsetDistribution>,
+    quality_filter: Option<f64>,
 ) -> Result<(), CliError> {
     let session_store = SessionStore::new(&loaded.config.storage.database_path);
     let _ = session_store.create_session(session_id, "batch", None);
@@ -2596,6 +2643,40 @@ async fn run_batch_item(
     }
 
     let _ = agent.run_turn(&item.prompt).await?;
+    if let Some(min_quality) = quality_filter {
+        discard_low_quality_trajectory(output_dir, session_id, min_quality)?;
+    }
+    Ok(())
+}
+
+fn discard_low_quality_trajectory(
+    output_dir: &str,
+    session_id: &str,
+    min_quality: f64,
+) -> Result<(), CliError> {
+    let output_path = batch_output_path(output_dir, session_id);
+    if !output_path.exists() {
+        return Ok(());
+    }
+
+    let raw = std::fs::read_to_string(&output_path)
+        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", output_path.display())))?;
+    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
+        CliError::Other(format!(
+            "invalid trajectory JSON in {}: {e}",
+            output_path.display()
+        ))
+    })?;
+    let quality = genesis_core::quality::score(&trajectory);
+    if quality.overall < min_quality {
+        std::fs::remove_file(&output_path).map_err(|e| {
+            CliError::Other(format!(
+                "failed to discard low-quality trajectory {}: {e}",
+                output_path.display()
+            ))
+        })?;
+    }
+
     Ok(())
 }
 
@@ -3013,6 +3094,119 @@ fn run_eval_quality(
 
         Ok(lines.join("\n"))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeduplicateGroup {
+    key: String,
+    files: Vec<String>,
+}
+
+fn run_eval_deduplicate(
+    dir: &str,
+    recursive: bool,
+    remove: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut grouped = BTreeMap::<String, Vec<PathBuf>>::new();
+
+    for path in files {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "invalid trajectory JSON in {}: {e}",
+                    path.display()
+                ))
+            })?;
+        grouped
+            .entry(deduplicate_key(&trajectory))
+            .or_default()
+            .push(path);
+    }
+
+    let mut groups = grouped
+        .into_iter()
+        .filter_map(|(key, mut files)| {
+            if files.len() < 2 {
+                return None;
+            }
+            files.sort();
+            Some((key, files))
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut removed_files = 0usize;
+    if remove {
+        for (_, files) in &groups {
+            for file in files.iter().skip(1) {
+                std::fs::remove_file(file).map_err(|e| {
+                    CliError::Other(format!("failed to remove {}: {e}", file.display()))
+                })?;
+                removed_files += 1;
+            }
+        }
+    }
+
+    let groups = groups
+        .into_iter()
+        .map(|(key, files)| DeduplicateGroup {
+            key,
+            files: files
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "directory": dir,
+            "recursive": recursive,
+            "remove": remove,
+            "duplicate_groups": groups.len(),
+            "removed_files": removed_files,
+            "groups": groups.iter().map(|group| {
+                serde_json::json!({
+                    "key": group.key,
+                    "files": group.files,
+                })
+            }).collect::<Vec<_>>(),
+        }))?);
+    }
+
+    if groups.is_empty() {
+        return Ok("No duplicate trajectories found.".to_owned());
+    }
+
+    let mut lines = Vec::new();
+    lines.push("genesis eval deduplicate".to_owned());
+    lines.push(format!("directory:        {dir}"));
+    lines.push(format!("recursive:        {recursive}"));
+    lines.push(format!("remove:           {remove}"));
+    lines.push(format!("duplicate groups: {}", groups.len()));
+    lines.push(format!("removed files:    {removed_files}"));
+    for group in &groups {
+        lines.push(format!("group: {}", group.key));
+        for file in &group.files {
+            lines.push(format!("  - {file}"));
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn deduplicate_key(trajectory: &genesis_core::trajectory::Trajectory) -> String {
+    let first_user_message = trajectory
+        .steps
+        .iter()
+        .find(|step| step.action_type == genesis_core::trajectory::ActionType::UserMessage)
+        .map(|step| step.content.trim())
+        .unwrap_or("");
+    format!("{}::{}", trajectory.system_prompt_hash, first_user_message)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6305,6 +6499,7 @@ storage:
                 max_turns,
                 concurrency,
                 toolset,
+                quality_filter,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
@@ -6312,6 +6507,7 @@ storage:
                 assert!(max_turns.is_none());
                 assert!(concurrency.is_none());
                 assert!(toolset.is_none());
+                assert!(quality_filter.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6343,6 +6539,7 @@ storage:
                 max_turns,
                 concurrency,
                 toolset,
+                quality_filter,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
@@ -6350,6 +6547,7 @@ storage:
                 assert_eq!(max_turns, Some(12));
                 assert_eq!(concurrency, Some(8));
                 assert!(toolset.is_none());
+                assert!(quality_filter.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6372,6 +6570,28 @@ storage:
         match cli.command {
             Command::Batch { toolset, .. } => {
                 assert_eq!(toolset.as_deref(), Some("development"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_command_with_quality_filter() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "batch",
+            "--input",
+            "prompts.jsonl",
+            "--output",
+            "trajectories",
+            "--quality-filter",
+            "0.75",
+        ])
+        .expect("batch with quality filter should parse");
+
+        match cli.command {
+            Command::Batch { quality_filter, .. } => {
+                assert_eq!(quality_filter, Some(0.75));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6492,6 +6712,27 @@ storage:
     }
 
     #[test]
+    fn parses_eval_deduplicate_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "deduplicate",
+            "trajectories",
+            "--recursive",
+            "--remove",
+        ])
+        .expect("deduplicate should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Deduplicate { dir, recursive, remove }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+                assert!(remove);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_eval_quality_scores_trajectories() {
         let dir = tempdir().expect("tempdir");
         // Write a good trajectory
@@ -6581,6 +6822,82 @@ storage:
         assert!(result.contains("1/2"));
         assert!(result.contains("good"));
         assert!(!result.contains(" bad"));
+    }
+
+    #[test]
+    fn discard_low_quality_trajectory_removes_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("low.json");
+        let trajectory = serde_json::json!({
+            "session_id": "low",
+            "model": "",
+            "system_prompt_hash": "",
+            "started_at": "2025-01-01T00:00:00Z",
+            "completed_at": null,
+            "steps": [],
+            "outcome": {"type": "failure", "reason": "broke"},
+            "tags": []
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
+
+        crate::discard_low_quality_trajectory(dir.path().to_str().unwrap(), "low", 0.5)
+            .expect("quality discard should succeed");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn run_eval_deduplicate_groups_and_removes_duplicates() {
+        let dir = tempdir().expect("tempdir");
+
+        let write_duplicate = |session_id: &str, filename: &str| {
+            let trajectory = serde_json::json!({
+                "session_id": session_id,
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": "same-hash",
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [
+                    {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "same prompt"},
+                    {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "response"}
+                ],
+                "outcome": {"type": "success"},
+                "tags": []
+            });
+            std::fs::write(
+                dir.path().join(filename),
+                serde_json::to_string_pretty(&trajectory).unwrap(),
+            )
+            .unwrap();
+        };
+
+        write_duplicate("s1", "a.json");
+        write_duplicate("s2", "b.json");
+        std::fs::write(
+            dir.path().join("unique.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "session_id": "s3",
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": "other-hash",
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [
+                    {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "different prompt"}
+                ],
+                "outcome": {"type": "success"},
+                "tags": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let output =
+            crate::run_eval_deduplicate(dir.path().to_str().unwrap(), false, true, false)
+                .expect("deduplicate should succeed");
+
+        assert!(output.contains("duplicate groups: 1"));
+        assert!(output.contains("removed files:    1"));
+        assert!(dir.path().join("unique.json").exists());
+        assert!(!(dir.path().join("a.json").exists() && dir.path().join("b.json").exists()));
     }
 
     #[test]

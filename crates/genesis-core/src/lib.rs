@@ -720,6 +720,7 @@ mod tests {
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                 },
                 gateway: None,
+                toolsets: std::collections::HashMap::new(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

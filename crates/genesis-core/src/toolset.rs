@@ -169,6 +169,28 @@ pub fn builtin_distribution_names() -> Vec<&'static str> {
     ]
 }
 
+/// Create a distribution from a config-defined tool probability map.
+pub fn from_config(name: &str, tools: &std::collections::HashMap<String, f64>) -> ToolsetDistribution {
+    ToolsetDistribution {
+        name: name.to_owned(),
+        description: format!("Custom distribution '{name}' from config."),
+        tools: tools.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+    }
+}
+
+/// Resolve a distribution by name, checking custom config distributions first,
+/// then falling back to built-ins.
+pub fn resolve_distribution(
+    name: &str,
+    custom: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+) -> Option<ToolsetDistribution> {
+    if let Some(tools) = custom.get(name) {
+        Some(from_config(name, tools))
+    } else {
+        builtin_distribution(name)
+    }
+}
+
 /// Full distribution: every tool at 100%.
 fn full() -> ToolsetDistribution {
     let mut tools = BTreeMap::new();
@@ -475,5 +497,41 @@ mod tests {
         assert!(tools.contains("ha_call_service"));
         assert!(tools.contains("ha_list_entities"));
         assert!(tools.contains("ha_list_services"));
+    }
+
+    #[test]
+    fn from_config_creates_distribution() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("shell_exec".to_owned(), 1.0);
+        tools.insert("read_file".to_owned(), 0.5);
+        let dist = from_config("custom", &tools);
+        assert_eq!(dist.name, "custom");
+        assert_eq!(dist.possible_tools().len(), 2);
+    }
+
+    #[test]
+    fn resolve_prefers_custom_over_builtin() {
+        let mut custom = std::collections::HashMap::new();
+        let mut tools = std::collections::HashMap::new();
+        tools.insert("custom_tool".to_owned(), 1.0);
+        custom.insert("full".to_owned(), tools);
+
+        // "full" is a builtin name, but custom should take precedence
+        let dist = resolve_distribution("full", &custom).unwrap();
+        assert!(dist.possible_tools().contains("custom_tool"));
+        assert!(!dist.possible_tools().contains("shell_exec"));
+    }
+
+    #[test]
+    fn resolve_falls_back_to_builtin() {
+        let custom = std::collections::HashMap::new();
+        let dist = resolve_distribution("minimal", &custom).unwrap();
+        assert!(dist.possible_tools().contains("shell_exec"));
+    }
+
+    #[test]
+    fn resolve_returns_none_for_unknown() {
+        let custom = std::collections::HashMap::new();
+        assert!(resolve_distribution("nonexistent", &custom).is_none());
     }
 }
