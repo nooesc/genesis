@@ -8,7 +8,10 @@ use genesis_core::agent_loop::{AgentError, AgentLoop, AgentLoopConfig};
 use genesis_core::prompt::{agent_name, build_system_prompt};
 use genesis_core::{build_default_tool_runtime, build_execution_context_from_loaded, run_doctor};
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
-use genesis_storage::{bootstrap, SessionStore, SessionSummary, StorageError, StoredMessage};
+use genesis_storage::{
+    bootstrap, ScheduleStore, SessionStore, SessionSummary, StorageError, StoredMessage,
+    StoredSchedule,
+};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 
@@ -43,6 +46,8 @@ pub enum Command {
     Storage(StorageCommand),
     #[command(subcommand, about = "Inspect recent saved sessions")]
     Sessions(SessionsCommand),
+    #[command(subcommand, about = "Manage scheduled prompts")]
+    Schedule(ScheduleCommand),
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -75,6 +80,26 @@ pub enum SessionsCommand {
     List,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ScheduleCommand {
+    #[command(about = "Create a schedule")]
+    Create {
+        #[arg(long, help = "Cron expression for the schedule")]
+        cron: String,
+        #[arg(long, help = "Destination for schedule delivery")]
+        destination: String,
+        #[arg(long, help = "Prompt to execute when the schedule triggers")]
+        prompt: String,
+    },
+    #[command(about = "List schedules")]
+    List,
+    #[command(about = "Delete a schedule by id")]
+    Delete {
+        #[arg(help = "Schedule id to delete")]
+        id: String,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(transparent)]
@@ -91,6 +116,8 @@ pub enum CliError {
     Io(#[from] io::Error),
     #[error("session `{0}` was not found")]
     SessionNotFound(String),
+    #[error("schedule `{0}` was not found")]
+    ScheduleNotFound(String),
     #[error("failed to encode json output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
@@ -140,6 +167,47 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_json::to_string_pretty(&sessions)?)
             } else {
                 Ok(format_session_list(&sessions))
+            }
+        }
+        Command::Schedule(schedule_command) => {
+            let loaded = load(cli.config.as_deref())?;
+            bootstrap(&loaded.config.storage.database_path)?;
+            let store = ScheduleStore::new(&loaded.config.storage.database_path);
+
+            match schedule_command {
+                ScheduleCommand::Create {
+                    cron,
+                    destination,
+                    prompt,
+                } => {
+                    let schedule = store.create(
+                        &default_schedule_id(),
+                        &cron,
+                        &destination,
+                        &prompt,
+                    )?;
+
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&schedule)?)
+                    } else {
+                        Ok(format_created_schedule(&schedule))
+                    }
+                }
+                ScheduleCommand::List => {
+                    let schedules = store.list_all()?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&schedules)?)
+                    } else {
+                        Ok(format_schedule_list(&schedules))
+                    }
+                }
+                ScheduleCommand::Delete { id } => {
+                    if !store.delete(&id)? {
+                        return Err(CliError::ScheduleNotFound(id));
+                    }
+
+                    Ok(format!("deleted schedule {id}"))
+                }
             }
         }
         Command::Bootstrap(BootstrapCommand::Config) => {
@@ -315,6 +383,14 @@ fn default_session_id() -> String {
     format!("cli-{timestamp}")
 }
 
+fn default_schedule_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("sched-{timestamp}")
+}
+
 fn is_exit_command(input: &str) -> bool {
     matches!(input, "exit" | "quit" | "/exit" | "/quit")
 }
@@ -329,6 +405,32 @@ fn format_session_list(sessions: &[SessionSummary]) -> String {
         lines.push(format!(
             "{}\t{}\t{}",
             session.id, session.platform, session.created_at
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_created_schedule(schedule: &StoredSchedule) -> String {
+    format!(
+        "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ncreated_at: {}",
+        schedule.id,
+        schedule.cron_expression,
+        schedule.destination,
+        schedule.prompt,
+        schedule.created_at
+    )
+}
+
+fn format_schedule_list(schedules: &[StoredSchedule]) -> String {
+    if schedules.is_empty() {
+        return "no saved schedules".to_owned();
+    }
+
+    let mut lines = vec!["genesis schedules".to_owned()];
+    for schedule in schedules {
+        lines.push(format!(
+            "{}\t{}\t{}\t{}",
+            schedule.id, schedule.destination, schedule.cron_expression, schedule.created_at
         ));
     }
     lines.join("\n")
@@ -392,11 +494,12 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_session_id, format_session_list, is_exit_command, restore_chat_history, run,
-        BootstrapCommand, Cli, Command, SessionsCommand, StorageCommand,
+        default_schedule_id, default_session_id, format_schedule_list, format_session_list,
+        is_exit_command, restore_chat_history, run, BootstrapCommand, Cli, Command,
+        ScheduleCommand, SessionsCommand, StorageCommand,
     };
     use clap::Parser;
-    use genesis_storage::{SessionSummary, StoredMessage};
+    use genesis_storage::{SessionSummary, StoredMessage, StoredSchedule};
     use std::fs;
     use tempfile::tempdir;
 
@@ -464,6 +567,11 @@ mod tests {
         assert!(default_session_id().starts_with("cli-"));
     }
 
+    #[test]
+    fn default_schedule_id_uses_sched_prefix() {
+        assert!(default_schedule_id().starts_with("sched-"));
+    }
+
     #[tokio::test]
     async fn parses_storage_path_command() {
         let cli = Cli::try_parse_from(["genesis", "storage", "path"])
@@ -507,6 +615,74 @@ mod tests {
 
         match cli.command {
             Command::Sessions(SessionsCommand::List) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_schedule_list_for_humans() {
+        let output = format_schedule_list(&[StoredSchedule {
+            id: "sched-123".to_owned(),
+            cron_expression: "*/5 * * * *".to_owned(),
+            destination: "cli".to_owned(),
+            prompt: "check status".to_owned(),
+            enabled: true,
+            created_at: "2026-03-08 12:00:00".to_owned(),
+        }]);
+
+        assert!(output.contains("genesis schedules"));
+        assert!(output.contains("sched-123\tcli\t*/5 * * * *\t2026-03-08 12:00:00"));
+    }
+
+    #[tokio::test]
+    async fn parses_schedule_create_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "schedule",
+            "create",
+            "--cron",
+            "*/5 * * * *",
+            "--destination",
+            "cli",
+            "--prompt",
+            "check status",
+        ])
+        .expect("schedule create command should parse");
+
+        match cli.command {
+            Command::Schedule(ScheduleCommand::Create {
+                cron,
+                destination,
+                prompt,
+            }) => {
+                assert_eq!(cron, "*/5 * * * *");
+                assert_eq!(destination, "cli");
+                assert_eq!(prompt, "check status");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_schedule_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "schedule", "list"])
+            .expect("schedule list command should parse");
+
+        match cli.command {
+            Command::Schedule(ScheduleCommand::List) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_schedule_delete_command() {
+        let cli = Cli::try_parse_from(["genesis", "schedule", "delete", "sched-123"])
+            .expect("schedule delete command should parse");
+
+        match cli.command {
+            Command::Schedule(ScheduleCommand::Delete { id }) => {
+                assert_eq!(id, "sched-123");
+            }
             other => panic!("unexpected command parsed: {other:?}"),
         }
     }
