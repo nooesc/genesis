@@ -3,6 +3,7 @@
 //! Exposes a REST API so external services (webhooks, platform bots)
 //! can send messages to Eve and receive responses.
 
+pub mod commands;
 pub mod platforms;
 pub mod verify;
 

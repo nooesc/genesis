@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_storage::SessionStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -301,6 +302,21 @@ pub async fn webhook_handler(
     );
 
     info!(parent: &span, "received telegram message");
+
+    // Handle gateway slash commands before reaching the agent.
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    match crate::commands::handle_command(&text, &session_id, &store) {
+        crate::commands::CommandResult::Reply(reply) => {
+            let token2 = token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = send_reply(&token2, chat_id, &reply, Some(message_id)).await {
+                    error!(error = %e, "failed to send command reply");
+                }
+            });
+            return StatusCode::OK;
+        }
+        crate::commands::CommandResult::PassThrough => {}
+    }
 
     // Spawn background task so we return 200 immediately
     let state = Arc::clone(&state);

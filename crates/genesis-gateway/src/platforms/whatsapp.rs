@@ -203,6 +203,27 @@ pub async fn webhook_handler(
 
                 info!(parent: &span, "received whatsapp message");
 
+                // Handle gateway slash commands before reaching the agent.
+                let store = genesis_storage::SessionStore::new(
+                    &state.loaded.config.storage.database_path,
+                );
+                match crate::commands::handle_command(&text, &session_id, &store) {
+                    crate::commands::CommandResult::Reply(reply) => {
+                        let token2 = token.clone();
+                        let phone2 = phone_id.clone();
+                        let from2 = from.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                send_reply(&token2, &phone2, &from2, &reply).await
+                            {
+                                error!(error = %e, "failed to send command reply");
+                            }
+                        });
+                        continue;
+                    }
+                    crate::commands::CommandResult::PassThrough => {}
+                }
+
                 let state = Arc::clone(&state);
                 let token = token.clone();
                 let phone_id = phone_id.clone();

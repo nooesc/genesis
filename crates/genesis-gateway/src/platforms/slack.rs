@@ -148,6 +148,23 @@ pub async fn events_handler(
 
     info!(parent: &span, event_type = event.event_type.as_str(), "received slack event");
 
+    // Handle gateway slash commands before reaching the agent.
+    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
+    match crate::commands::handle_command(&text, &session_id, &store) {
+        crate::commands::CommandResult::Reply(reply) => {
+            let token2 = token.clone();
+            let channel2 = channel.clone();
+            let ts = thread_ts.clone();
+            tokio::spawn(async move {
+                if let Err(e) = post_message(&token2, &channel2, &reply, ts.as_deref()).await {
+                    error!(error = %e, "failed to send command reply");
+                }
+            });
+            return Ok(Json(serde_json::json!({ "ok": true })));
+        }
+        crate::commands::CommandResult::PassThrough => {}
+    }
+
     // Process in background
     tokio::spawn(
         async move {
