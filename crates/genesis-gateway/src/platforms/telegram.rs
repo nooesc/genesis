@@ -234,46 +234,39 @@ pub async fn webhook_handler(
         None => return StatusCode::OK, // Ignore non-message updates (edits, callbacks, etc.)
     };
 
-    // Extract text from message. Handle text, photos, voice, and audio.
-    let (text, is_voice) = if let Some(t) = message.text.filter(|t| !t.is_empty()) {
-        (t, false)
+    // Classify the incoming message into a typed input.
+    enum MessageInput {
+        Text(String),
+        Voice { file_id: String, duration: i64 },
+        Audio { file_id: String, duration: i64, file_name: String },
+    }
+
+    let input = if let Some(t) = message.text.filter(|t| !t.is_empty()) {
+        MessageInput::Text(t)
     } else if let Some(photos) = &message.photo {
-        // Photo message — use the largest photo (last in the array).
         let best = photos.last();
         let caption = message.caption.as_deref().unwrap_or("");
         let file_info = best
             .map(|p| format!("{}x{}, file_id={}", p.width, p.height, p.file_id))
             .unwrap_or_else(|| "unknown".to_owned());
-        (
-            format!(
-                "[Photo received: {file_info}. Caption: \"{caption}\". \
-                 Use the vision tool to analyze the image if needed.]"
-            ),
-            false,
-        )
+        MessageInput::Text(format!(
+            "[Photo received: {file_info}. Caption: \"{caption}\". \
+             Use the vision tool to analyze the image if needed.]"
+        ))
     } else if let Some(voice) = &message.voice {
-        // Voice message — will attempt auto-transcription in background task.
-        (
-            format!(
-                "__voice:{}:{}",
-                voice.file_id, voice.duration
-            ),
-            true,
-        )
+        MessageInput::Voice {
+            file_id: voice.file_id.clone(),
+            duration: voice.duration,
+        }
     } else if let Some(audio) = &message.audio {
-        let name = audio.file_name.as_deref().unwrap_or("audio");
-        let dur = audio.duration.unwrap_or(0);
-        (
-            format!(
-                "__audio:{}:{}:{name}",
-                audio.file_id, dur
-            ),
-            true,
-        )
+        MessageInput::Audio {
+            file_id: audio.file_id.clone(),
+            duration: audio.duration.unwrap_or(0),
+            file_name: audio.file_name.clone().unwrap_or_else(|| "audio".to_owned()),
+        }
     } else {
         return StatusCode::OK; // Ignore unsupported message types
     };
-    let _ = is_voice;
 
     let chat_id = message.chat.id;
     let message_id = message.message_id;
@@ -303,10 +296,12 @@ pub async fn webhook_handler(
 
     info!(parent: &span, "received telegram message");
 
-    // Handle gateway slash commands before reaching the agent.
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    match crate::commands::handle_command(&text, &session_id, &store) {
-        crate::commands::CommandResult::Reply(reply) => {
+    // Handle gateway slash commands (only for text messages).
+    if let MessageInput::Text(ref text) = input {
+        let store = SessionStore::new(&state.loaded.config.storage.database_path);
+        if let crate::commands::CommandResult::Reply(reply) =
+            crate::commands::handle_command(text, &session_id, &store)
+        {
             let token2 = token.clone();
             tokio::spawn(async move {
                 if let Err(e) = send_reply(&token2, chat_id, &reply, Some(message_id)).await {
@@ -315,55 +310,47 @@ pub async fn webhook_handler(
             });
             return StatusCode::OK;
         }
-        crate::commands::CommandResult::PassThrough => {}
     }
 
     // Spawn background task so we return 200 immediately
     let state = Arc::clone(&state);
     tokio::spawn(
         async move {
-            // Auto-transcribe voice/audio messages before sending to agent.
-            let prompt = if let Some(rest) = text.strip_prefix("__voice:") {
-                // Parse: file_id:duration
-                let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                let file_id = parts[0];
-                let duration = parts.get(1).unwrap_or(&"0");
-                match transcribe_telegram_audio(&token, file_id).await {
-                    Ok(transcript) => {
-                        info!(duration, "voice message transcribed successfully");
-                        format!("[Voice message transcription ({duration}s)]: {transcript}")
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "voice transcription failed, falling back to metadata");
-                        format!(
-                            "[Voice message received: {duration}s audio, file_id={file_id}. \
-                             Auto-transcription failed: {e}. \
-                             Use the transcribe tool if needed.]"
-                        )
-                    }
-                }
-            } else if let Some(rest) = text.strip_prefix("__audio:") {
-                // Parse: file_id:duration:name
-                let parts: Vec<&str> = rest.splitn(3, ':').collect();
-                let file_id = parts[0];
-                let duration = parts.get(1).unwrap_or(&"0");
-                let name = parts.get(2).unwrap_or(&"audio");
-                match transcribe_telegram_audio(&token, file_id).await {
-                    Ok(transcript) => {
-                        info!(file_name = name, "audio file transcribed successfully");
-                        format!("[Audio \"{name}\" transcription ({duration}s)]: {transcript}")
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "audio transcription failed, falling back to metadata");
-                        format!(
-                            "[Audio file received: \"{name}\", {duration}s, file_id={file_id}. \
-                             Auto-transcription failed: {e}. \
-                             Use the transcribe tool if needed.]"
-                        )
+            // Resolve input to a prompt string, auto-transcribing voice/audio.
+            let prompt = match input {
+                MessageInput::Text(text) => text,
+                MessageInput::Voice { file_id, duration } => {
+                    match transcribe_telegram_audio(&token, &file_id).await {
+                        Ok(transcript) => {
+                            info!(duration, "voice message transcribed successfully");
+                            format!("[Voice message transcription ({duration}s)]: {transcript}")
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "voice transcription failed, falling back to metadata");
+                            format!(
+                                "[Voice message received: {duration}s audio, file_id={file_id}. \
+                                 Auto-transcription failed: {e}. \
+                                 Use the transcribe tool if needed.]"
+                            )
+                        }
                     }
                 }
-            } else {
-                text.clone()
+                MessageInput::Audio { file_id, duration, file_name } => {
+                    match transcribe_telegram_audio(&token, &file_id).await {
+                        Ok(transcript) => {
+                            info!(file_name = file_name.as_str(), "audio file transcribed successfully");
+                            format!("[Audio \"{file_name}\" transcription ({duration}s)]: {transcript}")
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "audio transcription failed, falling back to metadata");
+                            format!(
+                                "[Audio file received: \"{file_name}\", {duration}s, file_id={file_id}. \
+                                 Auto-transcription failed: {e}. \
+                                 Use the transcribe tool if needed.]"
+                            )
+                        }
+                    }
+                }
             };
 
             let service = SessionExecutionService::new(&state.loaded);
@@ -613,22 +600,25 @@ mod tests {
     }
 
     #[test]
-    fn voice_marker_format_parseable() {
-        let marker = format!("__voice:{}:{}", "AwACAgIAAxkBAAIB", 12);
-        let rest = marker.strip_prefix("__voice:").unwrap();
-        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-        assert_eq!(parts[0], "AwACAgIAAxkBAAIB");
-        assert_eq!(parts[1], "12");
+    fn voice_message_fields_extracted() {
+        let voice = TelegramVoice {
+            file_id: "AwACAgIAAxkBAAIB".to_owned(),
+            duration: 12,
+        };
+        assert_eq!(voice.file_id, "AwACAgIAAxkBAAIB");
+        assert_eq!(voice.duration, 12);
     }
 
     #[test]
-    fn audio_marker_format_parseable() {
-        let marker = format!("__audio:{}:{}:{}", "CQACAgI", 180, "podcast.mp3");
-        let rest = marker.strip_prefix("__audio:").unwrap();
-        let parts: Vec<&str> = rest.splitn(3, ':').collect();
-        assert_eq!(parts[0], "CQACAgI");
-        assert_eq!(parts[1], "180");
-        assert_eq!(parts[2], "podcast.mp3");
+    fn audio_message_fields_extracted() {
+        let audio = TelegramAudio {
+            file_id: "CQACAgI".to_owned(),
+            duration: Some(180),
+            file_name: Some("podcast.mp3".to_owned()),
+        };
+        assert_eq!(audio.file_id, "CQACAgI");
+        assert_eq!(audio.duration, Some(180));
+        assert_eq!(audio.file_name.as_deref(), Some("podcast.mp3"));
     }
 
     #[test]

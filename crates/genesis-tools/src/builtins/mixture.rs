@@ -124,7 +124,7 @@ impl ToolHandler for MixtureOfAgentsTool {
         let synthesis = if synthesize && successful_responses.len() > 1 {
             let synthesis_prompt = build_synthesis_prompt(prompt, &successful_responses);
             match query_model(
-                &std::env::vars().collect(),
+                &env,
                 synthesis_backend,
                 synthesis_model,
                 &synthesis_prompt,

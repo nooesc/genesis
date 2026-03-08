@@ -50,9 +50,13 @@ impl Serialize for ToolChoice {
             ToolChoice::Required => serializer.serialize_str("required"),
             ToolChoice::Function(name) => {
                 use serde::ser::SerializeMap;
+                #[derive(Serialize)]
+                struct FnRef<'a> {
+                    name: &'a str,
+                }
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("type", "function")?;
-                map.serialize_entry("function", &serde_json::json!({ "name": name }))?;
+                map.serialize_entry("function", &FnRef { name })?;
                 map.end()
             }
         }

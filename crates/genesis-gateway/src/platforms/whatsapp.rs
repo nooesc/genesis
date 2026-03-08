@@ -182,6 +182,10 @@ pub async fn webhook_handler(
                 .map(|c| c.profile.name.clone())
                 .unwrap_or_else(|| "Unknown".to_owned());
 
+            let store = genesis_storage::SessionStore::new(
+                &state.loaded.config.storage.database_path,
+            );
+
             for message in &change.value.messages {
                 if message.msg_type != "text" {
                     continue;
@@ -202,11 +206,6 @@ pub async fn webhook_handler(
                 );
 
                 info!(parent: &span, "received whatsapp message");
-
-                // Handle gateway slash commands before reaching the agent.
-                let store = genesis_storage::SessionStore::new(
-                    &state.loaded.config.storage.database_path,
-                );
                 match crate::commands::handle_command(&text, &session_id, &store) {
                     crate::commands::CommandResult::Reply(reply) => {
                         let token2 = token.clone();
