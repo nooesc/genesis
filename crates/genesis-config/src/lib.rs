@@ -72,6 +72,11 @@ pub struct ProviderConfig {
     /// provider preferences (e.g. `{"provider": {"sort": "price"}}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+    /// Tool call parser for models that embed tool calls in text content
+    /// rather than using native tool_calls. Auto-detected from model name
+    /// when not set. Examples: "hermes", "llama", "mistral", "deepseek_v3".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_parser: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,9 +110,32 @@ pub struct RuntimeConfig {
     /// portion of the conversation is summarized and replaced. `None` disables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Maximum number of LLM iterations across the agent's lifetime.
+    /// Unlike `max_turns` which resets each user message, this is a hard cap
+    /// on total LLM round-trips. Useful for autonomous/batch agents. `None`
+    /// means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<usize>,
     /// Context file security scanning policy.
     #[serde(default)]
     pub context_security: ContextSecurityPolicy,
+    /// Reasoning effort level for providers that support it.
+    /// Affects how much compute the model spends on reasoning.
+    /// Supported on OpenRouter, Anthropic, and some custom providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Reasoning effort level controlling how much compute the model spends.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Maximum reasoning depth.
+    High,
+    /// Balanced reasoning (default for most providers).
+    Medium,
+    /// Minimal reasoning for fast, cheap responses.
+    Low,
 }
 
 /// Policy for handling detected threats in context files (AGENTS.md, SOUL.md, etc.).
@@ -219,6 +247,8 @@ struct FileProviderConfig {
     api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     extra_body: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_parser: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -248,7 +278,11 @@ struct FileRuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_context_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_iterations: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context_security: Option<ContextSecurityPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Error)]
@@ -308,6 +342,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             base_url: None,
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
             extra_body: None,
+            tool_call_parser: None,
         },
         tool_provider: None,
         mcp_servers: HashMap::new(),
@@ -324,7 +359,9 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             terminal: None,
             thinking_budget: None,
             max_context_tokens: None,
+            max_iterations: None,
             context_security: ContextSecurityPolicy::default(),
+            reasoning_effort: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -403,6 +440,10 @@ pub fn load_from_map(
             .provider
             .as_ref()
             .and_then(|p| p.extra_body.clone()),
+        tool_call_parser: file_config
+            .provider
+            .as_ref()
+            .and_then(|p| p.tool_call_parser.clone()),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -429,6 +470,7 @@ pub fn load_from_map(
                 .or_else(|| tp.api_key_env.clone())
                 .or_else(|| provider.api_key_env.clone()),
             extra_body: tp.extra_body.clone(),
+            tool_call_parser: tp.tool_call_parser.clone(),
         }
     });
 
@@ -480,11 +522,19 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.max_context_tokens),
+        max_iterations: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.max_iterations),
         context_security: file_config
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.context_security.clone())
             .unwrap_or_default(),
+        reasoning_effort: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.reasoning_effort),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -620,7 +670,7 @@ pub fn update_provider_in_file(
 ///   profile, provider.backend, provider.model, provider.base_url,
 ///   provider.api_key_env, runtime.max_turns, runtime.max_concurrency,
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
-///   runtime.thinking_budget, runtime.max_context_tokens,
+///   runtime.thinking_budget, runtime.max_context_tokens, runtime.max_iterations,
 ///   gateway.idle_timeout_minutes, gateway.daily_reset_hour
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
@@ -713,6 +763,16 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .max_context_tokens = Some(v);
         }
+        "runtime.max_iterations" => {
+            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.max_iterations",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_iterations = Some(v);
+        }
         "gateway.idle_timeout_minutes" => {
             let v: u64 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
                 name: "gateway.idle_timeout_minutes",
@@ -761,16 +821,41 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 })
                 .rate_limit_rpm = Some(v);
         }
+        "provider.tool_call_parser" => {
+            file_config
+                .provider
+                .get_or_insert_with(FileProviderConfig::default)
+                .tool_call_parser = Some(value.to_owned());
+        }
+        "runtime.reasoning_effort" => {
+            let effort: ReasoningEffort = match value.to_ascii_lowercase().as_str() {
+                "high" => ReasoningEffort::High,
+                "medium" => ReasoningEffort::Medium,
+                "low" => ReasoningEffort::Low,
+                _ => {
+                    return Err(ConfigError::InvalidEnvValue {
+                        name: "runtime.reasoning_effort",
+                        value: value.to_owned(),
+                    })
+                }
+            };
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .reasoning_effort = Some(effort);
+        }
         _ => {
             return Err(ConfigError::InvalidEnvValue {
                 name: "key",
                 value: format!(
                     "unknown key `{key}`. Supported: profile, provider.backend, provider.model, \
-                     provider.base_url, provider.api_key_env, runtime.max_turns, \
-                     runtime.max_concurrency, runtime.allow_destructive_tools, \
-                     runtime.max_context_messages, runtime.thinking_budget, \
-                     runtime.max_context_tokens, gateway.idle_timeout_minutes, \
-                     gateway.daily_reset_hour, gateway.rate_limit_rpm"
+                     provider.base_url, provider.api_key_env, provider.tool_call_parser, \
+                     runtime.max_turns, runtime.max_concurrency, \
+                     runtime.allow_destructive_tools, runtime.max_context_messages, \
+                     runtime.thinking_budget, runtime.max_context_tokens, \
+                     runtime.max_iterations, runtime.reasoning_effort, \
+                     gateway.idle_timeout_minutes, gateway.daily_reset_hour, \
+                     gateway.rate_limit_rpm"
                 ),
             });
         }

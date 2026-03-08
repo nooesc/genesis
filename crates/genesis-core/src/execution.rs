@@ -25,6 +25,8 @@ pub struct SessionExecutionService<'a> {
     system_prompt_override: Option<String>,
     response_format: Option<genesis_provider::ResponseFormat>,
     approval_handler: Option<Arc<dyn genesis_tools::ApprovalHandler>>,
+    /// Default working directory for shell commands (worktree isolation).
+    default_working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +67,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None }
+        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -93,7 +95,7 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None }
+        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
@@ -115,6 +117,12 @@ impl<'a> SessionExecutionService<'a> {
     /// Set an interactive approval handler for tools requiring user confirmation.
     pub fn set_approval_handler(&mut self, handler: Arc<dyn genesis_tools::ApprovalHandler>) {
         self.approval_handler = Some(handler);
+    }
+
+    /// Set the default working directory for shell commands.
+    /// Used by worktree isolation to redirect tool execution.
+    pub fn set_default_working_dir(&mut self, dir: String) {
+        self.default_working_dir = Some(dir);
     }
 
     /// Return the MCP manager if connected, for sharing with other subsystems.
@@ -289,6 +297,11 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
         }
 
+        // Set default working directory (worktree isolation)
+        if let Some(ref dir) = self.default_working_dir {
+            tool_runtime.set_default_working_dir(dir.clone());
+        }
+
         // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
         let skills_section = match user_prompt {
@@ -296,10 +309,22 @@ impl<'a> SessionExecutionService<'a> {
             None => load_skills_prompt(db_path),
         };
         let user_model_section = self.load_user_model_section();
-        let context_section = load_context_file(
+        let mut context_section = load_context_file(
             std::path::Path::new("."),
             &self.loaded.config.runtime.context_security,
         );
+        // Append worktree info to context if running in an isolated worktree
+        if let Some(ref dir) = self.default_working_dir {
+            let worktree_note = format!(
+                "\n\n[Worktree Isolation] You are working in an isolated git worktree at `{dir}`. \
+                 All shell commands execute in this directory by default. Changes here do not \
+                 affect the main working tree. Commit your work when done."
+            );
+            context_section = Some(match context_section {
+                Some(existing) => format!("{existing}{worktree_note}"),
+                None => worktree_note,
+            });
+        }
         let memories_section = user_prompt.and_then(|prompt| self.recall_memories(prompt));
 
         let platform_str = delivery_platform_str(&execution_context.plan.platform);
@@ -346,6 +371,9 @@ impl<'a> SessionExecutionService<'a> {
                 budget_limit: self.loaded.config.runtime.budget_limit,
                 max_concurrency: self.loaded.config.runtime.max_concurrency,
                 max_context_tokens: self.loaded.config.runtime.max_context_tokens,
+                max_iterations: self.loaded.config.runtime.max_iterations,
+                tool_call_parser: self.loaded.config.provider.tool_call_parser.clone(),
+                reasoning_effort: self.loaded.config.runtime.reasoning_effort,
                 thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
                     genesis_provider::ThinkingConfig {
                         budget_tokens: Some(budget),
@@ -986,6 +1014,7 @@ mod tests {
                     base_url: Some("http://localhost:8000/v1".to_owned()),
                     api_key_env: None,
                     extra_body: None,
+                    tool_call_parser: None,
                 },
                 tool_provider: None,
                 mcp_servers: std::collections::HashMap::new(),
@@ -1002,7 +1031,9 @@ mod tests {
                     terminal: None,
                     thinking_budget: None,
                     max_context_tokens: None,
+                    max_iterations: None,
                     context_security: genesis_config::ContextSecurityPolicy::default(),
+                    reasoning_effort: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

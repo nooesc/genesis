@@ -227,7 +227,10 @@ impl ToolHandler for ShellExecTool {
             });
         }
 
-        let working_dir = call.arguments.get("working_dir");
+        let working_dir = call
+            .arguments
+            .get("working_dir")
+            .or(context.default_working_dir.as_ref());
         let timeout_secs: u64 = call
             .arguments
             .get("timeout")
@@ -310,6 +313,7 @@ mod tests {
             data_dir: "/tmp".to_owned(),
             allow_destructive_tools: true,
             terminal_backend: None,
+            default_working_dir: None,
         }
     }
 
@@ -371,6 +375,59 @@ mod tests {
         assert!(
             output.content.contains("/tmp"),
             "output should contain /tmp: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn shell_exec_uses_default_working_dir_from_context() {
+        let tool = ShellExecTool;
+        let call = ToolCall {
+            name: "shell_exec".to_owned(),
+            arguments: BTreeMap::from([("command".to_owned(), "pwd".to_owned())]),
+        };
+
+        let context = ToolContext {
+            session_id: "test".to_owned(),
+            profile: "test".to_owned(),
+            data_dir: "/tmp".to_owned(),
+            allow_destructive_tools: true,
+            terminal_backend: None,
+            default_working_dir: Some("/tmp".to_owned()),
+        };
+
+        let output = tool.run(&call, &context).expect("should succeed");
+        assert!(
+            output.content.contains("/tmp"),
+            "should use default_working_dir: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn shell_exec_explicit_working_dir_overrides_default() {
+        let tool = ShellExecTool;
+        let call = ToolCall {
+            name: "shell_exec".to_owned(),
+            arguments: BTreeMap::from([
+                ("command".to_owned(), "pwd".to_owned()),
+                ("working_dir".to_owned(), "/var".to_owned()),
+            ]),
+        };
+
+        let context = ToolContext {
+            session_id: "test".to_owned(),
+            profile: "test".to_owned(),
+            data_dir: "/tmp".to_owned(),
+            allow_destructive_tools: true,
+            terminal_backend: None,
+            default_working_dir: Some("/tmp".to_owned()),
+        };
+
+        let output = tool.run(&call, &context).expect("should succeed");
+        assert!(
+            output.content.contains("/var"),
+            "explicit working_dir should override default: {}",
             output.content
         );
     }

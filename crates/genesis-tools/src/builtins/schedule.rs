@@ -166,6 +166,7 @@ mod tests {
             data_dir: dir.to_string_lossy().to_string(),
             allow_destructive_tools: true,
             terminal_backend: None,
+            default_working_dir: None,
         }
     }
 

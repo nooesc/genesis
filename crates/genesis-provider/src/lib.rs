@@ -2,6 +2,7 @@ mod api_types;
 mod client;
 mod error;
 pub mod model_metadata;
+pub mod parsers;
 pub mod pricing;
 mod resolve;
 

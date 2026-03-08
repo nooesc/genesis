@@ -327,6 +327,7 @@ mod tests {
             data_dir: "/nonexistent".to_owned(),
             allow_destructive_tools: false,
             terminal_backend: None,
+            default_working_dir: None,
         };
 
         // Will fail on DB open but validates argument handling

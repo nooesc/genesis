@@ -93,6 +93,18 @@ pub struct AgentLoopConfig {
     /// Timeout for individual tool calls in seconds. When a tool exceeds this
     /// duration, it is cancelled and the LLM receives a timeout error. Default: 120s.
     pub tool_timeout_secs: u64,
+    /// Maximum number of iterations (LLM calls) across the lifetime of this
+    /// agent loop. Unlike `max_turns` which resets per user message, this is a
+    /// hard cap on total LLM round-trips. Useful for autonomous/batch agents
+    /// that run many turns. `None` means unlimited.
+    pub max_iterations: Option<usize>,
+    /// Tool call parser for models that embed tool calls in text content.
+    /// When set, responses are normalized to extract tool calls from text.
+    /// Auto-detected from model name when `None`.
+    pub tool_call_parser: Option<String>,
+    /// Reasoning effort level. Injected into the request as `reasoning_effort`
+    /// for providers that support it (OpenRouter, some custom providers).
+    pub reasoning_effort: Option<genesis_config::ReasoningEffort>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -134,6 +146,9 @@ impl Default for AgentLoopConfig {
             thinking: None,
             response_format: None,
             tool_timeout_secs: 120,
+            max_iterations: None,
+            tool_call_parser: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -150,6 +165,8 @@ pub enum AgentError {
     MaxTurnsExceeded(usize),
     #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
     BudgetExceeded { used: f64, limit: f64 },
+    #[error("iteration budget exhausted: {used} / {limit} iterations")]
+    IterationsExhausted { used: usize, limit: usize },
     #[error("agent loop was cancelled")]
     Cancelled,
 }
@@ -237,6 +254,9 @@ pub struct AgentLoop {
     /// `STUCK_LOOP_THRESHOLD` times in a row, a system nudge tells the LLM
     /// to try a different approach.
     tool_failure_counts: HashMap<String, usize>,
+    /// Total number of LLM iterations consumed across all user turns.
+    /// Checked against `config.max_iterations` at each loop boundary.
+    iterations_used: usize,
     /// Cancellation flag. When set to `true`, the loop exits gracefully
     /// at the next turn boundary.
     cancelled: Arc<AtomicBool>,
@@ -295,6 +315,7 @@ impl AgentLoop {
             trajectory,
             last_prompt_tokens: 0,
             tool_failure_counts: HashMap::new(),
+            iterations_used: 0,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -323,6 +344,64 @@ impl AgentLoop {
     /// Access recorded shell hook executions for inspection/testing.
     pub fn hook_results(&self) -> &[HookResult] {
         &self.hook_results
+    }
+
+    /// Returns how many LLM iterations remain, or `None` if no limit is set.
+    pub fn remaining_iterations(&self) -> Option<usize> {
+        self.config
+            .max_iterations
+            .map(|limit| limit.saturating_sub(self.iterations_used))
+    }
+
+    /// Returns the total number of LLM iterations consumed so far.
+    pub fn iterations_used(&self) -> usize {
+        self.iterations_used
+    }
+
+    /// Resolve the tool call parser: explicit config takes priority, then auto-detect.
+    fn resolve_parser(
+        &self,
+        model: &str,
+    ) -> Option<Box<dyn genesis_provider::parsers::ToolCallParser>> {
+        if let Some(ref name) = self.config.tool_call_parser {
+            genesis_provider::parsers::get_parser(name)
+        } else {
+            genesis_provider::parsers::detect_parser(model)
+        }
+    }
+
+    /// Apply tool call parser to normalize responses from models that embed
+    /// tool calls in text content rather than using the native tool_calls field.
+    fn apply_tool_call_parser(
+        &self,
+        response: &mut genesis_provider::ChatCompletionResponse,
+        model: &str,
+    ) {
+        if let Some(parser) = self.resolve_parser(model) {
+            genesis_provider::parsers::normalize_response(response, parser.as_ref());
+        }
+    }
+
+    /// Inject reasoning effort into the request's extra_body if configured.
+    fn inject_reasoning_effort(&self, request: &mut ChatCompletionRequest) {
+        if let Some(ref effort) = self.config.reasoning_effort {
+            let effort_str = match effort {
+                genesis_config::ReasoningEffort::High => "high",
+                genesis_config::ReasoningEffort::Medium => "medium",
+                genesis_config::ReasoningEffort::Low => "low",
+            };
+
+            let extra = request
+                .extra_body
+                .get_or_insert_with(|| serde_json::json!({}));
+
+            if let Some(obj) = extra.as_object_mut() {
+                obj.insert(
+                    "reasoning_effort".to_owned(),
+                    serde_json::Value::String(effort_str.to_owned()),
+                );
+            }
+        }
     }
 
     /// Pick the right client for the current turn. Uses the tool client when
@@ -425,6 +504,32 @@ impl AgentLoop {
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
+
+            // Check iteration budget (lifetime cap across all user turns)
+            if let Some(limit) = self.config.max_iterations {
+                if self.iterations_used >= limit {
+                    warn!(iterations = self.iterations_used, limit, "iteration budget exhausted");
+                    self.save_trajectory();
+                    let result = AgentResult {
+                        response: format!(
+                            "Iteration budget exhausted ({limit} iterations). \
+                             The work so far has been saved."
+                        ),
+                        turns_used,
+                        tool_calls_made,
+                        finished_naturally: false,
+                        total_input_tokens,
+                        total_output_tokens,
+                        estimated_cost: Some(self.cost.total_cost),
+                        pending_clarification: None,
+                    };
+                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.hooks.on_turn_end(&hook_session, &result);
+                    return Ok(result);
+                }
+            }
+            self.iterations_used += 1;
+
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
             self.prune_context().await;
@@ -435,12 +540,16 @@ impl AgentLoop {
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
             request.response_format = self.config.response_format.clone();
+            self.inject_reasoning_effort(&mut request);
 
             self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
-            let response = match client.complete(request).await {
+            let mut response = match client.complete(request).await {
                 Ok(response) => response,
                 Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
             };
+
+            // Apply tool call parser for models that embed tool calls in text
+            self.apply_tool_call_parser(&mut response, client.model());
 
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
@@ -708,6 +817,34 @@ impl AgentLoop {
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
+
+            // Check iteration budget (lifetime cap across all user turns)
+            if let Some(limit) = self.config.max_iterations {
+                if self.iterations_used >= limit {
+                    warn!(iterations = self.iterations_used, limit, "iteration budget exhausted (streaming)");
+                    let msg = format!(
+                        "Iteration budget exhausted ({limit} iterations). \
+                         The work so far has been saved."
+                    );
+                    on_event(StreamEvent::Chunk(&msg));
+                    self.save_trajectory();
+                    let result = AgentResult {
+                        response: msg,
+                        turns_used,
+                        tool_calls_made,
+                        finished_naturally: false,
+                        total_input_tokens,
+                        total_output_tokens,
+                        estimated_cost: Some(self.cost.total_cost),
+                        pending_clarification: None,
+                    };
+                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.hooks.on_turn_end(&hook_session, &result);
+                    return Ok(result);
+                }
+            }
+            self.iterations_used += 1;
+
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
             self.prune_context().await;
@@ -718,6 +855,7 @@ impl AgentLoop {
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
             request.response_format = self.config.response_format.clone();
+            self.inject_reasoning_effort(&mut request);
 
             self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
             match client.complete_stream(request.clone()).await {
@@ -772,6 +910,16 @@ impl AgentLoop {
                         turn_input_tokens,
                         turn_output_tokens,
                     );
+
+                    // If streaming didn't produce native tool calls, try parsing from text
+                    if streamed_tool_calls.is_empty() && !response_text.is_empty() {
+                        if let Some(parser) = self.resolve_parser(client.model()) {
+                            if let Some(result) = parser.parse(&response_text) {
+                                streamed_tool_calls = result.tool_calls;
+                                response_text = result.content.unwrap_or_default();
+                            }
+                        }
+                    }
 
                     if !streamed_tool_calls.is_empty() {
                         // Record assistant message if present
@@ -904,7 +1052,7 @@ impl AgentLoop {
                 }
                 Err(_) => {
                     warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
-                    let response = match client.complete(request).await {
+                    let mut response = match client.complete(request).await {
                         Ok(response) => response,
                         Err(err) => {
                             return Err(self.report_error(
@@ -914,6 +1062,9 @@ impl AgentLoop {
                             ))
                         }
                     };
+
+                    // Apply tool call parser for models that embed tool calls in text
+                    self.apply_tool_call_parser(&mut response, client.model());
 
                     if let Some(usage) = &response.usage {
                         total_input_tokens =
@@ -2621,5 +2772,150 @@ mod tests {
             .find(|result| result.event == HookEvent::OnError)
             .expect("error hook");
         assert!(error_hook.stdout.contains("\"stage\":\"llm_request\""));
+    }
+
+    // --- Iteration budget tests ---
+
+    #[test]
+    fn remaining_iterations_none_when_unlimited() {
+        let agent = test_agent();
+        assert!(agent.remaining_iterations().is_none());
+        assert_eq!(agent.iterations_used(), 0);
+    }
+
+    #[test]
+    fn remaining_iterations_tracks_budget() {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "s".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp".to_owned(),
+            database_path: "/tmp/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let mut agent = AgentLoop::new(
+            client,
+            tools,
+            AgentLoopConfig {
+                max_iterations: Some(10),
+                ..AgentLoopConfig::default()
+            },
+            HookRunner::default(),
+        );
+
+        assert_eq!(agent.remaining_iterations(), Some(10));
+        assert_eq!(agent.iterations_used(), 0);
+
+        // Simulate consuming iterations
+        agent.iterations_used = 7;
+        assert_eq!(agent.remaining_iterations(), Some(3));
+        assert_eq!(agent.iterations_used(), 7);
+
+        // At the limit
+        agent.iterations_used = 10;
+        assert_eq!(agent.remaining_iterations(), Some(0));
+
+        // Past the limit (saturating_sub prevents underflow)
+        agent.iterations_used = 15;
+        assert_eq!(agent.remaining_iterations(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn iteration_budget_stops_loop_when_exhausted() {
+        // Set up two responses: first does a tool call, second gives text.
+        // But with max_iterations=1, the agent should stop after one LLM call
+        // (the tool-call response), and the second call will report exhaustion.
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+
+        let endpoint = start_mock_server(vec![first]);
+
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: endpoint,
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "s".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp".to_owned(),
+            database_path: "/tmp/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let mut agent = AgentLoop::new(
+            client,
+            tools,
+            AgentLoopConfig {
+                max_iterations: Some(1),
+                ..AgentLoopConfig::default()
+            },
+            HookRunner::default(),
+        );
+
+        let result = agent.run_turn("use a tool").await.expect("should return result, not error");
+        // After 1 iteration (tool call), the loop tries to iterate again but
+        // iteration budget is exhausted, so it returns gracefully.
+        assert!(!result.finished_naturally);
+        assert!(result.response.contains("Iteration budget exhausted"));
+        assert_eq!(agent.iterations_used(), 1);
+        assert_eq!(agent.remaining_iterations(), Some(0));
+    }
+
+    #[test]
+    fn iteration_budget_default_is_none() {
+        let config = AgentLoopConfig::default();
+        assert!(config.max_iterations.is_none());
     }
 }

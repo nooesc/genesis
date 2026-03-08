@@ -63,6 +63,11 @@ pub struct ToolContext {
     /// Terminal backend for shell command execution (local if None).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_backend: Option<TerminalBackend>,
+    /// Default working directory for shell commands. When set, local shell
+    /// commands use this as the current directory unless overridden by the
+    /// tool call's `working_dir` argument. Used by worktree isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_working_dir: Option<String>,
 }
 
 /// Configurable terminal backend for shell command execution.
@@ -1377,6 +1382,7 @@ mod tests {
             data_dir: "/tmp/genesis".to_owned(),
             allow_destructive_tools: false,
             terminal_backend: None,
+            default_working_dir: None,
         }
     }
 

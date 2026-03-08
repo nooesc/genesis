@@ -144,6 +144,8 @@ pub enum Command {
         system: Option<String>,
         #[arg(long, help = "Resume the most recent session")]
         last: bool,
+        #[arg(long, help = "Run in an isolated git worktree (requires git repo)")]
+        worktree: bool,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -839,8 +841,8 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system, last } => {
-            run_chat(cli.config, session_id, resume, prompt, system, last).await
+        Command::Chat { session_id, resume, prompt, system, last, worktree } => {
+            run_chat(cli.config, session_id, resume, prompt, system, last, worktree).await
         }
         Command::Doctor { bootstrap_storage, verify } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
@@ -2331,6 +2333,7 @@ async fn run_chat(
     initial_prompt: Option<String>,
     system_override: Option<String>,
     last: bool,
+    worktree: bool,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -2339,6 +2342,17 @@ async fn run_chat(
     if let Some(ref sys) = system_override {
         service.set_system_prompt_override(sys.clone());
     }
+
+    // Set up git worktree isolation if requested.
+    let _worktree_guard = if worktree {
+        let guard = create_worktree()?;
+        service.set_default_working_dir(guard.path.clone());
+        println!("Working in isolated worktree: {}", guard.path);
+        Some(guard)
+    } else {
+        None
+    };
+
     let store = SessionStore::new(&loaded.config.storage.database_path);
 
     let (session_id, is_resumed) = if last {
@@ -5998,6 +6012,87 @@ fn default_session_id() -> String {
     format!("cli-{timestamp}")
 }
 
+/// Guard that cleans up a git worktree when dropped.
+/// The worktree is removed only if no uncommitted changes exist.
+struct WorktreeGuard {
+    path: String,
+    branch: String,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        // Check for uncommitted changes before cleaning up
+        let has_changes = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.path)
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(true);
+
+        if has_changes {
+            eprintln!(
+                "Worktree has uncommitted changes, keeping at: {}\n\
+                 Branch: {}\n\
+                 To clean up: git worktree remove {}",
+                self.path, self.branch, self.path
+            );
+        } else {
+            // Remove the worktree
+            let _ = std::process::Command::new("git")
+                .args(["worktree", "remove", &self.path])
+                .output();
+            // Delete the temporary branch
+            let _ = std::process::Command::new("git")
+                .args(["branch", "-d", &self.branch])
+                .output();
+        }
+    }
+}
+
+/// Creates a git worktree in a temporary directory for isolated agent work.
+fn create_worktree() -> Result<WorktreeGuard, CliError> {
+    // Verify we're in a git repo
+    let toplevel = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| CliError::Other(format!("git not found: {e}")))?;
+    if !toplevel.status.success() {
+        return Err(CliError::Other(
+            "--worktree requires a git repository".to_owned(),
+        ));
+    }
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let branch_name = format!("genesis-worktree-{timestamp}");
+
+    // Create a temp directory for the worktree
+    let repo_root = String::from_utf8_lossy(&toplevel.stdout).trim().to_owned();
+    let worktree_path = format!("{repo_root}/.git/genesis-worktrees/{branch_name}");
+
+    // Ensure the worktrees directory exists
+    let _ = std::fs::create_dir_all(format!("{repo_root}/.git/genesis-worktrees"));
+
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "-b", &branch_name, &worktree_path])
+        .output()
+        .map_err(|e| CliError::Other(format!("failed to create worktree: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::Other(format!(
+            "git worktree add failed: {stderr}"
+        )));
+    }
+
+    Ok(WorktreeGuard {
+        path: worktree_path,
+        branch: branch_name,
+    })
+}
+
 fn default_schedule_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -6749,7 +6844,7 @@ mod tests {
             .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id, resume, prompt, system, last } => {
+            Command::Chat { session_id, resume, prompt, system, last, .. } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
                 assert_eq!(resume.as_deref(), Some("session-1"));
                 assert!(prompt.is_none());
@@ -7827,6 +7922,26 @@ storage:
             .expect("chat --last should parse");
         match cli.command {
             Command::Chat { last, .. } => assert!(last),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_worktree_flag() {
+        let cli = Cli::try_parse_from(["genesis", "chat", "--worktree"])
+            .expect("chat --worktree should parse");
+        match cli.command {
+            Command::Chat { worktree, .. } => assert!(worktree),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_worktree_defaults_to_false() {
+        let cli = Cli::try_parse_from(["genesis", "chat"])
+            .expect("chat should parse");
+        match cli.command {
+            Command::Chat { worktree, .. } => assert!(!worktree),
             other => panic!("unexpected command: {other:?}"),
         }
     }

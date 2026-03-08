@@ -106,6 +106,7 @@ mod tests {
             data_dir: "/tmp".to_owned(),
             allow_destructive_tools: true,
             terminal_backend: None,
+            default_working_dir: None,
         }
     }
 

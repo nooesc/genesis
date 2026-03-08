@@ -188,6 +188,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             data_dir: execution_context.data_dir.clone(),
             allow_destructive_tools: execution_context.allow_destructive_tools,
             terminal_backend: None,
+            default_working_dir: None,
         },
         mcp: None,
     }
@@ -470,6 +471,12 @@ fn infer_backend(model: &str) -> (&'static str, &'static str) {
 }
 
 impl ToolRuntime {
+    /// Set the default working directory for shell commands.
+    /// Used by worktree isolation to redirect tool execution.
+    pub fn set_default_working_dir(&mut self, dir: String) {
+        self.context.default_working_dir = Some(dir);
+    }
+
     /// Filter the tool registry to only include tools in the given set.
     pub fn retain(&mut self, names: &std::collections::HashSet<String>) {
         self.registry.retain(names);
@@ -709,6 +716,7 @@ mod tests {
                     base_url: Some("https://openrouter.ai/api/v1".to_owned()),
                     api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
                     extra_body: None,
+                    tool_call_parser: None,
                 },
                 tool_provider: None,
                 mcp_servers: std::collections::HashMap::new(),
@@ -725,7 +733,9 @@ mod tests {
                     terminal: None,
                     thinking_budget: None,
                     max_context_tokens: None,
+                    max_iterations: None,
                     context_security: genesis_config::ContextSecurityPolicy::default(),
+                    reasoning_effort: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
