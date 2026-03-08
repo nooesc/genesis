@@ -518,38 +518,7 @@ async fn run_chat(
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
         println!("you> {initial}");
-        let mut streamed = false;
-        let outcome = service
-            .run_turn_streaming(
-                SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: "cli",
-                    delivery_platform: DeliveryPlatform::Cli,
-                    prompt: &initial,
-                    title: None,
-                },
-                |chunk| {
-                    if !streamed {
-                        print!("eve> ");
-                        streamed = true;
-                    }
-                    print!("{chunk}");
-                    let _ = io::stdout().flush();
-                },
-            )
-            .await?;
-        if streamed {
-            println!();
-        } else {
-            println!("eve> {}", outcome.result.response);
-        }
-        let r = &outcome.result;
-        if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
-            println!(
-                "     [{} in / {} out tokens, {} turns, {} tool calls]",
-                r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
-            );
-        }
+        run_streaming_turn(&service, &session_id, &initial).await?;
     }
 
     loop {
@@ -573,40 +542,7 @@ async fn run_chat(
             continue;
         }
 
-        let mut streamed = false;
-        let outcome = service
-            .run_turn_streaming(
-                SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: "cli",
-                    delivery_platform: DeliveryPlatform::Cli,
-                    prompt: trimmed,
-                    title: None,
-                },
-                |chunk| {
-                if !streamed {
-                    print!("eve> ");
-                    streamed = true;
-                }
-                print!("{chunk}");
-                let _ = io::stdout().flush();
-                },
-            )
-            .await?;
-        if streamed {
-            println!();
-        } else {
-            println!("eve> {}", outcome.result.response);
-        }
-
-        // Show token usage when available
-        let r = &outcome.result;
-        if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
-            println!(
-                "     [{} in / {} out tokens, {} turns, {} tool calls]",
-                r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
-            );
-        }
+        run_streaming_turn(&service, &session_id, trimmed).await?;
     }
 
     Ok(format!("chat session saved as {session_id}"))
@@ -1219,6 +1155,63 @@ fn default_schedule_session_id() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("sched-run-{timestamp}")
+}
+
+/// Run a single streaming turn with Ctrl+C cancellation support.
+///
+/// Wraps `run_turn_streaming` with `tokio::select!` against `ctrl_c()` so
+/// pressing Ctrl+C during an LLM response cancels the operation and returns
+/// to the input prompt instead of killing the process.
+async fn run_streaming_turn(
+    service: &SessionExecutionService<'_>,
+    session_id: &str,
+    prompt: &str,
+) -> Result<(), CliError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let streamed = AtomicBool::new(false);
+    let turn_future = service.run_turn_streaming(
+        SessionTurnInput {
+            session_id,
+            session_platform: "cli",
+            delivery_platform: DeliveryPlatform::Cli,
+            prompt,
+            title: None,
+        },
+        |chunk| {
+            if !streamed.swap(true, Ordering::Relaxed) {
+                print!("eve> ");
+            }
+            print!("{chunk}");
+            let _ = io::stdout().flush();
+        },
+    );
+
+    tokio::select! {
+        result = turn_future => {
+            let outcome = result?;
+            if streamed.load(Ordering::Relaxed) {
+                println!();
+            } else {
+                println!("eve> {}", outcome.result.response);
+            }
+            let r = &outcome.result;
+            if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+                println!(
+                    "     [{} in / {} out tokens, {} turns, {} tool calls]",
+                    r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+                );
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            if streamed.load(Ordering::Relaxed) {
+                println!();
+            }
+            println!("     [interrupted]");
+        }
+    }
+
+    Ok(())
 }
 
 fn is_exit_command(input: &str) -> bool {
