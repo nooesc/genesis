@@ -689,7 +689,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Memory(memory_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
-            let store = genesis_storage::MemoryStore::new(&loaded.config.storage.database_path);
+            let store = MemoryStore::new(&loaded.config.storage.database_path);
             match memory_command {
                 MemoryCommand::List { limit } => {
                     let memories = store.list(limit)?;
@@ -805,6 +805,25 @@ async fn run_chat(
             session_id = default_session_id();
             service.ensure_session(&session_id, "cli", None)?;
             println!("Started new session: {session_id}");
+            continue;
+        }
+
+        // Handle /retry — undo last turn and re-send the user message
+        if trimmed == "/retry" {
+            let messages = store.load_messages(&session_id).unwrap_or_default();
+            let last_user_msg = messages.iter().rev().find(|m| m.role == "user");
+            match last_user_msg {
+                Some(msg) => {
+                    let prompt_text = msg.content.clone().unwrap_or_default();
+                    // Undo the last turn first
+                    let idx = messages.iter().rposition(|m| m.role == "user").unwrap();
+                    let to_remove = messages.len() - idx;
+                    let _ = store.delete_last_n_messages(&session_id, to_remove);
+                    println!("Retrying: {prompt_text}");
+                    run_streaming_turn(&service, &session_id, &prompt_text, model).await?;
+                }
+                None => println!("No user message to retry."),
+            }
             continue;
         }
 
@@ -1528,6 +1547,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /session  - Show current session ID\n\
              /new      - Start a new session\n\
              /undo     - Undo last turn (remove last user-assistant exchange)\n\
+             /retry    - Undo last turn and re-send the user message\n\
              /compress - Trim old messages, keeping recent context\n\
              /tools    - List available tools\n\
              /skills   - List saved skills\n\
@@ -2027,7 +2047,7 @@ fn build_status_text(loaded: &LoadedConfig) -> String {
             let schedule_store =
                 genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
             let memory_store =
-                genesis_storage::MemoryStore::new(&loaded.config.storage.database_path);
+                MemoryStore::new(&loaded.config.storage.database_path);
 
             if let Ok(stats) = session_store.usage_stats() {
                 lines.push(format!("  sessions:  {}", stats.total_sessions));
