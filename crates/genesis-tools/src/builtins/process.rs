@@ -164,6 +164,82 @@ fn parse_ps_line(line: &str) -> Option<PsEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// KillProcessTool
+// ---------------------------------------------------------------------------
+
+pub struct KillProcessTool;
+
+impl ToolHandler for KillProcessTool {
+    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let pid_str = call
+            .arguments
+            .get("pid")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "pid",
+            })?;
+
+        let pid: u32 = pid_str.parse().map_err(|_| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("`{pid_str}` is not a valid PID"),
+        })?;
+
+        // Don't allow killing PID 1 (init) or PID 0
+        if pid <= 1 {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("refusing to send signal to PID {pid} (system process)"),
+            });
+        }
+
+        let signal = call
+            .arguments
+            .get("signal")
+            .map(|s| s.to_uppercase())
+            .unwrap_or_else(|| "TERM".to_owned());
+
+        // Validate signal name
+        let valid_signals = [
+            "TERM", "KILL", "INT", "HUP", "QUIT", "USR1", "USR2", "STOP", "CONT",
+        ];
+        if !valid_signals.contains(&signal.as_str()) {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!(
+                    "unsupported signal `{signal}`. Valid signals: {}",
+                    valid_signals.join(", ")
+                ),
+            });
+        }
+
+        let output = Command::new("kill")
+            .args([&format!("-{signal}"), &pid.to_string()])
+            .output()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to execute kill: {e}"),
+            })?;
+
+        if output.status.success() {
+            Ok(ToolOutput {
+                content: format!("Sent SIG{signal} to PID {pid}"),
+                metadata: BTreeMap::from([
+                    ("tool".to_owned(), call.name.clone()),
+                    ("pid".to_owned(), pid.to_string()),
+                    ("signal".to_owned(), signal),
+                ]),
+            })
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("kill failed: {}", stderr.trim()),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SystemInfoTool
 // ---------------------------------------------------------------------------
 
@@ -790,6 +866,88 @@ en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
         assert!(summary.contains("192.168.1.100"));
         // gif0 has no inet lines, should be excluded.
         assert!(!summary.contains("gif0:"));
+    }
+
+    // -----------------------------------------------------------------------
+    // KillProcessTool
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kill_process_requires_pid() {
+        let tool = KillProcessTool;
+        let call = ToolCall {
+            name: "kill_process".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn kill_process_rejects_invalid_pid() {
+        let tool = KillProcessTool;
+        let call = ToolCall {
+            name: "kill_process".to_owned(),
+            arguments: BTreeMap::from([("pid".to_owned(), "notanumber".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("not a valid PID"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_process_rejects_pid_0() {
+        let tool = KillProcessTool;
+        let call = ToolCall {
+            name: "kill_process".to_owned(),
+            arguments: BTreeMap::from([("pid".to_owned(), "0".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("system process"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_process_rejects_pid_1() {
+        let tool = KillProcessTool;
+        let call = ToolCall {
+            name: "kill_process".to_owned(),
+            arguments: BTreeMap::from([("pid".to_owned(), "1".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("system process"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_process_rejects_invalid_signal() {
+        let tool = KillProcessTool;
+        let call = ToolCall {
+            name: "kill_process".to_owned(),
+            arguments: BTreeMap::from([
+                ("pid".to_owned(), "99999".to_owned()),
+                ("signal".to_owned(), "INVALID".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("unsupported signal"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

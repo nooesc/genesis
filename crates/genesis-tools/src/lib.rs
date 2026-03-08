@@ -1071,6 +1071,22 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "kill_process".to_owned(),
+                description: "Sends a signal to a process by PID. Use list_processes to find the PID first. Default signal is TERM (graceful shutdown); use KILL for force termination.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "pid": { "type": "string", "description": "Process ID to signal." },
+                        "signal": { "type": "string", "description": "Signal to send: TERM (default), KILL, INT, HUP, QUIT, USR1, USR2, STOP, CONT." }
+                    },
+                    "required": ["pid"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::process::KillProcessTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "glob_search".to_owned(),
                 description: "Finds files matching a glob pattern. Supports recursive patterns like **/*.rs. Skips hidden files and noise directories (.git, node_modules, target) by default.".to_owned(),
                 parameters: Some(json!({
@@ -1290,7 +1306,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 55);
+        assert_eq!(definitions.len(), 56);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
