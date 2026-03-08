@@ -6,14 +6,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use clap::{Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
-use genesis_core::agent_loop::{AgentError, AgentLoop, AgentLoopConfig};
-use genesis_core::prompt::{agent_name, build_system_prompt};
+use genesis_core::agent_loop::AgentError;
+use genesis_core::execution::{
+    delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
+};
+use genesis_core::prompt::agent_name;
 use genesis_core::scheduler::{check_due_schedules, CronTime};
-use genesis_core::{build_default_tool_runtime, build_execution_context_from_loaded, run_doctor};
-use genesis_provider::{client_from_config, ChatMessage, ProviderError};
+use genesis_core::run_doctor;
+use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, ScheduleStore, SessionStore, SessionSummary, StorageError, StoredMessage,
-    StoredSchedule,
+    bootstrap, ScheduleStore, SessionStore, SessionSummary, StorageError, StoredSchedule,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -125,6 +127,8 @@ pub enum CliError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error(transparent)]
+    Execution(#[from] SessionExecutionError),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("session `{0}` was not found")]
@@ -243,28 +247,21 @@ async fn run_chat(
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
+    let service = SessionExecutionService::new(&loaded);
     let store = SessionStore::new(&loaded.config.storage.database_path);
 
-    let (session_id, existing_messages, is_resumed) = match resume {
+    let (session_id, is_resumed) = match resume {
         Some(resume_id) => {
             let session = store
                 .get_session(&resume_id)?
                 .ok_or_else(|| CliError::SessionNotFound(resume_id.clone()))?;
-            let messages = store.load_messages(&resume_id)?;
-            (session.id, restore_chat_history(messages)?, true)
+            (session.id, true)
         }
-        None => (session_id.unwrap_or_else(default_session_id), Vec::new(), false),
+        None => (session_id.unwrap_or_else(default_session_id), false),
     };
 
-    let mut agent = build_agent_loop(
-        &loaded,
-        session_id.clone(),
-        DeliveryPlatform::Cli,
-        existing_messages,
-    )?;
-
     if !is_resumed {
-        store.create_session(&session_id, "cli", None)?;
+        service.ensure_session(&session_id, "cli", None)?;
     }
 
     if is_resumed {
@@ -291,23 +288,30 @@ async fn run_chat(
             break;
         }
 
-        let start_index = agent.messages().len();
         let mut streamed = false;
-        let result = agent
-            .run_turn_streaming(trimmed, |chunk| {
+        let outcome = service
+            .run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: "cli",
+                    delivery_platform: DeliveryPlatform::Cli,
+                    prompt: trimmed,
+                    title: None,
+                },
+                |chunk| {
                 if !streamed {
                     print!("eve> ");
                     streamed = true;
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
-            })
+                },
+            )
             .await?;
-        persist_new_messages(&store, &session_id, &agent.messages()[start_index..])?;
         if streamed {
             println!();
         } else {
-            println!("eve> {}", result.response);
+            println!("eve> {}", outcome.result.response);
         }
     }
 
@@ -319,6 +323,7 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
         "starting genesis scheduler daemon for provider {} / {}",
         loaded.config.provider.backend, loaded.config.provider.model
     );
+    let service = SessionExecutionService::new(loaded);
 
     loop {
         let store = ScheduleStore::new(&loaded.config.storage.database_path);
@@ -327,25 +332,22 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
 
         for schedule in due {
             let session_id = default_schedule_session_id();
-            let session_store = SessionStore::new(&loaded.config.storage.database_path);
-            session_store.create_session(
-                &session_id,
-                &schedule.destination,
-                Some(schedule.id.as_str()),
-            )?;
-
-            let result = run_one_off_prompt(
-                loaded,
-                &session_store,
-                session_id.clone(),
-                platform_from_destination(&schedule.destination),
-                &schedule.prompt,
-            )
-            .await?;
+            let outcome = service
+                .run_turn(SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: &schedule.destination,
+                    delivery_platform: delivery_platform_from_str(&schedule.destination),
+                    prompt: &schedule.prompt,
+                    title: Some(schedule.id.as_str()),
+                })
+                .await?;
 
             println!(
                 "fired {} -> session {} [{}]: {}",
-                schedule.id, session_id, schedule.destination, result.response
+                schedule.id,
+                outcome.session_id,
+                schedule.destination,
+                outcome.result.response
             );
         }
 
@@ -377,52 +379,6 @@ async fn run_serve(
     Ok("server stopped".to_owned())
 }
 
-fn build_agent_loop(
-    loaded: &LoadedConfig,
-    session_id: String,
-    platform: DeliveryPlatform,
-    history: Vec<ChatMessage>,
-) -> Result<AgentLoop, CliError> {
-    let execution_context =
-        build_execution_context_from_loaded(loaded, session_id, platform);
-    let tool_runtime = build_default_tool_runtime(&execution_context);
-    let system_prompt = build_system_prompt(
-        &execution_context.plan.profile,
-        &tool_runtime.definitions(),
-        None,
-    );
-    let client = client_from_config(
-        &loaded.config.provider.backend,
-        &loaded.config.provider.model,
-        loaded.config.provider.base_url.as_deref(),
-        loaded.config.provider.api_key_env.as_deref(),
-    )?;
-
-    Ok(AgentLoop::with_history(
-        client,
-        tool_runtime,
-        AgentLoopConfig {
-            system_prompt: Some(system_prompt),
-            ..AgentLoopConfig::default()
-        },
-        history,
-    ))
-}
-
-async fn run_one_off_prompt(
-    loaded: &LoadedConfig,
-    store: &SessionStore,
-    session_id: String,
-    platform: DeliveryPlatform,
-    prompt: &str,
-) -> Result<genesis_core::agent_loop::AgentResult, CliError> {
-    let mut agent = build_agent_loop(loaded, session_id.clone(), platform, Vec::new())?;
-    let start_index = agent.messages().len();
-    let result = agent.run_turn(prompt).await?;
-    persist_new_messages(store, &session_id, &agent.messages()[start_index..])?;
-    Ok(result)
-}
-
 fn read_user_input(prompt: &str) -> Result<String, CliError> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -434,51 +390,6 @@ fn read_user_input(prompt: &str) -> Result<String, CliError> {
     }
 
     Ok(input)
-}
-
-fn persist_new_messages(
-    store: &SessionStore,
-    session_id: &str,
-    messages: &[ChatMessage],
-) -> Result<(), CliError> {
-    for message in messages {
-        let tool_calls_json = message
-            .tool_calls
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-
-        store.append_message(
-            session_id,
-            &message.role,
-            message.content.as_deref(),
-            message.tool_call_id.as_deref(),
-            tool_calls_json.as_deref(),
-        )?;
-    }
-
-    Ok(())
-}
-
-fn restore_chat_history(messages: Vec<StoredMessage>) -> Result<Vec<ChatMessage>, CliError> {
-    messages
-        .into_iter()
-        .map(|message| {
-            let tool_calls = message
-                .tool_calls_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?;
-
-            Ok(ChatMessage {
-                role: message.role,
-                content: message.content,
-                tool_calls,
-                tool_call_id: message.tool_call_id,
-                name: None,
-            })
-        })
-        .collect()
 }
 
 fn default_session_id() -> String {
@@ -516,19 +427,6 @@ fn cron_time_from_datetime<Tz: chrono::TimeZone>(now: DateTime<Tz>) -> CronTime 
         day_of_month: now.day(),
         month: now.month(),
         day_of_week: now.weekday().num_days_from_sunday(),
-    }
-}
-
-fn platform_from_destination(destination: &str) -> DeliveryPlatform {
-    match destination.trim().to_ascii_lowercase().as_str() {
-        "telegram" => DeliveryPlatform::Telegram,
-        "discord" => DeliveryPlatform::Discord,
-        "slack" => DeliveryPlatform::Slack,
-        "homeassistant" | "home_assistant" | "home-assistant" => {
-            DeliveryPlatform::HomeAssistant
-        }
-        "whatsapp" => DeliveryPlatform::WhatsApp,
-        _ => DeliveryPlatform::Cli,
     }
 }
 
@@ -631,18 +529,15 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_agent_loop, cron_time_from_datetime, default_schedule_id,
-        default_schedule_session_id, default_session_id, format_schedule_list,
-        format_session_list, is_exit_command, platform_from_destination,
-        restore_chat_history, run, BootstrapCommand, ChatMessage, Cli, Command,
+        cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
+        default_session_id, delivery_platform_from_str, format_schedule_list,
+        format_session_list, is_exit_command, run, BootstrapCommand, Cli, Command,
         ScheduleCommand, SessionsCommand, StorageCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
-    use genesis_config::{AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig};
-    use genesis_storage::{SessionSummary, StoredMessage, StoredSchedule};
+    use genesis_storage::{SessionSummary, StoredSchedule};
     use std::fs;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -664,36 +559,6 @@ mod tests {
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
-    }
-
-    #[test]
-    fn restores_chat_history_from_stored_messages() {
-        let messages = restore_chat_history(vec![StoredMessage {
-            id: 1,
-            session_id: "session-1".to_owned(),
-            role: "assistant".to_owned(),
-            content: Some("hello".to_owned()),
-            tool_call_id: Some("tool-1".to_owned()),
-            tool_calls_json: Some(
-                r#"[{"id":"tool-1","type":"function","function":{"name":"echo","arguments":"{\"message\":\"hi\"}"}}]"#
-                    .to_owned(),
-            ),
-            created_at: "2026-03-08 12:00:00".to_owned(),
-        }])
-        .expect("history should restore");
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "assistant");
-        assert_eq!(messages[0].tool_call_id.as_deref(), Some("tool-1"));
-        assert_eq!(
-            messages[0]
-                .tool_calls
-                .as_ref()
-                .expect("tool calls should restore")[0]
-                .function
-                .name,
-            "echo"
-        );
     }
 
     #[test]
@@ -865,52 +730,14 @@ mod tests {
 
     #[test]
     fn platform_from_destination_defaults_to_cli() {
-        assert!(matches!(platform_from_destination("cli"), genesis_types::DeliveryPlatform::Cli));
         assert!(matches!(
-            platform_from_destination("slack"),
+            delivery_platform_from_str("cli"),
+            genesis_types::DeliveryPlatform::Cli
+        ));
+        assert!(matches!(
+            delivery_platform_from_str("slack"),
             genesis_types::DeliveryPlatform::Slack
         ));
-    }
-
-    #[test]
-    fn build_agent_loop_preserves_prior_history() {
-        let loaded = LoadedConfig {
-            config: GenesisConfig {
-                schema_version: 1,
-                profile: "operator".to_owned(),
-                provider: ProviderConfig {
-                    backend: "openai".to_owned(),
-                    model: "gpt-4.1-mini".to_owned(),
-                    base_url: Some("http://localhost:8000/v1".to_owned()),
-                    api_key_env: None,
-                },
-                storage: StorageConfig {
-                    data_dir: PathBuf::from("/tmp/genesis"),
-                    database_path: PathBuf::from("/tmp/genesis/genesis.db"),
-                },
-                runtime: RuntimeConfig {
-                    max_concurrency: 4,
-                    allow_destructive_tools: false,
-                },
-            },
-            paths: AppPaths {
-                config_path: PathBuf::from("/tmp/genesis/config.yaml"),
-                data_dir: PathBuf::from("/tmp/genesis"),
-                database_path: PathBuf::from("/tmp/genesis/genesis.db"),
-            },
-        };
-
-        let agent = build_agent_loop(
-            &loaded,
-            "session-1".to_owned(),
-            genesis_types::DeliveryPlatform::Cli,
-            vec![ChatMessage::user("hello")],
-        )
-        .expect("agent loop should build");
-
-        assert_eq!(agent.messages().len(), 2);
-        assert_eq!(agent.messages()[0].role, "system");
-        assert_eq!(agent.messages()[1].content.as_deref(), Some("hello"));
     }
 
     #[tokio::test]

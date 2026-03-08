@@ -9,12 +9,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use genesis_core::agent_loop::{AgentLoopConfig, AgentLoop};
-use genesis_core::prompt::build_system_prompt;
-use genesis_core::{build_default_tool_runtime, build_execution_context_from_loaded};
-use genesis_provider::client_from_config;
-use genesis_storage::{bootstrap, SessionStore};
-use genesis_types::DeliveryPlatform;
+use genesis_core::execution::{
+    delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
+};
 use serde::{Deserialize, Serialize};
 
 /// Shared application state for all request handlers.
@@ -71,10 +68,7 @@ async fn chat_handler(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, String)> {
     let loaded = &state.loaded;
-
-    bootstrap(&loaded.config.storage.database_path).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}"))
-    })?;
+    let service = SessionExecutionService::new(loaded);
 
     let session_id = request.session_id.unwrap_or_else(|| {
         format!(
@@ -85,73 +79,24 @@ async fn chat_handler(
                 .as_secs()
         )
     });
-
-    let execution_context = build_execution_context_from_loaded(
-        loaded,
-        session_id.clone(),
-        DeliveryPlatform::Cli, // API maps to CLI for now
-    );
-    let tool_runtime = build_default_tool_runtime(&execution_context);
-    let system_prompt = build_system_prompt(
-        &execution_context.plan.profile,
-        &tool_runtime.definitions(),
-        None,
-    );
-
-    let client = client_from_config(
-        &loaded.config.provider.backend,
-        &loaded.config.provider.model,
-        loaded.config.provider.base_url.as_deref(),
-        loaded.config.provider.api_key_env.as_deref(),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("provider error: {e}")))?;
-
-    let mut agent = AgentLoop::new(
-        client,
-        tool_runtime,
-        AgentLoopConfig {
-            system_prompt: Some(system_prompt),
-            ..AgentLoopConfig::default()
-        },
-    );
-
-    // Create session and load history if resuming
-    let store = SessionStore::new(&loaded.config.storage.database_path);
-    if store.get_session(&session_id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}"))
-    })?.is_none() {
-        store.create_session(&session_id, &request.platform, None).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}"))
+    let outcome = service
+        .run_turn(SessionTurnInput {
+            session_id: &session_id,
+            session_platform: &request.platform,
+            delivery_platform: delivery_platform_from_str(&request.platform),
+            prompt: &request.message,
+            title: None,
+        })
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("execution error: {e}"))
         })?;
-    }
-
-    let result = agent.run_turn(&request.message).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("agent error: {e}"))
-    })?;
-
-    // Persist messages
-    let messages = agent.messages();
-    // Skip system prompt (index 0), persist only conversation messages
-    for msg in messages.iter().skip(1) {
-        let tool_calls_json = msg
-            .tool_calls
-            .as_ref()
-            .and_then(|tc| serde_json::to_string(tc).ok());
-
-        let _ = store.append_message(
-            &session_id,
-            &msg.role,
-            msg.content.as_deref(),
-            msg.tool_call_id.as_deref(),
-            tool_calls_json.as_deref(),
-        );
-    }
 
     Ok(Json(ChatResponse {
-        session_id,
-        response: result.response,
-        turns_used: result.turns_used,
-        tool_calls_made: result.tool_calls_made,
+        session_id: outcome.session_id,
+        response: outcome.result.response,
+        turns_used: outcome.result.turns_used,
+        tool_calls_made: outcome.result.tool_calls_made,
     }))
 }
 

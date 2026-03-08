@@ -1,6 +1,8 @@
 pub mod agent_loop;
+pub mod execution;
 pub mod prompt;
 pub mod scheduler;
+pub mod skills;
 
 use std::path::Path;
 

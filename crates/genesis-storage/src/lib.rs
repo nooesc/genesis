@@ -193,6 +193,16 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS skills (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                instructions TEXT NOT NULL,
+                trigger_hint TEXT,
+                tags TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
                 session_id UNINDEXED,
                 content
@@ -830,6 +840,210 @@ impl ScheduleStore {
     }
 }
 
+/// A stored agent skill — a reusable procedure the agent can invoke.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSkill {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub trigger_hint: Option<String>,
+    pub tags: Vec<String>,
+    pub version: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Skill persistence layer.
+pub struct SkillStore {
+    database_path: PathBuf,
+}
+
+impl SkillStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Create or update a skill. If the skill already exists, its version is bumped.
+    pub fn upsert(
+        &self,
+        name: &str,
+        description: &str,
+        instructions: &str,
+        trigger_hint: Option<&str>,
+        tags: &[&str],
+    ) -> Result<StoredSkill, StorageError> {
+        let connection = open(&self.database_path)?;
+        let tags_str = tags.join(",");
+
+        connection
+            .execute(
+                "INSERT INTO skills (name, description, instructions, trigger_hint, tags, version, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(name) DO UPDATE SET
+                     description = excluded.description,
+                     instructions = excluded.instructions,
+                     trigger_hint = excluded.trigger_hint,
+                     tags = excluded.tags,
+                     version = skills.version + 1,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![name, description, instructions, trigger_hint, tags_str],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        self.get(name)?
+            .ok_or_else(|| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            })
+    }
+
+    /// Get a skill by name.
+    pub fn get(&self, name: &str) -> Result<Option<StoredSkill>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
+                 FROM skills WHERE name = ?1",
+                params![name],
+                |row| {
+                    let tags_str: String = row.get(4)?;
+                    let tags = if tags_str.is_empty() {
+                        Vec::new()
+                    } else {
+                        tags_str.split(',').map(|s| s.to_owned()).collect()
+                    };
+
+                    Ok(StoredSkill {
+                        name: row.get(0)?,
+                        description: row.get(1)?,
+                        instructions: row.get(2)?,
+                        trigger_hint: row.get(3)?,
+                        tags,
+                        version: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// List all skills, ordered by name.
+    pub fn list_all(&self) -> Result<Vec<StoredSkill>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
+                 FROM skills ORDER BY name ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let skills = stmt
+            .query_map([], |row| {
+                let tags_str: String = row.get(4)?;
+                let tags = if tags_str.is_empty() {
+                    Vec::new()
+                } else {
+                    tags_str.split(',').map(|s| s.to_owned()).collect()
+                };
+
+                Ok(StoredSkill {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    instructions: row.get(2)?,
+                    trigger_hint: row.get(3)?,
+                    tags,
+                    version: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(skills)
+    }
+
+    /// Find skills matching any of the given tags.
+    pub fn find_by_tag(&self, tag: &str) -> Result<Vec<StoredSkill>, StorageError> {
+        let connection = open(&self.database_path)?;
+        // SQLite LIKE with comma-separated tags
+        let pattern = format!("%{tag}%");
+        let mut stmt = connection
+            .prepare(
+                "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
+                 FROM skills WHERE tags LIKE ?1 ORDER BY name ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let skills = stmt
+            .query_map(params![pattern], |row| {
+                let tags_str: String = row.get(4)?;
+                let tags = if tags_str.is_empty() {
+                    Vec::new()
+                } else {
+                    tags_str.split(',').map(|s| s.to_owned()).collect()
+                };
+
+                Ok(StoredSkill {
+                    name: row.get(0)?,
+                    description: row.get(1)?,
+                    instructions: row.get(2)?,
+                    trigger_hint: row.get(3)?,
+                    tags,
+                    version: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(skills)
+    }
+
+    /// Delete a skill by name. Returns true if a skill was deleted.
+    pub fn delete(&self, name: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows_changed = connection
+            .execute("DELETE FROM skills WHERE name = ?1", params![name])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows_changed > 0)
+    }
+}
+
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
     Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
@@ -1069,6 +1283,96 @@ mod tests {
         assert!(store.delete("s1").unwrap());
         assert!(store.get("s1").unwrap().is_none());
         assert!(!store.delete("s1").unwrap()); // already deleted
+    }
+
+    #[test]
+    fn skill_store_creates_and_retrieves_skill() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        let skill = store
+            .upsert(
+                "code_review",
+                "Reviews code for bugs and style issues",
+                "1. Read the file\n2. Check for common issues\n3. Report findings",
+                Some("when user asks to review code"),
+                &["dev", "review"],
+            )
+            .expect("upsert should work");
+
+        assert_eq!(skill.name, "code_review");
+        assert_eq!(skill.description, "Reviews code for bugs and style issues");
+        assert_eq!(skill.version, 1);
+        assert_eq!(skill.tags, vec!["dev", "review"]);
+        assert_eq!(skill.trigger_hint.as_deref(), Some("when user asks to review code"));
+
+        let fetched = store.get("code_review").unwrap().expect("should exist");
+        assert_eq!(fetched.name, "code_review");
+    }
+
+    #[test]
+    fn skill_store_upsert_bumps_version() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        let v1 = store
+            .upsert("deploy", "Deploy to prod", "run deploy script", None, &[])
+            .expect("v1");
+        assert_eq!(v1.version, 1);
+
+        let v2 = store
+            .upsert("deploy", "Deploy to production (improved)", "run deploy script v2", None, &["ops"])
+            .expect("v2");
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.description, "Deploy to production (improved)");
+        assert_eq!(v2.tags, vec!["ops"]);
+    }
+
+    #[test]
+    fn skill_store_lists_and_deletes() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        store.upsert("alpha", "A skill", "do A", None, &["a"]).unwrap();
+        store.upsert("beta", "B skill", "do B", None, &["b"]).unwrap();
+
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "alpha");
+        assert_eq!(all[1].name, "beta");
+
+        assert!(store.delete("alpha").unwrap());
+        assert!(!store.delete("alpha").unwrap()); // already gone
+
+        let remaining = store.list_all().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "beta");
+    }
+
+    #[test]
+    fn skill_store_finds_by_tag() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        store.upsert("web_scrape", "Scrape web", "use curl", None, &["web", "data"]).unwrap();
+        store.upsert("deploy", "Deploy", "kubectl apply", None, &["ops", "deploy"]).unwrap();
+        store.upsert("test_runner", "Run tests", "cargo test", None, &["dev", "test"]).unwrap();
+
+        let web_skills = store.find_by_tag("web").unwrap();
+        assert_eq!(web_skills.len(), 1);
+        assert_eq!(web_skills[0].name, "web_scrape");
+
+        let dev_skills = store.find_by_tag("dev").unwrap();
+        assert_eq!(dev_skills.len(), 1);
+        assert_eq!(dev_skills[0].name, "test_runner");
     }
 
     #[test]
