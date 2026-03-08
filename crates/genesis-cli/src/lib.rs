@@ -142,6 +142,19 @@ pub enum Command {
     },
     #[command(about = "Show status dashboard of all Genesis components")]
     Status,
+    #[command(about = "Generate agent training trajectories from a JSONL prompt file")]
+    Batch {
+        #[arg(long, help = "Input JSONL file where each line is {\"prompt\": ..., \"tags\": [...]}")]
+        input: String,
+        #[arg(long, help = "Output directory for saved trajectory files")]
+        output: String,
+        #[arg(long, help = "Override the model used for generation")]
+        model: Option<String>,
+        #[arg(long, help = "Override max turns per prompt")]
+        max_turns: Option<usize>,
+        #[arg(long, help = "Maximum number of prompts to run concurrently")]
+        concurrency: Option<usize>,
+    },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
     #[command(subcommand, about = "Inspect and manage stored memories")]
@@ -691,6 +704,13 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(build_status_text(&loaded))
             }
         }
+        Command::Batch {
+            input,
+            output,
+            model,
+            max_turns,
+            concurrency,
+        } => run_batch(cli.config, input, output, model, max_turns, concurrency).await,
         Command::Update => run_update().await,
         Command::Memory(memory_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1045,6 +1065,215 @@ async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
 
     let response = genesis_core::nudge::run_nudge(&loaded, &session_id).await?;
     Ok(format!("Nudge complete (session: {session_id}):\n\n{response}"))
+}
+
+#[derive(Debug)]
+struct BatchInputLine {
+    prompt: String,
+    tags: Vec<String>,
+}
+
+async fn run_batch(
+    config_path: Option<PathBuf>,
+    input: String,
+    output: String,
+    model_override: Option<String>,
+    max_turns: Option<usize>,
+    concurrency: Option<usize>,
+) -> Result<String, CliError> {
+    let loaded = std::sync::Arc::new(load(config_path.as_deref())?);
+    bootstrap(&loaded.config.storage.database_path)?;
+
+    let input_file = std::fs::File::open(&input)
+        .map_err(|e| CliError::Other(format!("failed to open {input}: {e}")))?;
+    let reader = std::io::BufReader::new(input_file);
+    let mut items = Vec::new();
+
+    for (line_no, line) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line.map_err(|e| {
+            CliError::Other(format!("failed to read line {} from {}: {e}", line_no + 1, input))
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let item = parse_batch_input_line(&line).map_err(|e| {
+            CliError::Other(format!("invalid JSONL at {} line {}: {}", input, line_no + 1, e))
+        })?;
+        items.push(item);
+    }
+
+    if items.is_empty() {
+        return Ok(format!("no prompts found in {input}"));
+    }
+
+    std::fs::create_dir_all(&output).map_err(|e| {
+        CliError::Other(format!("failed to create output directory {}: {e}", output))
+    })?;
+
+    let total = items.len();
+    let limit = concurrency
+        .unwrap_or(loaded.config.runtime.max_concurrency)
+        .max(1);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(limit));
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for (index, item) in items.into_iter().enumerate() {
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
+            CliError::Other(format!("failed to acquire concurrency permit: {e}"))
+        })?;
+        let loaded = loaded.clone();
+        let output_dir = output.clone();
+        let model_override = model_override.clone();
+        let completed = completed.clone();
+
+        tasks.spawn(async move {
+            let _permit = permit;
+            let session_id = format!(
+                "batch-{}-{index}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+
+            let result = run_batch_item(
+                &loaded,
+                &session_id,
+                &item,
+                &output_dir,
+                model_override.as_deref(),
+                max_turns,
+            )
+            .await;
+
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            eprintln!("[{done}/{total}] {session_id}");
+            result
+        });
+    }
+
+    let mut succeeded = 0usize;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => succeeded += 1,
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                return Err(CliError::Other(format!("batch task join error: {error}")));
+            }
+        }
+    }
+
+    Ok(format!(
+        "generated {succeeded}/{total} trajectories in {}",
+        output
+    ))
+}
+
+async fn run_batch_item(
+    loaded: &genesis_config::LoadedConfig,
+    session_id: &str,
+    item: &BatchInputLine,
+    output_dir: &str,
+    model_override: Option<&str>,
+    max_turns: Option<usize>,
+) -> Result<(), CliError> {
+    let session_store = SessionStore::new(&loaded.config.storage.database_path);
+    let _ = session_store.create_session(session_id, "batch", None);
+
+    let execution_context = genesis_core::build_execution_context_from_loaded(
+        loaded,
+        session_id.to_owned(),
+        DeliveryPlatform::Cli,
+    );
+    let tool_runtime = genesis_core::build_default_tool_runtime(&execution_context);
+    let skills_section = genesis_core::skills::load_skills_prompt_for_prompt(
+        &loaded.config.storage.database_path,
+        &item.prompt,
+    );
+    let context_section = load_context_file(std::path::Path::new("."));
+    let system_prompt = genesis_core::prompt::build_system_prompt_complete(
+        &execution_context.plan.profile,
+        &tool_runtime.definitions(),
+        None,
+        skills_section.as_deref(),
+        None,
+        context_section.as_deref(),
+    );
+
+    let model = model_override.unwrap_or(&loaded.config.provider.model);
+    let client = genesis_provider::client_from_config(
+        &loaded.config.provider.backend,
+        model,
+        loaded.config.provider.base_url.as_deref(),
+        loaded.config.provider.api_key_env.as_deref(),
+    )?;
+
+    let mut agent = genesis_core::agent_loop::AgentLoop::new(
+        client,
+        tool_runtime,
+        genesis_core::agent_loop::AgentLoopConfig {
+            system_prompt: Some(system_prompt),
+            max_turns: max_turns.unwrap_or(loaded.config.runtime.max_turns),
+            max_context_messages: loaded.config.runtime.max_context_messages,
+            budget_limit: loaded.config.runtime.budget_limit,
+            max_concurrency: loaded.config.runtime.max_concurrency,
+            enable_trajectory: true,
+            trajectory_dir: Some(output_dir.to_owned()),
+            session_id: Some(session_id.to_owned()),
+            ..genesis_core::agent_loop::AgentLoopConfig::default()
+        },
+    );
+
+    if let Some(tp) = &loaded.config.tool_provider {
+        let tool_client = genesis_provider::client_from_config(
+            &tp.backend,
+            &tp.model,
+            tp.base_url.as_deref(),
+            tp.api_key_env.as_deref(),
+        )?;
+        agent.set_tool_client(tool_client);
+    }
+
+    for tag in &item.tags {
+        agent.trajectory_mut().add_tag(tag);
+    }
+
+    let _ = agent.run_turn(&item.prompt).await?;
+    Ok(())
+}
+
+fn parse_batch_input_line(line: &str) -> Result<BatchInputLine, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "expected JSON object".to_owned())?;
+
+    let prompt = object
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing string field `prompt`".to_owned())?
+        .to_owned();
+
+    let tags = object
+        .get("tags")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| "field `tags` must be an array of strings".to_owned())?
+                .iter()
+                .map(|tag| {
+                    tag.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "field `tags` must be an array of strings".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(BatchInputLine { prompt, tags })
 }
 
 fn run_init(
@@ -2511,7 +2740,7 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        context_template,
+        context_template, parse_batch_input_line,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, export_session_markdown,
         format_insights, format_memory_list, format_schedule_list, format_session_list,
@@ -3716,6 +3945,80 @@ storage:
             Command::Insights { days } => assert_eq!(days, 7),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_batch_command_minimal() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "batch",
+            "--input",
+            "prompts.jsonl",
+            "--output",
+            "trajectories",
+        ])
+        .expect("batch should parse");
+
+        match cli.command {
+            Command::Batch {
+                input,
+                output,
+                model,
+                max_turns,
+                concurrency,
+            } => {
+                assert_eq!(input, "prompts.jsonl");
+                assert_eq!(output, "trajectories");
+                assert!(model.is_none());
+                assert!(max_turns.is_none());
+                assert!(concurrency.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_command_with_overrides() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "batch",
+            "--input",
+            "prompts.jsonl",
+            "--output",
+            "trajectories",
+            "--model",
+            "claude-sonnet-4-6",
+            "--max-turns",
+            "12",
+            "--concurrency",
+            "8",
+        ])
+        .expect("batch with overrides should parse");
+
+        match cli.command {
+            Command::Batch {
+                input,
+                output,
+                model,
+                max_turns,
+                concurrency,
+            } => {
+                assert_eq!(input, "prompts.jsonl");
+                assert_eq!(output, "trajectories");
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(max_turns, Some(12));
+                assert_eq!(concurrency, Some(8));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_input_line_defaults_tags() {
+        let parsed =
+            parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
+        assert_eq!(parsed.prompt, "hello");
+        assert!(parsed.tags.is_empty());
     }
 
     #[test]
