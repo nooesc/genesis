@@ -159,6 +159,24 @@ mod session_store_tests {
         let store = SessionStore::new(&database_path);
         assert!(!store.set_title("nonexistent", "Title").unwrap());
     }
+
+    #[test]
+    fn purge_older_than_deletes_nothing_for_recent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("recent", "cli", None).expect("create");
+        store.append_message("recent", "user", Some("hello"), None, None).expect("msg");
+
+        let deleted = store.purge_older_than(30).unwrap();
+        assert_eq!(deleted, 0);
+
+        // Session and messages should still exist
+        assert!(store.get_session("recent").unwrap().is_some());
+        assert_eq!(store.load_messages("recent").unwrap().len(), 1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -761,6 +779,45 @@ impl SessionStore {
                 source,
             })?;
         Ok(deleted > 0)
+    }
+
+    /// Delete sessions (and their messages/FTS entries) older than `days` days.
+    /// Returns the number of sessions deleted.
+    pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let cutoff = format!("-{days} days");
+        // Gather session IDs to purge
+        let mut stmt = connection
+            .prepare("SELECT id FROM sessions WHERE created_at < datetime('now', ?1)")
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let ids: Vec<String> = stmt
+            .query_map(params![cutoff], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for id in &ids {
+            let _ = connection.execute(
+                "DELETE FROM session_search WHERE session_id = ?1",
+                params![id],
+            );
+            let _ = connection.execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![id],
+            );
+            let _ = connection.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![id],
+            );
+        }
+
+        Ok(ids.len() as u64)
     }
 
     /// Load all messages for a session in chronological order.

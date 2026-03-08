@@ -191,6 +191,11 @@ pub enum SessionsCommand {
     },
     #[command(about = "Show aggregate usage statistics across all sessions")]
     Stats,
+    #[command(about = "Delete sessions older than a given number of days")]
+    Purge {
+        #[arg(long, help = "Delete sessions older than N days (e.g. 30)")]
+        older_than: u32,
+    },
     #[command(about = "Rename a session (set its title)")]
     Rename {
         #[arg(help = "Session ID to rename")]
@@ -412,6 +417,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     } else {
                         Ok(format_usage_stats(&stats))
                     }
+                }
+                SessionsCommand::Purge { older_than } => {
+                    let deleted = store.purge_older_than(older_than)?;
+                    Ok(format!("Purged {deleted} session(s) older than {older_than} days"))
                 }
                 SessionsCommand::Rename { id, title } => {
                     if store.set_title(&id, &title)? {
@@ -1218,7 +1227,8 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /export   - Export session as Markdown\n\
              /tokens   - Show session token usage\n\
              /session  - Show current session ID\n\
-             /clear    - Clear the screen"
+             /clear    - Clear the screen\n\
+             Use \\ at end of line for multi-line input"
                 .to_owned(),
         ),
         "history" => {
@@ -2699,5 +2709,34 @@ storage:
             Command::Chat { last, .. } => assert!(last),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_sessions_purge_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "sessions", "purge", "--older-than", "30",
+        ])
+        .expect("sessions purge should parse");
+        match cli.command {
+            Command::Sessions(SessionsCommand::Purge { older_than }) => {
+                assert_eq!(older_than, 30);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_help_includes_multiline_hint() {
+        let result = handle_chat_command("/help", "s1", &stub_session_store());
+        let help = result.expect("help should return something");
+        assert!(help.contains("/history"));
+        assert!(help.contains("multi-line"));
+    }
+
+    fn stub_session_store() -> genesis_storage::SessionStore {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        genesis_storage::SessionStore::new(&db)
     }
 }
