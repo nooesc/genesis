@@ -127,30 +127,21 @@ mod tests {
     #[test]
     fn slack_signature_valid() {
         let secret = "8f742231b10e8888abcd99yez67800";
-        let timestamp = "1531420618";
         let body = b"token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&api_app_id=A19GAU123";
 
-        // Compute the expected signature
-        let base_string = format!("v0:{timestamp}:{}", std::str::from_utf8(body).unwrap());
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(base_string.as_bytes());
-        let sig = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
-
-        // Use a fixed "now" time that's within 5 minutes of the timestamp
-        // Since verify_slack_signature checks against real time, we test the
-        // HMAC logic by creating a signature with a recent timestamp.
+        // Use a recent timestamp so verify_slack_signature's freshness check passes
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let recent_ts = now.to_string();
 
-        let base_recent = format!("v0:{recent_ts}:{}", std::str::from_utf8(body).unwrap());
-        let mut mac2 = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac2.update(base_recent.as_bytes());
-        let sig_recent = format!("v0={}", hex::encode(mac2.finalize().into_bytes()));
+        let base_string = format!("v0:{recent_ts}:{}", std::str::from_utf8(body).unwrap());
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(base_string.as_bytes());
+        let sig = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
 
-        assert!(verify_slack_signature(secret, &recent_ts, body, &sig_recent));
+        assert!(verify_slack_signature(secret, &recent_ts, body, &sig));
     }
 
     #[test]
