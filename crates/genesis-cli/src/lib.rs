@@ -1058,9 +1058,15 @@ fn format_session_list(sessions: &[SessionSummary]) -> String {
 
     let mut lines = vec!["genesis sessions".to_owned()];
     for session in sessions {
+        let tokens = session.total_input_tokens + session.total_output_tokens;
+        let token_info = if tokens > 0 {
+            format!("\t{}tok", tokens)
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "{}\t{}\t{}",
-            session.id, session.platform, session.created_at
+            "{}\t{}\t{}{}",
+            session.id, session.platform, session.created_at, token_info
         ));
     }
     lines.join("\n")
@@ -1328,6 +1334,8 @@ mod tests {
             id: "session-1".to_owned(),
             title: None,
             platform: "cli".to_owned(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
             created_at: "2026-03-08 12:00:00".to_owned(),
             updated_at: "2026-03-08 12:05:00".to_owned(),
         }]);

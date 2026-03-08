@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -74,6 +74,44 @@ mod session_store_tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "session-alpha");
         assert_eq!(matches[0].platform, "cli");
+    }
+
+    #[test]
+    fn add_usage_accumulates_token_counts() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-tok", "cli", None)
+            .expect("session should be created");
+
+        store.add_usage("session-tok", 100, 50).expect("first add_usage");
+        store.add_usage("session-tok", 200, 75).expect("second add_usage");
+
+        let session = store.get_session("session-tok").expect("get should work").expect("session should exist");
+        assert_eq!(session.total_input_tokens, 300);
+        assert_eq!(session.total_output_tokens, 125);
+    }
+
+    #[test]
+    fn add_usage_noop_for_zero_tokens() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-zero", "cli", None)
+            .expect("session should be created");
+
+        // Should be a no-op
+        store.add_usage("session-zero", 0, 0).expect("zero add_usage");
+
+        let session = store.get_session("session-zero").expect("get should work").expect("session should exist");
+        assert_eq!(session.total_input_tokens, 0);
+        assert_eq!(session.total_output_tokens, 0);
     }
 }
 
@@ -155,6 +193,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 id TEXT PRIMARY KEY,
                 title TEXT,
                 platform TEXT NOT NULL,
+                total_input_tokens INTEGER NOT NULL DEFAULT 0,
+                total_output_tokens INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -246,6 +286,9 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
             source,
         })?;
 
+    // Run migrations for existing databases.
+    migrate_to_v2(&connection, database_path)?;
+
     connection
         .execute(
             "
@@ -263,6 +306,30 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
         database_path: database_path.to_path_buf(),
         schema_version: SCHEMA_VERSION,
     })
+}
+
+/// Migrate v1 → v2: add token tracking columns to sessions table.
+fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    // Check if columns already exist (idempotent).
+    let has_column: bool = connection
+        .prepare("SELECT total_input_tokens FROM sessions LIMIT 0")
+        .is_ok();
+
+    if has_column {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
 }
 
 pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {
@@ -456,6 +523,8 @@ pub struct SessionSummary {
     pub id: String,
     pub title: Option<String>,
     pub platform: String,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -546,6 +615,33 @@ impl SessionStore {
         Ok(message_id)
     }
 
+    /// Atomically add token usage to a session's running totals.
+    pub fn add_usage(
+        &self,
+        session_id: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Result<(), StorageError> {
+        if input_tokens == 0 && output_tokens == 0 {
+            return Ok(());
+        }
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "UPDATE sessions SET
+                    total_input_tokens = total_input_tokens + ?2,
+                    total_output_tokens = total_output_tokens + ?3,
+                    updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                params![session_id, input_tokens as i64, output_tokens as i64],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Load all messages for a session in chronological order.
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StorageError> {
         let connection = open(&self.database_path)?;
@@ -594,7 +690,7 @@ impl SessionStore {
 
         let mut stmt = connection
             .prepare(
-                "SELECT DISTINCT s.id, s.title, s.platform, s.created_at, s.updated_at
+                "SELECT DISTINCT s.id, s.title, s.platform, s.total_input_tokens, s.total_output_tokens, s.created_at, s.updated_at
                  FROM session_search ss
                  JOIN sessions s ON s.id = ss.session_id
                  WHERE session_search MATCH ?1
@@ -611,8 +707,10 @@ impl SessionStore {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     platform: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    total_input_tokens: row.get(3)?,
+                    total_output_tokens: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -634,7 +732,7 @@ impl SessionStore {
 
         connection
             .query_row(
-                "SELECT id, title, platform, created_at, updated_at
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
@@ -642,8 +740,10 @@ impl SessionStore {
                         id: row.get(0)?,
                         title: row.get(1)?,
                         platform: row.get(2)?,
-                        created_at: row.get(3)?,
-                        updated_at: row.get(4)?,
+                        total_input_tokens: row.get(3)?,
+                        total_output_tokens: row.get(4)?,
+                        created_at: row.get(5)?,
+                        updated_at: row.get(6)?,
                     })
                 },
             )
@@ -658,7 +758,7 @@ impl SessionStore {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
-                "SELECT id, title, platform, created_at, updated_at
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, created_at, updated_at
                  FROM sessions
                  ORDER BY updated_at DESC, created_at DESC, id DESC
                  LIMIT ?1",
@@ -674,8 +774,10 @@ impl SessionStore {
                     id: row.get(0)?,
                     title: row.get(1)?,
                     platform: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    total_input_tokens: row.get(3)?,
+                    total_output_tokens: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {

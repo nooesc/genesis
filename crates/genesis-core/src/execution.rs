@@ -314,12 +314,22 @@ impl<'a> SessionExecutionService<'a> {
         let executed = runner(history).await?;
         let store = self.session_store();
         persist_new_messages(&store, input.session_id, &executed.emitted_messages)?;
+        // Persist token usage
+        if let Err(e) = store.add_usage(
+            input.session_id,
+            executed.result.total_input_tokens,
+            executed.result.total_output_tokens,
+        ) {
+            warn!(error = %e, "failed to persist token usage");
+        }
         info!(
             created_session,
             emitted_messages = executed.emitted_messages.len(),
             turns_used = executed.result.turns_used,
             tool_calls_made = executed.result.tool_calls_made,
             finished_naturally = executed.result.finished_naturally,
+            input_tokens = executed.result.total_input_tokens,
+            output_tokens = executed.result.total_output_tokens,
             "completed turn execution"
         );
 
@@ -348,12 +358,22 @@ impl<'a> SessionExecutionService<'a> {
         let executed = runner(history, on_chunk).await?;
         let store = self.session_store();
         persist_new_messages(&store, input.session_id, &executed.emitted_messages)?;
+        // Persist token usage
+        if let Err(e) = store.add_usage(
+            input.session_id,
+            executed.result.total_input_tokens,
+            executed.result.total_output_tokens,
+        ) {
+            warn!(error = %e, "failed to persist token usage");
+        }
         info!(
             created_session,
             emitted_messages = executed.emitted_messages.len(),
             turns_used = executed.result.turns_used,
             tool_calls_made = executed.result.tool_calls_made,
             finished_naturally = executed.result.finished_naturally,
+            input_tokens = executed.result.total_input_tokens,
+            output_tokens = executed.result.total_output_tokens,
             "completed streaming turn execution"
         );
 
