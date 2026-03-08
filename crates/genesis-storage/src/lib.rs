@@ -642,6 +642,22 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Set the title on an existing session (only if currently null).
+    pub fn update_title(&self, session_id: &str, title: &str) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "UPDATE sessions SET title = ?2, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND title IS NULL",
+                params![session_id, title],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Load all messages for a session in chronological order.
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StorageError> {
         let connection = open(&self.database_path)?;

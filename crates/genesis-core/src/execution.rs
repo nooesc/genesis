@@ -307,6 +307,13 @@ impl<'a> SessionExecutionService<'a> {
         let executed = runner(history).await?;
         let store = self.session_store();
         persist_new_messages(&store, input.session_id, &executed.emitted_messages)?;
+        // Auto-generate title from prompt if this is a new session without one
+        if created_session && input.title.is_none() {
+            let title = generate_session_title(input.prompt);
+            if let Err(e) = store.update_title(input.session_id, &title) {
+                warn!(error = %e, "failed to set auto-generated session title");
+            }
+        }
         // Persist token usage
         if let Err(e) = store.add_usage(
             input.session_id,
@@ -351,6 +358,13 @@ impl<'a> SessionExecutionService<'a> {
         let executed = runner(history, on_chunk).await?;
         let store = self.session_store();
         persist_new_messages(&store, input.session_id, &executed.emitted_messages)?;
+        // Auto-generate title from prompt if this is a new session without one
+        if created_session && input.title.is_none() {
+            let title = generate_session_title(input.prompt);
+            if let Err(e) = store.update_title(input.session_id, &title) {
+                warn!(error = %e, "failed to set auto-generated session title");
+            }
+        }
         // Persist token usage
         if let Err(e) = store.add_usage(
             input.session_id,
@@ -535,6 +549,26 @@ pub fn restore_chat_history(
         .collect()
 }
 
+/// Generate a short title from the first user prompt.
+///
+/// Takes up to 60 characters, truncated at a word boundary, with "..." appended
+/// if truncated. Strips leading/trailing whitespace and collapses internal
+/// whitespace.
+fn generate_session_title(prompt: &str) -> String {
+    const MAX_LEN: usize = 60;
+
+    let normalized: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized.len() <= MAX_LEN {
+        return normalized;
+    }
+
+    // Find the last space before the limit
+    let truncated = &normalized[..MAX_LEN];
+    let end = truncated.rfind(' ').unwrap_or(MAX_LEN);
+    format!("{}...", &normalized[..end])
+}
+
 pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
     match raw.trim().to_ascii_lowercase().as_str() {
         "telegram" => DeliveryPlatform::Telegram,
@@ -551,8 +585,8 @@ pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        delivery_platform_from_str, persist_new_messages, restore_chat_history, ExecutedTurn,
-        SessionExecutionService, SessionTurnInput,
+        delivery_platform_from_str, generate_session_title, persist_new_messages,
+        restore_chat_history, ExecutedTurn, SessionExecutionService, SessionTurnInput,
     };
     use crate::agent_loop::AgentResult;
     use genesis_config::{
@@ -781,5 +815,33 @@ mod tests {
                 database_path,
             },
         }
+    }
+
+    #[test]
+    fn generate_title_short_prompt_unchanged() {
+        assert_eq!(generate_session_title("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn generate_title_long_prompt_truncated_at_word_boundary() {
+        let prompt = "This is a very long prompt that exceeds the sixty character limit and should be truncated";
+        let title = generate_session_title(prompt);
+        assert!(title.len() <= 63); // 60 + "..."
+        assert!(title.ends_with("..."));
+        // Should not cut in the middle of a word
+        assert!(!title.contains("lim"));
+    }
+
+    #[test]
+    fn generate_title_normalizes_whitespace() {
+        assert_eq!(
+            generate_session_title("  hello   world  "),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn generate_title_empty_prompt() {
+        assert_eq!(generate_session_title(""), "");
     }
 }
