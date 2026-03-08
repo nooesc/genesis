@@ -363,6 +363,7 @@ mod tests {
         let config = GatewayConfig {
             idle_timeout_minutes: None,
             daily_reset_hour: None,
+            rate_limit_rpm: None,
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
     }
@@ -373,6 +374,7 @@ mod tests {
         let config = GatewayConfig {
             idle_timeout_minutes: Some(30),
             daily_reset_hour: None,
+            rate_limit_rpm: None,
         };
         assert!(!check_session_expiry("nonexistent", &store, Some(&config)));
     }
@@ -391,6 +393,7 @@ mod tests {
         let config = GatewayConfig {
             idle_timeout_minutes: Some(60),
             daily_reset_hour: None,
+            rate_limit_rpm: None,
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         // Session should be deleted
@@ -406,6 +409,7 @@ mod tests {
         let config = GatewayConfig {
             idle_timeout_minutes: Some(60),
             daily_reset_hour: None,
+            rate_limit_rpm: None,
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
         // Session should still exist
@@ -427,6 +431,7 @@ mod tests {
         let config = GatewayConfig {
             idle_timeout_minutes: None,
             daily_reset_hour: Some(0),
+            rate_limit_rpm: None,
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         assert!(store.get_session("s1").unwrap().is_none());

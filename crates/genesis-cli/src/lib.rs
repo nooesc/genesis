@@ -1827,9 +1827,11 @@ async fn run_serve(
     };
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
+    // Env var overrides config file setting
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
         .ok()
-        .and_then(|v| v.parse::<u32>().ok());
+        .and_then(|v| v.parse::<u32>().ok())
+        .or_else(|| loaded.config.gateway.as_ref().and_then(|g| g.rate_limit_rpm));
     let state = std::sync::Arc::new(AppState::new(loaded, api_key, mcp, rate_limit_rpm));
     let router = build_router(state);
 

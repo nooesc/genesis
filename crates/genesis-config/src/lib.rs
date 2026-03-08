@@ -140,6 +140,10 @@ pub struct GatewayConfig {
     /// is cleared on the next incoming message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_reset_hour: Option<u8>,
+    /// Maximum requests per minute per IP. Overridden by GENESIS_RATE_LIMIT_RPM
+    /// env var when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,6 +677,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert(GatewayConfig {
                     idle_timeout_minutes: None,
                     daily_reset_hour: None,
+                    rate_limit_rpm: None,
                 })
                 .idle_timeout_minutes = Some(v);
         }
@@ -692,8 +697,23 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert(GatewayConfig {
                     idle_timeout_minutes: None,
                     daily_reset_hour: None,
+                    rate_limit_rpm: None,
                 })
                 .daily_reset_hour = Some(v);
+        }
+        "gateway.rate_limit_rpm" => {
+            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "gateway.rate_limit_rpm",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .gateway
+                .get_or_insert(GatewayConfig {
+                    idle_timeout_minutes: None,
+                    daily_reset_hour: None,
+                    rate_limit_rpm: None,
+                })
+                .rate_limit_rpm = Some(v);
         }
         _ => {
             return Err(ConfigError::InvalidEnvValue {
@@ -704,7 +724,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      runtime.max_concurrency, runtime.allow_destructive_tools, \
                      runtime.max_context_messages, runtime.thinking_budget, \
                      runtime.max_context_tokens, gateway.idle_timeout_minutes, \
-                     gateway.daily_reset_hour"
+                     gateway.daily_reset_hour, gateway.rate_limit_rpm"
                 ),
             });
         }
