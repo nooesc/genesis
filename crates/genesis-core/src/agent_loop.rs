@@ -1067,13 +1067,22 @@ async fn execute_single_tool(
         }
         Err(err) => {
             match &err {
-                ToolError::ToolNotFound(_) => {
-                    error!(
+                ToolError::ToolNotFound(name) => {
+                    warn!(
                         elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        error = %err,
-                        "tool call failed with missing tool"
+                        tool_name = name.as_str(),
+                        "tool not found, suggesting alternatives"
                     );
-                    Err(err.into())
+                    let suggestions = suggest_similar_tools(name, tools);
+                    let msg = if suggestions.is_empty() {
+                        format!("Error: tool `{name}` not found. Use only tools listed in the system prompt.")
+                    } else {
+                        format!(
+                            "Error: tool `{name}` not found. Did you mean: {}?",
+                            suggestions.join(", ")
+                        )
+                    };
+                    Ok((msg, false))
                 }
                 _ => {
                     warn!(
@@ -1106,6 +1115,53 @@ fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentErro
             (k.clone(), string_value)
         })
         .collect())
+}
+
+/// Suggest tool names similar to `name` using edit distance.
+/// Returns up to 3 suggestions sorted by similarity.
+fn suggest_similar_tools(name: &str, tools: &ToolRuntime) -> Vec<String> {
+    let mut scored: Vec<(String, usize)> = tools
+        .definitions()
+        .iter()
+        .filter_map(|def| {
+            let dist = edit_distance(&name.to_lowercase(), &def.name.to_lowercase());
+            let max_len = name.len().max(def.name.len());
+            // Only suggest if within 40% edit distance
+            if max_len > 0 && dist <= max_len * 2 / 5 {
+                Some((def.name.clone(), dist))
+            } else {
+                // Also match if one is a substring of the other
+                let nl = name.to_lowercase();
+                let dl = def.name.to_lowercase();
+                if dl.contains(&nl) || nl.contains(&dl) {
+                    Some((def.name.clone(), dist))
+                } else {
+                    None
+                }
+            }
+        })
+        .collect();
+    scored.sort_by_key(|(_, d)| *d);
+    scored.truncate(3);
+    scored.into_iter().map(|(n, _)| format!("`{n}`")).collect()
+}
+
+/// Simple Levenshtein edit distance.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut prev = (0..=n).collect::<Vec<_>>();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 #[cfg(test)]
@@ -1273,7 +1329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_tool_call_propagates_missing_tool() {
+    async fn execute_tool_call_suggests_alternatives_for_missing_tool() {
         let agent = test_agent();
         let result = execute_single_tool(
             &agent.tools,
@@ -1288,7 +1344,31 @@ mod tests {
             },
         ).await;
 
-        assert!(matches!(result, Err(AgentError::Tool(ToolError::ToolNotFound(_)))));
+        // ToolNotFound is now a recoverable error with a helpful message
+        let (msg, _) = result.expect("should be recoverable");
+        assert!(msg.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_call_suggests_similar_name() {
+        let agent = test_agent();
+        // "ech" is close to "echo" — should suggest it
+        let result = execute_single_tool(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &ToolCallEntry {
+                id: "tool-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "ech".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            },
+        ).await;
+
+        let (msg, _) = result.expect("should be recoverable");
+        assert!(msg.contains("Did you mean"));
+        assert!(msg.contains("echo"));
     }
 
     #[tokio::test]
@@ -1375,7 +1455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parallel_tool_execution_propagates_first_error() {
+    async fn parallel_tool_execution_recovers_from_missing_tool() {
         let agent = test_agent();
         let tool_calls = vec![
             ToolCallEntry {
@@ -1404,7 +1484,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "should propagate ToolNotFound error");
+        // ToolNotFound is now recoverable, so the parallel execution should succeed
+        let results = result.expect("should recover from ToolNotFound");
+        assert_eq!(results.len(), 2);
+        assert!(results[0].0.contains("ok")); // echo succeeded
+        assert!(results[1].0.contains("not found")); // helpful error message
     }
 
     #[tokio::test]
