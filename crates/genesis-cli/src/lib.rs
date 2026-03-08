@@ -18,8 +18,9 @@ use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, InsightsData, MemoryStore, ScheduleStore, SessionStore, SessionSummary, SkillStore,
-    StorageError, StoredSchedule, SubagentStore, UsageStats, UserModelStore,
+    bootstrap, InsightsData, MemoryStore, PairingStore, ScheduleStore, SessionStore,
+    SessionSummary, SkillStore, StorageError, StoredSchedule, SubagentStore, UsageStats,
+    UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -265,6 +266,8 @@ pub enum Command {
     },
     #[command(subcommand, about = "Inspect offline trajectory replay reports")]
     Eval(EvalCommand),
+    #[command(subcommand, about = "Manage DM pairing authorization for messaging platforms")]
+    Pairing(PairingCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -503,6 +506,39 @@ pub enum ScheduleCommand {
     Delete {
         #[arg(help = "Schedule id to delete")]
         id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PairingCommand {
+    #[command(about = "List approved (paired) users")]
+    List {
+        #[arg(long, help = "Filter by platform (telegram, discord, slack, whatsapp)")]
+        platform: Option<String>,
+    },
+    #[command(about = "List pending pairing requests")]
+    Pending {
+        #[arg(long, help = "Filter by platform")]
+        platform: Option<String>,
+    },
+    #[command(about = "Approve a pairing code")]
+    Approve {
+        #[arg(help = "Platform name (telegram, discord, slack, whatsapp)")]
+        platform: String,
+        #[arg(help = "The pairing code to approve")]
+        code: String,
+    },
+    #[command(about = "Revoke an approved user's access")]
+    Revoke {
+        #[arg(help = "Platform name")]
+        platform: String,
+        #[arg(help = "User ID to revoke")]
+        user_id: String,
+    },
+    #[command(about = "Clear all pending pairing codes")]
+    ClearPending {
+        #[arg(long, help = "Only clear pending codes for this platform")]
+        platform: Option<String>,
     },
 }
 
@@ -984,6 +1020,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json).await,
         Command::Benchmark { runs, tool_provider } => {
             run_benchmark(cli.config, runs, tool_provider, cli.json).await
+        }
+        Command::Pairing(pairing_command) => {
+            run_pairing(cli.config, pairing_command, cli.json).await
         }
     }
 }
@@ -2683,6 +2722,132 @@ async fn run_mcp(
     }
 }
 
+async fn run_pairing(
+    config_path: Option<PathBuf>,
+    command: PairingCommand,
+    json: bool,
+) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    let store = PairingStore::new(&loaded.config.storage.database_path);
+
+    match command {
+        PairingCommand::List { platform } => {
+            let users = store
+                .list_approved(platform.as_deref())
+                .map_err(|e| CliError::Other(format!("storage error: {e}")))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "approved": users,
+                    "count": users.len(),
+                }))
+                .unwrap());
+            }
+
+            if users.is_empty() {
+                return Ok("No approved users.".to_owned());
+            }
+
+            let mut lines = vec![format!("{:<12} {:<20} {:<20} {}", "PLATFORM", "USER_ID", "NAME", "APPROVED_AT")];
+            for u in &users {
+                lines.push(format!("{:<12} {:<20} {:<20} {}", u.platform, u.user_id, u.user_name, u.approved_at));
+            }
+            lines.push(format!("\n{} approved user(s)", users.len()));
+            Ok(lines.join("\n"))
+        }
+        PairingCommand::Pending { platform } => {
+            let pending = store
+                .list_pending(platform.as_deref())
+                .map_err(|e| CliError::Other(format!("storage error: {e}")))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "pending": pending,
+                    "count": pending.len(),
+                }))
+                .unwrap());
+            }
+
+            if pending.is_empty() {
+                return Ok("No pending pairing requests.".to_owned());
+            }
+
+            let mut lines = vec![format!("{:<12} {:<10} {:<20} {:<20} {}", "PLATFORM", "CODE", "USER_ID", "NAME", "CREATED_AT")];
+            for p in &pending {
+                lines.push(format!("{:<12} {:<10} {:<20} {:<20} {}", p.platform, p.code, p.user_id, p.user_name, p.created_at));
+            }
+            lines.push(format!("\n{} pending request(s)", pending.len()));
+            Ok(lines.join("\n"))
+        }
+        PairingCommand::Approve { platform, code } => {
+            let result = store
+                .approve_code(&platform, &code)
+                .map_err(|e| CliError::Other(format!("storage error: {e}")))?;
+
+            match result {
+                Some(user) => {
+                    if json {
+                        Ok(serde_json::to_string_pretty(&serde_json::json!({
+                            "approved": true,
+                            "user": user,
+                        }))
+                        .unwrap())
+                    } else {
+                        Ok(format!(
+                            "Approved {} ({}) on {}",
+                            user.user_name, user.user_id, user.platform
+                        ))
+                    }
+                }
+                None => Err(CliError::Other(
+                    "Invalid or expired pairing code.".to_owned(),
+                )),
+            }
+        }
+        PairingCommand::Revoke { platform, user_id } => {
+            let revoked = store
+                .revoke(&platform, &user_id)
+                .map_err(|e| CliError::Other(format!("storage error: {e}")))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "revoked": revoked,
+                    "platform": platform,
+                    "user_id": user_id,
+                }))
+                .unwrap());
+            }
+
+            if revoked {
+                Ok(format!("Revoked access for {} on {}", user_id, platform))
+            } else {
+                Err(CliError::Other(format!(
+                    "No approved user '{}' on platform '{}'",
+                    user_id, platform
+                )))
+            }
+        }
+        PairingCommand::ClearPending { platform } => {
+            let cleared = store
+                .clear_pending(platform.as_deref())
+                .map_err(|e| CliError::Other(format!("storage error: {e}")))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "cleared": cleared,
+                    "platform": platform,
+                }))
+                .unwrap());
+            }
+
+            match platform {
+                Some(p) => Ok(format!("Cleared {} pending code(s) for {}", cleared, p)),
+                None => Ok(format!("Cleared {} pending code(s) across all platforms", cleared)),
+            }
+        }
+    }
+}
+
 async fn run_benchmark(
     config_path: Option<PathBuf>,
     runs: usize,
@@ -4031,8 +4196,8 @@ mod tests {
         format_usage_stats, format_session_messages, format_skill, format_skill_list,
         format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
         run, BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
-        MemoryCommand, ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand,
-        StorageCommand, SubagentsCommand,
+        MemoryCommand, ModelCommand, PairingCommand, ScheduleCommand, SessionsCommand,
+        SkillsCommand, StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -6219,6 +6384,102 @@ storage:
                 assert_eq!(file, "conversation.json");
                 assert_eq!(format.as_deref(), Some("sharegpt"));
                 assert_eq!(title.as_deref(), Some("Imported Conversation"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    // --- Pairing command tests ---
+
+    #[test]
+    fn parses_pairing_list() {
+        let cli = Cli::try_parse_from(["genesis", "pairing", "list"])
+            .expect("pairing list should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::List { platform }) => {
+                assert!(platform.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_list_with_platform() {
+        let cli = Cli::try_parse_from([
+            "genesis", "pairing", "list", "--platform", "telegram",
+        ])
+        .expect("pairing list --platform should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::List { platform }) => {
+                assert_eq!(platform.as_deref(), Some("telegram"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_pending() {
+        let cli = Cli::try_parse_from(["genesis", "pairing", "pending"])
+            .expect("pairing pending should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::Pending { platform }) => {
+                assert!(platform.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_approve() {
+        let cli = Cli::try_parse_from([
+            "genesis", "pairing", "approve", "telegram", "ABC12345",
+        ])
+        .expect("pairing approve should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::Approve { platform, code }) => {
+                assert_eq!(platform, "telegram");
+                assert_eq!(code, "ABC12345");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_revoke() {
+        let cli = Cli::try_parse_from([
+            "genesis", "pairing", "revoke", "discord", "user-42",
+        ])
+        .expect("pairing revoke should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::Revoke { platform, user_id }) => {
+                assert_eq!(platform, "discord");
+                assert_eq!(user_id, "user-42");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_clear_pending() {
+        let cli = Cli::try_parse_from(["genesis", "pairing", "clear-pending"])
+            .expect("pairing clear-pending should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::ClearPending { platform }) => {
+                assert!(platform.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pairing_clear_pending_with_platform() {
+        let cli = Cli::try_parse_from([
+            "genesis", "pairing", "clear-pending", "--platform", "slack",
+        ])
+        .expect("pairing clear-pending --platform should parse");
+        match cli.command {
+            Command::Pairing(PairingCommand::ClearPending { platform }) => {
+                assert_eq!(platform.as_deref(), Some("slack"));
             }
             other => panic!("unexpected command: {other:?}"),
         }

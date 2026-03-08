@@ -294,6 +294,44 @@ pub async fn webhook_handler(
 
     info!(parent: &span, "received telegram message");
 
+    // DM pairing check — gate unknown users
+    let user_id_str = message
+        .from
+        .as_ref()
+        .map(|u| u.id.to_string())
+        .unwrap_or_else(|| chat_id.to_string());
+
+    match super::check_pairing(
+        &state.loaded.config.storage.database_path,
+        "telegram",
+        &user_id_str,
+        &user_name,
+    ) {
+        super::PairingCheck::Approved => {} // proceed
+        super::PairingCheck::NeedsPairing(code) => {
+            let reply = super::pairing_reply(&code);
+            let client2 = state.http_client.clone();
+            let token2 = token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                    error!(error = %e, "failed to send pairing reply");
+                }
+            });
+            return StatusCode::OK;
+        }
+        super::PairingCheck::AtCapacity => {
+            let reply = super::pairing_capacity_reply().to_owned();
+            let client2 = state.http_client.clone();
+            let token2 = token.clone();
+            tokio::spawn(async move {
+                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                    error!(error = %e, "failed to send capacity reply");
+                }
+            });
+            return StatusCode::OK;
+        }
+    }
+
     // Handle gateway slash commands (only for text messages).
     if let MessageInput::Text(ref text) = input {
         let store = SessionStore::new(&state.loaded.config.storage.database_path);

@@ -24,7 +24,7 @@ use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
-use genesis_storage::{MemoryStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
+use genesis_storage::{MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -270,6 +270,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Skill usage stats
         .route("/skills/{name}/usage", get(skill_usage_stats_handler))
         .route("/skills/{name}/usage/recent", get(skill_usage_recent_handler))
+        // DM pairing management
+        .route("/pairing/approved", get(list_approved_handler))
+        .route("/pairing/pending", get(list_pending_handler))
+        .route("/pairing/approve", post(approve_pairing_handler))
+        .route("/pairing/revoke", post(revoke_pairing_handler))
+        .route("/pairing/clear-pending", post(clear_pending_handler))
         // Tool introspection
         .route("/tools", get(list_tools_handler))
         .layer(middleware::from_fn_with_state(
@@ -1515,6 +1521,118 @@ async fn chat_batch_handler(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// DM Pairing endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PairingPlatformQuery {
+    platform: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovePairingRequest {
+    platform: String,
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokePairingRequest {
+    platform: String,
+    user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClearPendingRequest {
+    platform: Option<String>,
+}
+
+async fn list_approved_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = PairingStore::new(&state.loaded.config.storage.database_path);
+    let users = store
+        .list_approved(params.platform.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "approved": users,
+        "count": users.len(),
+    })))
+}
+
+async fn list_pending_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = PairingStore::new(&state.loaded.config.storage.database_path);
+    let pending = store
+        .list_pending(params.platform.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "pending": pending,
+        "count": pending.len(),
+    })))
+}
+
+async fn approve_pairing_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ApprovePairingRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = PairingStore::new(&state.loaded.config.storage.database_path);
+    let approved = store
+        .approve_code(&request.platform, &request.code)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match approved {
+        Some(user) => Ok(Json(serde_json::json!({
+            "approved": true,
+            "user": user,
+        }))),
+        None => Err((StatusCode::NOT_FOUND, "invalid or expired pairing code".to_owned())),
+    }
+}
+
+async fn revoke_pairing_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RevokePairingRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = PairingStore::new(&state.loaded.config.storage.database_path);
+    let revoked = store
+        .revoke(&request.platform, &request.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if revoked {
+        Ok(Json(serde_json::json!({
+            "revoked": true,
+            "platform": request.platform,
+            "user_id": request.user_id,
+        })))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!(
+            "no approved user '{}' on platform '{}'",
+            request.user_id, request.platform
+        )))
+    }
+}
+
+async fn clear_pending_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ClearPendingRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = PairingStore::new(&state.loaded.config.storage.database_path);
+    let cleared = store
+        .clear_pending(request.platform.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "cleared": cleared,
+        "platform": request.platform,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1942,5 +2060,51 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(!json.contains("total_estimated_cost"));
+    }
+
+    // --- Pairing endpoint request/response tests ---
+
+    #[test]
+    fn approve_pairing_request_deserializes() {
+        let json = r#"{"platform": "telegram", "code": "ABC12345"}"#;
+        let req: ApprovePairingRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.platform, "telegram");
+        assert_eq!(req.code, "ABC12345");
+    }
+
+    #[test]
+    fn revoke_pairing_request_deserializes() {
+        let json = r#"{"platform": "discord", "user_id": "123456789"}"#;
+        let req: RevokePairingRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.platform, "discord");
+        assert_eq!(req.user_id, "123456789");
+    }
+
+    #[test]
+    fn clear_pending_request_deserializes_with_platform() {
+        let json = r#"{"platform": "slack"}"#;
+        let req: ClearPendingRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.platform.as_deref(), Some("slack"));
+    }
+
+    #[test]
+    fn clear_pending_request_deserializes_without_platform() {
+        let json = r#"{}"#;
+        let req: ClearPendingRequest = serde_json::from_str(json).expect("should deserialize");
+        assert!(req.platform.is_none());
+    }
+
+    #[test]
+    fn pairing_platform_query_deserializes_empty() {
+        let json = r#"{}"#;
+        let query: PairingPlatformQuery = serde_json::from_str(json).expect("should deserialize");
+        assert!(query.platform.is_none());
+    }
+
+    #[test]
+    fn pairing_platform_query_deserializes_with_platform() {
+        let json = r#"{"platform": "whatsapp"}"#;
+        let query: PairingPlatformQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(query.platform.as_deref(), Some("whatsapp"));
     }
 }

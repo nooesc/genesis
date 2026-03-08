@@ -206,6 +206,47 @@ pub async fn webhook_handler(
                 );
 
                 info!(parent: &span, "received whatsapp message");
+
+                // DM pairing check
+                match super::check_pairing(
+                    &state.loaded.config.storage.database_path,
+                    "whatsapp",
+                    &from,
+                    &contact_name,
+                ) {
+                    super::PairingCheck::Approved => {}
+                    super::PairingCheck::NeedsPairing(code) => {
+                        let reply = super::pairing_reply(&code);
+                        let client2 = state.http_client.clone();
+                        let token2 = token.clone();
+                        let phone2 = phone_id.clone();
+                        let from2 = from.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
+                            {
+                                error!(error = %e, "failed to send pairing reply");
+                            }
+                        });
+                        continue;
+                    }
+                    super::PairingCheck::AtCapacity => {
+                        let reply = super::pairing_capacity_reply().to_owned();
+                        let client2 = state.http_client.clone();
+                        let token2 = token.clone();
+                        let phone2 = phone_id.clone();
+                        let from2 = from.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
+                            {
+                                error!(error = %e, "failed to send capacity reply");
+                            }
+                        });
+                        continue;
+                    }
+                }
+
                 match crate::commands::handle_command(
                     &text,
                     &session_id,

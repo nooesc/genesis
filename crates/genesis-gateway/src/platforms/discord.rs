@@ -178,6 +178,38 @@ pub async fn interactions_handler(
 
         info!(parent: &span, "received discord interaction");
 
+        // DM pairing check
+        let discord_user_id = extract_user_id(&interaction).unwrap_or_default();
+        match super::check_pairing(
+            &state.loaded.config.storage.database_path,
+            "discord",
+            &discord_user_id,
+            &user_name,
+        ) {
+            super::PairingCheck::Approved => {}
+            super::PairingCheck::NeedsPairing(code) => {
+                let reply = super::pairing_reply(&code);
+                return Ok(Json(
+                    serde_json::to_value(InteractionResponse {
+                        response_type: RESPONSE_CHANNEL_MESSAGE,
+                        data: Some(InteractionResponseData { content: reply }),
+                    })
+                    .unwrap(),
+                ));
+            }
+            super::PairingCheck::AtCapacity => {
+                return Ok(Json(
+                    serde_json::to_value(InteractionResponse {
+                        response_type: RESPONSE_CHANNEL_MESSAGE,
+                        data: Some(InteractionResponseData {
+                            content: super::pairing_capacity_reply().to_owned(),
+                        }),
+                    })
+                    .unwrap(),
+                ));
+            }
+        }
+
         // Handle gateway slash commands.
         let store = genesis_storage::SessionStore::new(
             &state.loaded.config.storage.database_path,
@@ -289,6 +321,15 @@ fn extract_message(interaction: &DiscordInteraction) -> Option<String> {
         .and_then(|o| o.value.as_ref())
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned())
+}
+
+fn extract_user_id(interaction: &DiscordInteraction) -> Option<String> {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|m| m.user.as_ref())
+        .or(interaction.user.as_ref())
+        .map(|u| u.id.clone())
 }
 
 fn extract_username(interaction: &DiscordInteraction) -> String {

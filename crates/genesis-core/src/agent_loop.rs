@@ -159,6 +159,58 @@ pub trait SubagentSpawner: Send + Sync {
     fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str);
 }
 
+/// Lifecycle hooks for the agent loop.
+///
+/// All methods have default no-op implementations, so consumers only need
+/// to override the events they care about. Hooks are called synchronously
+/// and should return quickly — expensive work should be spawned.
+///
+/// Errors in hooks are logged but never propagate to the agent loop.
+pub trait AgentHooks: Send + Sync {
+    /// Called when a user turn begins, before the first LLM call.
+    fn on_turn_start(&self, _session_id: &str, _user_message: &str) {}
+
+    /// Called when a user turn completes (naturally or by limit/budget).
+    fn on_turn_end(&self, _session_id: &str, _result: &AgentResult) {}
+
+    /// Called before each tool is executed.
+    fn on_tool_call_start(&self, _session_id: &str, _tool_name: &str) {}
+
+    /// Called after a tool finishes executing (success or failure).
+    fn on_tool_call_end(
+        &self,
+        _session_id: &str,
+        _tool_name: &str,
+        _success: bool,
+        _duration_ms: u64,
+    ) {
+    }
+
+    /// Called before each LLM API request.
+    fn on_llm_request(&self, _session_id: &str, _model: &str, _turn: usize) {}
+
+    /// Called after each LLM API response with token counts.
+    fn on_llm_response(
+        &self,
+        _session_id: &str,
+        _model: &str,
+        _input_tokens: u32,
+        _output_tokens: u32,
+    ) {
+    }
+
+    /// Called when context compression is triggered.
+    fn on_context_prune(&self, _session_id: &str, _messages_before: usize, _messages_after: usize) {
+    }
+
+    /// Called when a tool is detected in a stuck loop.
+    fn on_stuck_loop(&self, _session_id: &str, _tool_name: &str, _failure_count: usize) {}
+}
+
+/// No-op hook implementation (default).
+pub struct NoopHooks;
+impl AgentHooks for NoopHooks {}
+
 /// The core agent loop that wires provider (LLM) and tool execution together.
 ///
 /// Flow: user message → LLM → [tool_calls → execute → LLM]* → final text
@@ -172,6 +224,7 @@ pub struct AgentLoop {
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
     subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    hooks: Arc<dyn AgentHooks>,
     cost: SessionCost,
     trajectory: TrajectoryRecorder,
     /// Last reported prompt token count from the API. Used for token-aware
@@ -226,6 +279,7 @@ impl AgentLoop {
             config,
             messages,
             subagent_spawner: None,
+            hooks: Arc::new(NoopHooks),
             cost,
             trajectory,
             last_prompt_tokens: 0,
@@ -248,6 +302,11 @@ impl AgentLoop {
     /// Attach a subagent spawner so the agent can spawn parallel workstreams.
     pub fn set_subagent_spawner(&mut self, spawner: Arc<dyn SubagentSpawner>) {
         self.subagent_spawner = Some(spawner);
+    }
+
+    /// Attach lifecycle hooks for monitoring, logging, or integration.
+    pub fn set_hooks(&mut self, hooks: Arc<dyn AgentHooks>) {
+        self.hooks = hooks;
     }
 
     /// Pick the right client for the current turn. Uses the tool client when
@@ -287,6 +346,10 @@ impl AgentLoop {
             self.messages
                 .push(ChatMessage::user_with_images(user_message, images));
         }
+
+        // Fire turn-start hook
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        self.hooks.on_turn_start(&hook_session, user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -342,6 +405,7 @@ impl AgentLoop {
             request.thinking = self.config.thinking.clone();
             request.response_format = self.config.response_format.clone();
 
+            self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
             let response = client.complete(request).await?;
 
             if let Some(usage) = &response.usage {
@@ -349,6 +413,12 @@ impl AgentLoop {
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
                 self.last_prompt_tokens = usage.prompt_tokens;
                 self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
+                self.hooks.on_llm_response(
+                    &hook_session,
+                    client.model(),
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                );
             }
 
             let choice = &response.choices[0];
@@ -371,12 +441,14 @@ impl AgentLoop {
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
 
-                    // Record each tool call
+                    // Record each tool call and fire hooks
                     for tc in tool_calls {
                         self.trajectory
                             .record_tool_call(&tc.function.name, &tc.function.arguments);
+                        self.hooks.on_tool_call_start(&hook_session, &tc.function.name);
                     }
 
+                    let tool_start = Instant::now();
                     let results = execute_tool_calls_parallel(
                         &self.tools,
                         &self.subagent_spawner,
@@ -385,6 +457,7 @@ impl AgentLoop {
                         self.config.tool_timeout_secs,
                     )
                     .await?;
+                    let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
                     let mut clarification = None;
                     for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
@@ -392,7 +465,8 @@ impl AgentLoop {
                         self.trajectory
                             .record_tool_result(&tc.function.name, &result);
                         // Track consecutive failures per tool
-                        if result.starts_with("Error:") {
+                        let success = !result.starts_with("Error:");
+                        if !success {
                             let count = self
                                 .tool_failure_counts
                                 .entry(tc.function.name.clone())
@@ -401,6 +475,12 @@ impl AgentLoop {
                         } else {
                             self.tool_failure_counts.remove(&tc.function.name);
                         }
+                        self.hooks.on_tool_call_end(
+                            &hook_session,
+                            &tc.function.name,
+                            success,
+                            tool_elapsed_ms,
+                        );
                         if requires_input {
                             clarification = Some(result.clone());
                         }
@@ -444,7 +524,7 @@ impl AgentLoop {
             self.messages.push(ChatMessage::assistant(&response_text));
 
             self.save_trajectory();
-            return Ok(AgentResult {
+            let result = AgentResult {
                 response: response_text,
                 turns_used,
                 tool_calls_made,
@@ -453,7 +533,9 @@ impl AgentLoop {
                 total_output_tokens,
                 estimated_cost: Some(self.cost.total_cost),
                 pending_clarification: None,
-            });
+            };
+            self.hooks.on_turn_end(&hook_session, &result);
+            return Ok(result);
         }
     }
 
@@ -487,6 +569,10 @@ impl AgentLoop {
             self.messages
                 .push(ChatMessage::user_with_images(user_message, images));
         }
+
+        // Fire turn-start hook (streaming)
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        self.hooks.on_turn_start(&hook_session, user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -543,6 +629,7 @@ impl AgentLoop {
             request.thinking = self.config.thinking.clone();
             request.response_format = self.config.response_format.clone();
 
+            self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
             match client.complete_stream(request.clone()).await {
                 Ok(mut stream) => {
                     let mut response_text = String::new();
@@ -576,6 +663,12 @@ impl AgentLoop {
                     total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
                     self.last_prompt_tokens = turn_input_tokens;
                     self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)?;
+                    self.hooks.on_llm_response(
+                        &hook_session,
+                        client.model(),
+                        turn_input_tokens,
+                        turn_output_tokens,
+                    );
 
                     if !streamed_tool_calls.is_empty() {
                         // Record assistant message if present
@@ -656,7 +749,7 @@ impl AgentLoop {
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
-                    return Ok(AgentResult {
+                    let result = AgentResult {
                         response: response_text,
                         turns_used,
                         tool_calls_made,
@@ -665,7 +758,9 @@ impl AgentLoop {
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
-                    });
+                    };
+                    self.hooks.on_turn_end(&hook_session, &result);
+                    return Ok(result);
                 }
                 Err(_) => {
                     warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
@@ -821,12 +916,14 @@ impl AgentLoop {
             return;
         }
 
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
         for tool in &stuck_tools {
+            let count = self.tool_failure_counts[tool];
             warn!(
                 tool_name = tool.as_str(),
-                "tool has failed {} consecutive times, injecting stuck-loop nudge",
-                self.tool_failure_counts[tool]
+                "tool has failed {count} consecutive times, injecting stuck-loop nudge",
             );
+            self.hooks.on_stuck_loop(&hook_session, tool, count);
             // Reset the counter so we don't spam nudges
             self.tool_failure_counts.remove(tool);
         }
@@ -937,6 +1034,7 @@ impl AgentLoop {
 
         let summary = self.summarize_messages(&to_drop).await;
 
+        let messages_before = self.messages.len();
         // Remove the old messages.
         self.messages.drain(drop_start..drop_start + drop_count);
 
@@ -947,6 +1045,10 @@ impl AgentLoop {
             ));
             self.messages.insert(drop_start, summary_msg);
         }
+
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        self.hooks
+            .on_context_prune(&hook_session, messages_before, self.messages.len());
     }
 
     /// Check if token-based compression should trigger (>85% of max_context_tokens).
@@ -1973,5 +2075,91 @@ mod tests {
         };
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(!json.contains("estimated_cost"));
+    }
+
+    // --- AgentHooks tests ---
+
+    #[test]
+    fn noop_hooks_compiles_and_runs() {
+        let hooks = NoopHooks;
+        hooks.on_turn_start("session-1", "hello");
+        hooks.on_turn_end(
+            "session-1",
+            &AgentResult {
+                response: "hi".to_owned(),
+                turns_used: 1,
+                tool_calls_made: 0,
+                finished_naturally: true,
+                total_input_tokens: 10,
+                total_output_tokens: 5,
+                estimated_cost: None,
+                pending_clarification: None,
+            },
+        );
+        hooks.on_tool_call_start("session-1", "shell");
+        hooks.on_tool_call_end("session-1", "shell", true, 100);
+        hooks.on_llm_request("session-1", "gpt-4", 1);
+        hooks.on_llm_response("session-1", "gpt-4", 100, 50);
+        hooks.on_context_prune("session-1", 20, 10);
+        hooks.on_stuck_loop("session-1", "shell", 3);
+    }
+
+    #[test]
+    fn custom_hooks_can_capture_events() {
+        use std::sync::Mutex;
+
+        struct CapturingHooks {
+            events: Mutex<Vec<String>>,
+        }
+
+        impl AgentHooks for CapturingHooks {
+            fn on_turn_start(&self, session_id: &str, message: &str) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("turn_start:{session_id}:{message}"));
+            }
+            fn on_tool_call_end(
+                &self,
+                _session_id: &str,
+                tool_name: &str,
+                success: bool,
+                duration_ms: u64,
+            ) {
+                self.events.lock().unwrap().push(format!(
+                    "tool_end:{tool_name}:{success}:{duration_ms}ms"
+                ));
+            }
+        }
+
+        let hooks = CapturingHooks {
+            events: Mutex::new(Vec::new()),
+        };
+
+        hooks.on_turn_start("s1", "hello");
+        hooks.on_tool_call_end("s1", "shell", true, 42);
+        hooks.on_tool_call_end("s1", "patch", false, 200);
+
+        let events = hooks.events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], "turn_start:s1:hello");
+        assert_eq!(events[1], "tool_end:shell:true:42ms");
+        assert_eq!(events[2], "tool_end:patch:false:200ms");
+    }
+
+    #[test]
+    fn agent_loop_defaults_to_noop_hooks() {
+        let agent = test_agent();
+        // The agent should have NoopHooks by default — just verify it doesn't panic
+        agent.hooks.on_turn_start("test", "verify hooks work");
+    }
+
+    #[test]
+    fn agent_loop_accepts_custom_hooks() {
+        let mut agent = test_agent();
+        let hooks = Arc::new(NoopHooks);
+        agent.set_hooks(hooks);
+        // Should compile and not panic
+        agent.hooks.on_turn_start("test", "custom hooks set");
     }
 }

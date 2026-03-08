@@ -148,6 +148,42 @@ pub async fn events_handler(
 
     info!(parent: &span, event_type = event.event_type.as_str(), "received slack event");
 
+    // DM pairing check
+    match super::check_pairing(
+        &state.loaded.config.storage.database_path,
+        "slack",
+        &user,
+        &user, // Slack user IDs are opaque; username isn't available without API call
+    ) {
+        super::PairingCheck::Approved => {}
+        super::PairingCheck::NeedsPairing(code) => {
+            let reply = super::pairing_reply(&code);
+            let client2 = state.http_client.clone();
+            let token2 = token.clone();
+            let channel2 = channel.clone();
+            let ts = thread_ts.clone();
+            tokio::spawn(async move {
+                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
+                    error!(error = %e, "failed to send pairing reply");
+                }
+            });
+            return Ok(Json(serde_json::json!({ "ok": true })));
+        }
+        super::PairingCheck::AtCapacity => {
+            let reply = super::pairing_capacity_reply().to_owned();
+            let client2 = state.http_client.clone();
+            let token2 = token.clone();
+            let channel2 = channel.clone();
+            let ts = thread_ts.clone();
+            tokio::spawn(async move {
+                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
+                    error!(error = %e, "failed to send capacity reply");
+                }
+            });
+            return Ok(Json(serde_json::json!({ "ok": true })));
+        }
+    }
+
     // Handle gateway slash commands before reaching the agent.
     let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
     match crate::commands::handle_command(&text, &session_id, &store, &state.loaded.config) {
