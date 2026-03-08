@@ -160,6 +160,13 @@ pub struct ChatResponse {
     pub response: String,
     pub turns_used: usize,
     pub tool_calls_made: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
+    /// If set, the agent is paused waiting for user clarification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_clarification: Option<String>,
 }
 
 /// SSE payload for a streamed token chunk.
@@ -176,6 +183,10 @@ pub struct StreamDoneResponse {
     pub response: String,
     pub turns_used: usize,
     pub tool_calls_made: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
 }
 
 /// SSE payload signaling an execution failure.
@@ -429,6 +440,10 @@ async fn chat_handler(
             response: outcome.result.response,
             turns_used: outcome.result.turns_used,
             tool_calls_made: outcome.result.tool_calls_made,
+            estimated_cost: outcome.result.estimated_cost,
+            total_input_tokens: outcome.result.total_input_tokens,
+            total_output_tokens: outcome.result.total_output_tokens,
+            pending_clarification: outcome.result.pending_clarification,
         }))
     }
     .instrument(span)
@@ -538,6 +553,9 @@ async fn chat_stream_handler(
                     response: outcome.result.response,
                     turns_used: outcome.result.turns_used,
                     tool_calls_made: outcome.result.tool_calls_made,
+                    estimated_cost: outcome.result.estimated_cost,
+                    total_input_tokens: outcome.result.total_input_tokens,
+                    total_output_tokens: outcome.result.total_output_tokens,
                 }) {
                     let _ = tx.send(Ok(Event::default().event("done").data(payload)));
                 }
@@ -638,10 +656,35 @@ mod tests {
             response: "Hello!".to_owned(),
             turns_used: 1,
             tool_calls_made: 0,
+            estimated_cost: Some(0.0042),
+            total_input_tokens: 150,
+            total_output_tokens: 50,
+            pending_clarification: None,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"session_id\":\"api-123\""));
         assert!(json.contains("\"response\":\"Hello!\""));
+        assert!(json.contains("\"estimated_cost\":0.0042"));
+        assert!(json.contains("\"total_input_tokens\":150"));
+        assert!(json.contains("\"total_output_tokens\":50"));
+        assert!(!json.contains("pending_clarification"));
+    }
+
+    #[test]
+    fn chat_response_includes_clarification_when_present() {
+        let resp = ChatResponse {
+            session_id: "api-123".to_owned(),
+            response: String::new(),
+            turns_used: 1,
+            tool_calls_made: 1,
+            estimated_cost: None,
+            total_input_tokens: 100,
+            total_output_tokens: 25,
+            pending_clarification: Some("Which file do you mean?".to_owned()),
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(json.contains("\"pending_clarification\":\"Which file do you mean?\""));
+        assert!(!json.contains("estimated_cost"));
     }
 
     #[test]
@@ -670,10 +713,14 @@ mod tests {
             response: "hello".to_owned(),
             turns_used: 1,
             tool_calls_made: 0,
+            estimated_cost: Some(0.001),
+            total_input_tokens: 100,
+            total_output_tokens: 20,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"response\":\"hello\""));
         assert!(json.contains("\"turns_used\":1"));
+        assert!(json.contains("\"total_input_tokens\":100"));
     }
 
     #[test]
