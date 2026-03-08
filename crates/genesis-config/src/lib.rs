@@ -21,6 +21,11 @@ pub struct GenesisConfig {
     /// reserves the primary provider for reasoning turns (after user messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_provider: Option<ProviderConfig>,
+    /// Fallback providers tried in order when the primary provider fails.
+    /// After the primary provider exhausts its retries, each fallback is
+    /// attempted in sequence until one succeeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_providers: Vec<ProviderConfig>,
     /// MCP (Model Context Protocol) server definitions. Each entry maps a
     /// server name to its connection config (stdio or HTTP transport).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -224,6 +229,8 @@ struct FileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_provider: Option<FileProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_providers: Option<Vec<FileProviderConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     mcp_servers: Option<HashMap<String, McpServerConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<FileStorageConfig>,
@@ -345,6 +352,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             tool_call_parser: None,
         },
         tool_provider: None,
+        fallback_providers: Vec::new(),
         mcp_servers: HashMap::new(),
         storage: StorageConfig {
             data_dir: paths.data_dir.clone(),
@@ -474,6 +482,33 @@ pub fn load_from_map(
         }
     });
 
+    // Fallback providers — each inherits primary provider defaults when partially specified.
+    let fallback_providers = file_config
+        .fallback_providers
+        .unwrap_or_default()
+        .iter()
+        .map(|fp| ProviderConfig {
+            backend: fp
+                .backend
+                .clone()
+                .unwrap_or_else(|| provider.backend.clone()),
+            model: fp
+                .model
+                .clone()
+                .unwrap_or_else(|| provider.model.clone()),
+            base_url: fp
+                .base_url
+                .clone()
+                .or_else(|| provider.base_url.clone()),
+            api_key_env: fp
+                .api_key_env
+                .clone()
+                .or_else(|| provider.api_key_env.clone()),
+            extra_body: fp.extra_body.clone(),
+            tool_call_parser: fp.tool_call_parser.clone(),
+        })
+        .collect::<Vec<_>>();
+
     let runtime = RuntimeConfig {
         max_concurrency: parse_env(
             env,
@@ -545,6 +580,7 @@ pub fn load_from_map(
             profile,
             provider,
             tool_provider,
+            fallback_providers,
             mcp_servers,
             storage: StorageConfig {
                 data_dir: data_dir.clone(),
@@ -1048,6 +1084,47 @@ tool_provider:
     fn tool_provider_absent_when_not_configured() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.tool_provider.is_none());
+    }
+
+    #[test]
+    fn fallback_providers_parsed_from_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openrouter
+  model: anthropic/claude-sonnet-4-6
+  api_key_env: OPENROUTER_API_KEY
+fallback_providers:
+  - backend: openai
+    model: gpt-4.1
+    api_key_env: OPENAI_API_KEY
+  - model: anthropic/claude-haiku-4-5
+"#,
+        )
+        .expect("write config");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        assert_eq!(loaded.config.fallback_providers.len(), 2);
+        let first = &loaded.config.fallback_providers[0];
+        assert_eq!(first.backend, "openai");
+        assert_eq!(first.model, "gpt-4.1");
+        assert_eq!(first.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+
+        // Second inherits backend from primary provider
+        let second = &loaded.config.fallback_providers[1];
+        assert_eq!(second.backend, "openrouter");
+        assert_eq!(second.model, "anthropic/claude-haiku-4-5");
+    }
+
+    #[test]
+    fn fallback_providers_empty_when_not_configured() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.fallback_providers.is_empty());
     }
 
     #[test]

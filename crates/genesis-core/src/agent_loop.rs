@@ -238,6 +238,8 @@ pub struct AgentLoop {
     /// follow tool results use this client while turns following user messages
     /// use the primary `client`.
     tool_client: Option<ChatClient>,
+    /// Fallback clients tried in order when the primary (or active) client fails.
+    fallback_clients: Vec<ChatClient>,
     tools: ToolRuntime,
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
@@ -304,6 +306,7 @@ impl AgentLoop {
         Self {
             client,
             tool_client: None,
+            fallback_clients: Vec::new(),
             tools,
             config,
             messages,
@@ -329,6 +332,11 @@ impl AgentLoop {
     /// Set an optional cheaper client for tool-calling turns.
     pub fn set_tool_client(&mut self, client: ChatClient) {
         self.tool_client = Some(client);
+    }
+
+    /// Set fallback clients to try when the primary provider fails.
+    pub fn set_fallback_clients(&mut self, clients: Vec<ChatClient>) {
+        self.fallback_clients = clients;
     }
 
     /// Attach a subagent spawner so the agent can spawn parallel workstreams.
@@ -416,6 +424,108 @@ impl AgentLoop {
             }
         }
         &self.client
+    }
+
+    /// Try a blocking completion against the active client, falling back to
+    /// each fallback client in order if the primary fails.
+    async fn complete_with_failover(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<(genesis_provider::ChatCompletionResponse, String), ProviderError> {
+        let client = self.active_client().clone();
+        let model = client.model().to_owned();
+
+        match client.complete(request.clone()).await {
+            Ok(response) => return Ok((response, model)),
+            Err(err) => {
+                if self.fallback_clients.is_empty() {
+                    return Err(err);
+                }
+                warn!(
+                    model = model.as_str(),
+                    error = %err,
+                    fallback_count = self.fallback_clients.len(),
+                    "primary provider failed, trying fallbacks"
+                );
+            }
+        }
+
+        for (i, fallback) in self.fallback_clients.iter().enumerate() {
+            let fb_model = fallback.model().to_owned();
+            match fallback.complete(request.clone()).await {
+                Ok(response) => {
+                    info!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        "fallback provider succeeded"
+                    );
+                    return Ok((response, fb_model));
+                }
+                Err(err) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        error = %err,
+                        "fallback provider failed"
+                    );
+                }
+            }
+        }
+
+        Err(ProviderError::AllProvidersFailed {
+            count: 1 + self.fallback_clients.len(),
+        })
+    }
+
+    /// Try a streaming completion against the active client, falling back to
+    /// each fallback client in order if the primary fails to connect.
+    async fn complete_stream_with_failover(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<(genesis_provider::ChatCompletionChunkStream, String), ProviderError> {
+        let client = self.active_client().clone();
+        let model = client.model().to_owned();
+
+        match client.complete_stream(request.clone()).await {
+            Ok(stream) => return Ok((stream, model)),
+            Err(err) => {
+                if self.fallback_clients.is_empty() {
+                    return Err(err);
+                }
+                warn!(
+                    model = model.as_str(),
+                    error = %err,
+                    fallback_count = self.fallback_clients.len(),
+                    "primary provider stream failed, trying fallbacks"
+                );
+            }
+        }
+
+        for (i, fallback) in self.fallback_clients.iter().enumerate() {
+            let fb_model = fallback.model().to_owned();
+            match fallback.complete_stream(request.clone()).await {
+                Ok(stream) => {
+                    info!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        "fallback provider stream succeeded"
+                    );
+                    return Ok((stream, fb_model));
+                }
+                Err(err) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        error = %err,
+                        "fallback provider stream failed"
+                    );
+                }
+            }
+        }
+
+        Err(ProviderError::AllProvidersFailed {
+            count: 1 + self.fallback_clients.len(),
+        })
     }
 
     /// Run a single user turn through the agent loop.
@@ -533,7 +643,6 @@ impl AgentLoop {
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
             self.prune_context().await;
-            let client = self.active_client().clone();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
@@ -542,14 +651,14 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
-            self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
-            let mut response = match client.complete(request).await {
-                Ok(response) => response,
+            self.hooks.on_llm_request(&hook_session, self.active_client().model(), turns_used);
+            let (mut response, active_model) = match self.complete_with_failover(request).await {
+                Ok(result) => result,
                 Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
             };
 
             // Apply tool call parser for models that embed tool calls in text
-            self.apply_tool_call_parser(&mut response, client.model());
+            self.apply_tool_call_parser(&mut response, &active_model);
 
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
@@ -562,7 +671,7 @@ impl AgentLoop {
                 }
                 self.hooks.on_llm_response(
                     &hook_session,
-                    client.model(),
+                    &active_model,
                     usage.prompt_tokens,
                     usage.completion_tokens,
                 );
@@ -848,7 +957,6 @@ impl AgentLoop {
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
             self.prune_context().await;
-            let client = self.active_client().clone();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
@@ -857,9 +965,10 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
-            self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
-            match client.complete_stream(request.clone()).await {
-                Ok(mut stream) => {
+            self.hooks.on_llm_request(&hook_session, self.active_client().model(), turns_used);
+            let stream_result = self.complete_stream_with_failover(request.clone()).await;
+            match stream_result {
+                Ok((mut stream, active_model)) => {
                     let mut response_text = String::new();
                     let mut streamed_tool_calls = Vec::new();
                     let mut finished_naturally = true;
@@ -906,14 +1015,14 @@ impl AgentLoop {
                     }
                     self.hooks.on_llm_response(
                         &hook_session,
-                        client.model(),
+                        &active_model,
                         turn_input_tokens,
                         turn_output_tokens,
                     );
 
                     // If streaming didn't produce native tool calls, try parsing from text
                     if streamed_tool_calls.is_empty() && !response_text.is_empty() {
-                        if let Some(parser) = self.resolve_parser(client.model()) {
+                        if let Some(parser) = self.resolve_parser(&active_model) {
                             if let Some(result) = parser.parse(&response_text) {
                                 streamed_tool_calls = result.tool_calls;
                                 response_text = result.content.unwrap_or_default();
@@ -1052,8 +1161,8 @@ impl AgentLoop {
                 }
                 Err(_) => {
                     warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
-                    let mut response = match client.complete(request).await {
-                        Ok(response) => response,
+                    let (mut response, fb_model) = match self.complete_with_failover(request).await {
+                        Ok(result) => result,
                         Err(err) => {
                             return Err(self.report_error(
                                 &hook_session,
@@ -1064,7 +1173,7 @@ impl AgentLoop {
                     };
 
                     // Apply tool call parser for models that embed tool calls in text
-                    self.apply_tool_call_parser(&mut response, client.model());
+                    self.apply_tool_call_parser(&mut response, &fb_model);
 
                     if let Some(usage) = &response.usage {
                         total_input_tokens =

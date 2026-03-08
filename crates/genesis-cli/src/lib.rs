@@ -2933,6 +2933,20 @@ async fn run_batch_item(
         agent.set_tool_client(tool_client);
     }
 
+    if !loaded.config.fallback_providers.is_empty() {
+        let mut fallbacks = Vec::new();
+        for fp in &loaded.config.fallback_providers {
+            let fb_client = genesis_provider::client_from_config(
+                &fp.backend,
+                &fp.model,
+                fp.base_url.as_deref(),
+                fp.api_key_env.as_deref(),
+            )?;
+            fallbacks.push(fb_client);
+        }
+        agent.set_fallback_clients(fallbacks);
+    }
+
     for tag in &item.tags {
         agent.trajectory_mut().add_tag(tag);
     }

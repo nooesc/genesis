@@ -14,4 +14,6 @@ pub enum ProviderError {
     Serialize(#[from] serde_json::Error),
     #[error("stream decode error: {0}")]
     StreamDecode(String),
+    #[error("all {count} providers failed (primary + fallbacks)")]
+    AllProvidersFailed { count: usize },
 }

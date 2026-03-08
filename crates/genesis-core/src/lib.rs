@@ -738,6 +738,7 @@ mod tests {
                     tool_call_parser: None,
                 },
                 tool_provider: None,
+                fallback_providers: Vec::new(),
                 mcp_servers: std::collections::HashMap::new(),
                 storage: StorageConfig {
                     data_dir: PathBuf::from("/tmp/genesis"),

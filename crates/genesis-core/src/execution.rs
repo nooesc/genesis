@@ -402,6 +402,25 @@ impl<'a> SessionExecutionService<'a> {
             );
         }
 
+        // Set up fallback providers for automatic failover
+        if !self.loaded.config.fallback_providers.is_empty() {
+            let mut fallbacks = Vec::new();
+            for fp in &self.loaded.config.fallback_providers {
+                let fb_client = client_from_config(
+                    &fp.backend,
+                    &fp.model,
+                    fp.base_url.as_deref(),
+                    fp.api_key_env.as_deref(),
+                )?;
+                fallbacks.push(fb_client);
+            }
+            agent.set_fallback_clients(fallbacks);
+            debug!(
+                fallback_count = self.loaded.config.fallback_providers.len(),
+                "provider failover enabled"
+            );
+        }
+
         // Attach subagent spawner so agent can spawn parallel workstreams
         agent.set_subagent_spawner(Arc::new(ExecutionSubagentSpawner {
             loaded: Arc::new(self.loaded.clone()),
@@ -1017,6 +1036,7 @@ mod tests {
                     tool_call_parser: None,
                 },
                 tool_provider: None,
+                fallback_providers: Vec::new(),
                 mcp_servers: std::collections::HashMap::new(),
                 storage: StorageConfig {
                     data_dir: data_dir.clone(),
