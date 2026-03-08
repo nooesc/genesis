@@ -474,6 +474,35 @@ pub enum EvalCommand {
         #[arg(long, help = "Delete invalid files")]
         remove: bool,
     },
+    #[command(about = "Run a multi-step data pipeline: validate → auto-tag → filter → export")]
+    Pipeline {
+        #[arg(help = "Source directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Output directory for processed trajectories")]
+        output: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Remove invalid trajectories during validation")]
+        validate: bool,
+        #[arg(long, help = "Apply auto-tagging")]
+        auto_tag: bool,
+        #[arg(long, help = "Minimum quality score filter (0.0-1.0)")]
+        min_quality: Option<f64>,
+        #[arg(long, help = "Only include successful trajectories")]
+        success_only: bool,
+        #[arg(long, help = "Only include trajectories with this tag")]
+        tag: Option<String>,
+        #[arg(long, help = "Only include trajectories for this model")]
+        model: Option<String>,
+        #[arg(long, help = "Export format: json (default), chatml, or sharegpt")]
+        format: Option<String>,
+        #[arg(long, help = "Build dataset.json manifest in output dir")]
+        manifest: bool,
+        #[arg(long, help = "Maximum number of trajectories to include")]
+        limit: Option<usize>,
+        #[arg(long, help = "Random seed for sampling when limit is set")]
+        seed: Option<u64>,
+    },
     #[command(about = "Random sample of trajectories from a directory")]
     Sample {
         #[arg(help = "Source directory containing trajectory JSON files")]
@@ -1020,6 +1049,25 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 save,
                 recursive,
                 cli.json,
+            ),
+            EvalCommand::Pipeline {
+                dir,
+                output,
+                recursive,
+                validate,
+                auto_tag,
+                min_quality,
+                success_only,
+                tag,
+                model,
+                format,
+                manifest,
+                limit,
+                seed,
+            } => run_eval_pipeline(
+                &dir, &output, recursive, validate, auto_tag,
+                min_quality, success_only, tag.as_deref(), model.as_deref(),
+                format.as_deref(), manifest, limit, seed,
             ),
             EvalCommand::Validate {
                 dir,
@@ -4047,6 +4095,210 @@ fn run_eval_manifest(
     }
 
     Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_eval_pipeline(
+    dir: &str,
+    output: &str,
+    recursive: bool,
+    validate: bool,
+    auto_tag: bool,
+    min_quality: Option<f64>,
+    success_only: bool,
+    tag: Option<&str>,
+    model: Option<&str>,
+    format: Option<&str>,
+    build_manifest: bool,
+    limit: Option<usize>,
+    seed: Option<u64>,
+) -> Result<String, CliError> {
+    std::fs::create_dir_all(output)
+        .map_err(|e| CliError::Other(format!("failed to create {output}: {e}")))?;
+
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut log = Vec::new();
+    log.push(format!("pipeline: {} source files", files.len()));
+
+    // Step 1: Load and optionally validate
+    let mut trajectories: Vec<(std::path::PathBuf, genesis_core::trajectory::Trajectory)> =
+        Vec::new();
+    let mut invalid = 0usize;
+
+    for path in &files {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(_) => {
+                invalid += 1;
+                continue;
+            }
+        };
+        match serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw) {
+            Ok(mut traj) => {
+                if validate
+                    && (traj.session_id.is_empty()
+                        || traj.model.is_empty()
+                        || traj.steps.is_empty())
+                {
+                    invalid += 1;
+                    continue;
+                }
+
+                // Step 2: Auto-tag
+                if auto_tag {
+                    let new_tags = genesis_core::tagger::auto_tag(&traj);
+                    let existing: HashSet<String> = traj.tags.iter().cloned().collect();
+                    for t in new_tags {
+                        if !existing.contains(&t) {
+                            traj.tags.push(t);
+                        }
+                    }
+                    traj.tags.sort();
+                }
+
+                trajectories.push((path.clone(), traj));
+            }
+            Err(_) => {
+                invalid += 1;
+            }
+        }
+    }
+
+    if validate {
+        log.push(format!("validate: {} valid, {invalid} invalid", trajectories.len()));
+    }
+    if auto_tag {
+        log.push(format!("auto-tag: applied to {} trajectories", trajectories.len()));
+    }
+
+    // Step 3: Filter
+    let before_filter = trajectories.len();
+    trajectories.retain(|(_, traj)| {
+        if success_only {
+            if !matches!(
+                traj.outcome,
+                Some(genesis_core::trajectory::TrajectoryOutcome::Success)
+            ) {
+                return false;
+            }
+        }
+        if let Some(t) = tag {
+            if !traj.tags.iter().any(|tag| tag == t) {
+                return false;
+            }
+        }
+        if let Some(m) = model {
+            if !traj.model.contains(m) {
+                return false;
+            }
+        }
+        if let Some(min_q) = min_quality {
+            let score = genesis_core::quality::score(traj).overall;
+            if score < min_q {
+                return false;
+            }
+        }
+        true
+    });
+
+    if trajectories.len() != before_filter {
+        log.push(format!(
+            "filter: {} → {} trajectories",
+            before_filter,
+            trajectories.len()
+        ));
+    }
+
+    // Step 4: Sample/limit
+    if let Some(max) = limit {
+        if trajectories.len() > max {
+            use rand::seq::SliceRandom;
+            let mut rng = match seed {
+                Some(s) => {
+                    use rand::SeedableRng;
+                    rand::rngs::StdRng::seed_from_u64(s)
+                }
+                None => {
+                    use rand::SeedableRng;
+                    rand::rngs::StdRng::from_os_rng()
+                }
+            };
+            trajectories.shuffle(&mut rng);
+            trajectories.truncate(max);
+            log.push(format!("sample: limited to {max} trajectories"));
+        }
+    }
+
+    // Step 5: Write output
+    let output_format = format.unwrap_or("json");
+    match output_format {
+        "json" => {
+            for (_, traj) in &trajectories {
+                let filename = format!(
+                    "{}.json",
+                    sanitize_session_id_for_filename(&traj.session_id)
+                );
+                let dest = std::path::Path::new(output).join(&filename);
+                let json = serde_json::to_string_pretty(traj)?;
+                std::fs::write(&dest, json).map_err(|e| {
+                    CliError::Other(format!("failed to write {}: {e}", dest.display()))
+                })?;
+            }
+            log.push(format!("output: {} JSON files in {output}", trajectories.len()));
+        }
+        "chatml" | "sharegpt" => {
+            let output_file = std::path::Path::new(output).join(format!("dataset.{output_format}.jsonl"));
+            let mut lines = Vec::new();
+            for (original_path, _) in &trajectories {
+                let compressed = load_training_compressed_trajectory(original_path)?;
+                let data = if output_format == "chatml" {
+                    serde_json::json!({
+                        "session_id": compressed.session_id,
+                        "model": compressed.model,
+                        "tags": compressed.tags,
+                        "outcome": compressed.outcome,
+                        "chatml": genesis_core::compress::to_chatml(&compressed),
+                    })
+                } else {
+                    serde_json::json!({
+                        "session_id": compressed.session_id,
+                        "model": compressed.model,
+                        "tags": compressed.tags,
+                        "outcome": compressed.outcome,
+                        "sharegpt": genesis_core::compress::to_sharegpt(&compressed),
+                    })
+                };
+                lines.push(serde_json::to_string(&data)?);
+            }
+            std::fs::write(&output_file, lines.join("\n"))
+                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", output_file.display())))?;
+            log.push(format!(
+                "output: {} records as {output_format} JSONL",
+                trajectories.len()
+            ));
+        }
+        other => {
+            return Err(CliError::Other(format!(
+                "unknown format '{other}', expected json, chatml, or sharegpt"
+            )));
+        }
+    }
+
+    // Step 6: Build manifest
+    if build_manifest && output_format == "json" {
+        let manifest = genesis_core::dataset::build_manifest(
+            "pipeline-output",
+            &log.join("; "),
+            std::path::Path::new(output),
+            false,
+        )
+        .map_err(|e| CliError::Other(format!("failed to build manifest: {e}")))?;
+        genesis_core::dataset::save_manifest(&manifest, std::path::Path::new(output))
+            .map_err(|e| CliError::Other(format!("failed to save manifest: {e}")))?;
+        log.push("manifest: saved dataset.json".to_owned());
+    }
+
+    Ok(log.join("\n"))
 }
 
 fn run_eval_validate(
@@ -9671,6 +9923,104 @@ storage:
         assert!(result.contains("test-ds"));
         assert!(result.contains("files: 1"));
         assert!(result.contains("gpt-4"));
+    }
+
+    #[test]
+    fn parses_eval_pipeline_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "pipeline", "src", "--output", "out",
+            "--validate", "--auto-tag", "--min-quality", "0.5",
+            "--success-only", "--manifest",
+        ])
+        .expect("pipeline should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Pipeline {
+                dir,
+                output,
+                validate,
+                auto_tag,
+                min_quality,
+                success_only,
+                manifest,
+                ..
+            }) => {
+                assert_eq!(dir, "src");
+                assert_eq!(output, "out");
+                assert!(validate);
+                assert!(auto_tag);
+                assert_eq!(min_quality, Some(0.5));
+                assert!(success_only);
+                assert!(manifest);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_pipeline_filters_and_outputs() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let good = serde_json::json!({
+            "session_id": "good", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"},
+                      {"step_index": 1, "timestamp": "t", "action_type": "assistant_message", "content": "hello"}],
+            "outcome": {"type": "success"}, "tags": []
+        });
+        let bad = serde_json::json!({
+            "session_id": "bad", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
+            "outcome": {"type": "failure", "reason": "oops"}, "tags": []
+        });
+        std::fs::write(src.join("good.json"), serde_json::to_string(&good).unwrap()).unwrap();
+        std::fs::write(src.join("bad.json"), serde_json::to_string(&bad).unwrap()).unwrap();
+
+        let result = crate::run_eval_pipeline(
+            src.to_str().unwrap(), out.to_str().unwrap(),
+            false, true, true, None, true, None, None, None, false, None, None,
+        )
+        .expect("pipeline should succeed");
+
+        assert!(result.contains("1 JSON files"));
+        assert!(out.join("good.json").exists());
+        assert!(!out.join("bad.json").exists());
+
+        // Check auto-tagging was applied
+        let output_raw = std::fs::read_to_string(out.join("good.json")).unwrap();
+        let output_traj: serde_json::Value = serde_json::from_str(&output_raw).unwrap();
+        let tags = output_traj["tags"].as_array().unwrap();
+        assert!(!tags.is_empty()); // auto-tagger should have added tags
+    }
+
+    #[test]
+    fn run_eval_pipeline_with_limit() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for i in 0..10 {
+            let t = serde_json::json!({
+                "session_id": format!("s{i}"), "model": "m", "system_prompt_hash": "h",
+                "started_at": "2026-01-01T00:00:00Z",
+                "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
+                "outcome": {"type": "success"}, "tags": []
+            });
+            std::fs::write(src.join(format!("s{i}.json")), serde_json::to_string(&t).unwrap()).unwrap();
+        }
+
+        let result = crate::run_eval_pipeline(
+            src.to_str().unwrap(), out.to_str().unwrap(),
+            false, false, false, None, false, None, None, None, false, Some(3), Some(42),
+        )
+        .expect("pipeline should succeed");
+
+        assert!(result.contains("limited to 3"));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
     }
 
     #[test]
