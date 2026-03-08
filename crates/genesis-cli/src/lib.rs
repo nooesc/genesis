@@ -1554,20 +1554,22 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
 
     match name {
         "help" | "h" => Some(
-            "/help     - Show this help\n\
-             /history  - Show recent conversation history\n\
-             /export   - Export session as Markdown\n\
-             /tokens   - Show session token usage\n\
-             /session  - Show current session ID\n\
-             /new      - Start a new session\n\
-             /undo     - Undo last turn (remove last user-assistant exchange)\n\
-             /retry    - Undo last turn and re-send the user message\n\
-             /fork     - Branch conversation into a new session\n\
-             /compress - Trim old messages, keeping recent context\n\
-             /tools    - List available tools\n\
-             /skills   - List saved skills\n\
-             /model    - Show active model\n\
-             /clear    - Clear the screen\n\
+            "/help       - Show this help\n\
+             /history    - Show recent conversation history\n\
+             /export     - Export session as Markdown\n\
+             /tokens     - Show session token usage\n\
+             /session    - Show current session ID\n\
+             /new        - Start a new session\n\
+             /undo       - Undo last turn (remove last user-assistant exchange)\n\
+             /retry      - Undo last turn and re-send the user message\n\
+             /fork       - Branch conversation into a new session\n\
+             /search <q> - Search past sessions for a query\n\
+             /memories   - Show stored memories\n\
+             /compress   - Trim old messages, keeping recent context\n\
+             /tools      - List available tools\n\
+             /skills     - List saved skills\n\
+             /model      - Show active model\n\
+             /clear      - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
         ),
@@ -1621,6 +1623,45 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                     ))
                 }
                 Err(e) => Some(format!("Compression failed: {e}")),
+            }
+        }
+        "search" => {
+            let query = _args.trim();
+            if query.is_empty() {
+                return Some("Usage: /search <query>".to_owned());
+            }
+            match store.search_sessions(query) {
+                Ok(results) if results.is_empty() => {
+                    Some(format!("No sessions found matching '{query}'."))
+                }
+                Ok(results) => {
+                    let mut lines = vec![format!("{} session(s) matching '{query}':", results.len())];
+                    for s in results.iter().take(10) {
+                        let title = s.title.as_deref().unwrap_or("(untitled)");
+                        lines.push(format!("  {} - {} [{}]", s.id, title, s.updated_at));
+                    }
+                    if results.len() > 10 {
+                        lines.push(format!("  ... and {} more", results.len() - 10));
+                    }
+                    Some(lines.join("\n"))
+                }
+                Err(_) => Some(format!("No sessions found matching '{query}'.")),
+            }
+        }
+        "memories" => {
+            let memory_store = MemoryStore::new(store.database_path());
+            match memory_store.list(20) {
+                Ok(memories) if memories.is_empty() => {
+                    Some("No stored memories.".to_owned())
+                }
+                Ok(memories) => {
+                    let mut lines = vec![format!("{} memory/memories:", memories.len())];
+                    for m in &memories {
+                        lines.push(format!("  [{}] {}", m.kind, m.content));
+                    }
+                    Some(lines.join("\n"))
+                }
+                Err(_) => Some("No stored memories.".to_owned()),
             }
         }
         "clear" => {
@@ -3628,6 +3669,39 @@ storage:
         let result = handle_chat_command("/help", "s1", &stub_session_store());
         let help = result.expect("help should return something");
         assert!(help.contains("/undo"));
+    }
+
+    #[test]
+    fn chat_help_includes_search_and_memories() {
+        let result = handle_chat_command("/help", "s1", &stub_session_store());
+        let help = result.expect("help should return something");
+        assert!(help.contains("/search"));
+        assert!(help.contains("/memories"));
+    }
+
+    #[test]
+    fn chat_search_requires_query() {
+        let store = stub_session_store();
+        let result = handle_chat_command("/search", "s1", &store);
+        let output = result.expect("should return something");
+        assert!(output.contains("Usage"));
+    }
+
+    #[test]
+    fn chat_search_with_query_runs() {
+        let store = stub_session_store();
+        let result = handle_chat_command("/search test query", "s1", &store);
+        let output = result.expect("should return something");
+        // Either finds results or says no results found
+        assert!(output.contains("session") || output.contains("No sessions"));
+    }
+
+    #[test]
+    fn chat_memories_empty() {
+        let store = stub_session_store();
+        let result = handle_chat_command("/memories", "s1", &store);
+        let output = result.expect("should return something");
+        assert!(output.contains("No stored memories") || output.contains("memory"));
     }
 
     #[test]

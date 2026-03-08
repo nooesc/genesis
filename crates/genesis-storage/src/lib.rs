@@ -651,6 +651,11 @@ impl SessionStore {
         }
     }
 
+    /// Returns the database path this store is using.
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
     /// Create a new session record.
     pub fn create_session(
         &self,
