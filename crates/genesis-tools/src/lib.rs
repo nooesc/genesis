@@ -370,12 +370,16 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "search_files".to_owned(),
-                description: "Searches file contents recursively using grep, returning matching lines with file paths and line numbers.".to_owned(),
+                description: "Searches file contents recursively using ripgrep (rg) with grep fallback, returning matching lines with file paths and line numbers.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
-                        "pattern": { "type": "string", "description": "The text pattern to search for (supports basic regex)." },
-                        "path": { "type": "string", "description": "Directory to search in (defaults to current directory)." }
+                        "pattern": { "type": "string", "description": "The text pattern to search for (supports regex)." },
+                        "path": { "type": "string", "description": "Directory to search in (defaults to current directory)." },
+                        "case_insensitive": { "type": "string", "description": "Set to \"true\" for case-insensitive search." },
+                        "file_type": { "type": "string", "description": "Restrict search to a file type (e.g. \"rust\", \"py\", \"js\"). Only supported with ripgrep." },
+                        "glob": { "type": "string", "description": "Glob pattern to filter files (e.g. \"*.rs\", \"src/**/*.ts\"). Only supported with ripgrep." },
+                        "context_lines": { "type": "string", "description": "Number of context lines to show around each match (e.g. \"3\"). Only supported with ripgrep." }
                     },
                     "required": ["pattern"]
                 })),

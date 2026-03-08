@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const MAX_RESULTS: usize = 50;
+const MAX_RESULTS: usize = 100;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 pub struct SearchFilesTool;
@@ -32,35 +32,147 @@ impl ToolHandler for SearchFilesTool {
             });
         }
 
-        // Use grep -rn for recursive search with line numbers
-        let output = Command::new("grep")
-            .args(["-rn", "--include=*", "-m", &MAX_RESULTS.to_string(), pattern, path])
-            .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to run grep: {e}"),
-            })?;
+        let case_insensitive = call
+            .arguments
+            .get("case_insensitive")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let file_type = call.arguments.get("file_type").map(|s| s.as_str());
+        let glob_filter = call.arguments.get("glob").map(|s| s.as_str());
+        let context_lines = call
+            .arguments
+            .get("context_lines")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        // Prefer ripgrep (rg), fall back to grep.
+        let use_rg = which_exists("rg");
+
+        let output = if use_rg {
+            run_ripgrep(
+                pattern,
+                path,
+                case_insensitive,
+                file_type,
+                glob_filter,
+                context_lines,
+            )
+        } else {
+            run_grep(pattern, path, case_insensitive)
+        }
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("search failed: {e}"),
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let content = if stdout.is_empty() {
             format!("no matches found for pattern `{pattern}` in {path}")
-        } else if stdout.len() > MAX_OUTPUT_BYTES {
-            let mut truncated = stdout[..MAX_OUTPUT_BYTES].to_string();
-            truncated.push_str("\n... (output truncated)");
-            truncated
         } else {
-            stdout.into_owned()
+            truncate_output(&stdout)
         };
 
-        let match_count = content.lines().count();
+        let match_count = content
+            .lines()
+            .filter(|l| !l.starts_with("--")) // skip context separator lines
+            .filter(|l| !l.is_empty())
+            .count();
+
+        let tool_name = if use_rg { "rg" } else { "grep" };
 
         Ok(ToolOutput {
             content,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
                 ("match_count".to_owned(), match_count.to_string()),
+                ("search_engine".to_owned(), tool_name.to_owned()),
             ]),
         })
+    }
+}
+
+fn run_ripgrep(
+    pattern: &str,
+    path: &str,
+    case_insensitive: bool,
+    file_type: Option<&str>,
+    glob_filter: Option<&str>,
+    context_lines: usize,
+) -> Result<std::process::Output, String> {
+    let mut cmd = Command::new("rg");
+    cmd.args(["--line-number", "--no-heading", "--color", "never"]);
+    cmd.args(["--max-count", &MAX_RESULTS.to_string()]);
+
+    if case_insensitive {
+        cmd.arg("--ignore-case");
+    }
+
+    if let Some(ft) = file_type {
+        cmd.args(["--type", ft]);
+    }
+
+    if let Some(g) = glob_filter {
+        cmd.args(["--glob", g]);
+    }
+
+    if context_lines > 0 {
+        cmd.args(["-C", &context_lines.to_string()]);
+    }
+
+    cmd.arg(pattern);
+    cmd.arg(path);
+
+    cmd.output().map_err(|e| e.to_string())
+}
+
+fn run_grep(
+    pattern: &str,
+    path: &str,
+    case_insensitive: bool,
+) -> Result<std::process::Output, String> {
+    let mut cmd = Command::new("grep");
+    cmd.args(["-rn", "--include=*"]);
+    cmd.args(["-m", &MAX_RESULTS.to_string()]);
+
+    if case_insensitive {
+        cmd.arg("-i");
+    }
+
+    cmd.arg(pattern);
+    cmd.arg(path);
+
+    cmd.output().map_err(|e| e.to_string())
+}
+
+fn which_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn truncate_output(output: &str) -> String {
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return output.to_owned();
+    }
+
+    // Find a safe UTF-8 boundary.
+    let mut end = MAX_OUTPUT_BYTES;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    // Try to end at a newline for cleaner output.
+    if let Some(last_nl) = output[..end].rfind('\n') {
+        let mut truncated = output[..=last_nl].to_string();
+        truncated.push_str("... (output truncated)");
+        truncated
+    } else {
+        let mut truncated = output[..end].to_string();
+        truncated.push_str("\n... (output truncated)");
+        truncated
     }
 }
 
@@ -143,5 +255,64 @@ mod tests {
 
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn search_files_case_insensitive() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("test.txt"), "Hello World\n").unwrap();
+
+        let tool = SearchFilesTool;
+        let call = ToolCall {
+            name: "search_files".to_owned(),
+            arguments: BTreeMap::from([
+                ("pattern".to_owned(), "hello".to_owned()),
+                ("path".to_owned(), dir.path().display().to_string()),
+                ("case_insensitive".to_owned(), "true".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(output.content.contains("Hello World"));
+    }
+
+    #[test]
+    fn which_exists_finds_common_tools() {
+        // grep should exist on all unix systems
+        assert!(which_exists("grep"));
+        assert!(!which_exists("nonexistent_tool_abc123"));
+    }
+
+    #[test]
+    fn truncate_output_preserves_short_text() {
+        let short = "hello world\n";
+        assert_eq!(truncate_output(short), short);
+    }
+
+    #[test]
+    fn truncate_output_cuts_at_newline() {
+        let long = "a\n".repeat(100_000);
+        let result = truncate_output(&long);
+        assert!(result.len() <= MAX_OUTPUT_BYTES + 50); // allow for suffix
+        assert!(result.ends_with("... (output truncated)"));
+    }
+
+    #[test]
+    fn reports_search_engine_in_metadata() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("test.txt"), "hello\n").unwrap();
+
+        let tool = SearchFilesTool;
+        let call = ToolCall {
+            name: "search_files".to_owned(),
+            arguments: BTreeMap::from([
+                ("pattern".to_owned(), "hello".to_owned()),
+                ("path".to_owned(), dir.path().display().to_string()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        let engine = output.metadata.get("search_engine").unwrap();
+        assert!(engine == "rg" || engine == "grep");
     }
 }

@@ -662,6 +662,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "futures-util",
  "genesis-config",
  "genesis-core",
  "genesis-gateway",
@@ -781,6 +782,7 @@ dependencies = [
 name = "genesis-tools"
 version = "0.1.0"
 dependencies = [
+ "genesis-provider",
  "genesis-storage",
  "genesis-types",
  "reqwest",
@@ -789,6 +791,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
