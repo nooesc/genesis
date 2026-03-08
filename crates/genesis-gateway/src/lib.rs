@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use genesis_core::execution::{
@@ -16,6 +18,7 @@ use genesis_core::execution::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info, info_span, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -23,6 +26,9 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// Shared application state for all request handlers.
 pub struct AppState {
     pub loaded: genesis_config::LoadedConfig,
+    /// Optional API key for gateway authentication.
+    /// When set, all non-health requests must include `Authorization: Bearer <key>`.
+    pub api_key: Option<String>,
 }
 
 /// Request body for the `/chat` endpoint.
@@ -94,11 +100,49 @@ pub struct HealthResponse {
 
 /// Build the axum Router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/health", get(health_handler))
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    // Protected routes (require API key when configured)
+    let protected = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth_middleware,
+        ));
+
+    // Public routes
+    Router::new()
+        .route("/health", get(health_handler))
+        .merge(protected)
+        .layer(cors)
         .with_state(state)
+}
+
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let expected_key = match &state.api_key {
+        Some(key) => key,
+        None => return Ok(next.run(request).await),
+    };
+
+    let auth_header = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(value) if value.strip_prefix("Bearer ").is_some_and(|token| token == expected_key) => {
+            Ok(next.run(request).await)
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
 async fn health_handler() -> Json<HealthResponse> {
@@ -316,7 +360,10 @@ mod tests {
     #[test]
     fn build_router_creates_routes() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = Arc::new(AppState { loaded });
+        let state = Arc::new(AppState {
+            loaded,
+            api_key: None,
+        });
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
     }

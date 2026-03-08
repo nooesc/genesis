@@ -419,7 +419,8 @@ async fn run_serve(
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
 
-    let state = std::sync::Arc::new(AppState { loaded });
+    let api_key = std::env::var("GENESIS_API_KEY").ok();
+    let state = std::sync::Arc::new(AppState { loaded, api_key });
     let router = build_router(state);
 
     let addr = format!("{host}:{port}");
