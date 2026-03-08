@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -174,7 +174,15 @@ pub struct AgentLoop {
     /// Last reported prompt token count from the API. Used for token-aware
     /// context compression.
     last_prompt_tokens: u32,
+    /// Tracks consecutive failures per tool name. When a tool fails
+    /// `STUCK_LOOP_THRESHOLD` times in a row, a system nudge tells the LLM
+    /// to try a different approach.
+    tool_failure_counts: HashMap<String, usize>,
 }
+
+/// Number of consecutive failures for the same tool before injecting a
+/// "try a different approach" nudge.
+const STUCK_LOOP_THRESHOLD: usize = 3;
 
 impl AgentLoop {
     pub fn new(client: ChatClient, tools: ToolRuntime, config: AgentLoopConfig) -> Self {
@@ -215,6 +223,7 @@ impl AgentLoop {
             cost,
             trajectory,
             last_prompt_tokens: 0,
+            tool_failure_counts: HashMap::new(),
         }
     }
 
@@ -353,12 +362,25 @@ impl AgentLoop {
                         let result = sanitize::sanitize_credentials(&result);
                         self.trajectory
                             .record_tool_result(&tc.function.name, &result);
+                        // Track consecutive failures per tool
+                        if result.starts_with("Error:") {
+                            let count = self
+                                .tool_failure_counts
+                                .entry(tc.function.name.clone())
+                                .or_insert(0);
+                            *count += 1;
+                        } else {
+                            self.tool_failure_counts.remove(&tc.function.name);
+                        }
                         if requires_input {
                             clarification = Some(result.clone());
                         }
                         self.messages
                             .push(ChatMessage::tool_result(&tc.id, result));
                     }
+
+                    // Inject stuck-loop nudge if any tool failed too many times
+                    self.maybe_inject_stuck_nudge();
 
                     // If a tool requested user input, pause the agent loop
                     if let Some(question) = clarification {
@@ -552,12 +574,20 @@ impl AgentLoop {
                             on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
+                            if result.starts_with("Error:") {
+                                let count = self.tool_failure_counts.entry(tc.function.name.clone()).or_insert(0);
+                                *count += 1;
+                            } else {
+                                self.tool_failure_counts.remove(&tc.function.name);
+                            }
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
                             }
                             self.messages.push(ChatMessage::tool_result(&tc.id, result));
                         }
+
+                        self.maybe_inject_stuck_nudge();
 
                         if let Some(question) = clarification {
                             self.save_trajectory();
@@ -646,12 +676,20 @@ impl AgentLoop {
                                 on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
+                                if result.starts_with("Error:") {
+                                    let count = self.tool_failure_counts.entry(tc.function.name.clone()).or_insert(0);
+                                    *count += 1;
+                                } else {
+                                    self.tool_failure_counts.remove(&tc.function.name);
+                                }
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded { question: &result });
                                     clarification = Some(result.clone());
                                 }
                                 self.messages.push(ChatMessage::tool_result(&tc.id, result));
                             }
+
+                            self.maybe_inject_stuck_nudge();
 
                             if let Some(question) = clarification {
                                 self.save_trajectory();
@@ -723,6 +761,40 @@ impl AgentLoop {
             self.messages
                 .push(ChatMessage::system(SKILL_CREATION_NUDGE));
         }
+    }
+
+    /// Check if any tool has failed too many times in a row and inject a
+    /// system nudge telling the LLM to try a different approach.
+    fn maybe_inject_stuck_nudge(&mut self) {
+        let stuck_tools: Vec<String> = self
+            .tool_failure_counts
+            .iter()
+            .filter(|(_, count)| **count >= STUCK_LOOP_THRESHOLD)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if stuck_tools.is_empty() {
+            return;
+        }
+
+        for tool in &stuck_tools {
+            warn!(
+                tool_name = tool.as_str(),
+                "tool has failed {} consecutive times, injecting stuck-loop nudge",
+                self.tool_failure_counts[tool]
+            );
+            // Reset the counter so we don't spam nudges
+            self.tool_failure_counts.remove(tool);
+        }
+
+        let tools_list = stuck_tools.join(", ");
+        let nudge = format!(
+            "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
+             Stop retrying the same approach. Consider: (1) using a different tool, \
+             (2) modifying the arguments, (3) breaking the task into smaller steps, or \
+             (4) asking the user for clarification."
+        );
+        self.messages.push(ChatMessage::system(&nudge));
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
@@ -1364,6 +1436,42 @@ mod tests {
 
         agent.maybe_inject_memory_nudge(15);
         assert_eq!(agent.messages().len(), initial_len, "no nudge when disabled");
+    }
+
+    #[test]
+    fn stuck_loop_nudge_fires_after_threshold() {
+        let mut agent = test_agent();
+        let initial_len = agent.messages().len();
+
+        // Simulate 2 failures — not enough to trigger
+        agent.tool_failure_counts.insert("web_search".to_owned(), 2);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(agent.messages().len(), initial_len, "no nudge below threshold");
+
+        // Simulate 3 failures — should trigger
+        agent.tool_failure_counts.insert("web_search".to_owned(), 3);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(agent.messages().len(), initial_len + 1, "nudge injected at threshold");
+        let last = agent.messages().last().unwrap();
+        assert!(last.content_text().unwrap().contains("Stuck loop"));
+        assert!(last.content_text().unwrap().contains("web_search"));
+
+        // Counter should be cleared, so next check shouldn't nudge again
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(agent.messages().len(), initial_len + 1, "no double nudge");
+    }
+
+    #[test]
+    fn tool_success_resets_failure_count() {
+        let mut agent = test_agent();
+
+        // Track 2 failures
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 2);
+        assert_eq!(agent.tool_failure_counts.get("shell_exec"), Some(&2));
+
+        // A success should clear the counter
+        agent.tool_failure_counts.remove("shell_exec");
+        assert!(agent.tool_failure_counts.get("shell_exec").is_none());
     }
 
     #[test]
