@@ -21,7 +21,75 @@ use genesis_storage::{
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
+use rustyline::completion::{Completer, Pair};
+use rustyline::hint::Hinter;
+use rustyline::highlight::Highlighter;
+use rustyline::validate::Validator;
 use thiserror::Error;
+
+/// Slash-command completer for the interactive chat TUI.
+/// Provides tab-completion and inline hints for `/` commands.
+struct SlashCompleter {
+    commands: Vec<&'static str>,
+}
+
+impl SlashCompleter {
+    fn new() -> Self {
+        Self {
+            commands: vec![
+                "/help", "/history", "/export", "/tokens", "/session",
+                "/new", "/undo", "/retry", "/fork", "/search",
+                "/memories", "/compress", "/tools", "/skills", "/model",
+                "/clear",
+            ],
+        }
+    }
+}
+
+impl Completer for SlashCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        if line.starts_with('/') && !line[1..].contains(' ') {
+            let matches: Vec<Pair> = self
+                .commands
+                .iter()
+                .filter(|cmd| cmd.starts_with(line))
+                .map(|cmd| Pair {
+                    display: cmd.to_string(),
+                    replacement: cmd.to_string(),
+                })
+                .collect();
+            Ok((0, matches))
+        } else {
+            Ok((pos, vec![]))
+        }
+    }
+}
+
+impl Hinter for SlashCompleter {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> Option<String> {
+        if line.starts_with('/') && !line[1..].contains(' ') && pos == line.len() {
+            self.commands
+                .iter()
+                .find(|cmd| cmd.starts_with(line) && cmd.len() > line.len())
+                .map(|cmd| cmd[line.len()..].to_owned())
+        } else {
+            None
+        }
+    }
+}
+
+impl Highlighter for SlashCompleter {}
+impl Validator for SlashCompleter {}
+impl rustyline::Helper for SlashCompleter {}
 
 /// Interactive approval handler for CLI mode. Prompts the user via stdin
 /// when a tool requires explicit confirmation (e.g., send_message).
@@ -113,8 +181,19 @@ pub enum Command {
         #[arg(long, default_value = "30", help = "Number of days to analyze (default: 30)")]
         days: u32,
     },
-    #[command(about = "Initialize Genesis (creates config, bootstraps storage, verifies provider)")]
+    #[command(about = "Initialize Genesis — interactive setup wizard (or pass flags for non-interactive)")]
     Init {
+        #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
+        backend: Option<String>,
+        #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
+        model: Option<String>,
+        #[arg(long, help = "Base URL for the provider API")]
+        base_url: Option<String>,
+        #[arg(long, help = "Environment variable holding the API key")]
+        api_key_env: Option<String>,
+    },
+    #[command(about = "Run the interactive setup wizard (alias for `init`)", hide = true)]
+    Setup {
         #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
         backend: Option<String>,
         #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
@@ -713,6 +792,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             model,
             base_url,
             api_key_env,
+        }
+        | Command::Setup {
+            backend,
+            model,
+            base_url,
+            api_key_env,
         } => run_init(cli.config, backend, model, base_url, api_key_env),
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
@@ -837,8 +922,9 @@ async fn run_chat(
         );
     }
 
-    let mut rl = rustyline::DefaultEditor::new()
+    let mut rl = rustyline::Editor::new()
         .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
+    rl.set_helper(Some(SlashCompleter::new()));
 
     let model = &loaded.config.provider.model;
     let mut session_id = session_id;
@@ -1406,6 +1492,183 @@ fn run_init(
     base_url: Option<String>,
     api_key_env: Option<String>,
 ) -> Result<String, CliError> {
+    use std::io::IsTerminal;
+
+    // If no flags provided and stdin is a TTY, run interactive wizard
+    let is_interactive = backend.is_none()
+        && model.is_none()
+        && base_url.is_none()
+        && api_key_env.is_none()
+        && io::stdin().is_terminal();
+
+    if is_interactive {
+        return run_init_wizard(config_path);
+    }
+
+    run_init_non_interactive(config_path, backend, model, base_url, api_key_env)
+}
+
+/// Interactive setup wizard — prompts the user to choose a provider, model,
+/// and verify their API key. Invoked when `genesis init` is run with no flags.
+fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliError> {
+    use genesis_config::{render_example_yaml, update_provider_in_file, AppPaths};
+
+    eprintln!();
+    eprintln!("  Welcome to Genesis setup!");
+    eprintln!("  ========================");
+    eprintln!();
+
+    // Step 1: Choose provider
+    let providers: Vec<(&str, &str, &str)> = vec![
+        ("openai", "OpenAI", "OPENAI_API_KEY"),
+        ("anthropic", "Anthropic (Claude)", "ANTHROPIC_API_KEY"),
+        ("google", "Google (Gemini)", "GEMINI_API_KEY"),
+        ("openrouter", "OpenRouter (200+ models)", "OPENROUTER_API_KEY"),
+        ("local", "Local / Self-hosted (vLLM, Ollama, etc.)", ""),
+        ("compatible", "Custom OpenAI-compatible endpoint", ""),
+    ];
+
+    eprintln!("  Choose your LLM provider:");
+    eprintln!();
+    for (i, (_, label, _)) in providers.iter().enumerate() {
+        eprintln!("    {}. {}", i + 1, label);
+    }
+    eprintln!();
+
+    let provider_idx = prompt_choice("  Provider", providers.len())?;
+    let (backend, _provider_label, default_key_env) = providers[provider_idx];
+    eprintln!();
+
+    // Step 2: Choose model
+    let models = known_models();
+    let backend_models: Vec<_> = models
+        .iter()
+        .filter(|(p, _, _)| p.eq_ignore_ascii_case(backend))
+        .collect();
+
+    let chosen_model = if backend_models.is_empty() {
+        // No known models for this backend — ask for free-form input
+        eprintln!("  Enter the model name:");
+        prompt_line("  Model")?
+    } else {
+        eprintln!("  Choose a model:");
+        eprintln!();
+        for (i, (_, model_id, desc)) in backend_models.iter().enumerate() {
+            eprintln!("    {}. {} — {}", i + 1, model_id, desc);
+        }
+        eprintln!("    {}. Enter a custom model name", backend_models.len() + 1);
+        eprintln!();
+
+        let model_idx = prompt_choice("  Model", backend_models.len() + 1)?;
+        if model_idx < backend_models.len() {
+            backend_models[model_idx].1.to_owned()
+        } else {
+            prompt_line("  Custom model name")?
+        }
+    };
+    eprintln!();
+
+    // Step 3: Base URL (only for local/compatible)
+    let base_url = if backend == "local" || backend == "compatible" {
+        eprintln!("  Enter the API base URL (e.g. http://localhost:11434/v1):");
+        let url = prompt_line("  Base URL")?;
+        eprintln!();
+        Some(url)
+    } else {
+        None
+    };
+
+    // Step 4: API key
+    let api_key_env = if !default_key_env.is_empty() {
+        eprintln!(
+            "  API key env var [default: {}]:",
+            default_key_env
+        );
+        let input = prompt_line_or_default("  Env var", default_key_env)?;
+        eprintln!();
+
+        // Check if the key is actually set
+        if std::env::var(&input).is_ok() {
+            eprintln!("  [ok] ${} is set", input);
+        } else {
+            eprintln!(
+                "  [!!] ${} is NOT set — set it before chatting:",
+                input
+            );
+            eprintln!("       export {}=your-api-key-here", input);
+        }
+        eprintln!();
+
+        Some(input)
+    } else {
+        None
+    };
+
+    // Now run the actual init with the chosen values
+    let mut steps = Vec::new();
+    steps.push(String::new());
+
+    let paths = AppPaths::resolve(config_path.as_deref())?;
+
+    // Create config if needed
+    if !paths.config_path.exists() {
+        if let Some(parent) = paths.config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(CliError::Io)?;
+        }
+        let yaml = render_example_yaml(config_path.as_deref())?;
+        std::fs::write(&paths.config_path, &yaml).map_err(CliError::Io)?;
+        steps.push(format!(
+            "  [+] Created config: {}",
+            paths.config_path.display()
+        ));
+    } else {
+        steps.push(format!(
+            "  [ok] Config exists: {}",
+            paths.config_path.display()
+        ));
+    }
+
+    // Apply choices
+    update_provider_in_file(
+        &paths.config_path,
+        Some(backend),
+        Some(&chosen_model),
+        base_url.as_ref().map(|u| Some(u.as_str())),
+        api_key_env.as_ref().map(|k| Some(k.as_str())),
+    )?;
+    steps.push(format!(
+        "  [+] Provider: {} / {}",
+        backend, chosen_model
+    ));
+
+    // Bootstrap storage
+    std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
+    let storage_result = bootstrap(&paths.database_path)?;
+    steps.push(format!(
+        "  [+] Storage ready: {} (schema v{})",
+        paths.database_path.display(),
+        storage_result.schema_version
+    ));
+
+    let tool_count = genesis_core::default_tool_count();
+    steps.push(String::new());
+    steps.push(format!(
+        "  Genesis is ready! {} tools available.",
+        tool_count
+    ));
+    steps.push("  Run `genesis chat` to start talking to Eve.".to_owned());
+
+    Ok(steps.join("\n"))
+}
+
+/// Non-interactive init — used when CLI flags are provided or stdin is not a TTY.
+fn run_init_non_interactive(
+    config_path: Option<PathBuf>,
+    backend: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+) -> Result<String, CliError> {
     use genesis_config::{render_example_yaml, update_provider_in_file, AppPaths};
 
     let paths = AppPaths::resolve(config_path.as_deref())?;
@@ -1491,6 +1754,61 @@ fn run_init(
     steps.push("Run `genesis chat` to start talking to Eve.".to_owned());
 
     Ok(steps.join("\n"))
+}
+
+/// Prompt the user to enter a number (1-based) and return 0-based index.
+fn prompt_choice(label: &str, max: usize) -> Result<usize, CliError> {
+    loop {
+        eprint!("{} [1-{}]: ", label, max);
+        let _ = io::stderr().flush();
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(CliError::Io)?;
+
+        match input.trim().parse::<usize>() {
+            Ok(n) if n >= 1 && n <= max => return Ok(n - 1),
+            _ => eprintln!("  Please enter a number between 1 and {}.", max),
+        }
+    }
+}
+
+/// Prompt the user for a free-form line of input.
+fn prompt_line(label: &str) -> Result<String, CliError> {
+    loop {
+        eprint!("{}: ", label);
+        let _ = io::stderr().flush();
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(CliError::Io)?;
+
+        let trimmed = input.trim().to_owned();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+        eprintln!("  Please enter a value.");
+    }
+}
+
+/// Prompt the user for a line of input with a default value.
+fn prompt_line_or_default(label: &str, default: &str) -> Result<String, CliError> {
+    eprint!("{} [{}]: ", label, default);
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(CliError::Io)?;
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(trimmed.to_owned())
+    }
 }
 
 async fn run_update() -> Result<String, CliError> {
@@ -2227,7 +2545,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
 /// Read multi-line input from the user. Lines ending with `\` are joined with
 /// a newline and the next line is read with a continuation prompt.
 fn read_multiline_input(
-    rl: &mut rustyline::DefaultEditor,
+    rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>,
     prompt: &str,
     continuation: &str,
 ) -> Option<String> {
@@ -2259,7 +2577,7 @@ fn read_multiline_input(
     Some(buf)
 }
 
-fn read_user_input(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Option<String> {
+fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>, prompt: &str) -> Option<String> {
     match rl.readline(prompt) {
         Ok(line) => {
             if !line.trim().is_empty() {
