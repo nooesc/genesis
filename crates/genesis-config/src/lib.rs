@@ -557,7 +557,9 @@ pub fn update_provider_in_file(
 /// Supported keys:
 ///   profile, provider.backend, provider.model, provider.base_url,
 ///   provider.api_key_env, runtime.max_turns, runtime.max_concurrency,
-///   runtime.allow_destructive_tools, runtime.max_context_messages
+///   runtime.allow_destructive_tools, runtime.max_context_messages,
+///   runtime.thinking_budget, gateway.idle_timeout_minutes,
+///   gateway.daily_reset_hour
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
 
@@ -629,6 +631,48 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .max_context_messages = Some(v);
         }
+        "runtime.thinking_budget" => {
+            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.thinking_budget",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .thinking_budget = Some(v);
+        }
+        "gateway.idle_timeout_minutes" => {
+            let v: u64 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "gateway.idle_timeout_minutes",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .gateway
+                .get_or_insert(GatewayConfig {
+                    idle_timeout_minutes: None,
+                    daily_reset_hour: None,
+                })
+                .idle_timeout_minutes = Some(v);
+        }
+        "gateway.daily_reset_hour" => {
+            let v: u8 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "gateway.daily_reset_hour",
+                value: value.to_owned(),
+            })?;
+            if v >= 24 {
+                return Err(ConfigError::InvalidEnvValue {
+                    name: "gateway.daily_reset_hour",
+                    value: value.to_owned(),
+                });
+            }
+            file_config
+                .gateway
+                .get_or_insert(GatewayConfig {
+                    idle_timeout_minutes: None,
+                    daily_reset_hour: None,
+                })
+                .daily_reset_hour = Some(v);
+        }
         _ => {
             return Err(ConfigError::InvalidEnvValue {
                 name: "key",
@@ -636,7 +680,8 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     "unknown key `{key}`. Supported: profile, provider.backend, provider.model, \
                      provider.base_url, provider.api_key_env, runtime.max_turns, \
                      runtime.max_concurrency, runtime.allow_destructive_tools, \
-                     runtime.max_context_messages"
+                     runtime.max_context_messages, runtime.thinking_budget, \
+                     gateway.idle_timeout_minutes, gateway.daily_reset_hour"
                 ),
             });
         }
@@ -914,6 +959,46 @@ mcp_servers:
         let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
             .expect("reload should work");
         assert_eq!(loaded.config.runtime.max_turns, 50);
+    }
+
+    #[test]
+    fn set_value_in_file_sets_thinking_budget() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_value_in_file(&config_path, "runtime.thinking_budget", "4096")
+            .expect("set should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
+            .expect("reload should work");
+        assert_eq!(loaded.config.runtime.thinking_budget, Some(4096));
+    }
+
+    #[test]
+    fn set_value_in_file_sets_gateway_idle_timeout() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_value_in_file(&config_path, "gateway.idle_timeout_minutes", "120")
+            .expect("set should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
+            .expect("reload should work");
+        let gw = loaded.config.gateway.expect("gateway should be set");
+        assert_eq!(gw.idle_timeout_minutes, Some(120));
+        assert_eq!(gw.daily_reset_hour, None);
+    }
+
+    #[test]
+    fn set_value_in_file_rejects_invalid_reset_hour() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let result = super::set_value_in_file(&config_path, "gateway.daily_reset_hour", "25");
+        assert!(result.is_err());
     }
 
     #[test]
