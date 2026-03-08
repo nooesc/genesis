@@ -13,7 +13,11 @@ genesis-mcp = { path = "../genesis-mcp" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }
+ed25519-dalek.workspace = true
 futures-util.workspace = true
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

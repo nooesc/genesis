@@ -4,6 +4,7 @@
 //! can send messages to Eve and receive responses.
 
 pub mod platforms;
+pub mod verify;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

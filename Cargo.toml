@@ -23,6 +23,10 @@ async-stream = "0.3.6"
 axum = "0.8"
 clap = { version = "4.5.32", features = ["derive"] }
 dirs = "6.0.0"
+ed25519-dalek = { version = "2.1", features = ["std"] }
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
 futures-util = "0.3.31"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }

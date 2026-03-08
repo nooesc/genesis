@@ -18,8 +18,9 @@ use axum::Json;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_discord_signature;
 use crate::AppState;
 
 pub fn bot_token() -> Option<String> {
@@ -106,9 +107,26 @@ struct EditFollowup {
 /// - Message Component (type 3): Button clicks, etc.
 pub async fn interactions_handler(
     State(state): State<Arc<AppState>>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Verify Discord Ed25519 signature if public key is configured
+    if let Some(pub_key) = public_key() {
+        let signature = headers
+            .get("X-Signature-Ed25519")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let timestamp = headers
+            .get("X-Signature-Timestamp")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_discord_signature(&pub_key, timestamp, &body, signature) {
+            warn!("discord webhook signature verification failed");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
     // Parse the interaction
     let interaction: DiscordInteraction =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;

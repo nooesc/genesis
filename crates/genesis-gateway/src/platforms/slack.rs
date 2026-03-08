@@ -11,18 +11,24 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_slack_signature;
 use crate::AppState;
 
 pub fn bot_token() -> Option<String> {
     std::env::var("SLACK_BOT_TOKEN").ok()
+}
+
+fn signing_secret() -> Option<String> {
+    std::env::var("SLACK_SIGNING_SECRET").ok()
 }
 
 // --- Slack API types ---
@@ -66,8 +72,29 @@ struct SlackPostMessage {
 /// - `event_callback` with `app_mention` event: Process @mentions
 pub async fn events_handler(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<SlackEventPayload>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Verify Slack signature if signing secret is configured
+    if let Some(secret) = signing_secret() {
+        let timestamp = headers
+            .get("X-Slack-Request-Timestamp")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let signature = headers
+            .get("X-Slack-Signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if !verify_slack_signature(&secret, timestamp, &body, signature) {
+            warn!("slack webhook signature verification failed");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    let payload: SlackEventPayload =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+
     // Handle URL verification challenge
     if payload.payload_type == "url_verification" {
         let challenge = payload.challenge.unwrap_or_default();
