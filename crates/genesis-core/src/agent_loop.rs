@@ -82,6 +82,9 @@ pub struct AgentLoopConfig {
     pub trajectory_dir: Option<String>,
     /// Session ID for trajectory file naming.
     pub session_id: Option<String>,
+    /// Extended thinking configuration. When set, requests include reasoning
+    /// parameters for providers that support it (e.g. Claude, o1/o3).
+    pub thinking: Option<genesis_provider::ThinkingConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -109,6 +112,7 @@ impl Default for AgentLoopConfig {
             enable_trajectory: false,
             trajectory_dir: None,
             session_id: None,
+            thinking: None,
         }
     }
 }
@@ -278,6 +282,7 @@ impl AgentLoop {
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
+            request.thinking = self.config.thinking.clone();
 
             let response = client.complete(request).await?;
 
@@ -448,6 +453,7 @@ impl AgentLoop {
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
+            request.thinking = self.config.thinking.clone();
 
             match client.complete_stream(request.clone()).await {
                 Ok(mut stream) => {

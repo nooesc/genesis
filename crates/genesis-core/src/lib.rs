@@ -706,6 +706,7 @@ mod tests {
                     max_context_messages: None,
                     budget_limit: None,
                     terminal: None,
+                    thinking_budget: None,
                 },
                 gateway: None,
             },

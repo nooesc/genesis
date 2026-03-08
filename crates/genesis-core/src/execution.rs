@@ -322,6 +322,11 @@ impl<'a> SessionExecutionService<'a> {
                 max_context_messages: self.loaded.config.runtime.max_context_messages,
                 budget_limit: self.loaded.config.runtime.budget_limit,
                 max_concurrency: self.loaded.config.runtime.max_concurrency,
+                thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
+                    genesis_provider::ThinkingConfig {
+                        budget_tokens: Some(budget),
+                    }
+                }),
                 ..AgentLoopConfig::default()
             },
             history,
@@ -904,6 +909,7 @@ mod tests {
                     max_context_messages: None,
                     budget_limit: None,
                     terminal: None,
+                    thinking_budget: None,
                 },
                 gateway: None,
             },

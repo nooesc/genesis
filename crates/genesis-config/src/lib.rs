@@ -88,6 +88,10 @@ pub struct RuntimeConfig {
     /// Terminal backend for shell_exec. Defaults to local shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<TerminalConfig>,
+    /// Extended thinking budget in tokens. When set, providers that support
+    /// reasoning (Claude, o1/o3) will use extended thinking with this budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
 }
 
 /// Terminal backend configuration for shell command execution.
@@ -200,6 +204,8 @@ struct FileRuntimeConfig {
     budget_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal: Option<TerminalConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<u32>,
 }
 
 #[derive(Debug, Error)]
@@ -272,6 +278,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             max_context_messages: None,
             budget_limit: None,
             terminal: None,
+            thinking_budget: None,
         },
         gateway: None,
     })
@@ -413,6 +420,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.terminal.clone()),
+        thinking_budget: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.thinking_budget),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
