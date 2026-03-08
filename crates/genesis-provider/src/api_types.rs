@@ -14,7 +14,15 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+}
+
+/// Options for streaming responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 /// A single message in the chat conversation (OpenAI wire format).
@@ -133,6 +141,9 @@ pub struct ChatCompletionResponse {
 pub struct ChatCompletionChunk {
     pub id: String,
     pub choices: Vec<ChatChunkChoice>,
+    /// Token usage stats included in the final chunk when `stream_options.include_usage` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -161,7 +172,7 @@ pub struct ChatChoice {
 }
 
 /// Token usage statistics.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ChatUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -177,6 +188,7 @@ impl ChatCompletionRequest {
             temperature: None,
             max_tokens: None,
             stream: None,
+            stream_options: None,
             extra_body: None,
         }
     }

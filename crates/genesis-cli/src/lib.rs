@@ -511,6 +511,15 @@ async fn run_chat(
         } else {
             println!("eve> {}", outcome.result.response);
         }
+
+        // Show token usage when available
+        let r = &outcome.result;
+        if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+            println!(
+                "     [{} in / {} out tokens, {} turns, {} tool calls]",
+                r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+            );
+        }
     }
 
     Ok(format!("chat session saved as {session_id}"))

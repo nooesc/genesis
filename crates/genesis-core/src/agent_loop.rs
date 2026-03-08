@@ -269,6 +269,11 @@ impl AgentLoop {
                             finished_naturally = reason != "length";
                         }
 
+                        if let Some(usage) = update.usage {
+                            total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
+                            total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
+                        }
+
                         streamed_tool_calls.extend(update.tool_calls);
                     }
 
@@ -531,6 +536,7 @@ impl AgentLoop {
             temperature: Some(0.3),
             max_tokens: Some(256),
             stream: None,
+            stream_options: None,
             extra_body: None,
         };
 
@@ -564,6 +570,7 @@ struct StreamUpdate {
     contents: Vec<String>,
     tool_calls: Vec<ToolCallEntry>,
     finish_reason: Option<String>,
+    usage: Option<genesis_provider::ChatUsage>,
 }
 
 fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
@@ -587,6 +594,7 @@ fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
         contents,
         tool_calls,
         finish_reason,
+        usage: chunk.usage,
     }
 }
 
@@ -695,11 +703,30 @@ mod tests {
                 },
                 finish_reason: Some("stop".to_owned()),
             }],
+            usage: None,
         });
 
         assert_eq!(update.contents, vec!["hello".to_owned()]);
         assert_eq!(update.finish_reason.as_deref(), Some("stop"));
         assert!(update.tool_calls.is_empty());
+        assert!(update.usage.is_none());
+    }
+
+    #[test]
+    fn collect_stream_update_captures_usage_from_final_chunk() {
+        let update = collect_stream_update(ChatCompletionChunk {
+            id: "chunk-final".to_owned(),
+            choices: vec![],
+            usage: Some(genesis_provider::ChatUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            }),
+        });
+
+        let usage = update.usage.expect("usage should be present");
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
     }
 
     #[test]

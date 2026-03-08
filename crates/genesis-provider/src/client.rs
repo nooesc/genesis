@@ -235,6 +235,7 @@ impl ChatClient {
             request.model = self.model.clone();
         }
         request.stream = Some(true);
+        request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
 
         let body = Self::prepare_body(&mut request)?;
         let response = self.send_with_retry(&body, &request.model).await?;
