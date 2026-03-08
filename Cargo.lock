@@ -539,6 +539,7 @@ dependencies = [
  "genesis-mcp",
  "genesis-provider",
  "genesis-storage",
+ "genesis-tools",
  "genesis-types",
  "rustyline",
  "serde_json",

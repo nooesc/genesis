@@ -1298,12 +1298,15 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
     let (name, _args) = cmd.split_once(' ').unwrap_or((cmd, ""));
 
     match name {
-        "help" => Some(
+        "help" | "h" => Some(
             "/help     - Show this help\n\
              /history  - Show recent conversation history\n\
              /export   - Export session as Markdown\n\
              /tokens   - Show session token usage\n\
              /session  - Show current session ID\n\
+             /tools    - List available tools\n\
+             /skills   - List saved skills\n\
+             /model    - Show active model\n\
              /clear    - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
@@ -1321,7 +1324,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
             let messages = store.load_messages(session_id).ok()?;
             Some(export_session_markdown(session_id, &messages))
         }
-        "tokens" => {
+        "tokens" | "usage" => {
             let session = store.get_session(session_id).ok()??;
             let total = session.total_input_tokens + session.total_output_tokens;
             Some(format!(
@@ -1335,6 +1338,22 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
             print!("\x1b[2J\x1b[H");
             let _ = io::stdout().flush();
             Some(String::new())
+        }
+        "tools" => {
+            let registry = genesis_tools::default_registry();
+            let defs = registry.definitions();
+            let mut lines: Vec<String> = defs
+                .iter()
+                .map(|d| format!("  {} - {}", d.name, d.description))
+                .collect();
+            lines.sort();
+            Some(format!("Available tools ({}):\n{}", defs.len(), lines.join("\n")))
+        }
+        "skills" => {
+            Some("Use `genesis skills list` to see saved skills.".to_owned())
+        }
+        "model" => {
+            Some("Use `genesis model show` to see the active model.".to_owned())
         }
         _ => Some(format!("Unknown command: /{name}. Type /help for available commands.")),
     }
