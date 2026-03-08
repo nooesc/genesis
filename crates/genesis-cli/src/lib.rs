@@ -146,6 +146,8 @@ pub enum Command {
     Doctor {
         #[arg(long, help = "Create the SQLite schema if it does not exist yet")]
         bootstrap_storage: bool,
+        #[arg(long, help = "Verify API connectivity with a test request")]
+        verify: bool,
     },
     #[command(subcommand, about = "Inspect resolved configuration")]
     Config(ConfigCommand),
@@ -502,13 +504,39 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Chat { session_id, resume, prompt, system, last } => {
             run_chat(cli.config, session_id, resume, prompt, system, last).await
         }
-        Command::Doctor { bootstrap_storage } => {
+        Command::Doctor { bootstrap_storage, verify } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
-            if cli.json {
-                Ok(serde_json::to_string_pretty(&report)?)
+            let mut output = if cli.json {
+                serde_json::to_string_pretty(&report)?
             } else {
-                Ok(format_doctor_report(&report))
+                format_doctor_report(&report)
+            };
+
+            // Optional API connectivity verification
+            if verify {
+                output.push_str("\n\nAPI connectivity:\n");
+                let loaded = load(cli.config.as_deref())?;
+                match verify_api_connectivity(&loaded).await {
+                    Ok(latency_ms) => {
+                        output.push_str(&format!(
+                            "  [ok] {} / {} responded in {}ms",
+                            loaded.config.provider.backend,
+                            loaded.config.provider.model,
+                            latency_ms
+                        ));
+                    }
+                    Err(e) => {
+                        output.push_str(&format!(
+                            "  [FAIL] {} / {}: {}",
+                            loaded.config.provider.backend,
+                            loaded.config.provider.model,
+                            e
+                        ));
+                    }
+                }
             }
+
+            Ok(output)
         }
         Command::Config(ConfigCommand::Path) => {
             let loaded = load(cli.config.as_deref())?;
@@ -2343,6 +2371,34 @@ fn run_model(
             }
         }
     }
+}
+
+/// Verify API connectivity by sending a minimal completion request.
+/// Returns round-trip latency in milliseconds on success.
+async fn verify_api_connectivity(loaded: &LoadedConfig) -> Result<u128, String> {
+    use genesis_provider::{ChatCompletionRequest, ChatMessage as ProviderMessage};
+
+    let client = genesis_provider::client_from_config(
+        &loaded.config.provider.backend,
+        &loaded.config.provider.model,
+        loaded.config.provider.base_url.as_deref(),
+        loaded.config.provider.api_key_env.as_deref(),
+    )
+    .map_err(|e| format!("failed to create client: {e}"))?;
+
+    let mut request = ChatCompletionRequest::new(
+        &loaded.config.provider.model,
+        vec![ProviderMessage::user("Say: ok")],
+    );
+    request.max_tokens = Some(5);
+
+    let start = std::time::Instant::now();
+    client
+        .complete(request)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(start.elapsed().as_millis())
 }
 
 /// Well-known models grouped by provider.
