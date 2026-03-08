@@ -4,6 +4,7 @@ members = [
   "crates/genesis-cli",
   "crates/genesis-config",
   "crates/genesis-core",
+  "crates/genesis-gateway",
   "crates/genesis-provider",
   "crates/genesis-storage",
   "crates/genesis-tools",
@@ -18,6 +19,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 async-stream = "0.3.6"
+axum = "0.8"
 clap = { version = "4.5.32", features = ["derive"] }
 dirs = "6.0.0"
 futures-util = "0.3.31"

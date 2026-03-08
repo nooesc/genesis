@@ -1,11 +1,14 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Datelike, Local, Timelike};
 use clap::{Parser, Subcommand};
-use genesis_config::load;
+use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::{AgentError, AgentLoop, AgentLoopConfig};
 use genesis_core::prompt::{agent_name, build_system_prompt};
+use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::{build_default_tool_runtime, build_execution_context_from_loaded, run_doctor};
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
 use genesis_storage::{
@@ -93,6 +96,8 @@ pub enum ScheduleCommand {
     },
     #[command(about = "List schedules")]
     List,
+    #[command(about = "Run the background scheduler daemon")]
+    Run,
     #[command(about = "Delete a schedule by id")]
     Delete {
         #[arg(help = "Schedule id to delete")]
@@ -201,6 +206,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format_schedule_list(&schedules))
                     }
                 }
+                ScheduleCommand::Run => run_schedule_daemon(&loaded).await,
                 ScheduleCommand::Delete { id } => {
                     if !store.delete(&id)? {
                         return Err(CliError::ScheduleNotFound(id));
@@ -241,30 +247,12 @@ async fn run_chat(
         None => (session_id.unwrap_or_else(default_session_id), Vec::new(), false),
     };
 
-    let execution_context =
-        build_execution_context_from_loaded(&loaded, session_id.clone(), DeliveryPlatform::Cli);
-    let tool_runtime = build_default_tool_runtime(&execution_context);
-    let system_prompt = build_system_prompt(
-        &execution_context.plan.profile,
-        &tool_runtime.definitions(),
-        None,
-    );
-
-    let client = client_from_config(
-        &loaded.config.provider.backend,
-        &loaded.config.provider.model,
-        loaded.config.provider.base_url.as_deref(),
-        loaded.config.provider.api_key_env.as_deref(),
-    )?;
-    let mut agent = AgentLoop::with_history(
-        client,
-        tool_runtime,
-        AgentLoopConfig {
-            system_prompt: Some(system_prompt),
-            ..AgentLoopConfig::default()
-        },
+    let mut agent = build_agent_loop(
+        &loaded,
+        session_id.clone(),
+        DeliveryPlatform::Cli,
         existing_messages,
-    );
+    )?;
 
     if !is_resumed {
         store.create_session(&session_id, "cli", None)?;
@@ -315,6 +303,91 @@ async fn run_chat(
     }
 
     Ok(format!("chat session saved as {session_id}"))
+}
+
+async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> {
+    println!(
+        "starting genesis scheduler daemon for provider {} / {}",
+        loaded.config.provider.backend, loaded.config.provider.model
+    );
+
+    loop {
+        let store = ScheduleStore::new(&loaded.config.storage.database_path);
+        let schedules = store.list_enabled()?;
+        let due = check_due_schedules(&schedules, &cron_time_from_datetime(Local::now()));
+
+        for schedule in due {
+            let session_id = default_schedule_session_id();
+            let session_store = SessionStore::new(&loaded.config.storage.database_path);
+            session_store.create_session(
+                &session_id,
+                &schedule.destination,
+                Some(schedule.id.as_str()),
+            )?;
+
+            let result = run_one_off_prompt(
+                loaded,
+                &session_store,
+                session_id.clone(),
+                platform_from_destination(&schedule.destination),
+                &schedule.prompt,
+            )
+            .await?;
+
+            println!(
+                "fired {} -> session {} [{}]: {}",
+                schedule.id, session_id, schedule.destination, result.response
+            );
+        }
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+fn build_agent_loop(
+    loaded: &LoadedConfig,
+    session_id: String,
+    platform: DeliveryPlatform,
+    history: Vec<ChatMessage>,
+) -> Result<AgentLoop, CliError> {
+    let execution_context =
+        build_execution_context_from_loaded(loaded, session_id, platform);
+    let tool_runtime = build_default_tool_runtime(&execution_context);
+    let system_prompt = build_system_prompt(
+        &execution_context.plan.profile,
+        &tool_runtime.definitions(),
+        None,
+    );
+    let client = client_from_config(
+        &loaded.config.provider.backend,
+        &loaded.config.provider.model,
+        loaded.config.provider.base_url.as_deref(),
+        loaded.config.provider.api_key_env.as_deref(),
+    )?;
+
+    Ok(AgentLoop::with_history(
+        client,
+        tool_runtime,
+        AgentLoopConfig {
+            system_prompt: Some(system_prompt),
+            ..AgentLoopConfig::default()
+        },
+        history,
+    ))
+}
+
+async fn run_one_off_prompt(
+    loaded: &LoadedConfig,
+    store: &SessionStore,
+    session_id: String,
+    platform: DeliveryPlatform,
+    prompt: &str,
+) -> Result<genesis_core::agent_loop::AgentResult, CliError> {
+    let mut agent = build_agent_loop(loaded, session_id.clone(), platform, Vec::new())?;
+    let start_index = agent.messages().len();
+    let result = agent.run_turn(prompt).await?;
+    persist_new_messages(store, &session_id, &agent.messages()[start_index..])?;
+    Ok(result)
 }
 
 fn read_user_input(prompt: &str) -> Result<String, CliError> {
@@ -391,8 +464,39 @@ fn default_schedule_id() -> String {
     format!("sched-{timestamp}")
 }
 
+fn default_schedule_session_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("sched-run-{timestamp}")
+}
+
 fn is_exit_command(input: &str) -> bool {
     matches!(input, "exit" | "quit" | "/exit" | "/quit")
+}
+
+fn cron_time_from_datetime<Tz: chrono::TimeZone>(now: DateTime<Tz>) -> CronTime {
+    CronTime {
+        minute: now.minute(),
+        hour: now.hour(),
+        day_of_month: now.day(),
+        month: now.month(),
+        day_of_week: now.weekday().num_days_from_sunday(),
+    }
+}
+
+fn platform_from_destination(destination: &str) -> DeliveryPlatform {
+    match destination.trim().to_ascii_lowercase().as_str() {
+        "telegram" => DeliveryPlatform::Telegram,
+        "discord" => DeliveryPlatform::Discord,
+        "slack" => DeliveryPlatform::Slack,
+        "homeassistant" | "home_assistant" | "home-assistant" => {
+            DeliveryPlatform::HomeAssistant
+        }
+        "whatsapp" => DeliveryPlatform::WhatsApp,
+        _ => DeliveryPlatform::Cli,
+    }
 }
 
 fn format_session_list(sessions: &[SessionSummary]) -> String {
@@ -494,13 +598,18 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_schedule_id, default_session_id, format_schedule_list, format_session_list,
-        is_exit_command, restore_chat_history, run, BootstrapCommand, Cli, Command,
+        build_agent_loop, cron_time_from_datetime, default_schedule_id,
+        default_schedule_session_id, default_session_id, format_schedule_list,
+        format_session_list, is_exit_command, platform_from_destination,
+        restore_chat_history, run, BootstrapCommand, ChatMessage, Cli, Command,
         ScheduleCommand, SessionsCommand, StorageCommand,
     };
+    use chrono::{LocalResult, TimeZone};
     use clap::Parser;
+    use genesis_config::{AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig};
     use genesis_storage::{SessionSummary, StoredMessage, StoredSchedule};
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -570,6 +679,11 @@ mod tests {
     #[test]
     fn default_schedule_id_uses_sched_prefix() {
         assert!(default_schedule_id().starts_with("sched-"));
+    }
+
+    #[test]
+    fn default_schedule_session_id_uses_sched_run_prefix() {
+        assert!(default_schedule_session_id().starts_with("sched-run-"));
     }
 
     #[tokio::test]
@@ -675,6 +789,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parses_schedule_run_command() {
+        let cli = Cli::try_parse_from(["genesis", "schedule", "run"])
+            .expect("schedule run command should parse");
+
+        match cli.command {
+            Command::Schedule(ScheduleCommand::Run) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn parses_schedule_delete_command() {
         let cli = Cli::try_parse_from(["genesis", "schedule", "delete", "sched-123"])
             .expect("schedule delete command should parse");
@@ -685,6 +810,74 @@ mod tests {
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cron_time_from_datetime_maps_fields_correctly() {
+        let dt = match chrono::FixedOffset::east_opt(0)
+            .expect("offset should build")
+            .with_ymd_and_hms(2026, 3, 8, 14, 5, 0)
+        {
+            LocalResult::Single(value) => value,
+            other => panic!("unexpected datetime construction result: {other:?}"),
+        };
+
+        let cron_time = cron_time_from_datetime(dt);
+        assert_eq!(cron_time.minute, 5);
+        assert_eq!(cron_time.hour, 14);
+        assert_eq!(cron_time.day_of_month, 8);
+        assert_eq!(cron_time.month, 3);
+        assert_eq!(cron_time.day_of_week, 0);
+    }
+
+    #[test]
+    fn platform_from_destination_defaults_to_cli() {
+        assert!(matches!(platform_from_destination("cli"), genesis_types::DeliveryPlatform::Cli));
+        assert!(matches!(
+            platform_from_destination("slack"),
+            genesis_types::DeliveryPlatform::Slack
+        ));
+    }
+
+    #[test]
+    fn build_agent_loop_preserves_prior_history() {
+        let loaded = LoadedConfig {
+            config: GenesisConfig {
+                schema_version: 1,
+                profile: "operator".to_owned(),
+                provider: ProviderConfig {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1-mini".to_owned(),
+                    base_url: Some("http://localhost:8000/v1".to_owned()),
+                    api_key_env: None,
+                },
+                storage: StorageConfig {
+                    data_dir: PathBuf::from("/tmp/genesis"),
+                    database_path: PathBuf::from("/tmp/genesis/genesis.db"),
+                },
+                runtime: RuntimeConfig {
+                    max_concurrency: 4,
+                    allow_destructive_tools: false,
+                },
+            },
+            paths: AppPaths {
+                config_path: PathBuf::from("/tmp/genesis/config.yaml"),
+                data_dir: PathBuf::from("/tmp/genesis"),
+                database_path: PathBuf::from("/tmp/genesis/genesis.db"),
+            },
+        };
+
+        let agent = build_agent_loop(
+            &loaded,
+            "session-1".to_owned(),
+            genesis_types::DeliveryPlatform::Cli,
+            vec![ChatMessage::user("hello")],
+        )
+        .expect("agent loop should build");
+
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages()[0].role, "system");
+        assert_eq!(agent.messages()[1].content.as_deref(), Some("hello"));
     }
 
     #[tokio::test]
