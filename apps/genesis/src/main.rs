@@ -21,10 +21,21 @@ fn init_tracing() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .try_init();
+    let use_json = std::env::var("GENESIS_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    if use_json {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .compact()
+            .try_init();
+    }
     tracing::debug!("tracing initialized");
 }

@@ -91,6 +91,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Optional per-IP rate limiter.
     pub rate_limiter: Option<RateLimiter>,
+    /// Timestamp when the gateway started (for uptime reporting).
+    pub started_at: std::time::Instant,
 }
 
 impl AppState {
@@ -106,6 +108,7 @@ impl AppState {
             mcp,
             http_client: reqwest::Client::new(),
             rate_limiter: rate_limit_rpm.map(RateLimiter::new),
+            started_at: std::time::Instant::now(),
         }
     }
 }
@@ -174,6 +177,9 @@ pub struct StreamErrorResponse {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub uptime_seconds: u64,
+    pub model: String,
+    pub mcp_servers: usize,
 }
 
 /// Build the axum Router with all routes.
@@ -294,10 +300,23 @@ async fn rate_limit_middleware(
     }
 }
 
-async fn health_handler() -> Json<HealthResponse> {
+async fn health_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<HealthResponse> {
+    let mcp_count = match &state.mcp {
+        Some(mcp) => mcp.server_count().await,
+        None => 0,
+    };
     Json(HealthResponse {
         status: "ok".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        model: format!(
+            "{}/{}",
+            state.loaded.config.provider.backend,
+            state.loaded.config.provider.model
+        ),
+        mcp_servers: mcp_count,
     })
 }
 
@@ -489,9 +508,14 @@ mod tests {
         let resp = HealthResponse {
             status: "ok".to_owned(),
             version: "0.1.0".to_owned(),
+            uptime_seconds: 42,
+            model: "openai/gpt-4.1-mini".to_owned(),
+            mcp_servers: 0,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"status\":\"ok\""));
+        assert!(json.contains("\"uptime_seconds\":42"));
+        assert!(json.contains("\"model\":\"openai/gpt-4.1-mini\""));
     }
 
     #[test]
