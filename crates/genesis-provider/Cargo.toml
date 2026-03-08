@@ -5,6 +5,8 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+async-stream.workspace = true
+futures-util.workspace = true
 genesis-types = { path = "../genesis-types" }
 reqwest.workspace = true
 serde.workspace = true

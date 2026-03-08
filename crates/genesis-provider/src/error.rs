@@ -12,4 +12,6 @@ pub enum ProviderError {
     MissingApiKey { env_var: String },
     #[error("failed to serialize request: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("stream decode error: {0}")]
+    StreamDecode(String),
 }

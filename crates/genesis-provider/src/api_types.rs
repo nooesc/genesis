@@ -12,6 +12,8 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
 }
 
@@ -126,6 +128,30 @@ pub struct ChatCompletionResponse {
     pub usage: Option<ChatUsage>,
 }
 
+/// OpenAI-compatible streaming chat chunk.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub choices: Vec<ChatChunkChoice>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ChatChunkChoice {
+    pub index: u32,
+    pub delta: ChatChunkDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ChatChunkDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallEntry>>,
+}
+
 /// A single choice in the response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatChoice {
@@ -150,6 +176,7 @@ impl ChatCompletionRequest {
             tools: Vec::new(),
             temperature: None,
             max_tokens: None,
+            stream: None,
             extra_body: None,
         }
     }
@@ -274,6 +301,27 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "echo");
         assert_eq!(tool_calls[0].id, "call_abc");
+    }
+
+    #[test]
+    fn streaming_chunk_deserializes_delta_content() {
+        let raw = r#"{
+            "id": "chatcmpl-chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": "Hel"
+                },
+                "finish_reason": null
+            }]
+        }"#;
+
+        let chunk: ChatCompletionChunk =
+            serde_json::from_str(raw).expect("streaming chunk should deserialize");
+        assert_eq!(chunk.id, "chatcmpl-chunk");
+        assert_eq!(chunk.choices[0].delta.role.as_deref(), Some("assistant"));
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hel"));
     }
 
     #[test]

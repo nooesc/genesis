@@ -4,10 +4,11 @@ mod error;
 mod resolve;
 
 pub use api_types::{
-    ChatCompletionRequest, ChatCompletionResponse, ChatChoice, ChatMessage, ChatTool,
-    ChatToolFunction, ChatUsage, FunctionCall, ToolCallEntry,
+    ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, ChatChoice, ChatMessage, ChatTool, ChatToolFunction, ChatUsage,
+    FunctionCall, ToolCallEntry,
 };
-pub use client::ChatClient;
+pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
 pub use resolve::{resolve, ResolvedProvider};
 
