@@ -52,6 +52,8 @@ pub enum Command {
     Storage(StorageCommand),
     #[command(subcommand, about = "Inspect recent saved sessions")]
     Sessions(SessionsCommand),
+    #[command(about = "List all available tools")]
+    Tools,
     #[command(subcommand, about = "Manage scheduled prompts")]
     Schedule(ScheduleCommand),
     #[command(about = "Start the HTTP API server")]
@@ -110,6 +112,13 @@ pub enum BootstrapCommand {
 pub enum SessionsCommand {
     #[command(about = "List recent sessions")]
     List,
+    #[command(about = "Show messages from a session")]
+    Show {
+        #[arg(help = "Session ID to display")]
+        id: String,
+        #[arg(long, default_value = "50", help = "Max messages to display")]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,16 +204,39 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(format_bootstrap_report(&report))
             }
         }
-        Command::Sessions(SessionsCommand::List) => {
+        Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
             let store = SessionStore::new(&loaded.config.storage.database_path);
-            let sessions = store.list_recent_sessions(20)?;
-            if cli.json {
-                Ok(serde_json::to_string_pretty(&sessions)?)
-            } else {
-                Ok(format_session_list(&sessions))
+
+            match sessions_command {
+                SessionsCommand::List => {
+                    let sessions = store.list_recent_sessions(20)?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&sessions)?)
+                    } else {
+                        Ok(format_session_list(&sessions))
+                    }
+                }
+                SessionsCommand::Show { id, limit } => {
+                    let session = store
+                        .get_session(&id)?
+                        .ok_or_else(|| CliError::SessionNotFound(id.clone()))?;
+                    let messages = store.load_messages(&id)?;
+                    let display_messages = if messages.len() > limit {
+                        &messages[messages.len() - limit..]
+                    } else {
+                        &messages
+                    };
+
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&display_messages)?)
+                    } else {
+                        Ok(format_session_messages(&session.id, display_messages))
+                    }
+                }
             }
         }
+        Command::Tools => run_tools(cli.config, cli.json),
         Command::Schedule(schedule_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -399,6 +431,27 @@ async fn run_serve(
     Ok("server stopped".to_owned())
 }
 
+fn run_tools(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    let ctx = genesis_core::build_execution_context_from_loaded(
+        &loaded,
+        "tools-list".to_owned(),
+        DeliveryPlatform::Cli,
+    );
+    let runtime = genesis_core::build_default_tool_runtime(&ctx);
+    let defs = runtime.definitions();
+
+    if json {
+        Ok(serde_json::to_string_pretty(&defs)?)
+    } else {
+        let mut lines = vec![format!("genesis tools ({} registered)", defs.len())];
+        for def in &defs {
+            lines.push(format!("  {:<20} {}", def.name, def.description));
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
 fn run_model(
     config_path: Option<PathBuf>,
     command: ModelCommand,
@@ -522,6 +575,24 @@ fn format_session_list(sessions: &[SessionSummary]) -> String {
     lines.join("\n")
 }
 
+fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+    if messages.is_empty() {
+        return format!("session {session_id}: no messages");
+    }
+
+    let mut lines = vec![format!("session {session_id} ({} messages)", messages.len())];
+    for msg in messages {
+        let content = msg.content.as_deref().unwrap_or("[no content]");
+        let truncated = if content.len() > 200 {
+            format!("{}...", &content[..200])
+        } else {
+            content.to_owned()
+        };
+        lines.push(format!("[{}] {}: {}", msg.created_at, msg.role, truncated));
+    }
+    lines.join("\n")
+}
+
 fn format_created_schedule(schedule: &StoredSchedule) -> String {
     format!(
         "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ncreated_at: {}",
@@ -608,8 +679,8 @@ mod tests {
     use super::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, format_schedule_list,
-        format_session_list, is_exit_command, run, BootstrapCommand, Cli, Command,
-        ModelCommand, ScheduleCommand, SessionsCommand, StorageCommand,
+        format_session_list, format_session_messages, is_exit_command, run, BootstrapCommand,
+        Cli, Command, ModelCommand, ScheduleCommand, SessionsCommand, StorageCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -1015,5 +1086,76 @@ storage:
             serde_json::from_str(&output).expect("output should be valid json");
         assert_eq!(parsed["backend"], "anthropic");
         assert_eq!(parsed["model"], "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn parses_tools_command() {
+        let cli = Cli::try_parse_from(["genesis", "tools"])
+            .expect("tools command should parse");
+        assert!(matches!(cli.command, Command::Tools));
+    }
+
+    #[tokio::test]
+    async fn tools_command_lists_registered_tools() {
+        let output = run(Cli {
+            config: None,
+            json: false,
+            command: Command::Tools,
+        })
+        .await
+        .expect("tools command should succeed");
+
+        assert!(output.contains("genesis tools"));
+        assert!(output.contains("echo"));
+        assert!(output.contains("user_observe"));
+    }
+
+    #[test]
+    fn parses_sessions_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "show", "session-42"])
+            .expect("sessions show command should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Show { id, limit }) => {
+                assert_eq!(id, "session-42");
+                assert_eq!(limit, 50);
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_session_messages_renders_history() {
+        let messages = vec![genesis_storage::StoredMessage {
+            id: 1,
+            session_id: "s-1".to_owned(),
+            role: "user".to_owned(),
+            content: Some("hello".to_owned()),
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: "2026-03-08 12:00:00".to_owned(),
+        }];
+
+        let output = format_session_messages("s-1", &messages);
+        assert!(output.contains("session s-1"));
+        assert!(output.contains("[2026-03-08 12:00:00] user: hello"));
+    }
+
+    #[test]
+    fn format_session_messages_truncates_long_content() {
+        let long_content = "a".repeat(300);
+        let messages = vec![genesis_storage::StoredMessage {
+            id: 1,
+            session_id: "s-1".to_owned(),
+            role: "assistant".to_owned(),
+            content: Some(long_content),
+            tool_call_id: None,
+            tool_calls_json: None,
+            created_at: "2026-03-08 12:00:00".to_owned(),
+        }];
+
+        let output = format_session_messages("s-1", &messages);
+        assert!(output.contains("..."));
+        assert!(output.len() < 400);
     }
 }
