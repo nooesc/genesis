@@ -650,6 +650,186 @@ impl SessionStore {
     }
 }
 
+/// A persisted scheduled job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSchedule {
+    pub id: String,
+    pub cron_expression: String,
+    pub destination: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+/// Schedule persistence layer.
+pub struct ScheduleStore {
+    database_path: PathBuf,
+}
+
+impl ScheduleStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Create a new scheduled job.
+    pub fn create(
+        &self,
+        id: &str,
+        cron_expression: &str,
+        destination: &str,
+        prompt: &str,
+    ) -> Result<StoredSchedule, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO schedules (id, cron_expression, destination, prompt, enabled, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, CURRENT_TIMESTAMP)",
+                params![id, cron_expression, destination, prompt],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        self.get(id)?
+            .ok_or_else(|| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            })
+    }
+
+    /// Get a schedule by ID.
+    pub fn get(&self, id: &str) -> Result<Option<StoredSchedule>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                 FROM schedules WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(StoredSchedule {
+                        id: row.get(0)?,
+                        cron_expression: row.get(1)?,
+                        destination: row.get(2)?,
+                        prompt: row.get(3)?,
+                        enabled: row.get::<_, i64>(4)? != 0,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// List all enabled schedules.
+    pub fn list_enabled(&self) -> Result<Vec<StoredSchedule>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                 FROM schedules WHERE enabled = 1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let schedules = stmt
+            .query_map([], |row| {
+                Ok(StoredSchedule {
+                    id: row.get(0)?,
+                    cron_expression: row.get(1)?,
+                    destination: row.get(2)?,
+                    prompt: row.get(3)?,
+                    enabled: row.get::<_, i64>(4)? != 0,
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(schedules)
+    }
+
+    /// List all schedules (enabled and disabled).
+    pub fn list_all(&self) -> Result<Vec<StoredSchedule>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                 FROM schedules
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let schedules = stmt
+            .query_map([], |row| {
+                Ok(StoredSchedule {
+                    id: row.get(0)?,
+                    cron_expression: row.get(1)?,
+                    destination: row.get(2)?,
+                    prompt: row.get(3)?,
+                    enabled: row.get::<_, i64>(4)? != 0,
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(schedules)
+    }
+
+    /// Enable or disable a schedule.
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows_changed = connection
+            .execute(
+                "UPDATE schedules SET enabled = ?2 WHERE id = ?1",
+                params![id, enabled as i64],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows_changed > 0)
+    }
+
+    /// Delete a schedule by ID.
+    pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows_changed = connection
+            .execute("DELETE FROM schedules WHERE id = ?1", params![id])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows_changed > 0)
+    }
+}
+
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
     Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
@@ -839,6 +1019,56 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "s-3");
+    }
+
+    #[test]
+    fn schedule_store_creates_and_retrieves_schedule() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let schedule_store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        let schedule = schedule_store
+            .create("sched-1", "*/5 * * * *", "cli", "run diagnostics")
+            .expect("create should work");
+
+        assert_eq!(schedule.id, "sched-1");
+        assert_eq!(schedule.cron_expression, "*/5 * * * *");
+        assert_eq!(schedule.destination, "cli");
+        assert_eq!(schedule.prompt, "run diagnostics");
+        assert!(schedule.enabled);
+
+        let fetched = schedule_store
+            .get("sched-1")
+            .expect("get should work")
+            .expect("schedule should exist");
+        assert_eq!(fetched.id, "sched-1");
+    }
+
+    #[test]
+    fn schedule_store_lists_enabled_only() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        store.create("s1", "*/5 * * * *", "cli", "job1").unwrap();
+        store.create("s2", "0 * * * *", "cli", "job2").unwrap();
+        store.set_enabled("s2", false).unwrap();
+
+        let enabled = store.list_enabled().expect("list should work");
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].id, "s1");
+
+        let all = store.list_all().expect("list_all should work");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn schedule_store_deletes_schedule() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        store.create("s1", "*/5 * * * *", "cli", "job1").unwrap();
+        assert!(store.delete("s1").unwrap());
+        assert!(store.get("s1").unwrap().is_none());
+        assert!(!store.delete("s1").unwrap()); // already deleted
     }
 
     #[test]
