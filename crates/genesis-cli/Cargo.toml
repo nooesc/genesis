@@ -9,6 +9,7 @@ axum.workspace = true
 base64.workspace = true
 chrono = { version = "0.4.40", features = ["clock"] }
 clap.workspace = true
+futures-util.workspace = true
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
 genesis-gateway = { path = "../genesis-gateway" }
