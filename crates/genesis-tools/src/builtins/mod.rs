@@ -1,5 +1,6 @@
 pub mod clarify;
 pub mod docker;
+pub mod export;
 pub mod fs;
 pub mod memory;
 pub mod patch;
@@ -12,3 +13,4 @@ pub mod subagent;
 pub mod todo;
 pub mod user_model;
 pub mod web;
+pub mod web_search;

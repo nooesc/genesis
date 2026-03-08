@@ -639,6 +639,39 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::clarify::ClarifyTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "web_search".to_owned(),
+                description: "Searches the web and returns relevant results. Uses Brave Search API when BRAVE_API_KEY is set, otherwise falls back to DuckDuckGo.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "The search query." },
+                        "count": { "type": "integer", "description": "Number of results to return (default: 5, max: 10)." }
+                    },
+                    "required": ["query"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::web_search::WebSearchTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "session_export".to_owned(),
+                description: "Exports a conversation session to Markdown or JSON format. Can write to a file or return the content directly.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "ID of the session to export. Defaults to current session." },
+                        "format": { "type": "string", "description": "Export format: 'markdown' (default) or 'json'." },
+                        "path": { "type": "string", "description": "Optional file path to write the export to. If omitted, content is returned directly." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::export::SessionExportTool,
         );
     registry
 }
@@ -719,7 +752,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 27);
+        assert_eq!(definitions.len(), 29);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
