@@ -155,6 +155,17 @@ pub enum Command {
         #[arg(long, help = "Maximum number of prompts to run concurrently")]
         concurrency: Option<usize>,
     },
+    #[command(about = "Compress a trajectory JSON file for training/export")]
+    Compress {
+        #[arg(long, help = "Input trajectory JSON file")]
+        input: String,
+        #[arg(long, help = "Optional output file path; writes to stdout when omitted")]
+        output: Option<String>,
+        #[arg(long, help = "Compression level: light, medium, or heavy")]
+        level: Option<String>,
+        #[arg(long, help = "Output format: json, sharegpt, or chatml")]
+        format: Option<String>,
+    },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
     #[command(subcommand, about = "Inspect and manage stored memories")]
@@ -728,6 +739,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             max_turns,
             concurrency,
         } => run_batch(cli.config, input, output, model, max_turns, concurrency).await,
+        Command::Compress {
+            input,
+            output,
+            level,
+            format,
+        } => run_compress(input, output, level, format),
         Command::Update => run_update().await,
         Command::Memory(memory_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1291,6 +1308,80 @@ fn parse_batch_input_line(line: &str) -> Result<BatchInputLine, String> {
         .unwrap_or_default();
 
     Ok(BatchInputLine { prompt, tags })
+}
+
+fn run_compress(
+    input: String,
+    output: Option<String>,
+    level: Option<String>,
+    format: Option<String>,
+) -> Result<String, CliError> {
+    let level = parse_compression_level(level.as_deref())?;
+    let format = parse_compression_format(format.as_deref())?;
+
+    let raw = std::fs::read_to_string(&input)
+        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", input)))?;
+    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("invalid trajectory JSON in {}: {e}", input)))?;
+
+    let compressed = genesis_core::compress::compress(&trajectory, level);
+    let rendered = match format {
+        CompressionFormat::Json => serde_json::to_string_pretty(&compressed)?,
+        CompressionFormat::ShareGpt => {
+            serde_json::to_string_pretty(&genesis_core::compress::to_sharegpt(&compressed))?
+        }
+        CompressionFormat::ChatMl => genesis_core::compress::to_chatml(&compressed),
+    };
+
+    match output {
+        Some(path) => {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        CliError::Other(format!(
+                            "failed to create parent directory for {}: {e}",
+                            path
+                        ))
+                    })?;
+                }
+            }
+            std::fs::write(&path, rendered)
+                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", path)))?;
+            Ok(format!("wrote compressed trajectory to {path}"))
+        }
+        None => Ok(rendered),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompressionFormat {
+    Json,
+    ShareGpt,
+    ChatMl,
+}
+
+fn parse_compression_level(
+    raw: Option<&str>,
+) -> Result<genesis_core::compress::CompressionLevel, CliError> {
+    match raw.unwrap_or("medium").trim().to_ascii_lowercase().as_str() {
+        "light" => Ok(genesis_core::compress::CompressionLevel::Light),
+        "medium" => Ok(genesis_core::compress::CompressionLevel::Medium),
+        "heavy" => Ok(genesis_core::compress::CompressionLevel::Heavy),
+        other => Err(CliError::Other(format!(
+            "unknown compression level '{other}', expected light, medium, or heavy"
+        ))),
+    }
+}
+
+fn parse_compression_format(raw: Option<&str>) -> Result<CompressionFormat, CliError> {
+    match raw.unwrap_or("json").trim().to_ascii_lowercase().as_str() {
+        "json" => Ok(CompressionFormat::Json),
+        "sharegpt" => Ok(CompressionFormat::ShareGpt),
+        "chatml" => Ok(CompressionFormat::ChatMl),
+        other => Err(CliError::Other(format!(
+            "unknown compression format '{other}', expected json, sharegpt, or chatml"
+        ))),
+    }
 }
 
 fn run_init(
@@ -2838,7 +2929,8 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        context_template, parse_batch_input_line,
+        context_template, parse_batch_input_line, parse_compression_format,
+        parse_compression_level,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, export_session_markdown,
         format_insights, format_memory_list, format_schedule_list, format_session_list,
@@ -4117,6 +4209,80 @@ storage:
             parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
         assert_eq!(parsed.prompt, "hello");
         assert!(parsed.tags.is_empty());
+    }
+
+    #[test]
+    fn parses_compress_command_minimal() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "compress",
+            "--input",
+            "trajectory.json",
+        ])
+        .expect("compress should parse");
+
+        match cli.command {
+            Command::Compress {
+                input,
+                output,
+                level,
+                format,
+            } => {
+                assert_eq!(input, "trajectory.json");
+                assert!(output.is_none());
+                assert!(level.is_none());
+                assert!(format.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compress_command_with_options() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "compress",
+            "--input",
+            "trajectory.json",
+            "--output",
+            "out/sharegpt.json",
+            "--level",
+            "heavy",
+            "--format",
+            "sharegpt",
+        ])
+        .expect("compress with options should parse");
+
+        match cli.command {
+            Command::Compress {
+                input,
+                output,
+                level,
+                format,
+            } => {
+                assert_eq!(input, "trajectory.json");
+                assert_eq!(output.as_deref(), Some("out/sharegpt.json"));
+                assert_eq!(level.as_deref(), Some("heavy"));
+                assert_eq!(format.as_deref(), Some("sharegpt"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_compression_level_defaults_to_medium() {
+        assert!(matches!(
+            parse_compression_level(None).expect("default level should parse"),
+            genesis_core::compress::CompressionLevel::Medium
+        ));
+    }
+
+    #[test]
+    fn parse_compression_format_defaults_to_json() {
+        assert!(matches!(
+            parse_compression_format(None).expect("default format should parse"),
+            super::CompressionFormat::Json
+        ));
     }
 
     #[test]
