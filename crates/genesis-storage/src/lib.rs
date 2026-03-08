@@ -363,6 +363,15 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (platform, code)
             );
+            CREATE TABLE IF NOT EXISTS channels (
+                platform TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                channel_name TEXT NOT NULL,
+                channel_type TEXT NOT NULL DEFAULT 'channel',
+                is_member INTEGER NOT NULL DEFAULT 0,
+                cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, channel_id)
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
                 session_id UNINDEXED,
                 content
@@ -2969,6 +2978,153 @@ impl PairingStore {
                 })?
         };
         Ok(rows)
+    }
+}
+
+// ChannelStore — cached platform channel directory for send_message discovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CachedChannel {
+    pub platform: String,
+    pub channel_id: String,
+    pub channel_name: String,
+    pub channel_type: String,
+    pub is_member: bool,
+    pub cached_at: String,
+}
+
+pub struct ChannelStore {
+    database_path: PathBuf,
+}
+
+impl ChannelStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// List cached channels, optionally filtered by platform.
+    pub fn list(
+        &self,
+        platform: Option<&str>,
+    ) -> Result<Vec<CachedChannel>, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let (sql, param): (&str, Option<&str>) = if platform.is_some() {
+            (
+                "SELECT platform, channel_id, channel_name, channel_type, is_member, cached_at
+                 FROM channels WHERE platform = ?1
+                 ORDER BY channel_name",
+                platform,
+            )
+        } else {
+            (
+                "SELECT platform, channel_id, channel_name, channel_type, is_member, cached_at
+                 FROM channels ORDER BY platform, channel_name",
+                None,
+            )
+        };
+
+        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        let row_mapper = |row: &rusqlite::Row| {
+            Ok(CachedChannel {
+                platform: row.get(0)?,
+                channel_id: row.get(1)?,
+                channel_name: row.get(2)?,
+                channel_type: row.get(3)?,
+                is_member: row.get::<_, i64>(4)? != 0,
+                cached_at: row.get(5)?,
+            })
+        };
+
+        let channels: Vec<CachedChannel> = if let Some(p) = param {
+            stmt.query_map(params![p], row_mapper)
+        } else {
+            stmt.query_map([], row_mapper)
+        }
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        Ok(channels)
+    }
+
+    /// Upsert a batch of channels for a platform, replacing stale entries.
+    pub fn upsert_channels(
+        &self,
+        platform: &str,
+        channels: &[CachedChannel],
+    ) -> Result<usize, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Clear old entries for this platform before inserting fresh data.
+        connection
+            .execute(
+                "DELETE FROM channels WHERE platform = ?1",
+                params![platform],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut count = 0usize;
+        for ch in channels {
+            connection
+                .execute(
+                    "INSERT INTO channels (platform, channel_id, channel_name, channel_type, is_member, cached_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)",
+                    params![
+                        platform,
+                        ch.channel_id,
+                        ch.channel_name,
+                        ch.channel_type,
+                        ch.is_member as i64,
+                    ],
+                )
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    /// Check if channels for a platform are cached and fresh (within max_age_secs).
+    pub fn is_fresh(
+        &self,
+        platform: &str,
+        max_age_secs: i64,
+    ) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let fresh: bool = connection
+            .query_row(
+                "SELECT COUNT(*) FROM channels
+                 WHERE platform = ?1
+                   AND CAST((julianday('now') - julianday(cached_at)) * 86400 AS INTEGER) < ?2",
+                params![platform, max_age_secs],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            > 0;
+        Ok(fresh)
     }
 }
 

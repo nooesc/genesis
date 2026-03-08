@@ -827,7 +827,7 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "send_message".to_owned(),
-                description: "Sends a message to a messaging platform (Slack, Telegram, Discord). Requires the corresponding API token environment variable to be set.".to_owned(),
+                description: "Sends a message to a messaging platform (Slack, Telegram, Discord). Requires the corresponding API token environment variable to be set. Use list_channels first to discover available channel IDs.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
@@ -841,6 +841,22 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Always,
             builtins::send_message::SendMessageTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "list_channels".to_owned(),
+                description: "Lists available channels on configured messaging platforms (Slack, Discord). Fetches from platform APIs and caches results. Use this to discover channel IDs before using send_message.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "platform": { "type": "string", "description": "Optional: filter to a specific platform ('slack', 'telegram', 'discord'). Omit to list all configured platforms." },
+                        "refresh": { "type": "string", "description": "Set to 'true' to force refresh the cache, bypassing the 5-minute TTL." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::channel_directory::ListChannelsTool,
         )
         .register(
             ToolDefinition {
@@ -1407,7 +1423,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 60);
+        assert_eq!(definitions.len(), 61);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
