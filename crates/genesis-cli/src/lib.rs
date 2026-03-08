@@ -827,6 +827,20 @@ async fn run_chat(
             continue;
         }
 
+        // Handle /fork — branch the conversation into a new session
+        if trimmed == "/fork" {
+            let new_id = default_session_id();
+            match store.fork_session(&session_id, &new_id) {
+                Ok(_) => {
+                    let old_id = session_id.clone();
+                    session_id = new_id;
+                    println!("Forked from {old_id} → new session: {session_id}");
+                }
+                Err(e) => println!("Fork failed: {e}"),
+            }
+            continue;
+        }
+
         // Handle in-chat slash commands
         if let Some(handled) = handle_chat_command(trimmed, &session_id, &store) {
             println!("{handled}");
@@ -1548,6 +1562,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /new      - Start a new session\n\
              /undo     - Undo last turn (remove last user-assistant exchange)\n\
              /retry    - Undo last turn and re-send the user message\n\
+             /fork     - Branch conversation into a new session\n\
              /compress - Trim old messages, keeping recent context\n\
              /tools    - List available tools\n\
              /skills   - List saved skills\n\
@@ -2394,6 +2409,7 @@ mod tests {
             platform: "cli".to_owned(),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            parent_session_id: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
             updated_at: "2026-03-08 12:05:00".to_owned(),
         }]);

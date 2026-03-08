@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -259,6 +259,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 platform TEXT NOT NULL,
                 total_input_tokens INTEGER NOT NULL DEFAULT 0,
                 total_output_tokens INTEGER NOT NULL DEFAULT 0,
+                parent_session_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -352,6 +353,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
 
     // Run migrations for existing databases.
     migrate_to_v2(&connection, database_path)?;
+    migrate_to_v3(&connection, database_path)?;
 
     connection
         .execute(
@@ -387,6 +389,28 @@ fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Result<(), St
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v2 → v3: add parent_session_id for conversation forking.
+fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    let has_column: bool = connection
+        .prepare("SELECT parent_session_id FROM sessions LIMIT 0")
+        .is_ok();
+
+    if has_column {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -589,6 +613,7 @@ pub struct SessionSummary {
     pub platform: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    pub parent_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -794,6 +819,62 @@ impl SessionStore {
         Ok(deleted > 0)
     }
 
+    /// Fork a session: create a new session that branches from the source
+    /// session, copying all messages up to the current point. Returns the new
+    /// session ID.
+    pub fn fork_session(
+        &self,
+        source_session_id: &str,
+        new_session_id: &str,
+    ) -> Result<String, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Get source session info
+        let (platform, title): (String, Option<String>) = connection
+            .query_row(
+                "SELECT platform, title FROM sessions WHERE id = ?1",
+                params![source_session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let fork_title = title
+            .as_deref()
+            .map(|t| format!("{t} (fork)"))
+            .unwrap_or_else(|| "Fork".to_owned());
+
+        // Create the new session with parent_session_id
+        connection
+            .execute(
+                "INSERT INTO sessions (id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 0, 0, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                params![new_session_id, fork_title, platform, source_session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Copy all messages from the source session
+        connection
+            .execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json, created_at)
+                 SELECT ?1, role, content, tool_call_id, tool_calls_json, created_at
+                 FROM messages WHERE session_id = ?2
+                 ORDER BY id ASC",
+                params![new_session_id, source_session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(new_session_id.to_owned())
+    }
+
     /// Delete sessions (and their messages/FTS entries) older than `days` days.
     /// Returns the number of sessions deleted.
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
@@ -949,7 +1030,7 @@ impl SessionStore {
 
         let mut stmt = connection
             .prepare(
-                "SELECT DISTINCT s.id, s.title, s.platform, s.total_input_tokens, s.total_output_tokens, s.created_at, s.updated_at
+                "SELECT DISTINCT s.id, s.title, s.platform, s.total_input_tokens, s.total_output_tokens, s.parent_session_id, s.created_at, s.updated_at
                  FROM session_search ss
                  JOIN sessions s ON s.id = ss.session_id
                  WHERE session_search MATCH ?1
@@ -968,8 +1049,9 @@ impl SessionStore {
                     platform: row.get(2)?,
                     total_input_tokens: row.get(3)?,
                     total_output_tokens: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    parent_session_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -991,7 +1073,7 @@ impl SessionStore {
 
         connection
             .query_row(
-                "SELECT id, title, platform, total_input_tokens, total_output_tokens, created_at, updated_at
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
@@ -1001,8 +1083,9 @@ impl SessionStore {
                         platform: row.get(2)?,
                         total_input_tokens: row.get(3)?,
                         total_output_tokens: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
+                        parent_session_id: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
                     })
                 },
             )
@@ -1017,7 +1100,7 @@ impl SessionStore {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
-                "SELECT id, title, platform, total_input_tokens, total_output_tokens, created_at, updated_at
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
                  FROM sessions
                  ORDER BY updated_at DESC, created_at DESC, id DESC
                  LIMIT ?1",
@@ -1035,8 +1118,9 @@ impl SessionStore {
                     platform: row.get(2)?,
                     total_input_tokens: row.get(3)?,
                     total_output_tokens: row.get(4)?,
-                    created_at: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    parent_session_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -2852,6 +2936,53 @@ mod tests {
         assert!(!data.sessions_per_day.is_empty());
         assert!(data.platform_breakdown.iter().any(|(p, _)| p == "cli"));
         assert!(data.platform_breakdown.iter().any(|(p, _)| p == "api"));
+    }
+
+    #[test]
+    fn fork_session_copies_messages_and_sets_parent() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-orig", "cli", Some("Original")).unwrap();
+        store.append_message("s-orig", "system", Some("sys"), None, None).unwrap();
+        store.append_message("s-orig", "user", Some("hello"), None, None).unwrap();
+        store.append_message("s-orig", "assistant", Some("hi"), None, None).unwrap();
+
+        let forked_id = store.fork_session("s-orig", "s-fork").unwrap();
+        assert_eq!(forked_id, "s-fork");
+
+        // Check the forked session exists
+        let session = store.get_session("s-fork").unwrap().expect("forked session should exist");
+        assert_eq!(session.title.as_deref(), Some("Original (fork)"));
+        assert_eq!(session.platform, "cli");
+        assert_eq!(session.parent_session_id.as_deref(), Some("s-orig"));
+
+        // Check messages were copied
+        let messages = store.load_messages("s-fork").unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[2].role, "assistant");
+    }
+
+    #[test]
+    fn fork_session_without_title() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-notitle", "api", None).unwrap();
+        store.append_message("s-notitle", "user", Some("test"), None, None).unwrap();
+
+        store.fork_session("s-notitle", "s-fork2").unwrap();
+
+        let session = store.get_session("s-fork2").unwrap().expect("exists");
+        assert_eq!(session.title.as_deref(), Some("Fork"));
+        assert_eq!(session.parent_session_id.as_deref(), Some("s-notitle"));
+    }
+
+    #[test]
+    fn session_summary_has_no_parent_by_default() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-nop", "cli", None).unwrap();
+
+        let session = store.get_session("s-nop").unwrap().expect("exists");
+        assert!(session.parent_session_id.is_none());
     }
 
     #[test]
