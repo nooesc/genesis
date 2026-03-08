@@ -10,6 +10,7 @@ use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult};
 use crate::prompt::build_system_prompt_full;
+use crate::skills::load_skills_prompt;
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
 pub struct SessionExecutionService<'a> {
@@ -202,14 +203,16 @@ impl<'a> SessionExecutionService<'a> {
             build_execution_context_from_loaded(self.loaded, session_id, platform);
         let tool_runtime = build_default_tool_runtime(&execution_context);
 
-        // Load user model for prompt personalization
+        // Load skills and user model for prompt personalization
+        let db_path = &self.loaded.config.storage.database_path;
+        let skills_section = load_skills_prompt(db_path);
         let user_model_section = self.load_user_model_section();
 
         let system_prompt = build_system_prompt_full(
             &execution_context.plan.profile,
             &tool_runtime.definitions(),
             None,
-            None,
+            skills_section.as_deref(),
             user_model_section.as_deref(),
         );
         let client = client_from_config(
