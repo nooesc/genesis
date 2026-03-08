@@ -68,6 +68,80 @@ pub fn load_skills_prompt(database_path: &std::path::Path) -> Option<String> {
     format_skills_for_prompt_with_stats(&skills, Some(&usage_store))
 }
 
+/// Load skills with context-aware filtering: all skills get a brief listing,
+/// but only skills matching the user's prompt get full instructions injected.
+///
+/// When there are fewer than 10 skills total, all get full instructions
+/// (no filtering needed). Above that threshold, we use trigger-based matching
+/// to avoid wasting context on irrelevant skill instructions.
+pub fn load_skills_prompt_for_prompt(
+    database_path: &std::path::Path,
+    user_prompt: &str,
+) -> Option<String> {
+    let store = SkillStore::new(database_path);
+    let all_skills = store.list_all().ok()?;
+    if all_skills.is_empty() {
+        return None;
+    }
+    let usage_store = SkillUsageStore::new(database_path);
+
+    // When few skills, load all with full instructions.
+    if all_skills.len() <= 10 {
+        return format_skills_for_prompt_with_stats(&all_skills, Some(&usage_store));
+    }
+
+    // Many skills: brief listing of all + full instructions for matched ones.
+    let matched = store.find_matching(user_prompt, 5).ok()?;
+    let matched_names: std::collections::HashSet<&str> =
+        matched.iter().map(|s| s.name.as_str()).collect();
+
+    let mut section = String::from("## Available Skills\n\n");
+    section.push_str("You have the following learned skills. ");
+    section.push_str("Use `skill_get` to load full instructions for any skill not shown below.\n\n");
+    section.push_str("**Self-improvement:** After using a skill, call `skill_record_usage` with the outcome.\n\n");
+
+    // Brief listing
+    section.push_str("### All Skills\n\n");
+    for skill in &all_skills {
+        let marker = if matched_names.contains(skill.name.as_str()) {
+            " ← auto-loaded"
+        } else {
+            ""
+        };
+        section.push_str(&format!(
+            "- **{}** (v{}): {}{}\n",
+            skill.name, skill.version, skill.description, marker
+        ));
+    }
+    section.push('\n');
+
+    // Full instructions for matched skills
+    if !matched.is_empty() {
+        section.push_str("### Auto-Loaded Skill Instructions\n\n");
+        section.push_str("The following skills were automatically loaded because they match your request:\n\n");
+        for skill in &matched {
+            section.push_str(&format!("#### {} (v{})\n", skill.name, skill.version));
+            if let Some(trigger) = &skill.trigger_hint {
+                section.push_str(&format!("**Trigger:** {trigger}\n"));
+            }
+            if !skill.tags.is_empty() {
+                section.push_str(&format!("**Tags:** {}\n", skill.tags.join(", ")));
+            }
+            if let Ok(stats) = usage_store.stats(&skill.name) {
+                if stats.total_uses > 0 {
+                    section.push_str(&format!(
+                        "**Usage:** {} uses ({} success, {} failure)\n",
+                        stats.total_uses, stats.successes, stats.failures
+                    ));
+                }
+            }
+            section.push_str(&format!("**Instructions:**\n{}\n\n", skill.instructions));
+        }
+    }
+
+    Some(section)
+}
+
 /// Match a user message against skill trigger hints.
 ///
 /// Returns skills whose trigger hint appears (case-insensitive substring match)
@@ -224,5 +298,71 @@ mod tests {
         let prompt = format_skills_for_prompt_with_stats(&skills, None)
             .expect("should have prompt");
         assert!(!prompt.contains("Usage:"));
+    }
+
+    #[test]
+    fn load_skills_prompt_for_prompt_loads_all_when_few() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let store = SkillStore::new(&db_path);
+        store
+            .upsert("deploy", "Deploy app", "Run deploy", Some("deploy production"), &["ops"])
+            .expect("upsert");
+        store
+            .upsert("review", "Review code", "Check bugs", Some("review code"), &["dev"])
+            .expect("upsert");
+
+        let prompt = load_skills_prompt_for_prompt(&db_path, "deploy this app")
+            .expect("should have prompt");
+        // With ≤10 skills, all get full instructions
+        assert!(prompt.contains("### deploy"));
+        assert!(prompt.contains("### review"));
+        assert!(prompt.contains("Run deploy"));
+        assert!(prompt.contains("Check bugs"));
+    }
+
+    #[test]
+    fn load_skills_prompt_for_prompt_filters_when_many() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let store = SkillStore::new(&db_path);
+        // Create 12 skills (above the 10 threshold)
+        for i in 0..12 {
+            let name = format!("skill_{i}");
+            let desc = format!("Description for skill {i}");
+            let instructions = format!("Instructions for skill {i}");
+            let trigger = format!("trigger for skill {i}");
+            store.upsert(&name, &desc, &instructions, Some(&trigger), &[]).unwrap();
+        }
+        // Create a skill that will match
+        store
+            .upsert("deploy_app", "Deploy application", "Run kubectl apply", Some("deploy production app"), &["ops", "deploy"])
+            .unwrap();
+
+        let prompt = load_skills_prompt_for_prompt(&db_path, "please deploy my app to production")
+            .expect("should have prompt");
+
+        // Should contain brief listing of all skills
+        assert!(prompt.contains("All Skills"));
+        assert!(prompt.contains("skill_0"));
+
+        // Should have auto-loaded section with matching skill
+        assert!(prompt.contains("Auto-Loaded"));
+        assert!(prompt.contains("deploy_app"));
+        assert!(prompt.contains("Run kubectl apply"));
+    }
+
+    #[test]
+    fn load_skills_prompt_for_prompt_returns_none_for_no_skills() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let result = load_skills_prompt_for_prompt(&db_path, "hello");
+        assert!(result.is_none());
     }
 }

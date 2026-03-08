@@ -16,7 +16,7 @@ use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::{build_system_prompt_with_memories, load_context_file};
-use crate::skills::load_skills_prompt;
+use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
 pub struct SessionExecutionService<'a> {
@@ -284,7 +284,10 @@ impl<'a> SessionExecutionService<'a> {
 
         // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
-        let skills_section = load_skills_prompt(db_path);
+        let skills_section = match user_prompt {
+            Some(prompt) => load_skills_prompt_for_prompt(db_path, prompt),
+            None => load_skills_prompt(db_path),
+        };
         let user_model_section = self.load_user_model_section();
         let context_section = load_context_file(std::path::Path::new("."));
         let memories_section = user_prompt.and_then(|prompt| self.recall_memories(prompt));

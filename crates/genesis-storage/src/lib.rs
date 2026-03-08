@@ -1836,6 +1836,45 @@ impl SkillStore {
         Ok(skills)
     }
 
+    /// Find skills whose trigger hints, names, descriptions, or tags match the
+    /// given user prompt. Uses simple keyword overlap scoring to rank results.
+    /// Returns up to `limit` matching skills, ordered by relevance score.
+    pub fn find_matching(&self, prompt: &str, limit: usize) -> Result<Vec<StoredSkill>, StorageError> {
+        let all_skills = self.list_all()?;
+        if all_skills.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Tokenize the prompt into lowercase words.
+        let prompt_words: Vec<String> = prompt
+            .split_whitespace()
+            .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_owned())
+            .filter(|w| w.len() >= 2)
+            .collect();
+
+        if prompt_words.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored: Vec<(f64, StoredSkill)> = all_skills
+            .into_iter()
+            .filter_map(|skill| {
+                let score = skill_match_score(&skill, &prompt_words);
+                if score > 0.0 {
+                    Some((score, skill))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by score descending.
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored.into_iter().map(|(_, skill)| skill).collect())
+    }
+
     /// Delete a skill by name. Returns true if a skill was deleted.
     pub fn delete(&self, name: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -1847,6 +1886,60 @@ impl SkillStore {
             })?;
         Ok(rows_changed > 0)
     }
+}
+
+/// Compute a relevance score for a skill against tokenized prompt words.
+/// Higher score = more relevant. Returns 0.0 if no match.
+fn skill_match_score(skill: &StoredSkill, prompt_words: &[String]) -> f64 {
+    let mut score = 0.0;
+
+    // Build searchable text from the skill's fields.
+    let trigger_words: Vec<String> = skill
+        .trigger_hint
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    let name_words: Vec<String> = skill
+        .name
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    let desc_words: Vec<String> = skill
+        .description
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    let tag_words: Vec<String> = skill
+        .tags
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    for word in prompt_words {
+        // Trigger hint matches are weighted highest (3x).
+        if trigger_words.iter().any(|tw| tw.contains(word.as_str())) {
+            score += 3.0;
+        }
+        // Skill name matches get 2x weight.
+        if name_words.iter().any(|nw| nw.contains(word.as_str())) {
+            score += 2.0;
+        }
+        // Tag matches get 2x weight.
+        if tag_words.iter().any(|tw| tw.contains(word.as_str())) {
+            score += 2.0;
+        }
+        // Description matches get 1x weight.
+        if desc_words.iter().any(|dw| dw.contains(word.as_str())) {
+            score += 1.0;
+        }
+    }
+
+    score
 }
 
 /// A stored subagent — a child agent loop spawned by a parent session.
@@ -2622,6 +2715,51 @@ mod tests {
         let dev_skills = store.find_by_tag("dev").unwrap();
         assert_eq!(dev_skills.len(), 1);
         assert_eq!(dev_skills[0].name, "test_runner");
+    }
+
+    #[test]
+    fn skill_store_find_matching_scores_by_relevance() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        store.upsert("deploy", "Deploy app to production", "kubectl apply", Some("deploy production"), &["ops", "deploy"]).unwrap();
+        store.upsert("review", "Review code for bugs", "check bugs", Some("review code"), &["dev", "review"]).unwrap();
+        store.upsert("unrelated", "Unrelated skill", "do nothing", Some("bake cookies"), &["cooking"]).unwrap();
+
+        let matches = store.find_matching("please deploy to production", 5).unwrap();
+        assert!(!matches.is_empty(), "should find deploy skill");
+        assert_eq!(matches[0].name, "deploy");
+    }
+
+    #[test]
+    fn skill_store_find_matching_returns_empty_for_no_match() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        store.upsert("deploy", "Deploy app", "run deploy", Some("deploy"), &["ops"]).unwrap();
+
+        let matches = store.find_matching("quantum physics lecture", 5).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn skill_store_find_matching_respects_limit() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::SkillStore::new(&db_path);
+        for i in 0..10 {
+            let name = format!("deploy_{i}");
+            store.upsert(&name, "Deploy variant", "run it", Some("deploy app"), &["deploy"]).unwrap();
+        }
+
+        let matches = store.find_matching("deploy my app", 3).unwrap();
+        assert!(matches.len() <= 3, "should respect limit");
     }
 
     #[test]
