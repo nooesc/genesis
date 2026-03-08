@@ -71,6 +71,19 @@ pub async fn webhook_handler(
 
     info!(parent: &span, "received home assistant webhook");
 
+    // Handle gateway slash commands before reaching the agent.
+    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
+    if let crate::commands::CommandResult::Reply(reply) =
+        crate::commands::handle_command(&request.message, &session_id, &store)
+    {
+        return Ok(Json(HomeAssistantResponse {
+            response: reply,
+            session_id,
+            turns_used: 0,
+            tool_calls_made: 0,
+        }));
+    }
+
     let service = SessionExecutionService::new(&state.loaded);
 
     let outcome = service

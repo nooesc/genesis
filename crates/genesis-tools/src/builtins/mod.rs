@@ -8,6 +8,7 @@ pub mod git;
 pub mod glob;
 pub mod image_gen;
 pub mod memory;
+pub mod mixture;
 pub mod patch;
 pub mod process;
 pub mod reason;

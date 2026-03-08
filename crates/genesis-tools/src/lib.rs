@@ -880,6 +880,26 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "mixture_of_agents".to_owned(),
+                description: "Queries multiple LLMs in parallel with the same prompt and synthesizes their responses. Use for critical decisions, complex reasoning, or when you want higher confidence through model consensus.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "The question or task to send to all models." },
+                        "models": { "type": "string", "description": "Comma-separated model specs as 'backend/model' (e.g., 'openai/gpt-4o, anthropic/claude-sonnet-4-20250514'). Defaults to gpt-4o, gpt-4o-mini, claude-sonnet-4-20250514." },
+                        "system": { "type": "string", "description": "Optional system prompt shared by all models." },
+                        "synthesize": { "type": "string", "description": "Whether to synthesize responses into one answer ('true'/'false'). Default: true." },
+                        "synthesis_model": { "type": "string", "description": "Model to use for synthesis. Default: gpt-4o." },
+                        "synthesis_backend": { "type": "string", "description": "Backend for synthesis model. Default: openai." }
+                    },
+                    "required": ["prompt"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::mixture::MixtureOfAgentsTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "list_tree".to_owned(),
                 description: "Recursively lists a directory as an indented tree. Skips noise directories (.git, node_modules, target, etc.) by default. Supports depth limiting, hidden files, and glob pattern filtering.".to_owned(),
                 parameters: Some(json!({
@@ -1193,7 +1213,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 50);
+        assert_eq!(definitions.len(), 51);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
