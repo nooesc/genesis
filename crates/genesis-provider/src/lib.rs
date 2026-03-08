@@ -1,6 +1,7 @@
 mod api_types;
 mod client;
 mod error;
+pub mod pricing;
 mod resolve;
 
 pub use api_types::{

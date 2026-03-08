@@ -515,10 +515,12 @@ async fn run_chat(
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
 
+    let model = &loaded.config.provider.model;
+
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
         println!("you> {initial}");
-        run_streaming_turn(&service, &session_id, &initial).await?;
+        run_streaming_turn(&service, &session_id, &initial, model).await?;
     }
 
     loop {
@@ -542,7 +544,7 @@ async fn run_chat(
             continue;
         }
 
-        run_streaming_turn(&service, &session_id, trimmed).await?;
+        run_streaming_turn(&service, &session_id, trimmed, model).await?;
     }
 
     Ok(format!("chat session saved as {session_id}"))
@@ -599,8 +601,15 @@ async fn run_oneshot(
         let mut output = outcome.result.response.clone();
         let r = &outcome.result;
         if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+            let cost_str = genesis_provider::pricing::estimate_cost(
+                &loaded.config.provider.model,
+                r.total_input_tokens,
+                r.total_output_tokens,
+            )
+            .map(|c| format!(", ~{c}"))
+            .unwrap_or_default();
             output.push_str(&format!(
-                "\n\n[{} in / {} out tokens, {} turns, {} tool calls]",
+                "\n\n[{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
                 r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
             ));
         }
@@ -1166,6 +1175,7 @@ async fn run_streaming_turn(
     service: &SessionExecutionService<'_>,
     session_id: &str,
     prompt: &str,
+    model: &str,
 ) -> Result<(), CliError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1197,8 +1207,15 @@ async fn run_streaming_turn(
             }
             let r = &outcome.result;
             if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+                let cost_str = genesis_provider::pricing::estimate_cost(
+                    model,
+                    r.total_input_tokens,
+                    r.total_output_tokens,
+                )
+                .map(|c| format!(", ~{c}"))
+                .unwrap_or_default();
                 println!(
-                    "     [{} in / {} out tokens, {} turns, {} tool calls]",
+                    "     [{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
                     r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
                 );
             }
