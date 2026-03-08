@@ -274,6 +274,8 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime,
             AgentLoopConfig {
                 system_prompt: Some(system_prompt),
+                max_turns: self.loaded.config.runtime.max_turns,
+                max_context_messages: self.loaded.config.runtime.max_context_messages,
                 ..AgentLoopConfig::default()
             },
             history,
@@ -783,6 +785,8 @@ mod tests {
                 runtime: RuntimeConfig {
                     max_concurrency: 4,
                     allow_destructive_tools: false,
+                    max_turns: 20,
+                    max_context_messages: None,
                 },
             },
             paths: AppPaths {

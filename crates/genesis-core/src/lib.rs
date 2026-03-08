@@ -354,6 +354,8 @@ mod tests {
                 runtime: RuntimeConfig {
                     max_concurrency: 8,
                     allow_destructive_tools: false,
+                    max_turns: 20,
+                    max_context_messages: None,
                 },
             },
             paths: AppPaths {

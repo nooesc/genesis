@@ -73,6 +73,11 @@ pub struct StorageConfig {
 pub struct RuntimeConfig {
     pub max_concurrency: usize,
     pub allow_destructive_tools: bool,
+    /// Maximum agent loop iterations per user turn (default: 20).
+    pub max_turns: usize,
+    /// Max conversation messages kept in context. Oldest messages are pruned
+    /// with a summary when exceeded. `None` means unlimited.
+    pub max_context_messages: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +137,10 @@ struct FileRuntimeConfig {
     max_concurrency: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allow_destructive_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_turns: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_context_messages: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -200,6 +209,8 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         runtime: RuntimeConfig {
             max_concurrency: 4,
             allow_destructive_tools: false,
+            max_turns: 20,
+            max_context_messages: None,
         },
     })
 }
@@ -319,6 +330,19 @@ pub fn load_from_map(
                 .and_then(|runtime| runtime.allow_destructive_tools)
                 .unwrap_or(false),
         )?,
+        max_turns: parse_env(
+            env,
+            "GENESIS_MAX_TURNS",
+            file_config
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.max_turns)
+                .unwrap_or(20),
+        )?,
+        max_context_messages: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.max_context_messages),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
