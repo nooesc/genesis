@@ -674,6 +674,7 @@ dependencies = [
  "rustyline",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -721,6 +722,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "chrono",
  "ed25519-dalek",
  "futures-util",
  "genesis-config",
@@ -732,6 +734,7 @@ dependencies = [
  "hex",
  "hmac",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

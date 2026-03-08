@@ -171,6 +171,7 @@ mod tests {
                     budget_limit: None,
                     terminal: None,
                 },
+                gateway: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

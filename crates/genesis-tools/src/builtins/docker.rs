@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::process::Command;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
-
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+use crate::{truncate_output_bytes, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 /// Tool that runs a command inside a Docker container via `docker exec`.
 pub struct DockerExecTool;
@@ -46,8 +44,8 @@ impl ToolHandler for DockerExecTool {
             reason: format!("failed to run docker exec: {e}"),
         })?;
 
-        let stdout = truncate_output(&output.stdout);
-        let stderr = truncate_output(&output.stderr);
+        let stdout = truncate_output_bytes(&output.stdout);
+        let stderr = truncate_output_bytes(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
         let mut content = String::new();
@@ -73,17 +71,6 @@ impl ToolHandler for DockerExecTool {
                 ("exit_code".to_owned(), exit_code.to_string()),
             ]),
         })
-    }
-}
-
-fn truncate_output(bytes: &[u8]) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut truncated = s[..MAX_OUTPUT_BYTES].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    } else {
-        s.into_owned()
     }
 }
 

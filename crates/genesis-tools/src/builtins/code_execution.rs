@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+use crate::{truncate_output_bytes, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Sandboxed Python code execution tool.
 ///
@@ -98,8 +97,8 @@ impl ToolHandler for CodeExecutionTool {
             }
         };
 
-        let stdout = truncate_output(&output.stdout);
-        let stderr = truncate_output(&output.stderr);
+        let stdout = truncate_output_bytes(&output.stdout);
+        let stderr = truncate_output_bytes(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
         let mut content = String::new();
@@ -125,17 +124,6 @@ impl ToolHandler for CodeExecutionTool {
                 ("exit_code".to_owned(), exit_code.to_string()),
             ]),
         })
-    }
-}
-
-fn truncate_output(bytes: &[u8]) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut truncated = s[..MAX_OUTPUT_BYTES].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    } else {
-        s.into_owned()
     }
 }
 

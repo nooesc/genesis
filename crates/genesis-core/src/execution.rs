@@ -601,6 +601,7 @@ pub fn restore_chat_history(
             Ok(ChatMessage {
                 role: message.role,
                 content: message.content.map(MessageContent::Text),
+                thinking: None,
                 tool_calls,
                 tool_call_id: message.tool_call_id,
                 name: None,
@@ -733,6 +734,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: "assistant".to_owned(),
             content: Some(MessageContent::Text("hello".to_owned())),
+            thinking: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
@@ -903,6 +905,7 @@ mod tests {
                     budget_limit: None,
                     terminal: None,
                 },
+                gateway: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

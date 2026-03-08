@@ -865,6 +865,7 @@ impl AgentLoop {
             stream_options: None,
             response_format: None,
             tool_choice: None,
+            thinking: None,
             extra_body: None,
         };
 

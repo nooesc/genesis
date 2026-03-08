@@ -20,7 +20,16 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+}
+
+/// Optional thinking/reasoning configuration for compatible providers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ThinkingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
 }
 
 /// Controls which (if any) tool the model should call.
@@ -239,6 +248,8 @@ pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -251,6 +262,7 @@ impl ChatMessage {
         Self {
             role: "system".to_owned(),
             content: Some(MessageContent::Text(content.into())),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -261,6 +273,7 @@ impl ChatMessage {
         Self {
             role: "user".to_owned(),
             content: Some(MessageContent::Text(content.into())),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -278,6 +291,7 @@ impl ChatMessage {
         Self {
             role: "user".to_owned(),
             content: Some(MessageContent::Parts(parts)),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -288,6 +302,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_owned(),
             content: Some(MessageContent::Text(content.into())),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -301,6 +316,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_owned(),
             content,
+            thinking: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
@@ -311,6 +327,7 @@ impl ChatMessage {
         Self {
             role: "tool".to_owned(),
             content: Some(MessageContent::Text(content.into())),
+            thinking: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
@@ -421,6 +438,7 @@ impl ChatCompletionRequest {
             stream_options: None,
             response_format: None,
             tool_choice: None,
+            thinking: None,
             extra_body: None,
         }
     }
@@ -568,6 +586,24 @@ mod tests {
         let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hello")]);
         let json = serde_json::to_value(&request).expect("should serialize");
         assert!(!json.as_object().unwrap().contains_key("tools"));
+    }
+
+    #[test]
+    fn request_serializes_thinking_when_present() {
+        let mut request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hello")]);
+        request.thinking = Some(ThinkingConfig {
+            budget_tokens: Some(2048),
+        });
+
+        let json = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(json["thinking"]["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn request_omits_thinking_when_absent() {
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hello")]);
+        let json = serde_json::to_value(&request).expect("should serialize");
+        assert!(!json.as_object().unwrap().contains_key("thinking"));
     }
 
     #[test]
@@ -719,6 +755,23 @@ mod tests {
         let raw = r#"{"role": "assistant", "content": null}"#;
         let msg: ChatMessage = serde_json::from_str(raw).expect("should deserialize null content");
         assert!(msg.content.is_none());
+    }
+
+    #[test]
+    fn chat_message_reasoning_field_round_trips() {
+        let msg = ChatMessage {
+            role: "assistant".to_owned(),
+            content: Some(MessageContent::Text("answer".to_owned())),
+            thinking: Some("hidden reasoning".to_owned()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        };
+
+        let json = serde_json::to_string(&msg).expect("should serialize");
+        let decoded: ChatMessage = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(decoded.thinking.as_deref(), Some("hidden reasoning"));
+        assert_eq!(decoded.content_text(), Some("answer"));
     }
 
     #[test]

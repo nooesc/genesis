@@ -41,6 +41,19 @@ pub fn truncate_output(output: &str) -> String {
     }
 }
 
+/// Truncate raw byte output (e.g. from `std::process::Output`) to
+/// MAX_OUTPUT_BYTES after lossy UTF-8 conversion.
+pub fn truncate_output_bytes(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    if s.len() > MAX_OUTPUT_BYTES {
+        let mut truncated = s[..MAX_OUTPUT_BYTES].to_string();
+        truncated.push_str("\n... (output truncated)");
+        truncated
+    } else {
+        s.into_owned()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolContext {
     pub session_id: String,
