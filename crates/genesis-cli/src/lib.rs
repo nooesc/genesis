@@ -5565,15 +5565,19 @@ storage:
                 recursive,
                 model,
                 tag,
+                tool,
                 failures_only,
                 warnings_only,
+                min_warnings,
             }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(!recursive);
                 assert!(model.is_none());
                 assert!(tag.is_none());
+                assert!(tool.is_none());
                 assert!(!failures_only);
                 assert!(!warnings_only);
+                assert!(min_warnings.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5595,15 +5599,19 @@ storage:
                 recursive,
                 model,
                 tag,
+                tool,
                 failures_only,
                 warnings_only,
+                min_warnings,
             }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(recursive);
                 assert!(model.is_none());
                 assert!(tag.is_none());
+                assert!(tool.is_none());
                 assert!(!failures_only);
                 assert!(!warnings_only);
+                assert!(min_warnings.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5628,15 +5636,19 @@ storage:
                 recursive,
                 model,
                 tag,
+                tool,
                 failures_only,
                 warnings_only,
+                min_warnings,
             }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(!recursive);
                 assert_eq!(model.as_deref(), Some("gpt-4.1-mini"));
                 assert_eq!(tag.as_deref(), Some("offline_eval"));
+                assert!(tool.is_none());
                 assert!(!failures_only);
                 assert!(!warnings_only);
+                assert!(min_warnings.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5659,15 +5671,19 @@ storage:
                 recursive,
                 model,
                 tag,
+                tool,
                 failures_only,
                 warnings_only,
+                min_warnings,
             }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(!recursive);
                 assert!(model.is_none());
                 assert!(tag.is_none());
+                assert!(tool.is_none());
                 assert!(failures_only);
                 assert!(warnings_only);
+                assert!(min_warnings.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5772,8 +5788,10 @@ storage:
             false,
             None,
             None,
+            None,
             false,
             false,
+            None,
         )
         .expect("summary should build");
 
@@ -5941,8 +5959,10 @@ storage:
             false,
             None,
             None,
+            None,
             false,
             false,
+            None,
         )
         .expect("non-recursive summary");
         let recursive = crate::summarize_replay_reports(
@@ -5950,8 +5970,10 @@ storage:
             true,
             None,
             None,
+            None,
             false,
             false,
+            None,
         )
         .expect("recursive summary");
 
@@ -5996,8 +6018,10 @@ storage:
             false,
             Some("gpt-4.1-mini"),
             Some("offline_eval"),
+            None,
             false,
             false,
+            None,
         )
         .expect("filtered summary should build");
 
@@ -6074,8 +6098,10 @@ storage:
             false,
             None,
             None,
+            None,
             true,
             true,
+            None,
         )
         .expect("filtered summary should build");
 
