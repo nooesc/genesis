@@ -85,6 +85,9 @@ pub struct AgentLoopConfig {
     /// Extended thinking configuration. When set, requests include reasoning
     /// parameters for providers that support it (e.g. Claude, o1/o3).
     pub thinking: Option<genesis_provider::ThinkingConfig>,
+    /// Optional response format constraint (e.g. json_object, json_schema).
+    /// When set, every chat completion request includes this format directive.
+    pub response_format: Option<genesis_provider::ResponseFormat>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -96,6 +99,17 @@ const MEMORY_NUDGE: &str = "\
 Consider saving any useful observations, patterns, or user preferences \
 you've noticed using `memory_create`. Focus on durable insights that \
 would be valuable in future sessions — not session-specific details.";
+
+/// Number of tool calls in a single turn that triggers a skill creation nudge.
+const SKILL_CREATION_THRESHOLD: usize = 8;
+
+/// The skill creation nudge message injected as a system message.
+const SKILL_CREATION_NUDGE: &str = "\
+[Skill creation opportunity] The task you just completed was multi-step and \
+complex. Consider whether the approach you used could be distilled into a \
+reusable skill. If so, call `skill_create` with a descriptive name, clear \
+instructions for how to handle this type of task, and relevant tags. Good \
+skills capture durable patterns — not one-off details.";
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
@@ -113,6 +127,7 @@ impl Default for AgentLoopConfig {
             trajectory_dir: None,
             session_id: None,
             thinking: None,
+            response_format: None,
         }
     }
 }
@@ -283,6 +298,7 @@ impl AgentLoop {
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
+            request.response_format = self.config.response_format.clone();
 
             let response = client.complete(request).await?;
 
@@ -454,6 +470,7 @@ impl AgentLoop {
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
+            request.response_format = self.config.response_format.clone();
 
             match client.complete_stream(request.clone()).await {
                 Ok(mut stream) => {
@@ -557,6 +574,7 @@ impl AgentLoop {
                     self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
+                    self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
                     return Ok(AgentResult {
                         response: response_text,
@@ -654,6 +672,7 @@ impl AgentLoop {
                     self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
+                    self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
                     return Ok(AgentResult {
                         response: response_text,
@@ -682,6 +701,20 @@ impl AgentLoop {
                 self.messages
                     .push(ChatMessage::system(MEMORY_NUDGE));
             }
+        }
+    }
+
+    /// Inject a skill creation nudge if the turn involved many tool calls,
+    /// suggesting the agent save the procedure as a reusable skill.
+    fn maybe_inject_skill_nudge(&mut self, tool_calls_made: usize) {
+        if tool_calls_made >= SKILL_CREATION_THRESHOLD {
+            debug!(
+                tool_calls_made,
+                threshold = SKILL_CREATION_THRESHOLD,
+                "injecting skill creation nudge"
+            );
+            self.messages
+                .push(ChatMessage::system(SKILL_CREATION_NUDGE));
         }
     }
 

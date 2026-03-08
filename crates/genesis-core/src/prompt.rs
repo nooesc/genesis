@@ -323,12 +323,26 @@ pub fn load_context_file(project_dir: &Path) -> Option<String> {
         let path = project_dir.join(candidate);
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if !contents.trim().is_empty() {
-                let warnings = scan_context_security(&contents);
+                // Run both basic secret scan and comprehensive injection scan
+                let mut warnings = scan_context_security(&contents);
+
+                let scan = crate::context_security::scan_context_file(&path, &contents);
+                for threat in &scan.threats {
+                    let line_info = threat
+                        .line
+                        .map(|l| format!(" (line {l})"))
+                        .unwrap_or_default();
+                    warnings.push(format!(
+                        "- [{}/{}]{}: {}",
+                        threat.severity, threat.category, line_info, threat.description
+                    ));
+                }
+
                 if warnings.is_empty() {
                     return Some(contents);
                 }
                 let warning_block = format!(
-                    "⚠️ SECURITY WARNINGS for {}:\n{}\n\n---\n\n",
+                    "SECURITY WARNINGS for {}:\n{}\n\n---\n\n",
                     candidate,
                     warnings.join("\n")
                 );

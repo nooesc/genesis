@@ -17,14 +17,14 @@ use axum::http::{header, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use axum::extract::Path;
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
-use genesis_storage::SessionStore;
+use genesis_storage::{MemoryStore, SessionStore, SkillStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -125,6 +125,12 @@ pub struct ChatRequest {
     /// Optional image URLs for multimodal prompts.
     #[serde(default)]
     pub images: Vec<ImageInput>,
+    /// Optional system prompt override for this request.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Optional response format constraint (json_object, json_schema, or text).
+    #[serde(default)]
+    pub response_format: Option<genesis_provider::ResponseFormat>,
 }
 
 /// An image input for multimodal chat requests.
@@ -234,8 +240,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
         .route("/sessions", get(list_sessions_handler))
+        .route("/sessions/purge", delete(purge_sessions_handler))
         .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
+        .route("/sessions/{id}/messages", get(session_messages_handler))
+        .route("/sessions/{id}/fork", post(fork_session_handler))
+        .route("/sessions/{id}/title", patch(update_session_title_handler))
         .route("/usage", get(usage_handler))
+        .route("/insights", get(insights_handler))
+        // Skills CRUD
+        .route("/skills", get(list_skills_handler).post(upsert_skill_handler))
+        .route("/skills/search", get(search_skills_handler))
+        .route("/skills/{name}", get(get_skill_handler).delete(delete_skill_handler))
+        // Memory endpoints
+        .route("/memories", get(list_memories_handler))
+        .route("/memories/search", get(search_memories_handler))
+        .route("/memories/{id}", delete(delete_memory_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -448,6 +467,129 @@ async fn delete_session_handler(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Session messages / fork / title / purge / insights endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for forking a session.
+#[derive(Debug, Deserialize)]
+struct ForkRequest {
+    #[serde(default)]
+    new_session_id: Option<String>,
+}
+
+/// Request body for updating a session title.
+#[derive(Debug, Deserialize)]
+struct UpdateTitleRequest {
+    title: String,
+}
+
+/// Query parameters for purging old sessions.
+#[derive(Debug, Deserialize)]
+struct PurgeQuery {
+    #[serde(default = "default_purge_days")]
+    older_than_days: u32,
+}
+
+fn default_purge_days() -> u32 {
+    30
+}
+
+/// Query parameters for insights.
+#[derive(Debug, Deserialize)]
+struct InsightsQuery {
+    #[serde(default = "default_insights_days")]
+    days: u32,
+}
+
+fn default_insights_days() -> u32 {
+    30
+}
+
+async fn session_messages_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let messages = store
+        .load_messages(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": id,
+        "messages": messages,
+        "count": messages.len(),
+    })))
+}
+
+async fn fork_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<ForkRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let new_id = request.new_session_id.unwrap_or_else(|| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        format!("fork-{id}-{ts}")
+    });
+
+    store
+        .fork_session(&id, &new_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "source_session_id": id,
+        "new_session_id": new_id,
+    })))
+}
+
+async fn update_session_title_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateTitleRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let updated = store
+        .set_title(&id, &request.title)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": id,
+        "title": request.title,
+        "updated": updated,
+    })))
+}
+
+async fn purge_sessions_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<PurgeQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let purged = store
+        .purge_older_than(params.older_than_days)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "purged": purged,
+        "older_than_days": params.older_than_days,
+    })))
+}
+
+async fn insights_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let data = store
+        .insights(params.days)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::to_value(data).unwrap()))
+}
+
 async fn usage_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -459,6 +601,185 @@ async fn usage_handler(
     Ok(Json(serde_json::to_value(stats).unwrap()))
 }
 
+
+// ---------------------------------------------------------------------------
+// Skills endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for creating/updating a skill.
+#[derive(Debug, Deserialize)]
+pub struct UpsertSkillRequest {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub trigger_hint: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Query parameters for searching skills by tag.
+#[derive(Debug, Deserialize)]
+struct SearchSkillsQuery {
+    tag: String,
+}
+
+async fn list_skills_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillStore::new(&state.loaded.config.storage.database_path);
+    let skills = store
+        .list_all()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = skills.len();
+    Ok(Json(serde_json::json!({
+        "skills": skills,
+        "count": count,
+    })))
+}
+
+async fn get_skill_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillStore::new(&state.loaded.config.storage.database_path);
+    let skill = store
+        .get(&name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match skill {
+        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
+    }
+}
+
+async fn upsert_skill_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UpsertSkillRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillStore::new(&state.loaded.config.storage.database_path);
+    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
+    let skill = store
+        .upsert(
+            &request.name,
+            &request.description,
+            &request.instructions,
+            request.trigger_hint.as_deref(),
+            &tag_refs,
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::to_value(skill).unwrap()))
+}
+
+async fn delete_skill_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillStore::new(&state.loaded.config.storage.database_path);
+    let deleted = store
+        .delete(&name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({"deleted": true, "name": name})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found")))
+    }
+}
+
+async fn search_skills_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillStore::new(&state.loaded.config.storage.database_path);
+    let skills = store
+        .find_by_tag(&params.tag)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = skills.len();
+    Ok(Json(serde_json::json!({
+        "skills": skills,
+        "count": count,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Memory endpoints
+// ---------------------------------------------------------------------------
+
+/// Query parameters for listing memories.
+#[derive(Debug, Deserialize)]
+struct ListMemoriesQuery {
+    #[serde(default = "default_memory_limit")]
+    limit: usize,
+}
+
+fn default_memory_limit() -> usize {
+    50
+}
+
+/// Query parameters for searching memories.
+#[derive(Debug, Deserialize)]
+struct SearchMemoriesQuery {
+    q: String,
+    #[serde(default = "default_memory_search_limit")]
+    limit: usize,
+}
+
+fn default_memory_search_limit() -> usize {
+    10
+}
+
+async fn list_memories_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
+    let memories = store
+        .list(params.limit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = memories.len();
+    Ok(Json(serde_json::json!({
+        "memories": memories,
+        "count": count,
+    })))
+}
+
+async fn search_memories_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<SearchMemoriesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
+    let memories = store
+        .search(&params.q, params.limit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = memories.len();
+    Ok(Json(serde_json::json!({
+        "memories": memories,
+        "count": count,
+    })))
+}
+
+async fn delete_memory_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
+    let deleted = store
+        .delete(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
+    }
+}
+
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
@@ -467,6 +788,12 @@ async fn chat_handler(
     let mut service = SessionExecutionService::new(loaded);
     if let Some(mcp) = &state.mcp {
         service.set_mcp(std::sync::Arc::clone(mcp));
+    }
+    if let Some(system_prompt) = request.system_prompt {
+        service.set_system_prompt_override(system_prompt);
+    }
+    if let Some(response_format) = request.response_format {
+        service.set_response_format(response_format);
     }
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
@@ -543,6 +870,8 @@ async fn chat_stream_handler(
 
     let platform = request.platform;
     let message = request.message;
+    let system_prompt = request.system_prompt;
+    let response_format = request.response_format;
     let images: Vec<genesis_provider::ImageUrl> = request
         .images
         .into_iter()
@@ -566,6 +895,12 @@ async fn chat_stream_handler(
         let mut service = SessionExecutionService::new(&state_for_task.loaded);
         if let Some(mcp) = &state_for_task.mcp {
             service.set_mcp(std::sync::Arc::clone(mcp));
+        }
+        if let Some(system_prompt) = system_prompt {
+            service.set_system_prompt_override(system_prompt);
+        }
+        if let Some(response_format) = response_format {
+            service.set_response_format(response_format);
         }
         let initial_payload = serde_json::to_string(&serde_json::json!({
             "session_id": session_id_for_task,
@@ -871,5 +1206,124 @@ mod tests {
         let loaded = genesis_config::load(None).expect("default config should load");
         let state = AppState::new(loaded, None, None, Some(60));
         assert!(state.rate_limiter.is_some());
+    }
+
+    #[test]
+    fn upsert_skill_request_deserializes_minimal() {
+        let json = r#"{"name": "greet", "description": "Greet the user", "instructions": "Say hello"}"#;
+        let req: UpsertSkillRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.name, "greet");
+        assert_eq!(req.description, "Greet the user");
+        assert_eq!(req.instructions, "Say hello");
+        assert!(req.trigger_hint.is_none());
+        assert!(req.tags.is_empty());
+    }
+
+    #[test]
+    fn upsert_skill_request_deserializes_full() {
+        let json = r#"{
+            "name": "summarize",
+            "description": "Summarize text",
+            "instructions": "Provide a concise summary",
+            "trigger_hint": "summarize this",
+            "tags": ["nlp", "text"]
+        }"#;
+        let req: UpsertSkillRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.name, "summarize");
+        assert_eq!(req.trigger_hint.as_deref(), Some("summarize this"));
+        assert_eq!(req.tags, vec!["nlp", "text"]);
+    }
+
+    #[test]
+    fn search_skills_query_deserializes() {
+        let json = r#"{"tag": "nlp"}"#;
+        let q: SearchSkillsQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.tag, "nlp");
+    }
+
+    #[test]
+    fn list_memories_query_defaults() {
+        let json = r#"{}"#;
+        let q: ListMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.limit, 50);
+    }
+
+    #[test]
+    fn list_memories_query_custom_limit() {
+        let json = r#"{"limit": 20}"#;
+        let q: ListMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.limit, 20);
+    }
+
+    #[test]
+    fn search_memories_query_deserializes() {
+        let json = r#"{"q": "hello world"}"#;
+        let q: SearchMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.q, "hello world");
+        assert_eq!(q.limit, 10);
+    }
+
+    #[test]
+    fn search_memories_query_custom_limit() {
+        let json = r#"{"q": "test", "limit": 5}"#;
+        let q: SearchMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.q, "test");
+        assert_eq!(q.limit, 5);
+    }
+
+    #[test]
+    fn chat_request_deserializes_with_system_prompt() {
+        let json = r#"{
+            "message": "hello",
+            "system_prompt": "You are a helpful pirate."
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.message, "hello");
+        assert_eq!(req.system_prompt.as_deref(), Some("You are a helpful pirate."));
+        assert!(req.response_format.is_none());
+    }
+
+    #[test]
+    fn chat_request_deserializes_with_response_format() {
+        let json = r#"{
+            "message": "give me json",
+            "response_format": {"type": "json_object"}
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.message, "give me json");
+        assert!(req.response_format.is_some());
+        let fmt = req.response_format.unwrap();
+        assert!(matches!(fmt, genesis_provider::ResponseFormat::JsonObject));
+    }
+
+    #[test]
+    fn chat_request_deserializes_with_json_schema() {
+        let json = r#"{
+            "message": "structured output",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "my_schema",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string"}
+                        },
+                        "required": ["answer"]
+                    }
+                }
+            }
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.message, "structured output");
+        match req.response_format {
+            Some(genesis_provider::ResponseFormat::JsonSchema { json_schema }) => {
+                assert_eq!(json_schema.name, "my_schema");
+                assert_eq!(json_schema.strict, Some(true));
+                assert!(json_schema.schema["properties"]["answer"]["type"] == "string");
+            }
+            other => panic!("expected JsonSchema variant, got {:?}", other),
+        }
     }
 }

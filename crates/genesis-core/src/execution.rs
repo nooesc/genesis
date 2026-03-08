@@ -23,6 +23,7 @@ pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
     mcp: Option<Arc<McpManager>>,
     system_prompt_override: Option<String>,
+    response_format: Option<genesis_provider::ResponseFormat>,
     approval_handler: Option<Arc<dyn genesis_tools::ApprovalHandler>>,
 }
 
@@ -64,7 +65,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, approval_handler: None }
+        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -92,7 +93,7 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None, approval_handler: None }
+        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
@@ -103,6 +104,12 @@ impl<'a> SessionExecutionService<'a> {
     /// Override the system prompt / agent identity for this service instance.
     pub fn set_system_prompt_override(&mut self, prompt: String) {
         self.system_prompt_override = Some(prompt);
+    }
+
+    /// Set a response format constraint for all chat completions in this
+    /// service instance (e.g. json_object or json_schema).
+    pub fn set_response_format(&mut self, format: genesis_provider::ResponseFormat) {
+        self.response_format = Some(format);
     }
 
     /// Set an interactive approval handler for tools requiring user confirmation.
@@ -341,6 +348,7 @@ impl<'a> SessionExecutionService<'a> {
                         budget_tokens: Some(budget),
                     }
                 }),
+                response_format: self.response_format.clone(),
                 ..AgentLoopConfig::default()
             },
             history,
