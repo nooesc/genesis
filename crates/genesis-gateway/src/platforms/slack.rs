@@ -152,11 +152,12 @@ pub async fn events_handler(
     let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
     match crate::commands::handle_command(&text, &session_id, &store, &state.loaded.config) {
         crate::commands::CommandResult::Reply(reply) => {
+            let client2 = state.http_client.clone();
             let token2 = token.clone();
             let channel2 = channel.clone();
             let ts = thread_ts.clone();
             tokio::spawn(async move {
-                if let Err(e) = post_message(&token2, &channel2, &reply, ts.as_deref()).await {
+                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
                     error!(error = %e, "failed to send command reply");
                 }
             });
@@ -204,7 +205,7 @@ pub async fn events_handler(
             };
 
             if let Err(e) =
-                post_message(&token, &channel, &reply_text, thread_ts.as_deref()).await
+                post_message(&state.http_client, &token, &channel, &reply_text, thread_ts.as_deref()).await
             {
                 error!(error = %e, "failed to post slack message");
             }
@@ -217,12 +218,12 @@ pub async fn events_handler(
 
 /// Post a message to a Slack channel via the Web API.
 async fn post_message(
+    client: &reqwest::Client,
     token: &str,
     channel: &str,
     text: &str,
     thread_ts: Option<&str>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
     let resp = client
         .post("https://slack.com/api/chat.postMessage")
         .bearer_auth(token)

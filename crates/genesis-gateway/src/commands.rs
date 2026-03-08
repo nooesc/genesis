@@ -343,6 +343,7 @@ mod tests {
                 budget_limit: None,
                 terminal: None,
                 thinking_budget: None,
+                max_context_tokens: None,
             },
             gateway: None,
         }

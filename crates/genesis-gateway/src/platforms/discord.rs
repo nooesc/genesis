@@ -256,7 +256,7 @@ pub async fn interactions_handler(
 
                 // Edit the deferred response with the actual reply
                 if let Err(e) =
-                    edit_followup(&token, &interaction_token, &reply_text).await
+                    edit_followup(&state.http_client, &token, &interaction_token, &reply_text).await
                 {
                     error!(error = %e, "failed to send discord followup");
                 }
@@ -303,12 +303,11 @@ fn extract_username(interaction: &DiscordInteraction) -> String {
 
 /// Edit the original deferred interaction response with the agent's reply.
 async fn edit_followup(
+    client: &reqwest::Client,
     bot_token: &str,
     interaction_token: &str,
     content: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
-
     // Discord has a 2000 character limit for messages
     let truncated = if content.len() > 2000 {
         format!("{}...", &content[..1997])

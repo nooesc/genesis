@@ -15,7 +15,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
-use crate::prompt::{build_system_prompt_with_memories, load_context_file};
+use crate::prompt::{SystemPromptBuilder, load_context_file};
 use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 
@@ -292,15 +292,28 @@ impl<'a> SessionExecutionService<'a> {
         let context_section = load_context_file(std::path::Path::new("."));
         let memories_section = user_prompt.and_then(|prompt| self.recall_memories(prompt));
 
-        let system_prompt = build_system_prompt_with_memories(
+        let platform_str = delivery_platform_str(&execution_context.plan.platform);
+        let tool_defs = tool_runtime.definitions();
+        let mut prompt_builder = SystemPromptBuilder::new(
             &execution_context.plan.profile,
-            &tool_runtime.definitions(),
-            self.system_prompt_override.as_deref(),
-            skills_section.as_deref(),
-            user_model_section.as_deref(),
-            context_section.as_deref(),
-            memories_section.as_deref(),
-        );
+            &tool_defs,
+        ).delivery_platform(platform_str);
+        if let Some(id) = self.system_prompt_override.as_deref() {
+            prompt_builder = prompt_builder.identity(id);
+        }
+        if let Some(s) = skills_section.as_deref() {
+            prompt_builder = prompt_builder.skills(s);
+        }
+        if let Some(u) = user_model_section.as_deref() {
+            prompt_builder = prompt_builder.user_model(u);
+        }
+        if let Some(c) = context_section.as_deref() {
+            prompt_builder = prompt_builder.context(c);
+        }
+        if let Some(m) = memories_section.as_deref() {
+            prompt_builder = prompt_builder.memories(m);
+        }
+        let system_prompt = prompt_builder.build();
         let client = client_from_config(
             &self.loaded.config.provider.backend,
             &self.loaded.config.provider.model,
@@ -322,6 +335,7 @@ impl<'a> SessionExecutionService<'a> {
                 max_context_messages: self.loaded.config.runtime.max_context_messages,
                 budget_limit: self.loaded.config.runtime.budget_limit,
                 max_concurrency: self.loaded.config.runtime.max_concurrency,
+                max_context_tokens: self.loaded.config.runtime.max_context_tokens,
                 thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
                     genesis_provider::ThinkingConfig {
                         budget_tokens: Some(budget),
@@ -685,6 +699,18 @@ fn generate_session_title(prompt: &str) -> String {
     format!("{}...", &normalized[..end])
 }
 
+/// Convert a DeliveryPlatform to its string representation.
+pub fn delivery_platform_str(platform: &DeliveryPlatform) -> &'static str {
+    match platform {
+        DeliveryPlatform::Cli => "cli",
+        DeliveryPlatform::Telegram => "telegram",
+        DeliveryPlatform::Discord => "discord",
+        DeliveryPlatform::Slack => "slack",
+        DeliveryPlatform::HomeAssistant => "homeassistant",
+        DeliveryPlatform::WhatsApp => "whatsapp",
+    }
+}
+
 pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
     match raw.trim().to_ascii_lowercase().as_str() {
         "telegram" => DeliveryPlatform::Telegram,
@@ -961,6 +987,7 @@ mod tests {
                     budget_limit: None,
                     terminal: None,
                     thinking_budget: None,
+                    max_context_tokens: None,
                 },
                 gateway: None,
             },

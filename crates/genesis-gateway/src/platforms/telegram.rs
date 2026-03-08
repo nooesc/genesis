@@ -122,9 +122,7 @@ struct WhisperResponse {
 
 /// Download a file from Telegram by file_id, then transcribe via Whisper API.
 /// Returns the transcribed text, or an error description.
-async fn transcribe_telegram_audio(token: &str, file_id: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
-
+async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_id: &str) -> Result<String, String> {
     // Step 1: Get the file path from Telegram.
     let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
@@ -302,9 +300,10 @@ pub async fn webhook_handler(
         if let crate::commands::CommandResult::Reply(reply) =
             crate::commands::handle_command(text, &session_id, &store, &state.loaded.config)
         {
+            let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
                     error!(error = %e, "failed to send command reply");
                 }
             });
@@ -330,7 +329,7 @@ pub async fn webhook_handler(
             let prompt = match input {
                 MessageInput::Text(text) => text,
                 MessageInput::Voice { file_id, duration } => {
-                    match transcribe_telegram_audio(&token, &file_id).await {
+                    match transcribe_telegram_audio(&state.http_client, &token, &file_id).await {
                         Ok(transcript) => {
                             info!(duration, "voice message transcribed successfully");
                             format!("[Voice message transcription ({duration}s)]: {transcript}")
@@ -346,7 +345,7 @@ pub async fn webhook_handler(
                     }
                 }
                 MessageInput::Audio { file_id, duration, file_name } => {
-                    match transcribe_telegram_audio(&token, &file_id).await {
+                    match transcribe_telegram_audio(&state.http_client, &token, &file_id).await {
                         Ok(transcript) => {
                             info!(file_name = file_name.as_str(), "audio file transcribed successfully");
                             format!("[Audio \"{file_name}\" transcription ({duration}s)]: {transcript}")
@@ -391,7 +390,7 @@ pub async fn webhook_handler(
                 }
             };
 
-            if let Err(e) = send_reply(&token, chat_id, &reply_text, Some(message_id)).await {
+            if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply_text, Some(message_id)).await {
                 error!(error = %e, "failed to send telegram reply");
             }
         }
@@ -403,6 +402,7 @@ pub async fn webhook_handler(
 
 /// Send a message via the Telegram Bot API.
 async fn send_reply(
+    client: &reqwest::Client,
     token: &str,
     chat_id: i64,
     text: &str,
@@ -412,7 +412,6 @@ async fn send_reply(
     // Split long responses into chunks.
     let chunks = split_message(text, 4096);
 
-    let client = reqwest::Client::new();
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
 
     for (i, chunk) in chunks.iter().enumerate() {

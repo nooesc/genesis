@@ -92,6 +92,11 @@ pub struct RuntimeConfig {
     /// reasoning (Claude, o1/o3) will use extended thinking with this budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
+    /// Maximum input tokens before context compression triggers. When the last
+    /// API response reports prompt_tokens above this threshold, the middle
+    /// portion of the conversation is summarized and replaced. `None` disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
 }
 
 /// Terminal backend configuration for shell command execution.
@@ -206,6 +211,8 @@ struct FileRuntimeConfig {
     terminal: Option<TerminalConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_budget: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_context_tokens: Option<u32>,
 }
 
 #[derive(Debug, Error)]
@@ -279,6 +286,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             budget_limit: None,
             terminal: None,
             thinking_budget: None,
+            max_context_tokens: None,
         },
         gateway: None,
     })
@@ -424,6 +432,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.thinking_budget),
+        max_context_tokens: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.max_context_tokens),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -558,8 +570,8 @@ pub fn update_provider_in_file(
 ///   profile, provider.backend, provider.model, provider.base_url,
 ///   provider.api_key_env, runtime.max_turns, runtime.max_concurrency,
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
-///   runtime.thinking_budget, gateway.idle_timeout_minutes,
-///   gateway.daily_reset_hour
+///   runtime.thinking_budget, runtime.max_context_tokens,
+///   gateway.idle_timeout_minutes, gateway.daily_reset_hour
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
 
@@ -641,6 +653,16 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .thinking_budget = Some(v);
         }
+        "runtime.max_context_tokens" => {
+            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.max_context_tokens",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_context_tokens = Some(v);
+        }
         "gateway.idle_timeout_minutes" => {
             let v: u64 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
                 name: "gateway.idle_timeout_minutes",
@@ -681,7 +703,8 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      provider.base_url, provider.api_key_env, runtime.max_turns, \
                      runtime.max_concurrency, runtime.allow_destructive_tools, \
                      runtime.max_context_messages, runtime.thinking_budget, \
-                     gateway.idle_timeout_minutes, gateway.daily_reset_hour"
+                     runtime.max_context_tokens, gateway.idle_timeout_minutes, \
+                     gateway.daily_reset_hour"
                 ),
             });
         }

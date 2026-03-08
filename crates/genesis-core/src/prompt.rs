@@ -70,13 +70,180 @@ const CONTEXT_FILE_CANDIDATES: &[&str] = &[
     ".github/copilot-instructions.md",
 ];
 
+/// Builder for constructing system prompts with optional sections.
+pub struct SystemPromptBuilder<'a> {
+    profile: &'a str,
+    tools: &'a [ToolDefinition],
+    custom_identity: Option<&'a str>,
+    skills_section: Option<&'a str>,
+    user_model_section: Option<&'a str>,
+    context_section: Option<&'a str>,
+    memories_section: Option<&'a str>,
+    delivery_platform: Option<&'a str>,
+}
+
+impl<'a> SystemPromptBuilder<'a> {
+    pub fn new(profile: &'a str, tools: &'a [ToolDefinition]) -> Self {
+        Self {
+            profile,
+            tools,
+            custom_identity: None,
+            skills_section: None,
+            user_model_section: None,
+            context_section: None,
+            memories_section: None,
+            delivery_platform: None,
+        }
+    }
+
+    pub fn identity(mut self, identity: &'a str) -> Self {
+        self.custom_identity = Some(identity);
+        self
+    }
+
+    pub fn skills(mut self, section: &'a str) -> Self {
+        self.skills_section = Some(section);
+        self
+    }
+
+    pub fn user_model(mut self, section: &'a str) -> Self {
+        self.user_model_section = Some(section);
+        self
+    }
+
+    pub fn context(mut self, section: &'a str) -> Self {
+        self.context_section = Some(section);
+        self
+    }
+
+    pub fn memories(mut self, section: &'a str) -> Self {
+        self.memories_section = Some(section);
+        self
+    }
+
+    pub fn delivery_platform(mut self, platform: &'a str) -> Self {
+        self.delivery_platform = Some(platform);
+        self
+    }
+
+    pub fn build(self) -> String {
+        let mut parts = Vec::new();
+
+        // Identity section
+        parts.push(
+            self.custom_identity
+                .unwrap_or(DEFAULT_AGENT_IDENTITY)
+                .to_owned(),
+        );
+
+        // Core behavioral instructions
+        parts.push(BEHAVIORAL_INSTRUCTIONS.to_owned());
+
+        // Profile
+        parts.push(format!("Current profile: {}", self.profile));
+
+        // Delivery platform hints
+        if let Some(platform) = self.delivery_platform {
+            if let Some(hint) = platform_hint(platform) {
+                parts.push(format!("## Delivery Platform\n\n{hint}"));
+            }
+        }
+
+        // Project context files
+        if let Some(context) = self.context_section {
+            parts.push(format!(
+                "## Project Context\n\nThe following instructions come from the project's context file. Follow them carefully.\n\n{context}"
+            ));
+        }
+
+        // User model section (what the agent knows about the user)
+        if let Some(user_model) = self.user_model_section {
+            parts.push(format!(
+                "## What you know about the user\n\nUse these observations to personalize your responses. Update them with user_observe when you learn something new.\n\n{user_model}"
+            ));
+        }
+
+        // Recalled memories relevant to the current conversation
+        if let Some(memories) = self.memories_section {
+            parts.push(format!(
+                "## Recalled Memories\n\nThe following memories were automatically recalled as potentially relevant to this conversation. Use them to inform your response.\n\n{memories}"
+            ));
+        }
+
+        // Tool listing
+        if !self.tools.is_empty() {
+            let mut tool_section = String::from("Available tools:");
+            for tool in self.tools {
+                tool_section.push_str(&format!("\n- {}: {}", tool.name, tool.description));
+            }
+            parts.push(tool_section);
+        }
+
+        // Skills section
+        if let Some(skills) = self.skills_section {
+            parts.push(skills.to_owned());
+        }
+
+        // Skill instruction
+        parts.push(
+            "You can learn new skills using the skill_create tool. After completing a complex multi-step task successfully, consider saving the procedure as a skill for future reuse.".to_owned(),
+        );
+
+        // Timestamp and platform hints
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M %Z").to_string();
+        let os_platform = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        parts.push(format!(
+            "Current time: {timestamp}. Platform: {os_platform}/{arch}."
+        ));
+
+        parts.join("\n\n")
+    }
+}
+
+/// Platform-specific behavioral hints for the agent.
+fn platform_hint(platform: &str) -> Option<&'static str> {
+    match platform {
+        "telegram" => Some(
+            "You are responding via Telegram. Keep messages concise (under 4096 chars). \
+             Use Telegram-compatible markdown: *bold*, _italic_, `code`, ```pre```. \
+             Avoid complex formatting. Users may be on mobile."
+        ),
+        "discord" => Some(
+            "You are responding via Discord. Keep messages under 2000 characters. \
+             Use Discord markdown: **bold**, *italic*, `code`, ```lang\\ncode```. \
+             Use embeds sparingly. Be conversational."
+        ),
+        "slack" => Some(
+            "You are responding via Slack. Use Slack mrkdwn: *bold*, _italic_, `code`, \
+             ```code blocks```. You can use bullet lists and numbered lists. \
+             Thread context may be limited."
+        ),
+        "whatsapp" => Some(
+            "You are responding via WhatsApp. Keep messages short and mobile-friendly. \
+             Use WhatsApp formatting: *bold*, _italic_, ~strikethrough~, ```monospace```. \
+             Avoid long code blocks."
+        ),
+        "homeassistant" => Some(
+            "You are responding to a Home Assistant automation. Be precise and actionable. \
+             Focus on the specific request without pleasantries. Your response may be \
+             used programmatically by automations."
+        ),
+        _ => None,
+    }
+}
+
+// --- Compatibility wrappers for existing callers ---
+
 /// Build a system prompt for the agent from the current context.
 pub fn build_system_prompt(
     profile: &str,
     tools: &[ToolDefinition],
     custom_identity: Option<&str>,
 ) -> String {
-    build_system_prompt_with_skills(profile, tools, custom_identity, None)
+    let mut builder = SystemPromptBuilder::new(profile, tools);
+    if let Some(id) = custom_identity { builder = builder.identity(id); }
+    builder.build()
 }
 
 /// Build a system prompt with optional skills context.
@@ -86,7 +253,10 @@ pub fn build_system_prompt_with_skills(
     custom_identity: Option<&str>,
     skills_section: Option<&str>,
 ) -> String {
-    build_system_prompt_full(profile, tools, custom_identity, skills_section, None)
+    let mut builder = SystemPromptBuilder::new(profile, tools);
+    if let Some(id) = custom_identity { builder = builder.identity(id); }
+    if let Some(s) = skills_section { builder = builder.skills(s); }
+    builder.build()
 }
 
 /// Build a system prompt with all optional sections.
@@ -97,14 +267,11 @@ pub fn build_system_prompt_full(
     skills_section: Option<&str>,
     user_model_section: Option<&str>,
 ) -> String {
-    build_system_prompt_complete(
-        profile,
-        tools,
-        custom_identity,
-        skills_section,
-        user_model_section,
-        None,
-    )
+    let mut builder = SystemPromptBuilder::new(profile, tools);
+    if let Some(id) = custom_identity { builder = builder.identity(id); }
+    if let Some(s) = skills_section { builder = builder.skills(s); }
+    if let Some(u) = user_model_section { builder = builder.user_model(u); }
+    builder.build()
 }
 
 /// Build a system prompt with all optional sections including project context.
@@ -116,15 +283,12 @@ pub fn build_system_prompt_complete(
     user_model_section: Option<&str>,
     context_section: Option<&str>,
 ) -> String {
-    build_system_prompt_with_memories(
-        profile,
-        tools,
-        custom_identity,
-        skills_section,
-        user_model_section,
-        context_section,
-        None,
-    )
+    let mut builder = SystemPromptBuilder::new(profile, tools);
+    if let Some(id) = custom_identity { builder = builder.identity(id); }
+    if let Some(s) = skills_section { builder = builder.skills(s); }
+    if let Some(u) = user_model_section { builder = builder.user_model(u); }
+    if let Some(c) = context_section { builder = builder.context(c); }
+    builder.build()
 }
 
 /// Build a system prompt with all optional sections including recalled memories.
@@ -137,70 +301,13 @@ pub fn build_system_prompt_with_memories(
     context_section: Option<&str>,
     memories_section: Option<&str>,
 ) -> String {
-    let mut parts = Vec::new();
-
-    // Identity section
-    parts.push(
-        custom_identity
-            .unwrap_or(DEFAULT_AGENT_IDENTITY)
-            .to_owned(),
-    );
-
-    // Core behavioral instructions
-    parts.push(BEHAVIORAL_INSTRUCTIONS.to_owned());
-
-    // Profile
-    parts.push(format!("Current profile: {profile}"));
-
-    // Project context files
-    if let Some(context) = context_section {
-        parts.push(format!(
-            "## Project Context\n\nThe following instructions come from the project's context file. Follow them carefully.\n\n{context}"
-        ));
-    }
-
-    // User model section (what the agent knows about the user)
-    if let Some(user_model) = user_model_section {
-        parts.push(format!(
-            "## What you know about the user\n\nUse these observations to personalize your responses. Update them with user_observe when you learn something new.\n\n{user_model}"
-        ));
-    }
-
-    // Recalled memories relevant to the current conversation
-    if let Some(memories) = memories_section {
-        parts.push(format!(
-            "## Recalled Memories\n\nThe following memories were automatically recalled as potentially relevant to this conversation. Use them to inform your response.\n\n{memories}"
-        ));
-    }
-
-    // Tool listing
-    if !tools.is_empty() {
-        let mut tool_section = String::from("Available tools:");
-        for tool in tools {
-            tool_section.push_str(&format!("\n- {}: {}", tool.name, tool.description));
-        }
-        parts.push(tool_section);
-    }
-
-    // Skills section
-    if let Some(skills) = skills_section {
-        parts.push(skills.to_owned());
-    }
-
-    // Skill instruction
-    parts.push(
-        "You can learn new skills using the skill_create tool. After completing a complex multi-step task successfully, consider saving the procedure as a skill for future reuse.".to_owned(),
-    );
-
-    // Timestamp and platform hints
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M %Z").to_string();
-    let platform = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    parts.push(format!(
-        "Current time: {timestamp}. Platform: {platform}/{arch}."
-    ));
-
-    parts.join("\n\n")
+    let mut builder = SystemPromptBuilder::new(profile, tools);
+    if let Some(id) = custom_identity { builder = builder.identity(id); }
+    if let Some(s) = skills_section { builder = builder.skills(s); }
+    if let Some(u) = user_model_section { builder = builder.user_model(u); }
+    if let Some(c) = context_section { builder = builder.context(c); }
+    if let Some(m) = memories_section { builder = builder.memories(m); }
+    builder.build()
 }
 
 /// Load project context from well-known file locations relative to a directory.
@@ -544,5 +651,76 @@ mod tests {
         let context = load_context_file(dir.path()).expect("should load");
         assert!(context.contains("SECURITY WARNINGS"));
         assert!(context.contains("sk-proj-abc123")); // original content preserved
+    }
+
+    #[test]
+    fn builder_produces_same_output_as_compat_function() {
+        let tools = vec![ToolDefinition {
+            name: "echo".to_owned(),
+            description: "Echoes".to_owned(),
+            parameters: None,
+        }];
+        let compat = build_system_prompt("default", &tools, None);
+        let builder = SystemPromptBuilder::new("default", &tools).build();
+        assert_eq!(compat, builder);
+    }
+
+    #[test]
+    fn builder_with_all_sections() {
+        let prompt = SystemPromptBuilder::new("operator", &[])
+            .identity("You are a test bot.")
+            .skills("## Skills\n- deploy")
+            .user_model("- likes_rust")
+            .context("Use Rust.")
+            .memories("- Built Genesis")
+            .delivery_platform("telegram")
+            .build();
+        assert!(prompt.contains("You are a test bot."));
+        assert!(prompt.contains("## Skills"));
+        assert!(prompt.contains("likes_rust"));
+        assert!(prompt.contains("Use Rust."));
+        assert!(prompt.contains("Built Genesis"));
+        assert!(prompt.contains("Telegram"));
+    }
+
+    #[test]
+    fn platform_hints_for_known_platforms() {
+        assert!(platform_hint("telegram").is_some());
+        assert!(platform_hint("discord").is_some());
+        assert!(platform_hint("slack").is_some());
+        assert!(platform_hint("whatsapp").is_some());
+        assert!(platform_hint("homeassistant").is_some());
+        assert!(platform_hint("cli").is_none());
+        assert!(platform_hint("unknown").is_none());
+    }
+
+    #[test]
+    fn telegram_hint_mentions_char_limit() {
+        let hint = platform_hint("telegram").unwrap();
+        assert!(hint.contains("4096"));
+        assert!(hint.contains("mobile"));
+    }
+
+    #[test]
+    fn discord_hint_mentions_char_limit() {
+        let hint = platform_hint("discord").unwrap();
+        assert!(hint.contains("2000"));
+    }
+
+    #[test]
+    fn builder_delivery_platform_adds_section() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .delivery_platform("slack")
+            .build();
+        assert!(prompt.contains("## Delivery Platform"));
+        assert!(prompt.contains("Slack"));
+    }
+
+    #[test]
+    fn builder_cli_platform_omits_hint() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .delivery_platform("cli")
+            .build();
+        assert!(!prompt.contains("Delivery Platform"));
     }
 }

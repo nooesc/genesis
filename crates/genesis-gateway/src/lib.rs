@@ -7,8 +7,10 @@ pub mod commands;
 pub mod platforms;
 pub mod verify;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
@@ -28,6 +30,55 @@ use tracing::{error, info, info_span, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Simple in-memory sliding-window rate limiter keyed by IP address.
+///
+/// Each entry stores `(request_count, window_start_secs)`.  When a new
+/// request arrives and the current timestamp is still within the same
+/// 60-second window, the count increments.  Otherwise the window resets.
+/// Stale entries (older than 2 minutes) are purged on every check to
+/// prevent unbounded memory growth.
+#[derive(Debug)]
+pub struct RateLimiter {
+    /// Max requests per 60-second window.  Stored here so the middleware
+    /// doesn't need to re-read `AppState`.
+    max_rpm: u32,
+    /// Map from IP -> (count, window_start_epoch_secs).
+    entries: Mutex<HashMap<IpAddr, (u32, u64)>>,
+}
+
+impl RateLimiter {
+    pub fn new(max_rpm: u32) -> Self {
+        Self {
+            max_rpm,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns `true` if the request is allowed, `false` if rate-limited.
+    pub fn check(&self, ip: IpAddr) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Purge stale entries (windows older than 120s)
+        map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 120);
+
+        let entry = map.entry(ip).or_insert((0, now));
+        if now.saturating_sub(entry.1) >= 60 {
+            // New window
+            *entry = (1, now);
+            true
+        } else if entry.0 < self.max_rpm {
+            entry.0 += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Shared application state for all request handlers.
 pub struct AppState {
     pub loaded: genesis_config::LoadedConfig,
@@ -36,6 +87,27 @@ pub struct AppState {
     pub api_key: Option<String>,
     /// Shared MCP manager for external tool servers (connected at startup).
     pub mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
+    /// Shared HTTP client for outbound platform API calls (connection pooling).
+    pub http_client: reqwest::Client,
+    /// Optional per-IP rate limiter.
+    pub rate_limiter: Option<RateLimiter>,
+}
+
+impl AppState {
+    pub fn new(
+        loaded: genesis_config::LoadedConfig,
+        api_key: Option<String>,
+        mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
+        rate_limit_rpm: Option<u32>,
+    ) -> Self {
+        Self {
+            loaded,
+            api_key,
+            mcp,
+            http_client: reqwest::Client::new(),
+            rate_limiter: rate_limit_rpm.map(RateLimiter::new),
+        }
+    }
 }
 
 /// Request body for the `/chat` endpoint.
@@ -128,11 +200,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/whatsapp/webhook", get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler))
         .route("/homeassistant/webhook", post(platforms::homeassistant::webhook_handler));
 
+    // Rate-limited routes (protected + platform webhooks)
+    let rate_limited = Router::new()
+        .merge(protected)
+        .merge(platform_webhooks)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            rate_limit_middleware,
+        ));
+
     // Public routes
     Router::new()
         .route("/health", get(health_handler))
-        .merge(protected)
-        .merge(platform_webhooks)
+        .merge(rate_limited)
         .layer(cors)
         .with_state(state)
 }
@@ -164,6 +244,53 @@ async fn auth_middleware(
     match token {
         Some(t) if t == expected_key => Ok(next.run(request).await),
         _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+/// Extracts the client IP from the request.
+///
+/// Checks `X-Forwarded-For` and `X-Real-IP` headers first (for reverse-proxy
+/// setups), then falls back to the peer socket address via `ConnectInfo`.
+fn client_ip<B>(request: &Request<B>) -> Option<IpAddr> {
+    // X-Forwarded-For: first entry is the original client
+    if let Some(forwarded) = request.headers().get("x-forwarded-for") {
+        if let Ok(val) = forwarded.to_str() {
+            if let Some(first) = val.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    // X-Real-IP
+    if let Some(real_ip) = request.headers().get("x-real-ip") {
+        if let Ok(val) = real_ip.to_str() {
+            if let Ok(ip) = val.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+    // Peer address via ConnectInfo (populated by axum::serve)
+    request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+async fn rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let limiter = match &state.rate_limiter {
+        Some(l) => l,
+        None => return Ok(next.run(request).await),
+    };
+    let ip = client_ip(&request).unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    if limiter.check(ip) {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::TOO_MANY_REQUESTS)
     }
 }
 
@@ -411,11 +538,7 @@ mod tests {
     #[test]
     fn build_router_creates_routes() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = Arc::new(AppState {
-            loaded,
-            api_key: None,
-            mcp: None,
-        });
+        let state = Arc::new(AppState::new(loaded, None, None, None));
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
     }
@@ -442,5 +565,51 @@ mod tests {
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"response\":\"hello\""));
         assert!(json.contains("\"turns_used\":1"));
+    }
+
+    #[test]
+    fn rate_limiter_allows_under_limit() {
+        let limiter = RateLimiter::new(5);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        for _ in 0..5 {
+            assert!(limiter.check(ip), "should allow requests under limit");
+        }
+    }
+
+    #[test]
+    fn rate_limiter_blocks_over_limit() {
+        let limiter = RateLimiter::new(3);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(!limiter.check(ip), "4th request should be blocked");
+    }
+
+    #[test]
+    fn rate_limiter_tracks_ips_independently() {
+        let limiter = RateLimiter::new(2);
+        let ip_a: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_b: IpAddr = "10.0.0.2".parse().unwrap();
+        assert!(limiter.check(ip_a));
+        assert!(limiter.check(ip_a));
+        assert!(!limiter.check(ip_a), "ip_a should be blocked");
+        assert!(limiter.check(ip_b), "ip_b should still be allowed");
+        assert!(limiter.check(ip_b));
+        assert!(!limiter.check(ip_b), "ip_b should now be blocked");
+    }
+
+    #[test]
+    fn rate_limiter_none_when_no_rpm() {
+        let loaded = genesis_config::load(None).expect("default config should load");
+        let state = AppState::new(loaded, None, None, None);
+        assert!(state.rate_limiter.is_none());
+    }
+
+    #[test]
+    fn rate_limiter_some_when_rpm_set() {
+        let loaded = genesis_config::load(None).expect("default config should load");
+        let state = AppState::new(loaded, None, None, Some(60));
+        assert!(state.rate_limiter.is_some());
     }
 }

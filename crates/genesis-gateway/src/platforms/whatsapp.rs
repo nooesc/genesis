@@ -213,12 +213,13 @@ pub async fn webhook_handler(
                     &state.loaded.config,
                 ) {
                     crate::commands::CommandResult::Reply(reply) => {
+                        let client2 = state.http_client.clone();
                         let token2 = token.clone();
                         let phone2 = phone_id.clone();
                         let from2 = from.clone();
                         tokio::spawn(async move {
                             if let Err(e) =
-                                send_reply(&token2, &phone2, &from2, &reply).await
+                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
                             {
                                 error!(error = %e, "failed to send command reply");
                             }
@@ -271,7 +272,7 @@ pub async fn webhook_handler(
                         };
 
                         if let Err(e) =
-                            send_reply(&token, &phone_id, &from, &reply_text).await
+                            send_reply(&state.http_client, &token, &phone_id, &from, &reply_text).await
                         {
                             error!(error = %e, "failed to send whatsapp reply");
                         }
@@ -287,12 +288,12 @@ pub async fn webhook_handler(
 
 /// Send a text message via the WhatsApp Cloud API.
 async fn send_reply(
+    client: &reqwest::Client,
     token: &str,
     phone_number_id: &str,
     to: &str,
     text: &str,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
     let url = format!(
         "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
     );
