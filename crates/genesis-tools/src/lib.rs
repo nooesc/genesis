@@ -565,6 +565,54 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "skill_store_file".to_owned(),
+                description: "Stores a supporting file for a skill, such as a reference document or example. Overwrites if the file already exists.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": { "type": "string", "description": "Name of the skill to attach the file to." },
+                        "file_path": { "type": "string", "description": "Relative path for the file, e.g. 'references/api.md'." },
+                        "content": { "type": "string", "description": "The file content to store." }
+                    },
+                    "required": ["skill_name", "file_path", "content"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill_file::SkillStoreFileTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_list_files".to_owned(),
+                description: "Lists all supporting files attached to a skill.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": { "type": "string", "description": "Name of the skill to list files for." }
+                    },
+                    "required": ["skill_name"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill_file::SkillListFilesTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_delete_file".to_owned(),
+                description: "Deletes a supporting file from a skill.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": { "type": "string", "description": "Name of the skill." },
+                        "file_path": { "type": "string", "description": "Relative path of the file to delete." }
+                    },
+                    "required": ["skill_name", "file_path"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::skill_file::SkillDeleteFileTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "skill_delete".to_owned(),
                 description: "Deletes a saved skill by name.".to_owned(),
                 parameters: Some(json!({
@@ -1337,7 +1385,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 57);
+        assert_eq!(definitions.len(), 60);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -1353,6 +1401,9 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_view_file"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_store_file"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_list_files"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_delete_file"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
         assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
         assert!(definitions.iter().any(|tool| tool.name == "user_model"));
