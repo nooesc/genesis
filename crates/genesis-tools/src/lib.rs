@@ -1038,6 +1038,47 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::transcribe::TranscribeTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "image_generation".to_owned(),
+                description: "Generates images from text prompts using OpenAI-compatible DALL-E API. Saves the generated image to a file. Supports size, quality, and style options.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "Text description of the image to generate." },
+                        "output_path": { "type": "string", "description": "File path to save the generated image." },
+                        "model": { "type": "string", "description": "Model to use (default: dall-e-3)." },
+                        "size": { "type": "string", "description": "Image size: 256x256, 512x512, 1024x1024, 1024x1792, 1792x1024 (default: 1024x1024)." },
+                        "quality": { "type": "string", "description": "Quality: 'standard' or 'hd' (default: standard)." },
+                        "style": { "type": "string", "description": "Style: 'vivid' or 'natural' (default: vivid)." },
+                        "api_base": { "type": "string", "description": "API base URL (default: https://api.openai.com/v1 or OPENAI_API_BASE env)." }
+                    },
+                    "required": ["prompt", "output_path"]
+                })),
+            },
+            ApprovalPolicy::Always,
+            builtins::image_gen::ImageGenerationTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "vision".to_owned(),
+                description: "Analyzes images using multimodal LLM APIs. Send a local image file or URL to get a detailed description, text transcription, diagram analysis, or answer questions about visual content.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path to a local image file (png, jpg, gif, webp, etc.)." },
+                        "image_url": { "type": "string", "description": "URL of an image to analyze (alternative to file_path)." },
+                        "question": { "type": "string", "description": "What to analyze or ask about the image (default: describe in detail)." },
+                        "model": { "type": "string", "description": "Vision model to use (default: gpt-4o)." },
+                        "max_tokens": { "type": "string", "description": "Maximum response tokens (default: 1024)." },
+                        "api_base": { "type": "string", "description": "API base URL (default: https://api.openai.com/v1 or OPENAI_API_BASE env)." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::vision::VisionTool,
         );
     registry
 }
@@ -1118,7 +1159,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 48);
+        assert_eq!(definitions.len(), 50);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
