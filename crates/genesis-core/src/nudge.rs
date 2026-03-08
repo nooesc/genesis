@@ -5,7 +5,7 @@
 //! model observations, and creating skills from repeated patterns.
 
 use genesis_config::LoadedConfig;
-use genesis_storage::{bootstrap, format_user_traits, SessionStore, UserModelStore};
+use genesis_storage::{bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore};
 
 use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTurnInput};
 
@@ -20,13 +20,15 @@ pub fn build_nudge_prompt(loaded: &LoadedConfig) -> String {
     let memories_section = load_memories_section(db_path);
     let user_model_section = load_user_model_section(db_path);
     let sessions_section = load_recent_sessions_section(db_path);
+    let skills_section = load_skills_performance_section(db_path);
 
     let mut prompt = String::from(
         "Perform a self-reflection on your accumulated knowledge. Review the information below and take action:\n\n\
          1. **Consolidate memories**: Remove outdated or redundant memories. Store any new insights.\n\
          2. **Refine user model**: Update observations about the user based on patterns. Increase confidence where evidence is strong, or note new traits you've observed.\n\
          3. **Create skills**: If you see repeated task patterns in recent sessions, create reusable skills to handle them more efficiently next time.\n\
-         4. **Prune low-value data**: Delete memories or observations that are no longer relevant.\n\n\
+         4. **Improve skills**: Review skill performance stats below. For skills with high failure rates, rewrite their instructions to address common failure modes. For unused skills, consider whether they should be deleted.\n\
+         5. **Prune low-value data**: Delete memories or observations that are no longer relevant.\n\n\
          Be concise. Only make changes that genuinely improve your knowledge. If everything looks good, say so briefly.\n"
     );
 
@@ -48,7 +50,17 @@ pub fn build_nudge_prompt(loaded: &LoadedConfig) -> String {
         prompt.push('\n');
     }
 
-    if memories_section.is_none() && user_model_section.is_none() && sessions_section.is_none() {
+    if let Some(ref section) = skills_section {
+        prompt.push_str("\n## Skill Performance\n");
+        prompt.push_str(section);
+        prompt.push('\n');
+    }
+
+    if memories_section.is_none()
+        && user_model_section.is_none()
+        && sessions_section.is_none()
+        && skills_section.is_none()
+    {
         prompt.push_str(
             "\nNo accumulated knowledge yet. This is normal for early sessions. \
              Focus on learning about the user and their needs as you interact.\n",
@@ -117,6 +129,53 @@ fn load_user_model_section(db_path: &std::path::Path) -> Option<String> {
     let store = UserModelStore::new(db_path);
     let traits = store.list_all().ok()?;
     format_user_traits(&traits)
+}
+
+/// Load skill performance data for the nudge prompt.
+///
+/// Lists each skill with its usage stats and flags underperforming skills
+/// (failure rate > 30%) for improvement.
+fn load_skills_performance_section(db_path: &std::path::Path) -> Option<String> {
+    let skill_store = SkillStore::new(db_path);
+    let usage_store = SkillUsageStore::new(db_path);
+    let skills = skill_store.list_all().ok()?;
+    if skills.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for skill in &skills {
+        let stats = usage_store.stats(&skill.name).ok();
+        let (uses, successes, failures) = match stats {
+            Some(ref s) if s.total_uses > 0 => (s.total_uses, s.successes, s.failures),
+            _ => {
+                lines.push(format!(
+                    "- **{}** (v{}) — no usage data yet",
+                    skill.name, skill.version
+                ));
+                continue;
+            }
+        };
+
+        let failure_rate = if uses > 0 {
+            (failures as f64 / uses as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let flag = if failure_rate > 30.0 {
+            " [NEEDS IMPROVEMENT]"
+        } else {
+            ""
+        };
+
+        lines.push(format!(
+            "- **{}** (v{}) — {} uses, {} success, {} failure ({:.0}% fail rate){}",
+            skill.name, skill.version, uses, successes, failures, failure_rate, flag
+        ));
+    }
+
+    Some(lines.join("\n"))
 }
 
 fn load_recent_sessions_section(db_path: &std::path::Path) -> Option<String> {
@@ -266,5 +325,68 @@ mod tests {
 
         let prompt = build_nudge_prompt(&loaded);
         assert!(prompt.contains("No accumulated knowledge yet"));
+    }
+
+    #[test]
+    fn nudge_prompt_includes_skill_performance() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let db_path = data_dir.join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = SkillStore::new(&db_path);
+        skill_store
+            .upsert("deploy", "Deploy app", "Run deploy", None, &[])
+            .expect("upsert");
+
+        let usage_store = SkillUsageStore::new(&db_path);
+        usage_store
+            .record_usage("deploy", None, "success", None)
+            .unwrap();
+        usage_store
+            .record_usage("deploy", None, "failure", Some("Timed out"))
+            .unwrap();
+
+        let loaded = test_loaded_config(data_dir, db_path);
+        let prompt = build_nudge_prompt(&loaded);
+        assert!(prompt.contains("Skill Performance"));
+        assert!(prompt.contains("deploy"));
+        assert!(prompt.contains("2 uses"));
+    }
+
+    #[test]
+    fn nudge_prompt_flags_underperforming_skills() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let db_path = data_dir.join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = SkillStore::new(&db_path);
+        skill_store
+            .upsert("flaky", "Flaky skill", "Sometimes works", None, &[])
+            .expect("upsert");
+
+        let usage_store = SkillUsageStore::new(&db_path);
+        // 1 success, 3 failures = 75% failure rate
+        usage_store.record_usage("flaky", None, "success", None).unwrap();
+        usage_store.record_usage("flaky", None, "failure", None).unwrap();
+        usage_store.record_usage("flaky", None, "failure", None).unwrap();
+        usage_store.record_usage("flaky", None, "failure", None).unwrap();
+
+        let loaded = test_loaded_config(data_dir, db_path);
+        let prompt = build_nudge_prompt(&loaded);
+        assert!(prompt.contains("NEEDS IMPROVEMENT"));
+    }
+
+    #[test]
+    fn nudge_prompt_instructions_mention_skill_improvement() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+
+        let prompt = build_nudge_prompt(&loaded);
+        assert!(prompt.contains("Improve skills"));
+        assert!(prompt.contains("failure rates"));
     }
 }
