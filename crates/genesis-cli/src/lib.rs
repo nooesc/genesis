@@ -252,6 +252,8 @@ pub enum Command {
         level: Option<String>,
         #[arg(long, help = "Output format: json, sharegpt, or chatml")]
         format: Option<String>,
+        #[arg(long, help = "Use the training compressor that protects first/last turns and summarizes the middle")]
+        training: bool,
     },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
@@ -270,6 +272,8 @@ pub enum Command {
     Eval(EvalCommand),
     #[command(subcommand, about = "Manage DM pairing authorization for messaging platforms")]
     Pairing(PairingCommand),
+    #[command(subcommand, about = "List and inspect toolset distributions for batch training")]
+    Toolset(ToolsetCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -304,6 +308,13 @@ pub enum EvalCommand {
         left: String,
         #[arg(help = "Right-hand trajectory JSON file")]
         right: String,
+    },
+    #[command(about = "Export a directory of trajectories as ChatML JSONL")]
+    ExportChatml {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        recursive: bool,
     },
 }
 
@@ -544,6 +555,24 @@ pub enum PairingCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ToolsetCommand {
+    #[command(about = "List available toolset distributions")]
+    List,
+    #[command(about = "Show details of a specific toolset distribution")]
+    Show {
+        #[arg(help = "Distribution name")]
+        name: String,
+    },
+    #[command(about = "Sample a distribution and show which tools would be selected")]
+    Sample {
+        #[arg(help = "Distribution name")]
+        name: String,
+        #[arg(long, help = "Random seed for reproducible sampling")]
+        seed: Option<u64>,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(transparent)]
@@ -706,6 +735,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 } else {
                     Ok(format_eval_comparison(&comparison))
                 }
+            }
+            EvalCommand::ExportChatml { dir, recursive } => {
+                run_eval_export_chatml(&dir, recursive)
             }
         },
         Command::Sessions(sessions_command) => {
@@ -986,7 +1018,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             output,
             level,
             format,
-        } => run_compress(input, output, level, format),
+            training,
+        } => run_compress(input, output, level, format, training),
         Command::Update => run_update().await,
         Command::Memory(memory_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1027,6 +1060,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Pairing(pairing_command) => {
             run_pairing(cli.config, pairing_command, cli.json).await
         }
+        Command::Toolset(toolset_command) => run_toolset(toolset_command, cli.json),
     }
 }
 
@@ -2266,6 +2300,7 @@ fn run_compress(
     output: Option<String>,
     level: Option<String>,
     format: Option<String>,
+    training: bool,
 ) -> Result<String, CliError> {
     let level = parse_compression_level(level.as_deref())?;
     let format = parse_compression_format(format.as_deref())?;
@@ -2275,7 +2310,12 @@ fn run_compress(
     let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("invalid trajectory JSON in {}: {e}", input)))?;
 
-    let compressed = genesis_core::compress::compress(&trajectory, level);
+    let compressed = if training {
+        genesis_core::compress::TrajectoryCompressor::default()
+            .compress_for_training(&trajectory)
+    } else {
+        genesis_core::compress::compress(&trajectory, level)
+    };
     let rendered = match format {
         CompressionFormat::Json => serde_json::to_string_pretty(&compressed)?,
         CompressionFormat::ShareGpt => {
@@ -2302,6 +2342,34 @@ fn run_compress(
         }
         None => Ok(rendered),
     }
+}
+
+fn run_eval_export_chatml(dir: &str, recursive: bool) -> Result<String, CliError> {
+    let mut lines = Vec::new();
+
+    for path in collect_eval_files(PathBuf::from(dir), recursive)? {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+            .map_err(|e| {
+                CliError::Other(format!(
+                    "invalid trajectory JSON in {}: {e}",
+                    path.display()
+                ))
+            })?;
+        let compressed = genesis_core::compress::TrajectoryCompressor::default()
+            .compress_for_training(&trajectory);
+        let line = serde_json::json!({
+            "session_id": compressed.session_id,
+            "model": compressed.model,
+            "tags": compressed.tags,
+            "outcome": compressed.outcome,
+            "chatml": genesis_core::compress::to_chatml(&compressed),
+        });
+        lines.push(serde_json::to_string(&line)?);
+    }
+
+    Ok(lines.join("\n"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2921,6 +2989,105 @@ async fn run_pairing(
             match platform {
                 Some(p) => Ok(format!("Cleared {} pending code(s) for {}", cleared, p)),
                 None => Ok(format!("Cleared {} pending code(s) across all platforms", cleared)),
+            }
+        }
+    }
+}
+
+fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String, CliError> {
+    use genesis_core::toolset;
+    use rand::SeedableRng;
+
+    match command {
+        ToolsetCommand::List => {
+            let names = toolset::builtin_distribution_names();
+            if json {
+                let distributions: Vec<serde_json::Value> = names
+                    .iter()
+                    .filter_map(|name| {
+                        toolset::builtin_distribution(name).map(|d| {
+                            serde_json::json!({
+                                "name": d.name,
+                                "description": d.description,
+                                "tool_count": d.possible_tools().len(),
+                            })
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::to_string_pretty(&distributions).unwrap())
+            } else {
+                let mut lines = vec![format!("{:<18} {:<5} {}", "NAME", "TOOLS", "DESCRIPTION")];
+                for name in &names {
+                    if let Some(d) = toolset::builtin_distribution(name) {
+                        lines.push(format!(
+                            "{:<18} {:<5} {}",
+                            d.name,
+                            d.possible_tools().len(),
+                            d.description
+                        ));
+                    }
+                }
+                Ok(lines.join("\n"))
+            }
+        }
+        ToolsetCommand::Show { name } => {
+            let dist = toolset::builtin_distribution(&name).ok_or_else(|| {
+                CliError::Other(format!(
+                    "unknown distribution '{name}'. Available: {}",
+                    toolset::builtin_distribution_names().join(", ")
+                ))
+            })?;
+
+            if json {
+                Ok(serde_json::to_string_pretty(&dist).unwrap())
+            } else {
+                let mut lines = vec![
+                    format!("Distribution: {}", dist.name),
+                    format!("Description:  {}", dist.description),
+                    format!("Tools ({}):", dist.tools.len()),
+                ];
+                for (tool, prob) in &dist.tools {
+                    lines.push(format!("  {:<30} {:.0}%", tool, prob * 100.0));
+                }
+                Ok(lines.join("\n"))
+            }
+        }
+        ToolsetCommand::Sample { name, seed } => {
+            let dist = toolset::builtin_distribution(&name).ok_or_else(|| {
+                CliError::Other(format!(
+                    "unknown distribution '{name}'. Available: {}",
+                    toolset::builtin_distribution_names().join(", ")
+                ))
+            })?;
+
+            let mut rng = match seed {
+                Some(s) => rand::rngs::StdRng::seed_from_u64(s),
+                None => rand::rngs::StdRng::from_os_rng(),
+            };
+            let selected = dist.sample(&mut rng);
+            let mut tools: Vec<&str> = selected.iter().map(|s| s.as_str()).collect();
+            tools.sort();
+
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "distribution": dist.name,
+                    "seed": seed,
+                    "selected_count": tools.len(),
+                    "possible_count": dist.possible_tools().len(),
+                    "selected": tools,
+                }))
+                .unwrap())
+            } else {
+                let mut lines = vec![format!(
+                    "Sampled {} tools from '{}' ({} possible):",
+                    tools.len(),
+                    dist.name,
+                    dist.possible_tools().len()
+                )];
+                for tool in &tools {
+                    lines.push(format!("  {tool}"));
+                }
+                Ok(lines.join("\n"))
             }
         }
     }
@@ -4273,9 +4440,10 @@ mod tests {
         format_insights, format_memory_list, format_schedule_list, format_session_list,
         format_usage_stats, format_session_messages, format_skill, format_skill_list,
         format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
-        run, BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
+        run, run_compress, run_eval_export_chatml, run_toolset,
+        BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
         MemoryCommand, ModelCommand, PairingCommand, ScheduleCommand, SessionsCommand,
-        SkillsCommand, StorageCommand, SubagentsCommand,
+        SkillsCommand, StorageCommand, SubagentsCommand, ToolsetCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -5567,6 +5735,93 @@ storage:
     }
 
     #[test]
+    fn parses_toolset_list() {
+        let cli = Cli::try_parse_from(["genesis", "toolset", "list"]).expect("should parse");
+        match cli.command {
+            Command::Toolset(ToolsetCommand::List) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_toolset_show() {
+        let cli =
+            Cli::try_parse_from(["genesis", "toolset", "show", "development"]).expect("should parse");
+        match cli.command {
+            Command::Toolset(ToolsetCommand::Show { name }) => {
+                assert_eq!(name, "development");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_toolset_sample_with_seed() {
+        let cli = Cli::try_parse_from(["genesis", "toolset", "sample", "random", "--seed", "42"])
+            .expect("should parse");
+        match cli.command {
+            Command::Toolset(ToolsetCommand::Sample { name, seed }) => {
+                assert_eq!(name, "random");
+                assert_eq!(seed, Some(42));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_toolset_list_works() {
+        let result = run_toolset(ToolsetCommand::List, false).expect("should succeed");
+        assert!(result.contains("full"));
+        assert!(result.contains("development"));
+        assert!(result.contains("minimal"));
+    }
+
+    #[test]
+    fn run_toolset_show_works() {
+        let result = run_toolset(
+            ToolsetCommand::Show {
+                name: "minimal".to_owned(),
+            },
+            false,
+        )
+        .expect("should succeed");
+        assert!(result.contains("shell_exec"));
+        assert!(result.contains("read_file"));
+    }
+
+    #[test]
+    fn run_toolset_show_unknown_errors() {
+        let result = run_toolset(
+            ToolsetCommand::Show {
+                name: "nonexistent".to_owned(),
+            },
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_toolset_sample_deterministic() {
+        let result1 = run_toolset(
+            ToolsetCommand::Sample {
+                name: "random".to_owned(),
+                seed: Some(42),
+            },
+            true,
+        )
+        .expect("should succeed");
+        let result2 = run_toolset(
+            ToolsetCommand::Sample {
+                name: "random".to_owned(),
+                seed: Some(42),
+            },
+            true,
+        )
+        .expect("should succeed");
+        assert_eq!(result1, result2);
+    }
+
+    #[test]
     fn batch_input_line_defaults_tags() {
         let parsed =
             parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
@@ -5604,11 +5859,13 @@ storage:
                 output,
                 level,
                 format,
+                training,
             } => {
                 assert_eq!(input, "trajectory.json");
                 assert!(output.is_none());
                 assert!(level.is_none());
                 assert!(format.is_none());
+                assert!(!training);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -5636,11 +5893,42 @@ storage:
                 output,
                 level,
                 format,
+                training,
             } => {
                 assert_eq!(input, "trajectory.json");
                 assert_eq!(output.as_deref(), Some("out/sharegpt.json"));
                 assert_eq!(level.as_deref(), Some("heavy"));
                 assert_eq!(format.as_deref(), Some("sharegpt"));
+                assert!(!training);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_compress_command_with_training_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "compress",
+            "--input",
+            "trajectory.json",
+            "--training",
+        ])
+        .expect("compress with training should parse");
+
+        match cli.command {
+            Command::Compress {
+                input,
+                output,
+                level,
+                format,
+                training,
+            } => {
+                assert_eq!(input, "trajectory.json");
+                assert!(output.is_none());
+                assert!(level.is_none());
+                assert!(format.is_none());
+                assert!(training);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6033,6 +6321,25 @@ storage:
     }
 
     #[test]
+    fn parses_eval_export_chatml_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "export-chatml",
+            "trajectories",
+            "--recursive",
+        ])
+        .expect("eval export-chatml should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::ExportChatml { dir, recursive }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn summarize_replay_reports_aggregates_directory() {
         let dir = tempdir().expect("tempdir");
         let file_one = dir.path().join("one.json");
@@ -6245,6 +6552,132 @@ storage:
                 && tool.left_result_count == 0
                 && tool.right_result_count == 1
         }));
+    }
+
+    #[test]
+    fn run_compress_training_uses_trajectory_compressor() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("trajectory.json");
+        let trajectory = serde_json::json!({
+            "session_id": "s-train",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-train",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "first"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T12:00:01Z",
+                    "action_type": "assistant_message",
+                    "content": "second"
+                },
+                {
+                    "step_index": 2,
+                    "timestamp": "2026-03-08T12:00:02Z",
+                    "action_type": "tool_call",
+                    "content": "tool_call: shell",
+                    "tool_name": "shell",
+                    "tool_arguments": "{\"cmd\":\"pwd\"}"
+                },
+                {
+                    "step_index": 3,
+                    "timestamp": "2026-03-08T12:00:03Z",
+                    "action_type": "tool_result",
+                    "content": "tool_result: shell",
+                    "tool_name": "shell",
+                    "tool_result": "/tmp"
+                },
+                {
+                    "step_index": 4,
+                    "timestamp": "2026-03-08T12:00:04Z",
+                    "action_type": "assistant_message",
+                    "content": "third"
+                },
+                {
+                    "step_index": 5,
+                    "timestamp": "2026-03-08T12:00:05Z",
+                    "action_type": "user_message",
+                    "content": "last user"
+                },
+                {
+                    "step_index": 6,
+                    "timestamp": "2026-03-08T12:00:06Z",
+                    "action_type": "assistant_message",
+                    "content": "last assistant"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["training"]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap())
+            .expect("write trajectory");
+
+        let rendered = run_compress(
+            input.to_string_lossy().into_owned(),
+            None,
+            Some("medium".to_owned()),
+            Some("json".to_owned()),
+            true,
+        )
+        .expect("training compression should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("compressed json should parse");
+        assert_eq!(parsed["turns"].as_array().unwrap().len(), 5);
+        assert!(parsed["turns"][2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Summary of"));
+    }
+
+    #[test]
+    fn run_eval_export_chatml_emits_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("trajectory.json");
+        let trajectory = serde_json::json!({
+            "session_id": "s-chatml",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-chatml",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T12:00:01Z",
+                    "action_type": "assistant_message",
+                    "content": "hi"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["dataset"]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap())
+            .expect("write trajectory");
+
+        let output = run_eval_export_chatml(dir.path().to_str().unwrap(), false)
+            .expect("chatml export should succeed");
+        let line = output.lines().next().expect("one jsonl line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid jsonl object");
+
+        assert_eq!(parsed["session_id"], "s-chatml");
+        assert_eq!(parsed["model"], "gpt-4.1-mini");
+        assert_eq!(parsed["tags"][0], "dataset");
+        assert!(parsed["chatml"]
+            .as_str()
+            .unwrap()
+            .contains("<|im_start|>user"));
     }
 
     #[test]
