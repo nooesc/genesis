@@ -1,0 +1,10 @@
+[package]
+name = "genesis"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+genesis-cli = { path = "../../crates/genesis-cli" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

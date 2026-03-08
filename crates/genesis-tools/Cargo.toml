@@ -1,0 +1,13 @@
+[package]
+name = "genesis-tools"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+genesis-types = { path = "../genesis-types" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

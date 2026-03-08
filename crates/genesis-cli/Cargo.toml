@@ -1,0 +1,20 @@
+[package]
+name = "genesis-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+clap.workspace = true
+genesis-config = { path = "../genesis-config" }
+genesis-core = { path = "../genesis-core" }
+genesis-provider = { path = "../genesis-provider" }
+genesis-storage = { path = "../genesis-storage" }
+genesis-types = { path = "../genesis-types" }
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

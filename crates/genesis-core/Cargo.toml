@@ -1,0 +1,16 @@
+[package]
+name = "genesis-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+genesis-config = { path = "../genesis-config" }
+genesis-provider = { path = "../genesis-provider" }
+genesis-storage = { path = "../genesis-storage" }
+genesis-tools = { path = "../genesis-tools" }
+genesis-types = { path = "../genesis-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
