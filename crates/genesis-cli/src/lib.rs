@@ -74,6 +74,17 @@ pub enum Command {
     Subagents(SubagentsCommand),
     #[command(about = "Run a self-reflection nudge to consolidate learning")]
     Nudge,
+    #[command(about = "Initialize Genesis (creates config, bootstraps storage, verifies provider)")]
+    Init {
+        #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
+        backend: Option<String>,
+        #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
+        model: Option<String>,
+        #[arg(long, help = "Base URL for the provider API")]
+        base_url: Option<String>,
+        #[arg(long, help = "Environment variable holding the API key")]
+        api_key_env: Option<String>,
+    },
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -385,6 +396,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Model(model_command) => run_model(cli.config, model_command, cli.json),
         Command::Serve { host, port } => run_serve(cli.config, &host, port).await,
         Command::Nudge => run_nudge(cli.config).await,
+        Command::Init {
+            backend,
+            model,
+            base_url,
+            api_key_env,
+        } => run_init(cli.config, backend, model, base_url, api_key_env),
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
@@ -550,6 +567,100 @@ async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
 
     let response = genesis_core::nudge::run_nudge(&loaded, &session_id).await?;
     Ok(format!("Nudge complete (session: {session_id}):\n\n{response}"))
+}
+
+fn run_init(
+    config_path: Option<PathBuf>,
+    backend: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+) -> Result<String, CliError> {
+    use genesis_config::{render_example_yaml, update_provider_in_file, AppPaths};
+
+    let paths = AppPaths::resolve(config_path.as_deref())?;
+    let mut steps = Vec::new();
+
+    // Step 1: Create config file if it doesn't exist
+    let config_existed = paths.config_path.exists();
+    if !config_existed {
+        // Create parent directory
+        if let Some(parent) = paths.config_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| CliError::Io(e))?;
+        }
+
+        // Write default config
+        let yaml = render_example_yaml(config_path.as_deref())?;
+        std::fs::write(&paths.config_path, &yaml).map_err(|e| CliError::Io(e))?;
+        steps.push(format!(
+            "[+] Created config: {}",
+            paths.config_path.display()
+        ));
+    } else {
+        steps.push(format!(
+            "[ok] Config exists: {}",
+            paths.config_path.display()
+        ));
+    }
+
+    // Step 2: Apply provider overrides if specified
+    if backend.is_some() || model.is_some() || base_url.is_some() || api_key_env.is_some() {
+        update_provider_in_file(
+            &paths.config_path,
+            backend.as_deref(),
+            model.as_deref(),
+            base_url.as_ref().map(|u| Some(u.as_str())),
+            api_key_env.as_ref().map(|k| Some(k.as_str())),
+        )?;
+
+        let mut parts = Vec::new();
+        if let Some(ref b) = backend {
+            parts.push(format!("backend={b}"));
+        }
+        if let Some(ref m) = model {
+            parts.push(format!("model={m}"));
+        }
+        steps.push(format!("[+] Updated provider: {}", parts.join(", ")));
+    }
+
+    // Step 3: Bootstrap storage
+    std::fs::create_dir_all(&paths.data_dir).map_err(|e| CliError::Io(e))?;
+    let storage_result = bootstrap(&paths.database_path)?;
+    steps.push(format!(
+        "[+] Storage ready: {} (schema v{})",
+        paths.database_path.display(),
+        storage_result.schema_version
+    ));
+
+    // Step 4: Load and verify config
+    let loaded = load(config_path.as_deref())?;
+    steps.push(format!(
+        "[ok] Profile: {}, Provider: {} / {}",
+        loaded.config.profile, loaded.config.provider.backend, loaded.config.provider.model
+    ));
+
+    // Step 5: Check API key
+    let api_key_var = loaded
+        .config
+        .provider
+        .api_key_env
+        .as_deref()
+        .unwrap_or("OPENAI_API_KEY");
+    if std::env::var(api_key_var).is_ok() {
+        steps.push(format!("[ok] API key: ${api_key_var} is set"));
+    } else {
+        steps.push(format!(
+            "[!!] API key: ${api_key_var} is NOT set — set it to start chatting"
+        ));
+    }
+
+    // Summary
+    let tool_count = genesis_core::default_tool_count();
+    steps.push(String::new());
+    steps.push(format!("Genesis is ready! {} tools available.", tool_count));
+    steps.push("Run `genesis chat` to start talking to Eve.".to_owned());
+
+    Ok(steps.join("\n"))
 }
 
 fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
@@ -1503,6 +1614,57 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "nudge"])
             .expect("nudge command should parse");
         assert!(matches!(cli.command, Command::Nudge));
+    }
+
+    #[test]
+    fn parses_init_command() {
+        let cli = Cli::try_parse_from(["genesis", "init"])
+            .expect("init command should parse");
+        assert!(matches!(cli.command, Command::Init { .. }));
+    }
+
+    #[test]
+    fn parses_init_with_options() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "init",
+            "--backend",
+            "openrouter",
+            "--model",
+            "anthropic/claude-sonnet-4-6",
+        ])
+        .expect("init with options should parse");
+        match cli.command {
+            Command::Init { backend, model, .. } => {
+                assert_eq!(backend.as_deref(), Some("openrouter"));
+                assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4-6"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_command_creates_config_and_storage() {
+        let dir = tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.yaml");
+
+        let output = run(Cli {
+            config: Some(config_path.clone()),
+            json: false,
+            command: Command::Init {
+                backend: None,
+                model: None,
+                base_url: None,
+                api_key_env: None,
+            },
+        })
+        .await
+        .expect("init should succeed");
+
+        assert!(output.contains("Created config"));
+        assert!(output.contains("Storage ready"));
+        assert!(output.contains("genesis chat"));
+        assert!(config_path.exists());
     }
 
     #[tokio::test]
