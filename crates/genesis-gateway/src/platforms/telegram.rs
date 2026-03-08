@@ -300,7 +300,7 @@ pub async fn webhook_handler(
     if let MessageInput::Text(ref text) = input {
         let store = SessionStore::new(&state.loaded.config.storage.database_path);
         if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(text, &session_id, &store)
+            crate::commands::handle_command(text, &session_id, &store, &state.loaded.config)
         {
             let token2 = token.clone();
             tokio::spawn(async move {

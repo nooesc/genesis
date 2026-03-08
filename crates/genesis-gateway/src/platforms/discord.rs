@@ -178,6 +178,34 @@ pub async fn interactions_handler(
 
         info!(parent: &span, "received discord interaction");
 
+        // Handle gateway slash commands.
+        let store = genesis_storage::SessionStore::new(
+            &state.loaded.config.storage.database_path,
+        );
+        if let crate::commands::CommandResult::Reply(reply) =
+            crate::commands::handle_command(
+                &message,
+                &session_id,
+                &store,
+                &state.loaded.config,
+            )
+        {
+            return Ok(Json(
+                serde_json::to_value(InteractionResponse {
+                    response_type: RESPONSE_CHANNEL_MESSAGE,
+                    data: Some(InteractionResponseData { content: reply }),
+                })
+                .unwrap(),
+            ));
+        }
+
+        // Auto-reset expired sessions before processing.
+        crate::commands::check_session_expiry(
+            &session_id,
+            &store,
+            state.loaded.config.gateway.as_ref(),
+        );
+
         // Respond with deferred message immediately
         let token = match bot_token() {
             Some(t) => t,

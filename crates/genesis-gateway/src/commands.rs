@@ -5,7 +5,7 @@
 //! was handled, or `None` to pass through to the agent.
 
 use chrono::{Local, NaiveDateTime};
-use genesis_config::GatewayConfig;
+use genesis_config::{GatewayConfig, GenesisConfig, ProviderConfig, RuntimeConfig, StorageConfig};
 use genesis_storage::SessionStore;
 use tracing::{info, warn};
 
@@ -24,7 +24,13 @@ pub enum CommandResult {
 /// - `/help` — show available commands
 /// - `/stop` — acknowledge stop
 /// - `/id` — show the current session ID
-pub fn handle_command(text: &str, session_id: &str, store: &SessionStore) -> CommandResult {
+/// - `/config` — show current model and session info
+pub fn handle_command(
+    text: &str,
+    session_id: &str,
+    store: &SessionStore,
+    config: &GenesisConfig,
+) -> CommandResult {
     let trimmed = text.trim();
 
     // Only handle messages that start with /
@@ -54,6 +60,7 @@ pub fn handle_command(text: &str, session_id: &str, store: &SessionStore) -> Com
             "Available commands:\n\
              \u{2022} /new \u{2014} Start a fresh conversation\n\
              \u{2022} /id \u{2014} Show current session ID\n\
+             \u{2022} /config \u{2014} Show current model and session info\n\
              \u{2022} /help \u{2014} Show this message"
                 .to_owned(),
         ),
@@ -63,6 +70,32 @@ pub fn handle_command(text: &str, session_id: &str, store: &SessionStore) -> Com
         ),
 
         "/id" => CommandResult::Reply(format!("Session ID: `{session_id}`")),
+
+        "/config" => {
+            let session = store.get_session(session_id).ok().flatten();
+            let message_count = store
+                .load_messages(session_id)
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            let mut lines = vec![
+                format!(
+                    "Model: {} / {}",
+                    config.provider.backend, config.provider.model
+                ),
+                format!("Session ID: `{session_id}`"),
+                format!("Messages: {message_count}"),
+            ];
+
+            if let Some(session) = session {
+                lines.push(format!("Platform: {}", session.platform));
+                if let Some(title) = session.title {
+                    lines.push(format!("Title: {title}"));
+                }
+            }
+
+            CommandResult::Reply(lines.join("\n"))
+        }
 
         _ => {
             // Unknown slash command — pass through to agent
@@ -171,10 +204,11 @@ mod tests {
     #[test]
     fn help_command_returns_reply() {
         let store = test_store();
-        match handle_command("/help", "test-session", &store) {
+        match handle_command("/help", "test-session", &store, &test_config()) {
             CommandResult::Reply(msg) => {
                 assert!(msg.contains("/new"));
                 assert!(msg.contains("/help"));
+                assert!(msg.contains("/config"));
             }
             CommandResult::PassThrough => panic!("expected Reply"),
         }
@@ -189,7 +223,7 @@ mod tests {
             .append_message("s1", "user", Some("Hello"), None, None)
             .unwrap();
 
-        match handle_command("/new", "s1", &store) {
+        match handle_command("/new", "s1", &store, &test_config()) {
             CommandResult::Reply(msg) => {
                 assert!(msg.contains("fresh"));
             }
@@ -204,7 +238,7 @@ mod tests {
     #[test]
     fn id_command_shows_session_id() {
         let store = test_store();
-        match handle_command("/id", "tg-42", &store) {
+        match handle_command("/id", "tg-42", &store, &test_config()) {
             CommandResult::Reply(msg) => {
                 assert!(msg.contains("tg-42"));
             }
@@ -215,7 +249,7 @@ mod tests {
     #[test]
     fn regular_message_passes_through() {
         let store = test_store();
-        match handle_command("Hello there", "test", &store) {
+        match handle_command("Hello there", "test", &store, &test_config()) {
             CommandResult::PassThrough => {} // expected
             CommandResult::Reply(_) => panic!("expected PassThrough"),
         }
@@ -224,7 +258,7 @@ mod tests {
     #[test]
     fn unknown_slash_command_passes_through() {
         let store = test_store();
-        match handle_command("/gif-search cats", "test", &store) {
+        match handle_command("/gif-search cats", "test", &store, &test_config()) {
             CommandResult::PassThrough => {} // expected — could be a skill
             CommandResult::Reply(_) => panic!("expected PassThrough for unknown command"),
         }
@@ -233,7 +267,7 @@ mod tests {
     #[test]
     fn stop_command_returns_reply() {
         let store = test_store();
-        match handle_command("/stop", "test", &store) {
+        match handle_command("/stop", "test", &store, &test_config()) {
             CommandResult::Reply(msg) => {
                 assert!(msg.contains("Acknowledged"));
             }
@@ -244,9 +278,29 @@ mod tests {
     #[test]
     fn reset_alias_works() {
         let store = test_store();
-        match handle_command("/reset", "test", &store) {
+        match handle_command("/reset", "test", &store, &test_config()) {
             CommandResult::Reply(msg) => {
                 assert!(msg.contains("fresh"));
+            }
+            CommandResult::PassThrough => panic!("expected Reply"),
+        }
+    }
+
+    #[test]
+    fn config_command_shows_model_and_session_info() {
+        let store = test_store();
+        store.create_session("s1", "telegram", Some("Support")).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None)
+            .unwrap();
+
+        match handle_command("/config", "s1", &store, &test_config()) {
+            CommandResult::Reply(msg) => {
+                assert!(msg.contains("Model: openai / gpt-4.1-mini"));
+                assert!(msg.contains("Session ID: `s1`"));
+                assert!(msg.contains("Messages: 1"));
+                assert!(msg.contains("Platform: telegram"));
+                assert!(msg.contains("Title: Support"));
             }
             CommandResult::PassThrough => panic!("expected Reply"),
         }
@@ -262,6 +316,35 @@ mod tests {
             rusqlite::params![timestamp, session_id],
         )
         .unwrap();
+    }
+
+    fn test_config() -> GenesisConfig {
+        GenesisConfig {
+            schema_version: 1,
+            profile: "default".to_owned(),
+            provider: ProviderConfig {
+                backend: "openai".to_owned(),
+                model: "gpt-4.1-mini".to_owned(),
+                base_url: None,
+                api_key_env: None,
+            },
+            tool_provider: None,
+            mcp_servers: std::collections::HashMap::new(),
+            storage: StorageConfig {
+                data_dir: std::path::PathBuf::from("/tmp/genesis"),
+                database_path: std::path::PathBuf::from("/tmp/genesis/genesis.db"),
+            },
+            runtime: RuntimeConfig {
+                max_concurrency: 4,
+                allow_destructive_tools: false,
+                max_turns: 20,
+                max_context_messages: None,
+                budget_limit: None,
+                terminal: None,
+                thinking_budget: None,
+            },
+            gateway: None,
+        }
     }
 
     #[test]

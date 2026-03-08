@@ -206,7 +206,12 @@ pub async fn webhook_handler(
                 );
 
                 info!(parent: &span, "received whatsapp message");
-                match crate::commands::handle_command(&text, &session_id, &store) {
+                match crate::commands::handle_command(
+                    &text,
+                    &session_id,
+                    &store,
+                    &state.loaded.config,
+                ) {
                     crate::commands::CommandResult::Reply(reply) => {
                         let token2 = token.clone();
                         let phone2 = phone_id.clone();

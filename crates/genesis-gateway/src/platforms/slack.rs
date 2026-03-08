@@ -150,7 +150,7 @@ pub async fn events_handler(
 
     // Handle gateway slash commands before reaching the agent.
     let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-    match crate::commands::handle_command(&text, &session_id, &store) {
+    match crate::commands::handle_command(&text, &session_id, &store, &state.loaded.config) {
         crate::commands::CommandResult::Reply(reply) => {
             let token2 = token.clone();
             let channel2 = channel.clone();
