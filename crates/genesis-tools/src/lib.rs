@@ -211,6 +211,21 @@ impl ToolRegistry {
         self
     }
 
+    /// Remove tools whose names are not in the given set.
+    pub fn retain(&mut self, names: &std::collections::HashSet<String>) {
+        self.tools.retain(|name, _| names.contains(name));
+    }
+
+    /// Return the number of registered tools.
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Return true if no tools are registered.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()

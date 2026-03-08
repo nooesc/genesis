@@ -1052,6 +1052,8 @@ struct EvalSummary {
     failure_count: usize,
     abandoned_count: usize,
     missing_outcome_count: usize,
+    top_warning_messages: Vec<(String, usize)>,
+    top_failure_reasons: Vec<(String, usize)>,
     models: Vec<(String, usize)>,
     tags: Vec<(String, usize)>,
     tools: Vec<AggregatedToolUsage>,
@@ -1151,6 +1153,8 @@ fn summarize_replay_reports(
     let mut failure_count = 0usize;
     let mut abandoned_count = 0usize;
     let mut missing_outcome_count = 0usize;
+    let mut warning_counts = BTreeMap::<String, usize>::new();
+    let mut failure_reasons = BTreeMap::<String, usize>::new();
 
     for report in &reports {
         total_events += report.total_events;
@@ -1176,11 +1180,19 @@ fn summarize_replay_reports(
             entry.call_count += tool.call_count;
             entry.result_count += tool.result_count;
         }
+        for warning in &report.warnings {
+            *warning_counts.entry(warning.message.clone()).or_default() += 1;
+        }
 
         match &report.outcome {
             Some(genesis_core::trajectory::TrajectoryOutcome::Success) => success_count += 1,
             Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. }) => {
-                failure_count += 1
+                failure_count += 1;
+                if let Some(genesis_core::trajectory::TrajectoryOutcome::Failure { reason }) =
+                    &report.outcome
+                {
+                    *failure_reasons.entry(reason.clone()).or_default() += 1;
+                }
             }
             Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => {
                 abandoned_count += 1
@@ -1197,6 +1209,17 @@ fn summarize_replay_reports(
             .then(right.result_count.cmp(&left.result_count))
             .then(left.name.cmp(&right.name))
     });
+    let mut top_warning_messages = warning_counts.into_iter().collect::<Vec<_>>();
+    top_warning_messages.sort_by(|left, right| {
+        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
+    });
+    top_warning_messages.truncate(5);
+
+    let mut top_failure_reasons = failure_reasons.into_iter().collect::<Vec<_>>();
+    top_failure_reasons.sort_by(|left, right| {
+        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
+    });
+    top_failure_reasons.truncate(5);
 
     Ok(EvalSummary {
         directory: dir.to_owned(),
@@ -1215,6 +1238,8 @@ fn summarize_replay_reports(
         failure_count,
         abandoned_count,
         missing_outcome_count,
+        top_warning_messages,
+        top_failure_reasons,
         models: model_counts.into_iter().collect(),
         tags: tag_counts.into_iter().collect(),
         tools,
@@ -1416,6 +1441,20 @@ fn format_eval_summary(summary: &EvalSummary) -> String {
         summary.missing_outcome_count
     ));
 
+    if !summary.top_warning_messages.is_empty() {
+        output.push_str("top warnings:\n");
+        for (message, count) in &summary.top_warning_messages {
+            output.push_str(&format!("  - {count}x {message}\n"));
+        }
+    }
+
+    if !summary.top_failure_reasons.is_empty() {
+        output.push_str("top failure reasons:\n");
+        for (reason, count) in &summary.top_failure_reasons {
+            output.push_str(&format!("  - {count}x {reason}\n"));
+        }
+    }
+
     if !summary.models.is_empty() {
         output.push_str("models:\n");
         for (model, count) in &summary.models {
@@ -1530,6 +1569,18 @@ fn eval_summary_to_json(summary: &EvalSummary) -> serde_json::Value {
         "failure_count": summary.failure_count,
         "abandoned_count": summary.abandoned_count,
         "missing_outcome_count": summary.missing_outcome_count,
+        "top_warning_messages": summary.top_warning_messages.iter().map(|(message, count)| {
+            serde_json::json!({
+                "message": message,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+        "top_failure_reasons": summary.top_failure_reasons.iter().map(|(reason, count)| {
+            serde_json::json!({
+                "reason": reason,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
         "models": summary.models.iter().map(|(model, count)| {
             serde_json::json!({
                 "model": model,
@@ -6031,6 +6082,8 @@ storage:
         assert_eq!(summary.abandoned_count, 1);
         assert_eq!(summary.failure_count, 0);
         assert_eq!(summary.missing_outcome_count, 0);
+        assert!(summary.top_failure_reasons.is_empty());
+        assert!(summary.top_warning_messages.is_empty());
         assert_eq!(summary.models, vec![("gpt-4.1-mini".to_owned(), 2)]);
         assert!(summary
             .tags
@@ -6330,6 +6383,57 @@ storage:
         assert!(summary.warnings_only);
         assert_eq!(summary.failure_count, 1);
         assert_eq!(summary.warnings, 1);
+        assert_eq!(
+            summary.top_failure_reasons,
+            vec![("tool broke".to_owned(), 1)]
+        );
+        assert_eq!(summary.top_warning_messages.len(), 1);
+        assert!(summary.top_warning_messages[0]
+            .0
+            .contains("appears truncated"));
+    }
+
+    #[test]
+    fn eval_comparison_json_includes_deltas_and_tags() {
+        let comparison = crate::EvalComparison {
+            left_path: "left.json".to_owned(),
+            right_path: "right.json".to_owned(),
+            left_session_id: "left-session".to_owned(),
+            right_session_id: "right-session".to_owned(),
+            left_model: "gpt-4.1-mini".to_owned(),
+            right_model: "claude-sonnet-4-6".to_owned(),
+            left_total_events: 4,
+            right_total_events: 6,
+            left_warning_count: 1,
+            right_warning_count: 3,
+            event_delta: crate::ReplayEventDelta {
+                user: 0,
+                assistant: 1,
+                tool_call: 1,
+                tool_result: 1,
+                system: -1,
+            },
+            tools: vec![crate::ToolUsageDelta {
+                name: "shell".to_owned(),
+                left_call_count: 0,
+                right_call_count: 1,
+                left_result_count: 0,
+                right_result_count: 1,
+            }],
+            left_only_tags: vec!["baseline".to_owned()],
+            right_only_tags: vec!["with_tools".to_owned()],
+        };
+
+        let json = crate::eval_comparison_to_json(&comparison);
+
+        assert_eq!(json["left_path"], "left.json");
+        assert_eq!(json["right_path"], "right.json");
+        assert_eq!(json["event_delta"]["tool_call"], 1);
+        assert_eq!(json["event_delta"]["system"], -1);
+        assert_eq!(json["tools"][0]["name"], "shell");
+        assert_eq!(json["tools"][0]["right_call_count"], 1);
+        assert_eq!(json["left_only_tags"][0], "baseline");
+        assert_eq!(json["right_only_tags"][0], "with_tools");
     }
 
     #[test]

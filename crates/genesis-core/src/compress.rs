@@ -6,6 +6,9 @@ const LIGHT_RESULT_TRUNCATE: usize = 512;
 
 /// Maximum length for tool arguments summary in Medium compression.
 const MEDIUM_ARGS_TRUNCATE: usize = 80;
+const DEFAULT_PROTECT_EDGE_TURNS: usize = 2;
+const DEFAULT_MIDDLE_HIGHLIGHTS: usize = 4;
+const DEFAULT_MIDDLE_SNIPPET_TRUNCATE: usize = 120;
 
 /// A compressed trajectory optimized for model training.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +48,34 @@ pub enum CompressionLevel {
     Heavy,
 }
 
+/// Configuration for post-processing trajectories into training-oriented
+/// compressed conversations while protecting the beginning and end.
+#[derive(Debug, Clone)]
+pub struct TrajectoryCompressionConfig {
+    pub protect_first_turns: usize,
+    pub protect_last_turns: usize,
+    pub max_middle_highlights: usize,
+    pub max_snippet_chars: usize,
+}
+
+impl Default for TrajectoryCompressionConfig {
+    fn default() -> Self {
+        Self {
+            protect_first_turns: DEFAULT_PROTECT_EDGE_TURNS,
+            protect_last_turns: DEFAULT_PROTECT_EDGE_TURNS,
+            max_middle_highlights: DEFAULT_MIDDLE_HIGHLIGHTS,
+            max_snippet_chars: DEFAULT_MIDDLE_SNIPPET_TRUNCATE,
+        }
+    }
+}
+
+/// Post-processes trajectories for training: keep the first and last N turns
+/// verbatim, and collapse the middle region into a single summary turn.
+#[derive(Debug, Clone, Default)]
+pub struct TrajectoryCompressor {
+    config: TrajectoryCompressionConfig,
+}
+
 /// Compress a trajectory into a training-ready format.
 pub fn compress(trajectory: &Trajectory, level: CompressionLevel) -> CompressedTrajectory {
     let turns = match level {
@@ -59,6 +90,101 @@ pub fn compress(trajectory: &Trajectory, level: CompressionLevel) -> CompressedT
         turns,
         outcome: trajectory.outcome.clone(),
         tags: trajectory.tags.clone(),
+    }
+}
+
+impl TrajectoryCompressor {
+    pub fn new(config: TrajectoryCompressionConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn compress_for_training(&self, trajectory: &Trajectory) -> CompressedTrajectory {
+        let mut compressed = compress(trajectory, CompressionLevel::Medium);
+        compressed.turns = self.compress_turns(&compressed.turns);
+        compressed
+    }
+
+    fn compress_turns(&self, turns: &[CompressedTurn]) -> Vec<CompressedTurn> {
+        let protect_first = self.config.protect_first_turns.min(turns.len());
+        let protect_last = self
+            .config
+            .protect_last_turns
+            .min(turns.len().saturating_sub(protect_first));
+
+        if turns.len() <= protect_first + protect_last + 1 {
+            return turns.to_vec();
+        }
+
+        let middle_start = protect_first;
+        let middle_end = turns.len() - protect_last;
+        let middle = &turns[middle_start..middle_end];
+
+        let mut output = Vec::new();
+        output.extend_from_slice(&turns[..protect_first]);
+        output.push(self.summarize_middle(middle));
+        output.extend_from_slice(&turns[middle_end..]);
+        output
+    }
+
+    fn summarize_middle(&self, turns: &[CompressedTurn]) -> CompressedTurn {
+        let mut user_turns = 0usize;
+        let mut assistant_turns = 0usize;
+        let mut action_turns = 0usize;
+        let mut tools_used = Vec::<String>::new();
+        let mut highlights = Vec::<String>::new();
+
+        for turn in turns {
+            match turn.role {
+                CompressedRole::User => user_turns += 1,
+                CompressedRole::Assistant => assistant_turns += 1,
+                CompressedRole::ActionSummary => action_turns += 1,
+            }
+
+            for tool in &turn.tools_used {
+                if !tools_used.contains(tool) {
+                    tools_used.push(tool.clone());
+                }
+            }
+
+            if highlights.len() < self.config.max_middle_highlights {
+                highlights.push(format!(
+                    "{}: {}",
+                    turn_role_label(&turn.role),
+                    truncate(&turn.content, self.config.max_snippet_chars)
+                ));
+            }
+        }
+
+        let tools_fragment = if tools_used.is_empty() {
+            "none".to_owned()
+        } else {
+            tools_used.join(", ")
+        };
+
+        let mut content = format!(
+            "Summary of {} middle turns: user={} assistant={} action={}.\nTools used: {}.",
+            turns.len(),
+            user_turns,
+            assistant_turns,
+            action_turns,
+            tools_fragment
+        );
+
+        if !highlights.is_empty() {
+            content.push_str("\nHighlights:\n");
+            for highlight in highlights {
+                content.push_str("- ");
+                content.push_str(&highlight);
+                content.push('\n');
+            }
+            content.pop();
+        }
+
+        CompressedTurn {
+            role: CompressedRole::ActionSummary,
+            content,
+            tools_used,
+        }
     }
 }
 
@@ -303,6 +429,14 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+fn turn_role_label(role: &CompressedRole) -> &'static str {
+    match role {
+        CompressedRole::User => "user",
+        CompressedRole::Assistant => "assistant",
+        CompressedRole::ActionSummary => "action",
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -496,6 +630,50 @@ mod tests {
         assert_eq!(compressed.model, "claude-sonnet-4-20250514");
         assert_eq!(compressed.outcome, Some(TrajectoryOutcome::Success));
         assert_eq!(compressed.tags, vec!["demo", "file-browsing"]);
+    }
+
+    #[test]
+    fn trajectory_compressor_preserves_edges_and_summarizes_middle() {
+        let traj = sample_trajectory();
+        let compressor = TrajectoryCompressor::new(TrajectoryCompressionConfig {
+            protect_first_turns: 1,
+            protect_last_turns: 1,
+            max_middle_highlights: 3,
+            max_snippet_chars: 60,
+        });
+
+        let compressed = compressor.compress_for_training(&traj);
+
+        assert_eq!(compressed.turns.len(), 3);
+        assert_eq!(compressed.turns[0].role, CompressedRole::User);
+        assert_eq!(compressed.turns[0].content, "What files are in /tmp?");
+        assert_eq!(compressed.turns[2].role, CompressedRole::Assistant);
+        assert_eq!(compressed.turns[2].content, "You're welcome!");
+        assert_eq!(compressed.turns[1].role, CompressedRole::ActionSummary);
+        assert!(compressed.turns[1]
+            .content
+            .contains("Summary of 3 middle turns"));
+        assert!(compressed.turns[1].content.contains("Tools used: shell_exec, read_file"));
+        assert!(compressed.turns[1]
+            .tools_used
+            .contains(&"shell_exec".to_owned()));
+        assert!(compressed.turns[1]
+            .tools_used
+            .contains(&"read_file".to_owned()));
+    }
+
+    #[test]
+    fn trajectory_compressor_leaves_short_trajectories_alone() {
+        let traj = simple_trajectory();
+        let compressor = TrajectoryCompressor::default();
+
+        let compressed = compressor.compress_for_training(&traj);
+
+        assert_eq!(compressed.turns.len(), 2);
+        assert_eq!(compressed.turns[0].role, CompressedRole::User);
+        assert_eq!(compressed.turns[1].role, CompressedRole::Assistant);
+        assert_eq!(compressed.turns[0].content, "What is 2+2?");
+        assert_eq!(compressed.turns[1].content, "2+2 equals 4.");
     }
 
     // -----------------------------------------------------------------------
