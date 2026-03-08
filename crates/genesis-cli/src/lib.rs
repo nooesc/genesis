@@ -89,6 +89,15 @@ pub enum Command {
     },
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
+    #[command(about = "Run a single prompt non-interactively and print the response")]
+    Run {
+        /// The prompt to send to the agent.
+        prompt: String,
+        #[arg(long, help = "Session ID to use (creates a new session if not found)")]
+        session_id: Option<String>,
+        #[arg(long, help = "Print raw response without metadata")]
+        raw: bool,
+    },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
     #[command(subcommand, about = "Inspect configured MCP servers")]
@@ -433,6 +442,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
+        Command::Run { prompt, session_id, raw } => {
+            run_oneshot(cli.config, &prompt, session_id, raw, cli.json).await
+        }
         Command::Update => run_update().await,
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json),
     }
@@ -523,6 +535,66 @@ async fn run_chat(
     }
 
     Ok(format!("chat session saved as {session_id}"))
+}
+
+/// Run a single prompt non-interactively and return the response.
+async fn run_oneshot(
+    config_path: Option<PathBuf>,
+    prompt: &str,
+    session_id: Option<String>,
+    raw: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    // Support piping: `echo "prompt" | genesis run -`
+    let prompt = if prompt == "-" {
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf).map_err(|e| CliError::Other(format!("stdin read error: {e}")))?;
+        buf.trim().to_owned()
+    } else {
+        prompt.to_owned()
+    };
+
+    let loaded = load(config_path.as_deref())?;
+    bootstrap(&loaded.config.storage.database_path)?;
+    let service = SessionExecutionService::new(&loaded);
+
+    let session_id = session_id.unwrap_or_else(default_session_id);
+    service.ensure_session(&session_id, "cli", None)?;
+
+    let outcome = service
+        .run_turn(SessionTurnInput {
+            session_id: &session_id,
+            session_platform: "cli",
+            delivery_platform: DeliveryPlatform::Cli,
+            prompt: &prompt,
+            title: None,
+        })
+        .await?;
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "session_id": outcome.session_id,
+            "response": outcome.result.response,
+            "turns_used": outcome.result.turns_used,
+            "tool_calls_made": outcome.result.tool_calls_made,
+            "total_input_tokens": outcome.result.total_input_tokens,
+            "total_output_tokens": outcome.result.total_output_tokens,
+        }))?);
+    }
+
+    if raw {
+        Ok(outcome.result.response)
+    } else {
+        let mut output = outcome.result.response.clone();
+        let r = &outcome.result;
+        if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
+            output.push_str(&format!(
+                "\n\n[{} in / {} out tokens, {} turns, {} tool calls]",
+                r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+            ));
+        }
+        Ok(output)
+    }
 }
 
 async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> {
@@ -1867,6 +1939,36 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "mcp", "list"])
             .expect("mcp list command should parse");
         assert!(matches!(cli.command, Command::Mcp(McpCommand::List)));
+    }
+
+    #[test]
+    fn parses_run_command() {
+        let cli = Cli::try_parse_from(["genesis", "run", "hello world"])
+            .expect("run command should parse");
+        match cli.command {
+            Command::Run { prompt, session_id, raw } => {
+                assert_eq!(prompt, "hello world");
+                assert!(session_id.is_none());
+                assert!(!raw);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_command_with_flags() {
+        let cli = Cli::try_parse_from([
+            "genesis", "run", "--raw", "--session-id", "my-session", "what is 2+2",
+        ])
+        .expect("run command with flags should parse");
+        match cli.command {
+            Command::Run { prompt, session_id, raw } => {
+                assert_eq!(prompt, "what is 2+2");
+                assert_eq!(session_id.as_deref(), Some("my-session"));
+                assert!(raw);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
