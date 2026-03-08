@@ -162,7 +162,7 @@ impl From<&genesis_types::ToolDefinition> for ChatTool {
             function: ChatToolFunction {
                 name: def.name.clone(),
                 description: def.description.clone(),
-                parameters: None,
+                parameters: def.parameters.clone(),
             },
         }
     }
@@ -281,6 +281,7 @@ mod tests {
         let def = genesis_types::ToolDefinition {
             name: "search".to_owned(),
             description: "Search things".to_owned(),
+            parameters: None,
         };
         let chat_tool = ChatTool::from(&def);
         assert_eq!(chat_tool.tool_type, "function");

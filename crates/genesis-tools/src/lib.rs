@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use genesis_types::ToolDefinition;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +139,13 @@ pub fn default_registry() -> ToolRegistry {
                 name: "echo".to_owned(),
                 description: "Echoes a message back into the runtime for local tool testing."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "The message to echo back." }
+                    },
+                    "required": ["message"]
+                })),
             },
             ApprovalPolicy::Never,
             EchoTool,
@@ -147,6 +155,11 @@ pub fn default_registry() -> ToolRegistry {
                 name: "session_info".to_owned(),
                 description: "Returns the current session id, profile, and data directory."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
             },
             ApprovalPolicy::Never,
             SessionInfoTool,
@@ -156,6 +169,14 @@ pub fn default_registry() -> ToolRegistry {
                 name: "shell_exec".to_owned(),
                 description: "Executes a shell command and returns its stdout/stderr output."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The shell command to execute." },
+                        "working_dir": { "type": "string", "description": "Optional working directory for the command." }
+                    },
+                    "required": ["command"]
+                })),
             },
             ApprovalPolicy::Destructive,
             builtins::shell::ShellExecTool,
@@ -164,6 +185,13 @@ pub fn default_registry() -> ToolRegistry {
             ToolDefinition {
                 name: "read_file".to_owned(),
                 description: "Reads the contents of a file at the given path.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute or relative path to the file to read." }
+                    },
+                    "required": ["path"]
+                })),
             },
             ApprovalPolicy::Never,
             builtins::fs::ReadFileTool,
@@ -174,6 +202,14 @@ pub fn default_registry() -> ToolRegistry {
                 description:
                     "Writes content to a file at the given path, creating parent directories as needed."
                         .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute or relative path to the file to write." },
+                        "content": { "type": "string", "description": "The content to write to the file." }
+                    },
+                    "required": ["path", "content"]
+                })),
             },
             ApprovalPolicy::Destructive,
             builtins::fs::WriteFileTool,
@@ -183,6 +219,13 @@ pub fn default_registry() -> ToolRegistry {
                 name: "list_dir".to_owned(),
                 description: "Lists entries in a directory, marking subdirectories with a trailing slash."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the directory to list." }
+                    },
+                    "required": ["path"]
+                })),
             },
             ApprovalPolicy::Never,
             builtins::fs::ListDirTool,
@@ -192,6 +235,14 @@ pub fn default_registry() -> ToolRegistry {
                 name: "memory_store".to_owned(),
                 description: "Stores a durable memory as a key and value pair in sqlite."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "A short label categorizing this memory (e.g. 'user_preference', 'project_goal')." },
+                        "value": { "type": "string", "description": "The content of the memory to store." }
+                    },
+                    "required": ["key", "value"]
+                })),
             },
             ApprovalPolicy::Never,
             builtins::memory::MemoryStoreTool,
@@ -201,6 +252,14 @@ pub fn default_registry() -> ToolRegistry {
                 name: "memory_recall".to_owned(),
                 description: "Searches stored memories using sqlite full-text search."
                     .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query to match against stored memories." },
+                        "limit": { "type": "integer", "description": "Maximum number of results to return (default: 5)." }
+                    },
+                    "required": ["query"]
+                })),
             },
             ApprovalPolicy::Never,
             builtins::memory::MemoryRecallTool,
@@ -323,6 +382,7 @@ mod tests {
             ToolDefinition {
                 name: "dangerous_tool".to_owned(),
                 description: "A placeholder destructive tool".to_owned(),
+                parameters: None,
             },
             ApprovalPolicy::Destructive,
             DangerousTool,

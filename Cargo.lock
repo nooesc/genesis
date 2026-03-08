@@ -429,6 +429,7 @@ dependencies = [
  "genesis-types",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

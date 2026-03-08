@@ -62,10 +62,12 @@ mod tests {
             ToolDefinition {
                 name: "echo".to_owned(),
                 description: "Echoes a message".to_owned(),
+                parameters: None,
             },
             ToolDefinition {
                 name: "search".to_owned(),
                 description: "Searches things".to_owned(),
+                parameters: None,
             },
         ];
 

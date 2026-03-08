@@ -44,13 +44,15 @@ pub struct ModelSelection {
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderTurnRequest {
     pub session_id: String,
     pub model: ModelSelection,
@@ -137,6 +139,7 @@ mod tests {
             tools: vec![ToolDefinition {
                 name: "session_search".to_owned(),
                 description: "Searches prior sessions".to_owned(),
+                parameters: None,
             }],
         };
 
