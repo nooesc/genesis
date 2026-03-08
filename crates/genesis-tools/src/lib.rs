@@ -1146,6 +1146,70 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::vision::VisionTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "ha_list_entities".to_owned(),
+                description: "List Home Assistant entities. Optionally filter by domain (light, switch, climate, sensor, etc.) or by area name (living room, kitchen, etc.).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "domain": { "type": "string", "description": "Entity domain filter (e.g. 'light', 'switch', 'climate', 'sensor', 'binary_sensor', 'cover', 'fan', 'media_player')." },
+                        "area": { "type": "string", "description": "Area/room name filter (e.g. 'living room', 'kitchen'). Matches against friendly names." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::homeassistant::HaListEntitiesTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "ha_get_state".to_owned(),
+                description: "Get the detailed state of a single Home Assistant entity, including all attributes (brightness, color, temperature setpoint, sensor readings, etc.).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "entity_id": { "type": "string", "description": "The entity ID to query (e.g. 'light.living_room', 'climate.thermostat', 'sensor.temperature')." }
+                    },
+                    "required": ["entity_id"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::homeassistant::HaGetStateTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "ha_list_services".to_owned(),
+                description: "List available Home Assistant services (actions) for device control. Shows what actions can be performed on each device type and their parameters.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "domain": { "type": "string", "description": "Filter by domain (e.g. 'light', 'climate', 'switch'). Omit to list all." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::homeassistant::HaListServicesTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "ha_call_service".to_owned(),
+                description: "Call a Home Assistant service to control a device. Use ha_list_services to discover available services and parameters.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "domain": { "type": "string", "description": "Service domain (e.g. 'light', 'switch', 'climate', 'cover', 'media_player', 'fan', 'scene', 'script')." },
+                        "service": { "type": "string", "description": "Service name (e.g. 'turn_on', 'turn_off', 'toggle', 'set_temperature')." },
+                        "entity_id": { "type": "string", "description": "Target entity ID (e.g. 'light.living_room'). Some services may not need this." },
+                        "data": { "type": "string", "description": "Additional service data as JSON string. Examples: '{\"brightness\": 255}' for lights, '{\"temperature\": 22}' for climate." }
+                    },
+                    "required": ["domain", "service"]
+                })),
+            },
+            ApprovalPolicy::Always,
+            builtins::homeassistant::HaCallServiceTool,
         );
     registry
 }
@@ -1226,7 +1290,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 51);
+        assert_eq!(definitions.len(), 55);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

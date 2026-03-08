@@ -6,6 +6,7 @@ pub mod export;
 pub mod fs;
 pub mod git;
 pub mod glob;
+pub mod homeassistant;
 pub mod image_gen;
 pub mod memory;
 pub mod mixture;
