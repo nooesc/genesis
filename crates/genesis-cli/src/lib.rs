@@ -294,6 +294,15 @@ pub enum SessionsCommand {
         #[arg(help = "New title for the session")]
         title: String,
     },
+    #[command(about = "Import a conversation from a file (ShareGPT JSON or JSONL)")]
+    Import {
+        #[arg(help = "Path to the file to import")]
+        file: String,
+        #[arg(long, help = "Import format: 'sharegpt' or 'jsonl' (auto-detected from extension if omitted)")]
+        format: Option<String>,
+        #[arg(long, help = "Optional title for the imported session")]
+        title: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -533,6 +542,14 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     } else {
                         Err(CliError::SessionNotFound(id))
                     }
+                }
+                SessionsCommand::Import { file, format, title } => {
+                    run_session_import(
+                        &store,
+                        &file,
+                        format.as_deref(),
+                        title.as_deref(),
+                    )
                 }
             }
         }
@@ -2582,6 +2599,87 @@ fn export_session_markdown(session_id: &str, messages: &[genesis_storage::Stored
     lines.join("\n")
 }
 
+fn run_session_import(
+    store: &genesis_storage::SessionStore,
+    file: &str,
+    format: Option<&str>,
+    title: Option<&str>,
+) -> Result<String, CliError> {
+    let path = std::path::Path::new(file);
+    let detected_format = match format {
+        Some(f) => f.to_owned(),
+        None => match path.extension().and_then(|e| e.to_str()) {
+            Some("json") => "sharegpt".to_owned(),
+            Some("jsonl") => "jsonl".to_owned(),
+            _ => {
+                return Err(CliError::Other(
+                    "cannot auto-detect format: use --format sharegpt or --format jsonl".to_owned(),
+                ))
+            }
+        },
+    };
+
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
+
+    let messages: Vec<(String, String)> = match detected_format.as_str() {
+        "sharegpt" => {
+            let entries: Vec<serde_json::Value> = serde_json::from_str(&contents)
+                .map_err(|e| CliError::Other(format!("invalid ShareGPT JSON: {e}")))?;
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let from = entry.get("from")?.as_str()?;
+                    let value = entry.get("value")?.as_str()?;
+                    let role = match from {
+                        "human" => "user",
+                        "gpt" => "assistant",
+                        _ => return None, // skip system, thought, etc.
+                    };
+                    Some((role.to_owned(), value.to_owned()))
+                })
+                .collect()
+        }
+        "jsonl" => {
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let entry: serde_json::Value = serde_json::from_str(line)
+                        .map_err(|e| CliError::Other(format!("invalid JSONL line: {e}")))?;
+                    let role = entry
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CliError::Other("JSONL line missing 'role' field".to_owned()))?
+                        .to_owned();
+                    let content = entry
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CliError::Other("JSONL line missing 'content' field".to_owned()))?
+                        .to_owned();
+                    Ok((role, content))
+                })
+                .collect::<Result<Vec<_>, CliError>>()?
+        }
+        other => {
+            return Err(CliError::Other(format!(
+                "unknown import format '{other}', expected 'sharegpt' or 'jsonl'"
+            )));
+        }
+    };
+
+    let count = messages.len();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let session_id = format!("import-{timestamp}");
+
+    store.import_session(&session_id, title, messages)?;
+
+    Ok(format!("Imported {count} messages into session {session_id}"))
+}
+
 fn format_skill_list(skills: &[genesis_storage::StoredSkill]) -> String {
     if skills.is_empty() {
         return "no saved skills".to_owned();
@@ -4231,5 +4329,55 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "status"])
             .expect("status should parse");
         assert!(matches!(cli.command, Command::Status));
+    }
+
+    #[test]
+    fn parses_sessions_import_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "import", "chat.json"])
+            .expect("sessions import should parse");
+        match cli.command {
+            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+                assert_eq!(file, "chat.json");
+                assert!(format.is_none());
+                assert!(title.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_import_with_options() {
+        let cli = Cli::try_parse_from([
+            "genesis", "sessions", "import", "data.jsonl",
+            "--format", "jsonl",
+            "--title", "My Chat",
+        ])
+        .expect("sessions import with options should parse");
+        match cli.command {
+            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+                assert_eq!(file, "data.jsonl");
+                assert_eq!(format.as_deref(), Some("jsonl"));
+                assert_eq!(title.as_deref(), Some("My Chat"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_import_sharegpt_format() {
+        let cli = Cli::try_parse_from([
+            "genesis", "sessions", "import", "conversation.json",
+            "--format", "sharegpt",
+            "--title", "Imported Conversation",
+        ])
+        .expect("sessions import sharegpt should parse");
+        match cli.command {
+            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+                assert_eq!(file, "conversation.json");
+                assert_eq!(format.as_deref(), Some("sharegpt"));
+                assert_eq!(title.as_deref(), Some("Imported Conversation"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

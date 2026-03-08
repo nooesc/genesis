@@ -1242,6 +1242,25 @@ impl SessionStore {
             platform_breakdown,
         })
     }
+
+    /// Import a sequence of messages into a new session.
+    ///
+    /// Creates a session with the given ID and title, then inserts each
+    /// (role, content) pair as a message. Returns the session ID.
+    pub fn import_session(
+        &self,
+        session_id: &str,
+        title: Option<&str>,
+        messages: Vec<(String, String)>,
+    ) -> Result<String, StorageError> {
+        self.create_session(session_id, "import", title)?;
+
+        for (role, content) in &messages {
+            self.append_message(session_id, role, Some(content), None, None)?;
+        }
+
+        Ok(session_id.to_owned())
+    }
 }
 
 /// A persisted scheduled job.
@@ -3169,5 +3188,69 @@ mod tests {
         let deleted = store.delete_last_n_messages("s-over", 100).unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(store.load_messages("s-over").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn import_session_creates_session_and_messages() {
+        let (_dir, store) = bootstrapped_store();
+
+        let messages = vec![
+            ("user".to_owned(), "hello".to_owned()),
+            ("assistant".to_owned(), "hi there".to_owned()),
+            ("user".to_owned(), "how are you?".to_owned()),
+        ];
+
+        let id = store
+            .import_session("import-1", Some("Test Import"), messages)
+            .expect("import should succeed");
+
+        assert_eq!(id, "import-1");
+
+        let session = store
+            .get_session("import-1")
+            .expect("get should work")
+            .expect("session should exist");
+        assert_eq!(session.platform, "import");
+        assert_eq!(session.title.as_deref(), Some("Test Import"));
+
+        let stored = store.load_messages("import-1").expect("load should work");
+        assert_eq!(stored.len(), 3);
+        assert_eq!(stored[0].role, "user");
+        assert_eq!(stored[0].content.as_deref(), Some("hello"));
+        assert_eq!(stored[1].role, "assistant");
+        assert_eq!(stored[1].content.as_deref(), Some("hi there"));
+        assert_eq!(stored[2].role, "user");
+        assert_eq!(stored[2].content.as_deref(), Some("how are you?"));
+    }
+
+    #[test]
+    fn import_session_with_no_title() {
+        let (_dir, store) = bootstrapped_store();
+
+        let messages = vec![("user".to_owned(), "test".to_owned())];
+
+        let id = store
+            .import_session("import-notitle", None, messages)
+            .expect("import should succeed");
+        assert_eq!(id, "import-notitle");
+
+        let session = store
+            .get_session("import-notitle")
+            .expect("get should work")
+            .expect("session should exist");
+        assert!(session.title.is_none());
+    }
+
+    #[test]
+    fn import_session_empty_messages() {
+        let (_dir, store) = bootstrapped_store();
+
+        let id = store
+            .import_session("import-empty", Some("Empty"), vec![])
+            .expect("import should succeed");
+        assert_eq!(id, "import-empty");
+
+        let stored = store.load_messages("import-empty").expect("load should work");
+        assert_eq!(stored.len(), 0);
     }
 }
