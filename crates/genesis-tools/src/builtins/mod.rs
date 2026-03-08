@@ -5,6 +5,7 @@ pub mod search;
 pub mod session;
 pub mod shell;
 pub mod skill;
+pub mod ssh;
 pub mod subagent;
 pub mod user_model;
 pub mod web;

@@ -203,6 +203,27 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "ssh_exec".to_owned(),
+                description:
+                    "Executes a command on a remote host via SSH."
+                        .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "host": { "type": "string", "description": "Hostname or IP address of the remote machine." },
+                        "command": { "type": "string", "description": "The command to execute on the remote host." },
+                        "user": { "type": "string", "description": "SSH user (defaults to current user if omitted)." },
+                        "port": { "type": "string", "description": "SSH port (defaults to 22)." },
+                        "identity_file": { "type": "string", "description": "Path to the SSH private key file." }
+                    },
+                    "required": ["host", "command"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::ssh::SshExecTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "read_file".to_owned(),
                 description: "Reads the contents of a file at the given path.".to_owned(),
                 parameters: Some(json!({
@@ -582,7 +603,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 23);
+        assert_eq!(definitions.len(), 24);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
