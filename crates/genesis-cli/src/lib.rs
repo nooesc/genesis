@@ -169,6 +169,11 @@ pub enum SessionsCommand {
         #[arg(long, default_value = "json", help = "Output format: json or md")]
         format: String,
     },
+    #[command(about = "Search across all sessions")]
+    Search {
+        #[arg(help = "Search query")]
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -342,6 +347,16 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         other => Err(CliError::Other(format!(
                             "unknown export format '{other}', expected 'json' or 'md'"
                         ))),
+                    }
+                }
+                SessionsCommand::Search { query } => {
+                    let results = store.search_sessions(&query)?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&results)?)
+                    } else if results.is_empty() {
+                        Ok(format!("No sessions found matching '{query}'"))
+                    } else {
+                        Ok(format_session_list(&results))
                     }
                 }
             }
@@ -2095,6 +2110,20 @@ storage:
         assert!(output.contains("hello"));
         assert!(output.contains("## Assistant"));
         assert!(output.contains("hi there"));
+    }
+
+    #[test]
+    fn parses_sessions_search_command() {
+        let cli =
+            Cli::try_parse_from(["genesis", "sessions", "search", "hello world"])
+                .expect("sessions search should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Search { query }) => {
+                assert_eq!(query, "hello world");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
     }
 
     #[test]
