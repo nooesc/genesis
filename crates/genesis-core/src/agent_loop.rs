@@ -137,7 +137,7 @@ impl AgentLoop {
             }
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
-            self.prune_context();
+            self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
@@ -218,7 +218,7 @@ impl AgentLoop {
             }
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
-            self.prune_context();
+            self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
@@ -419,7 +419,12 @@ impl AgentLoop {
 
     /// Prune messages to stay within `max_context_messages`, preserving the
     /// system prompt at index 0 (if present) and the most recent messages.
-    fn prune_context(&mut self) {
+    ///
+    /// Before dropping old messages, the agent calls the LLM to produce a
+    /// concise summary of the discarded conversation. This summary is
+    /// inserted as a system message right after the main system prompt so
+    /// the agent retains awareness of prior context.
+    async fn prune_context(&mut self) {
         let limit = match self.config.max_context_messages {
             Some(limit) => limit,
             None => return,
@@ -442,7 +447,87 @@ impl AgentLoop {
 
         let drop_count = non_system_count - limit;
         let drop_start = if has_system { 1 } else { 0 };
+
+        // Extract the messages we're about to drop and summarize them.
+        let to_drop: Vec<ChatMessage> =
+            self.messages[drop_start..drop_start + drop_count].to_vec();
+
+        let summary = self.summarize_messages(&to_drop).await;
+
+        // Remove the old messages.
         self.messages.drain(drop_start..drop_start + drop_count);
+
+        // Inject the summary right after the system prompt (or at position 0).
+        if let Some(text) = summary {
+            let summary_msg = ChatMessage::system(format!(
+                "[Prior conversation summary]\n{text}"
+            ));
+            self.messages.insert(drop_start, summary_msg);
+        }
+    }
+
+    /// Ask the LLM to produce a compact summary of a slice of conversation
+    /// messages. Returns `None` on any failure so the caller can degrade
+    /// gracefully to plain pruning.
+    async fn summarize_messages(&self, messages: &[ChatMessage]) -> Option<String> {
+        if messages.is_empty() {
+            return None;
+        }
+
+        // Build a transcript for the summarizer.
+        let mut transcript = String::new();
+        for msg in messages {
+            let role = &msg.role;
+            let content = msg.content.as_deref().unwrap_or("[tool call]");
+            // Truncate very long tool results to keep the summarization prompt small.
+            let truncated = if content.len() > 500 {
+                format!("{}...", &content[..500])
+            } else {
+                content.to_owned()
+            };
+            transcript.push_str(&format!("{role}: {truncated}\n"));
+        }
+
+        let prompt = format!(
+            "Summarize the following conversation excerpt in 2-4 sentences. \
+             Focus on: key decisions made, tasks completed, important facts \
+             established, and any open questions. Be factual and concise.\n\n\
+             ---\n{transcript}---"
+        );
+
+        let request = ChatCompletionRequest {
+            model: String::new(), // client fills this in
+            messages: vec![ChatMessage::user(&prompt)],
+            tools: Vec::new(),
+            temperature: Some(0.3),
+            max_tokens: Some(256),
+            stream: None,
+            extra_body: None,
+        };
+
+        match self.client.complete(request).await {
+            Ok(response) => {
+                let text = response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.clone())
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    None
+                } else {
+                    info!(
+                        summary_len = text.len(),
+                        dropped_messages = messages.len(),
+                        "summarized pruned context"
+                    );
+                    Some(text)
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "context summarization failed; dropping messages without summary");
+                None
+            }
+        }
     }
 }
 
@@ -640,8 +725,8 @@ mod tests {
         assert!(result.starts_with("Error:"));
     }
 
-    #[test]
-    fn prune_context_keeps_system_prompt_and_recent_messages() {
+    #[tokio::test]
+    async fn prune_context_keeps_system_prompt_and_recent_messages() {
         let provider = genesis_provider::ResolvedProvider {
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key: String::new(),
@@ -686,9 +771,11 @@ mod tests {
         // 1 system + 5 history = 6 messages total
         assert_eq!(agent.messages().len(), 6);
 
-        agent.prune_context();
+        // Summarization will fail (no real LLM) so messages are dropped without
+        // a summary — same count as the old synchronous test.
+        agent.prune_context().await;
 
-        // Should keep system + 3 most recent
+        // Should keep system + 3 most recent (no summary injected on failure)
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[0].role, "system");
         assert_eq!(
@@ -705,8 +792,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prune_context_noop_when_under_limit() {
+    #[tokio::test]
+    async fn prune_context_noop_when_under_limit() {
         let provider = genesis_provider::ResolvedProvider {
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key: String::new(),
@@ -742,7 +829,7 @@ mod tests {
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         );
 
-        agent.prune_context();
+        agent.prune_context().await;
         assert_eq!(agent.messages().len(), 3); // system + 2 unchanged
     }
 
@@ -759,5 +846,24 @@ mod tests {
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(json.contains("\"response\":\"Hello!\""));
         assert!(json.contains("\"turns_used\":1"));
+    }
+
+    #[tokio::test]
+    async fn summarize_messages_returns_none_for_empty_slice() {
+        let agent = test_agent();
+        let result = agent.summarize_messages(&[]).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn summarize_messages_degrades_gracefully_when_provider_unavailable() {
+        let agent = test_agent();
+        let messages = vec![
+            ChatMessage::user("What is 2+2?"),
+            ChatMessage::assistant("4"),
+        ];
+        // Provider at localhost:8000 won't be running, so this should return None
+        let result = agent.summarize_messages(&messages).await;
+        assert!(result.is_none());
     }
 }
