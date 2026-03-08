@@ -89,6 +89,8 @@ pub enum Command {
     },
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
+    #[command(about = "Update Genesis to the latest version from source")]
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
@@ -231,6 +233,8 @@ pub enum CliError {
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
@@ -421,6 +425,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
+        Command::Update => run_update().await,
     }
 }
 
@@ -670,6 +675,68 @@ fn run_init(
     steps.push(String::new());
     steps.push(format!("Genesis is ready! {} tools available.", tool_count));
     steps.push("Run `genesis chat` to start talking to Eve.".to_owned());
+
+    Ok(steps.join("\n"))
+}
+
+async fn run_update() -> Result<String, CliError> {
+    use std::process::Command as StdCommand;
+
+    let exe = std::env::current_exe().map_err(CliError::Io)?;
+    let repo_dir = exe
+        .ancestors()
+        .find(|p| p.join(".git").exists() || p.join("Cargo.toml").exists())
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| {
+            CliError::Other(
+                "cannot locate genesis source repo — update requires a source install".into(),
+            )
+        })?;
+
+    let mut steps = Vec::new();
+
+    // Step 1: git pull
+    steps.push("[*] Pulling latest changes…".to_owned());
+    let pull = StdCommand::new("git")
+        .args(["pull", "--rebase", "origin", "main"])
+        .current_dir(&repo_dir)
+        .output()
+        .map_err(CliError::Io)?;
+
+    let pull_out = String::from_utf8_lossy(&pull.stdout);
+    let pull_err = String::from_utf8_lossy(&pull.stderr);
+
+    if !pull.status.success() {
+        return Err(CliError::Other(format!(
+            "git pull failed:\n{pull_out}{pull_err}"
+        )));
+    }
+    steps.push(format!("    {}", pull_out.trim()));
+
+    // Step 2: cargo build --release
+    steps.push("[*] Building release binary…".to_owned());
+    let build = StdCommand::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(&repo_dir)
+        .output()
+        .map_err(CliError::Io)?;
+
+    if !build.status.success() {
+        let build_err = String::from_utf8_lossy(&build.stderr);
+        return Err(CliError::Other(format!(
+            "cargo build failed:\n{build_err}"
+        )));
+    }
+    steps.push("[ok] Build succeeded.".to_owned());
+
+    // Step 3: Report new version
+    let version_out = StdCommand::new(repo_dir.join("target/release/genesis"))
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_else(|| "unknown".to_owned());
+    steps.push(format!("[ok] Updated to: {}", version_out.trim()));
 
     Ok(steps.join("\n"))
 }
@@ -1703,6 +1770,13 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "nudge"])
             .expect("nudge command should parse");
         assert!(matches!(cli.command, Command::Nudge));
+    }
+
+    #[test]
+    fn parses_update_command() {
+        let cli = Cli::try_parse_from(["genesis", "update"])
+            .expect("update command should parse");
+        assert!(matches!(cli.command, Command::Update));
     }
 
     #[test]
