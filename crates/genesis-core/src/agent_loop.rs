@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use genesis_provider::{
@@ -8,6 +9,7 @@ use genesis_provider::{
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::{debug, error, info, info_span, warn};
 
 use crate::ToolRuntime;
 
@@ -118,6 +120,7 @@ impl AgentLoop {
             if turns_used > self.config.max_turns {
                 return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
             }
+            debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
             self.prune_context();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -198,6 +201,7 @@ impl AgentLoop {
             if turns_used > self.config.max_turns {
                 return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
             }
+            debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
             self.prune_context();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -258,6 +262,7 @@ impl AgentLoop {
                     });
                 }
                 Err(_) => {
+                    warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
                     let response = self.client.complete(request).await?;
 
                     if let Some(usage) = &response.usage {
@@ -305,7 +310,15 @@ impl AgentLoop {
 
     /// Execute a single tool call from the LLM response.
     fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
+        let _span = info_span!(
+            "agent.tool_call",
+            tool_name = tc.function.name.as_str(),
+            tool_call_id = tc.id.as_str()
+        )
+        .entered();
+        let started_at = Instant::now();
         let arguments = parse_tool_arguments(&tc.function.arguments)?;
+        debug!(argument_count = arguments.len(), "parsed tool arguments");
 
         let call = ToolCall {
             name: tc.function.name.clone(),
@@ -313,14 +326,35 @@ impl AgentLoop {
         };
 
         match self.tools.execute(&call) {
-            Ok(output) => Ok(output.content),
+            Ok(output) => {
+                info!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    output_bytes = output.content.len(),
+                    "tool call succeeded"
+                );
+                Ok(output.content)
+            }
             Err(err) => {
                 // Return tool errors as content so the LLM can see what went wrong
                 // and potentially retry or adjust. Only propagate if the tool is
                 // completely not found.
                 match &err {
-                    ToolError::ToolNotFound(_) => Err(err.into()),
-                    _ => Ok(format!("Error: {err}")),
+                    ToolError::ToolNotFound(_) => {
+                        error!(
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            error = %err,
+                            "tool call failed with missing tool"
+                        );
+                        Err(err.into())
+                    }
+                    _ => {
+                        warn!(
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            error = %err,
+                            "tool call returned recoverable error content"
+                        );
+                        Ok(format!("Error: {err}"))
+                    }
                 }
             }
         }
@@ -418,6 +452,42 @@ fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentErro
 mod tests {
     use super::*;
 
+    fn test_agent() -> AgentLoop {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "session-1".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp/genesis".to_owned(),
+            database_path: "/tmp/genesis/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        AgentLoop::with_history(
+            client,
+            tools,
+            AgentLoopConfig {
+                system_prompt: Some("system".to_owned()),
+                ..AgentLoopConfig::default()
+            },
+            Vec::new(),
+        )
+    }
+
     #[test]
     fn parse_tool_arguments_handles_simple_object() {
         let args = parse_tool_arguments(r#"{"message":"hello","count":"3"}"#)
@@ -476,44 +546,46 @@ mod tests {
 
     #[test]
     fn with_history_keeps_system_prompt_and_appends_prior_messages() {
-        let provider = genesis_provider::ResolvedProvider {
-            base_url: "http://localhost:8000/v1".to_owned(),
-            api_key: String::new(),
-            model: "test-model".to_owned(),
-        };
-        let client = ChatClient::new(&provider).expect("client should build");
-        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
-            plan: crate::SessionPlan {
-                session_id: "session-1".to_owned(),
-                profile: "default".to_owned(),
-                platform: genesis_types::DeliveryPlatform::Cli,
-                model: genesis_types::ModelSelection {
-                    provider: genesis_types::ModelProviderKind::OpenAi,
-                    model: "test-model".to_owned(),
-                    base_url: None,
-                },
-                initial_events: Vec::new(),
-            },
-            data_dir: "/tmp/genesis".to_owned(),
-            database_path: "/tmp/genesis/genesis.db".to_owned(),
-            max_concurrency: 4,
-            allow_destructive_tools: false,
-        });
-
-        let agent = AgentLoop::with_history(
-            client,
-            tools,
-            AgentLoopConfig {
-                system_prompt: Some("system".to_owned()),
-                ..AgentLoopConfig::default()
-            },
-            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        );
+        let mut agent = test_agent();
+        agent.messages.push(ChatMessage::user("hi"));
+        agent.messages.push(ChatMessage::assistant("hello"));
 
         assert_eq!(agent.messages().len(), 3);
         assert_eq!(agent.messages()[0].role, "system");
         assert_eq!(agent.messages()[1].role, "user");
         assert_eq!(agent.messages()[2].role, "assistant");
+    }
+
+    #[test]
+    fn execute_tool_call_propagates_missing_tool() {
+        let agent = test_agent();
+        let result = agent.execute_tool_call(&ToolCallEntry {
+            id: "tool-1".to_owned(),
+            call_type: "function".to_owned(),
+            function: genesis_provider::FunctionCall {
+                name: "does_not_exist".to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        });
+
+        assert!(matches!(result, Err(AgentError::Tool(ToolError::ToolNotFound(_)))));
+    }
+
+    #[test]
+    fn execute_tool_call_returns_error_content_for_recoverable_tool_error() {
+        let agent = test_agent();
+        let result = agent
+            .execute_tool_call(&ToolCallEntry {
+                id: "tool-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            })
+            .expect("recoverable tool errors should return content");
+
+        assert!(result.starts_with("Error:"));
     }
 
     #[test]

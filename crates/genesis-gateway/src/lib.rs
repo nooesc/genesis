@@ -3,6 +3,7 @@
 //! Exposes a REST API so external services (webhooks, platform bots)
 //! can send messages to Eve and receive responses.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -15,6 +16,9 @@ use genesis_core::execution::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tracing::{error, info, info_span, Instrument};
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Shared application state for all request handlers.
 pub struct AppState {
@@ -42,6 +46,11 @@ fn default_api_session_id() -> String {
             .unwrap_or_default()
             .as_secs()
     )
+}
+
+fn default_request_id() -> String {
+    let next = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("req-{next}")
 }
 
 /// Response body from the `/chat` endpoint.
@@ -106,25 +115,48 @@ async fn chat_handler(
     let loaded = &state.loaded;
     let service = SessionExecutionService::new(loaded);
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
-    let outcome = service
-        .run_turn(SessionTurnInput {
-            session_id: &session_id,
-            session_platform: &request.platform,
-            delivery_platform: delivery_platform_from_str(&request.platform),
-            prompt: &request.message,
-            title: None,
-        })
-        .await
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("execution error: {e}"))
-        })?;
+    let request_id = default_request_id();
+    let span = info_span!(
+        "gateway.chat",
+        request_id = request_id.as_str(),
+        session_id = session_id.as_str(),
+        platform = request.platform.as_str()
+    );
+    async move {
+        info!("received chat request");
+        let outcome = service
+            .run_turn(SessionTurnInput {
+                session_id: &session_id,
+                session_platform: &request.platform,
+                delivery_platform: delivery_platform_from_str(&request.platform),
+                prompt: &request.message,
+                title: None,
+            })
+            .await
+            .map_err(|e| {
+                error!(
+                    request_id = request_id.as_str(),
+                    error = %e,
+                    "chat request failed"
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("execution error: {e}"))
+            })?;
+        info!(
+            request_id = request_id.as_str(),
+            turns_used = outcome.result.turns_used,
+            tool_calls_made = outcome.result.tool_calls_made,
+            "chat request completed"
+        );
 
-    Ok(Json(ChatResponse {
-        session_id: outcome.session_id,
-        response: outcome.result.response,
-        turns_used: outcome.result.turns_used,
-        tool_calls_made: outcome.result.tool_calls_made,
-    }))
+        Ok(Json(ChatResponse {
+            session_id: outcome.session_id,
+            response: outcome.result.response,
+            turns_used: outcome.result.turns_used,
+            tool_calls_made: outcome.result.tool_calls_made,
+        }))
+    }
+    .instrument(span)
+    .await
 }
 
 async fn chat_stream_handler(
@@ -133,13 +165,27 @@ async fn chat_stream_handler(
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
 {
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
+    let request_id = default_request_id();
+    info!(
+        request_id = request_id.as_str(),
+        session_id = session_id.as_str(),
+        platform = request.platform.as_str(),
+        "accepted streaming chat request"
+    );
 
     let platform = request.platform;
     let message = request.message;
     let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
     let state_for_task = Arc::clone(&state);
     let session_id_for_task = session_id.clone();
+    let request_id_for_task = request_id.clone();
 
+    let spawn_span = info_span!(
+        "gateway.chat_stream",
+        request_id = request_id_for_task.as_str(),
+        session_id = session_id_for_task.as_str(),
+        platform = platform.as_str()
+    );
     tokio::spawn(async move {
         let service = SessionExecutionService::new(&state_for_task.loaded);
         let initial_payload = serde_json::to_string(&serde_json::json!({
@@ -172,6 +218,12 @@ async fn chat_stream_handler(
 
         match run_result {
             Ok(outcome) => {
+                info!(
+                    request_id = request_id_for_task.as_str(),
+                    turns_used = outcome.result.turns_used,
+                    tool_calls_made = outcome.result.tool_calls_made,
+                    "streaming chat request completed"
+                );
                 if let Ok(payload) = serde_json::to_string(&StreamDoneResponse {
                     session_id: outcome.session_id,
                     response: outcome.result.response,
@@ -182,6 +234,11 @@ async fn chat_stream_handler(
                 }
             }
             Err(error) => {
+                error!(
+                    request_id = request_id_for_task.as_str(),
+                    error = %error,
+                    "streaming chat request failed"
+                );
                 if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
                     session_id,
                     error: error.to_string(),
@@ -190,7 +247,7 @@ async fn chat_stream_handler(
                 }
             }
         }
-    });
+    }.instrument(spawn_span));
 
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
@@ -236,6 +293,11 @@ mod tests {
     #[test]
     fn default_api_session_id_uses_api_prefix() {
         assert!(default_api_session_id().starts_with("api-"));
+    }
+
+    #[test]
+    fn default_request_id_uses_req_prefix() {
+        assert!(default_request_id().starts_with("req-"));
     }
 
     #[test]

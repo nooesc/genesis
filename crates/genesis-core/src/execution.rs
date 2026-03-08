@@ -1,11 +1,12 @@
 use std::future::Future;
+use std::time::Instant;
 
 use genesis_config::LoadedConfig;
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
 use genesis_storage::{bootstrap, SessionStore, StorageError, StoredMessage};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
-use tracing::{debug, info, info_span, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult};
 use crate::prompt::build_system_prompt;
@@ -92,17 +93,17 @@ impl<'a> SessionExecutionService<'a> {
         &self,
         input: SessionTurnInput<'_>,
     ) -> Result<SessionTurnOutcome, SessionExecutionError> {
-        let _span = info_span!(
+        let span = info_span!(
             "session.run_turn",
             session_id = input.session_id,
             session_platform = input.session_platform
-        )
-        .entered();
+        );
+        let started_at = Instant::now();
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
 
-        self.run_turn_with_runner(input, |history| async move {
+        let outcome = self.run_turn_with_runner(input, |history| async move {
             let mut agent = self.build_agent_loop(session_id, platform, history)?;
             let start_index = agent.messages().len();
             let result = agent.run_turn(&prompt).await?;
@@ -111,7 +112,13 @@ impl<'a> SessionExecutionService<'a> {
                 emitted_messages: agent.messages()[start_index..].to_vec(),
             })
         })
-        .await
+        .instrument(span)
+        .await?;
+        info!(
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "session run_turn latency recorded"
+        );
+        Ok(outcome)
     }
 
     pub async fn run_turn_streaming<F>(
@@ -122,17 +129,17 @@ impl<'a> SessionExecutionService<'a> {
     where
         F: FnMut(&str),
     {
-        let _span = info_span!(
+        let span = info_span!(
             "session.run_turn_streaming",
             session_id = input.session_id,
             session_platform = input.session_platform
-        )
-        .entered();
+        );
+        let started_at = Instant::now();
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
 
-        self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
+        let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
             let mut agent = self.build_agent_loop(session_id, platform, history)?;
             let start_index = agent.messages().len();
             let result = agent.run_turn_streaming(&prompt, on_chunk).await?;
@@ -141,7 +148,13 @@ impl<'a> SessionExecutionService<'a> {
                 emitted_messages: agent.messages()[start_index..].to_vec(),
             })
         })
-        .await
+        .instrument(span)
+        .await?;
+        info!(
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "session run_turn_streaming latency recorded"
+        );
+        Ok(outcome)
     }
 
     fn session_store(&self) -> SessionStore {
@@ -169,8 +182,8 @@ impl<'a> SessionExecutionService<'a> {
             self.loaded.config.provider.api_key_env.as_deref(),
         )?;
         debug!(
-            provider_backend = self.loaded.config.provider.backend,
-            model = self.loaded.config.provider.model,
+            provider_backend = %self.loaded.config.provider.backend,
+            model = %self.loaded.config.provider.model,
             "built agent loop dependencies"
         );
 
