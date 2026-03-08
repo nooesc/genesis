@@ -301,6 +301,11 @@ impl ToolRuntime {
         self.mcp = Some(mcp);
     }
 
+    /// Set an interactive approval handler for tools requiring user confirmation.
+    pub fn set_approval_handler(&mut self, handler: Arc<dyn genesis_tools::ApprovalHandler>) {
+        self.registry.set_approval_handler(handler);
+    }
+
     /// Create a new ToolRuntime with a different session ID.
     /// Used when spawning subagent workstreams.
     pub fn with_session_id(&self, session_id: impl Into<String>) -> Self {

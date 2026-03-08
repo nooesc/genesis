@@ -43,6 +43,8 @@ pub enum Command {
         resume: Option<String>,
         #[arg(short, long, help = "Send an initial prompt before entering interactive mode")]
         prompt: Option<String>,
+        #[arg(long, help = "Override the system prompt / agent identity")]
+        system: Option<String>,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -99,6 +101,8 @@ pub enum Command {
         session_id: Option<String>,
         #[arg(long, help = "Print raw response without metadata")]
         raw: bool,
+        #[arg(long, help = "Override the system prompt / agent identity")]
+        system: Option<String>,
     },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
@@ -275,8 +279,8 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume, prompt } => {
-            run_chat(cli.config, session_id, resume, prompt).await
+        Command::Chat { session_id, resume, prompt, system } => {
+            run_chat(cli.config, session_id, resume, prompt, system).await
         }
         Command::Doctor { bootstrap_storage } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
@@ -495,8 +499,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
-        Command::Run { prompt, session_id, raw } => {
-            run_oneshot(cli.config, &prompt, session_id, raw, cli.json).await
+        Command::Run { prompt, session_id, raw, system } => {
+            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system).await
         }
         Command::Update => run_update().await,
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json),
@@ -508,10 +512,14 @@ async fn run_chat(
     session_id: Option<String>,
     resume: Option<String>,
     initial_prompt: Option<String>,
+    system_override: Option<String>,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
-    let service = SessionExecutionService::new(&loaded);
+    let mut service = SessionExecutionService::new(&loaded);
+    if let Some(ref sys) = system_override {
+        service.set_system_prompt_override(sys.clone());
+    }
     let store = SessionStore::new(&loaded.config.storage.database_path);
 
     let (session_id, is_resumed) = match resume {
@@ -552,7 +560,7 @@ async fn run_chat(
     }
 
     loop {
-        let input = match read_user_input(&mut rl, "you> ") {
+        let input = match read_multiline_input(&mut rl, "you> ", "  .. ") {
             Some(input) => input,
             None => break, // EOF or ctrl-c
         };
@@ -585,6 +593,7 @@ async fn run_oneshot(
     session_id: Option<String>,
     raw: bool,
     json: bool,
+    system_override: Option<String>,
 ) -> Result<String, CliError> {
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
@@ -597,7 +606,10 @@ async fn run_oneshot(
 
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
-    let service = SessionExecutionService::new(&loaded);
+    let mut service = SessionExecutionService::new(&loaded);
+    if let Some(sys) = system_override {
+        service.set_system_prompt_override(sys);
+    }
 
     let session_id = session_id.unwrap_or_else(default_session_id);
     service.ensure_session(&session_id, "cli", None)?;
@@ -1159,6 +1171,41 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
 
 /// Read user input with readline support (history, line editing).
 /// Returns `None` on EOF (ctrl-d) or interrupt (ctrl-c).
+/// Read multi-line input from the user. Lines ending with `\` are joined with
+/// a newline and the next line is read with a continuation prompt.
+fn read_multiline_input(
+    rl: &mut rustyline::DefaultEditor,
+    prompt: &str,
+    continuation: &str,
+) -> Option<String> {
+    let first = read_user_input(rl, prompt)?;
+    if !first.ends_with('\\') {
+        return Some(first);
+    }
+
+    let mut buf = String::new();
+    buf.push_str(first.trim_end_matches('\\'));
+    buf.push('\n');
+
+    loop {
+        let line = read_user_input(rl, continuation)?;
+        if line.ends_with('\\') {
+            buf.push_str(line.trim_end_matches('\\'));
+            buf.push('\n');
+        } else {
+            buf.push_str(&line);
+            break;
+        }
+    }
+
+    // Add the full multi-line input as a single history entry
+    if !buf.trim().is_empty() {
+        let _ = rl.add_history_entry(&buf);
+    }
+
+    Some(buf)
+}
+
 fn read_user_input(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Option<String> {
     match rl.readline(prompt) {
         Ok(line) => {
@@ -1538,10 +1585,11 @@ mod tests {
             .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id, resume, prompt } => {
+            Command::Chat { session_id, resume, prompt, system } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
                 assert_eq!(resume.as_deref(), Some("session-1"));
                 assert!(prompt.is_none());
+                assert!(system.is_none());
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
@@ -2277,10 +2325,11 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "run", "hello world"])
             .expect("run command should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw } => {
+            Command::Run { prompt, session_id, raw, system } => {
                 assert_eq!(prompt, "hello world");
                 assert!(session_id.is_none());
                 assert!(!raw);
+                assert!(system.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2293,10 +2342,40 @@ storage:
         ])
         .expect("run command with flags should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw } => {
+            Command::Run { prompt, session_id, raw, system } => {
                 assert_eq!(prompt, "what is 2+2");
                 assert_eq!(session_id.as_deref(), Some("my-session"));
                 assert!(raw);
+                assert!(system.is_none());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_with_system_override() {
+        let cli = Cli::try_parse_from([
+            "genesis", "chat", "--system", "You are a pirate.",
+        ])
+        .expect("chat with --system should parse");
+        match cli.command {
+            Command::Chat { system, .. } => {
+                assert_eq!(system.as_deref(), Some("You are a pirate."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_system_override() {
+        let cli = Cli::try_parse_from([
+            "genesis", "run", "--system", "You are a calculator.", "what is 2+2",
+        ])
+        .expect("run with --system should parse");
+        match cli.command {
+            Command::Run { prompt, system, .. } => {
+                assert_eq!(prompt, "what is 2+2");
+                assert_eq!(system.as_deref(), Some("You are a calculator."));
             }
             other => panic!("unexpected command: {other:?}"),
         }

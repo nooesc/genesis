@@ -22,6 +22,7 @@ use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
 pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
     mcp: Option<Arc<McpManager>>,
+    system_prompt_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +60,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None }
+        Self { loaded, mcp: None, system_prompt_override: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -86,12 +87,17 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp }
+        Self { loaded, mcp, system_prompt_override: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
     pub fn set_mcp(&mut self, mcp: Arc<McpManager>) {
         self.mcp = Some(mcp);
+    }
+
+    /// Override the system prompt / agent identity for this service instance.
+    pub fn set_system_prompt_override(&mut self, prompt: String) {
+        self.system_prompt_override = Some(prompt);
     }
 
     /// Return the MCP manager if connected, for sharing with other subsystems.
@@ -238,7 +244,7 @@ impl<'a> SessionExecutionService<'a> {
         let system_prompt = build_system_prompt_complete(
             &execution_context.plan.profile,
             &tool_runtime.definitions(),
-            None,
+            self.system_prompt_override.as_deref(),
             skills_section.as_deref(),
             user_model_section.as_deref(),
             context_section.as_deref(),

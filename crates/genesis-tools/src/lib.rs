@@ -40,6 +40,13 @@ pub trait ToolHandler: Send + Sync {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError>;
 }
 
+/// Callback for interactive tool approval. When a tool requires approval
+/// (e.g., `ApprovalPolicy::Always`), the registry calls this handler to
+/// ask the user whether to proceed.
+pub trait ApprovalHandler: Send + Sync {
+    fn request_approval(&self, tool_name: &str, arguments: &BTreeMap<String, String>) -> bool;
+}
+
 #[derive(Clone)]
 struct ToolRegistration {
     definition: ToolDefinition,
@@ -50,6 +57,7 @@ struct ToolRegistration {
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, ToolRegistration>,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -67,6 +75,11 @@ pub enum ToolError {
 impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set an interactive approval handler for tools that require user confirmation.
+    pub fn set_approval_handler(&mut self, handler: Arc<dyn ApprovalHandler>) {
+        self.approval_handler = Some(handler);
     }
 
     pub fn register<H>(
@@ -106,7 +119,12 @@ impl ToolRegistry {
             .get(&call.name)
             .ok_or_else(|| ToolError::ToolNotFound(call.name.clone()))?;
 
-        self.enforce_approval(&registration.definition.name, &registration.approval, context)?;
+        self.enforce_approval(
+            &registration.definition.name,
+            &registration.approval,
+            &call.arguments,
+            context,
+        )?;
         registration.handler.run(call, context)
     }
 
@@ -114,6 +132,7 @@ impl ToolRegistry {
         &self,
         tool_name: &str,
         approval: &ApprovalPolicy,
+        arguments: &BTreeMap<String, String>,
         context: &ToolContext,
     ) -> Result<(), ToolError> {
         match approval {
@@ -123,10 +142,23 @@ impl ToolRegistry {
                 tool: tool_name.to_owned(),
                 reason: "destructive tools are disabled in the current runtime".to_owned(),
             }),
-            ApprovalPolicy::Always => Err(ToolError::ApprovalDenied {
-                tool: tool_name.to_owned(),
-                reason: "interactive approval flow is not implemented yet".to_owned(),
-            }),
+            ApprovalPolicy::Always => {
+                if let Some(handler) = &self.approval_handler {
+                    if handler.request_approval(tool_name, arguments) {
+                        Ok(())
+                    } else {
+                        Err(ToolError::ApprovalDenied {
+                            tool: tool_name.to_owned(),
+                            reason: "user denied approval".to_owned(),
+                        })
+                    }
+                } else {
+                    Err(ToolError::ApprovalDenied {
+                        tool: tool_name.to_owned(),
+                        reason: "no approval handler configured".to_owned(),
+                    })
+                }
+            }
         }
     }
 }
@@ -673,6 +705,116 @@ mod tests {
             ToolError::ApprovalDenied {
                 tool: "dangerous_tool".to_owned(),
                 reason: "destructive tools are disabled in the current runtime".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn always_approval_denied_without_handler() {
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            ToolDefinition {
+                name: "guarded_tool".to_owned(),
+                description: "always requires approval".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Always,
+            DangerousTool,
+        );
+
+        let error = registry
+            .execute(
+                &ToolCall {
+                    name: "guarded_tool".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &sample_context(),
+            )
+            .expect_err("should be denied without handler");
+
+        assert_eq!(
+            error,
+            ToolError::ApprovalDenied {
+                tool: "guarded_tool".to_owned(),
+                reason: "no approval handler configured".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn always_approval_granted_with_approving_handler() {
+        use super::ApprovalHandler;
+        use std::sync::Arc;
+
+        struct AlwaysApprove;
+        impl ApprovalHandler for AlwaysApprove {
+            fn request_approval(&self, _: &str, _: &BTreeMap<String, String>) -> bool {
+                true
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.set_approval_handler(Arc::new(AlwaysApprove));
+        registry.register(
+            ToolDefinition {
+                name: "guarded_tool".to_owned(),
+                description: "always requires approval".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Always,
+            DangerousTool,
+        );
+
+        let result = registry.execute(
+            &ToolCall {
+                name: "guarded_tool".to_owned(),
+                arguments: BTreeMap::new(),
+            },
+            &sample_context(),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "danger acknowledged");
+    }
+
+    #[test]
+    fn always_approval_denied_by_handler() {
+        use super::ApprovalHandler;
+        use std::sync::Arc;
+
+        struct AlwaysDeny;
+        impl ApprovalHandler for AlwaysDeny {
+            fn request_approval(&self, _: &str, _: &BTreeMap<String, String>) -> bool {
+                false
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.set_approval_handler(Arc::new(AlwaysDeny));
+        registry.register(
+            ToolDefinition {
+                name: "guarded_tool".to_owned(),
+                description: "always requires approval".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Always,
+            DangerousTool,
+        );
+
+        let error = registry
+            .execute(
+                &ToolCall {
+                    name: "guarded_tool".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &sample_context(),
+            )
+            .expect_err("should be denied by handler");
+
+        assert_eq!(
+            error,
+            ToolError::ApprovalDenied {
+                tool: "guarded_tool".to_owned(),
+                reason: "user denied approval".to_owned(),
             }
         );
     }
