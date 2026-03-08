@@ -791,6 +791,24 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "text_to_speech".to_owned(),
+                description: "Generates speech audio from text using edge-tts and writes an MP3 file.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "Text to synthesize into speech." },
+                        "voice": { "type": "string", "description": "Optional voice name (default: en-US-AriaNeural)." },
+                        "output_path": { "type": "string", "description": "Path to the output MP3 file." },
+                        "rate": { "type": "string", "description": "Optional speech rate adjustment like '+20%' or '-10%'." }
+                    },
+                    "required": ["text", "output_path"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::tts::TextToSpeechTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "session_export".to_owned(),
                 description: "Exports a conversation session to Markdown or JSON format. Can write to a file or return the content directly.".to_owned(),
                 parameters: Some(json!({
@@ -1100,10 +1118,11 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 47);
+        assert_eq!(definitions.len(), 48);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
+        assert!(definitions.iter().any(|tool| tool.name == "text_to_speech"));
         assert!(definitions.iter().any(|tool| tool.name == "read_file"));
         assert!(definitions.iter().any(|tool| tool.name == "write_file"));
         assert!(definitions.iter().any(|tool| tool.name == "list_dir"));

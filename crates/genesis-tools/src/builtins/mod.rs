@@ -22,6 +22,7 @@ pub mod todo;
 pub mod trajectory;
 pub mod transcribe;
 pub mod tree;
+pub mod tts;
 pub mod user_model;
 pub mod web;
 pub mod web_search;
