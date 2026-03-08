@@ -278,6 +278,19 @@ pub enum Command {
     Pairing(PairingCommand),
     #[command(subcommand, about = "List and inspect toolset distributions for batch training")]
     Toolset(ToolsetCommand),
+    #[command(subcommand, about = "List and preview agent personalities")]
+    Personality(PersonalityCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PersonalityCommand {
+    #[command(about = "List all available personalities")]
+    List,
+    #[command(about = "Show details for a specific personality")]
+    Show {
+        #[arg(help = "Name of the personality")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1427,6 +1440,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             run_pairing(cli.config, pairing_command, cli.json).await
         }
         Command::Toolset(toolset_command) => run_toolset(toolset_command, cli.json),
+        Command::Personality(personality_command) => run_personality(personality_command, cli.json),
     }
 }
 
@@ -5207,6 +5221,60 @@ fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String, CliError> 
     }
 }
 
+fn run_personality(command: PersonalityCommand, json: bool) -> Result<String, CliError> {
+    use genesis_core::personality;
+
+    match command {
+        PersonalityCommand::List => {
+            let personalities = personality::list_personalities();
+            if json {
+                let items: Vec<serde_json::Value> = personalities
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "description": p.description,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::to_string_pretty(&items).unwrap())
+            } else {
+                let mut lines = vec![format!("{:<16} {}", "NAME", "DESCRIPTION")];
+                for p in &personalities {
+                    lines.push(format!("{:<16} {}", p.name, p.description));
+                }
+                Ok(lines.join("\n"))
+            }
+        }
+        PersonalityCommand::Show { name } => {
+            let p = personality::get_personality(&name).ok_or_else(|| {
+                let available: Vec<String> = personality::list_personalities()
+                    .iter()
+                    .map(|p| p.name.to_owned())
+                    .collect();
+                CliError::Other(format!(
+                    "unknown personality '{name}'. Available: {}",
+                    available.join(", ")
+                ))
+            })?;
+
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "system_prompt_prefix": p.system_prompt_prefix,
+                }))
+                .unwrap())
+            } else {
+                Ok(format!(
+                    "Personality: {}\nDescription: {}\n\nSystem prompt prefix:\n{}",
+                    p.name, p.description, p.system_prompt_prefix
+                ))
+            }
+        }
+    }
+}
+
 async fn run_benchmark(
     config_path: Option<PathBuf>,
     runs: usize,
@@ -6657,10 +6725,10 @@ mod tests {
         format_insights, format_memory_list, format_schedule_list, format_session_list,
         format_usage_stats, format_session_messages, format_skill, format_skill_list,
         format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
-        run, run_compress, run_eval_export_chatml, run_eval_quality, run_toolset,
+        run, run_compress, run_eval_export_chatml, run_eval_quality, run_personality, run_toolset,
         BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
-        MemoryCommand, ModelCommand, PairingCommand, ScheduleCommand, SessionsCommand,
-        SkillsCommand, StorageCommand, SubagentsCommand, ToolsetCommand,
+        MemoryCommand, ModelCommand, PairingCommand, PersonalityCommand, ScheduleCommand,
+        SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand, ToolsetCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -8169,6 +8237,68 @@ storage:
         )
         .expect("should succeed");
         assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn run_personality_list_works() {
+        let result = run_personality(PersonalityCommand::List, false).expect("should succeed");
+        assert!(result.contains("default"));
+        assert!(result.contains("pirate"));
+        assert!(result.contains("kawaii"));
+        assert!(result.contains("hacker"));
+    }
+
+    #[test]
+    fn run_personality_list_json() {
+        let result = run_personality(PersonalityCommand::List, true).expect("should succeed");
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).expect("valid json");
+        assert!(parsed.len() >= 13);
+        assert!(parsed.iter().any(|p| p["name"] == "pirate"));
+    }
+
+    #[test]
+    fn run_personality_show_works() {
+        let result = run_personality(
+            PersonalityCommand::Show {
+                name: "pirate".to_owned(),
+            },
+            false,
+        )
+        .expect("should succeed");
+        assert!(result.contains("Personality: pirate"));
+        assert!(result.contains("System prompt prefix:"));
+    }
+
+    #[test]
+    fn run_personality_show_unknown_errors() {
+        let result = run_personality(
+            PersonalityCommand::Show {
+                name: "nonexistent".to_owned(),
+            },
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_personality_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "personality", "list"]).expect("should parse");
+        match cli.command {
+            Command::Personality(PersonalityCommand::List) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_personality_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "personality", "show", "pirate"])
+            .expect("should parse");
+        match cli.command {
+            Command::Personality(PersonalityCommand::Show { name }) => {
+                assert_eq!(name, "pirate");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
