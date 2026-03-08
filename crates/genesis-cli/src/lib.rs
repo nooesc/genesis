@@ -116,6 +116,8 @@ pub enum Command {
 pub enum McpCommand {
     #[command(about = "List configured MCP servers")]
     List,
+    #[command(about = "Test connectivity to all configured MCP servers")]
+    Test,
 }
 
 #[derive(Debug, Subcommand)]
@@ -545,7 +547,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system).await
         }
         Command::Update => run_update().await,
-        Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json),
+        Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json).await,
     }
 }
 
@@ -954,7 +956,7 @@ async fn run_update() -> Result<String, CliError> {
     Ok(steps.join("\n"))
 }
 
-fn run_mcp(
+async fn run_mcp(
     config_path: Option<PathBuf>,
     command: McpCommand,
     json: bool,
@@ -995,6 +997,37 @@ fn run_mcp(
                     "{name}  [{transport}]  {endpoint}  timeout={timeout}s connect={connect_timeout}s"
                 ));
             }
+            Ok(lines.join("\n"))
+        }
+        McpCommand::Test => {
+            let servers = &loaded.config.mcp_servers;
+            if servers.is_empty() {
+                return Ok("no MCP servers configured".to_owned());
+            }
+
+            let configs = genesis_mcp::build_server_configs(servers);
+            if configs.is_empty() {
+                return Ok("no valid MCP server configs found".to_owned());
+            }
+
+            let mut lines = Vec::new();
+            let manager = genesis_mcp::McpManager::connect_all(configs).await;
+            let server_count = manager.server_count().await;
+            let tool_count = manager.tool_count().await;
+
+            if server_count == 0 {
+                lines.push("no MCP servers responded".to_owned());
+            } else {
+                lines.push(format!(
+                    "{server_count} server(s) connected, {tool_count} tool(s) available"
+                ));
+
+                let tool_defs = manager.tool_definitions().await;
+                for tool in &tool_defs {
+                    lines.push(format!("  - {}: {}", tool.name, tool.description));
+                }
+            }
+
             Ok(lines.join("\n"))
         }
     }
@@ -1411,13 +1444,18 @@ fn format_session_list(sessions: &[SessionSummary]) -> String {
     for session in sessions {
         let tokens = session.total_input_tokens + session.total_output_tokens;
         let token_info = if tokens > 0 {
-            format!("\t{}tok", tokens)
+            format!("  {}tok", tokens)
         } else {
             String::new()
         };
+        let title_info = session
+            .title
+            .as_deref()
+            .map(|t| format!("  \"{t}\""))
+            .unwrap_or_default();
         lines.push(format!(
-            "{}\t{}\t{}{}",
-            session.id, session.platform, session.created_at, token_info
+            "{}  {}  {}{title_info}{token_info}",
+            session.id, session.platform, session.created_at
         ));
     }
     lines.join("\n")
@@ -1725,7 +1763,7 @@ mod tests {
         }]);
 
         assert!(output.contains("genesis sessions"));
-        assert!(output.contains("session-1\tcli\t2026-03-08 12:00:00"));
+        assert!(output.contains("session-1  cli  2026-03-08 12:00:00"));
     }
 
     #[tokio::test]
@@ -2390,6 +2428,13 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "mcp", "list"])
             .expect("mcp list command should parse");
         assert!(matches!(cli.command, Command::Mcp(McpCommand::List)));
+    }
+
+    #[test]
+    fn parses_mcp_test_command() {
+        let cli = Cli::try_parse_from(["genesis", "mcp", "test"])
+            .expect("mcp test command should parse");
+        assert!(matches!(cli.command, Command::Mcp(McpCommand::Test)));
     }
 
     #[test]
