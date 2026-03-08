@@ -756,6 +756,7 @@ mod tests {
                             total_input_tokens: 0,
                             total_output_tokens: 0,
                             estimated_cost: None,
+                            pending_clarification: None,
                         },
                         emitted_messages: vec![
                             ChatMessage::user("new prompt"),
@@ -807,6 +808,7 @@ mod tests {
                             total_input_tokens: 0,
                             total_output_tokens: 0,
                             estimated_cost: None,
+                            pending_clarification: None,
                         },
                         emitted_messages: vec![ChatMessage::assistant("ok")],
                     })

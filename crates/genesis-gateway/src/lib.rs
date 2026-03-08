@@ -295,6 +295,14 @@ async fn chat_stream_handler(
                             }
                         }
                         StreamEvent::ToolCallEnd { .. } => {}
+                        StreamEvent::ClarificationNeeded { question } => {
+                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                                "session_id": &session_id,
+                                "question": question,
+                            })) {
+                                let _ = tx.send(Ok(Event::default().event("clarification").data(payload)));
+                            }
+                        }
                     }
                 },
             )

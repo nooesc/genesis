@@ -1604,13 +1604,18 @@ async fn run_streaming_turn(
                 streamed.store(false, Ordering::Relaxed);
             }
             StreamEvent::ToolCallEnd { .. } => {}
+            StreamEvent::ClarificationNeeded { question } => {
+                println!("\neve> {question}");
+            }
         },
     );
 
     tokio::select! {
         result = turn_future => {
             let outcome = result?;
-            if streamed.load(Ordering::Relaxed) {
+            if outcome.result.pending_clarification.is_some() {
+                // Clarification was already printed via stream event
+            } else if streamed.load(Ordering::Relaxed) {
                 println!();
             } else {
                 println!("eve> {}", outcome.result.response);

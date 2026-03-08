@@ -27,6 +27,8 @@ pub enum StreamEvent<'a> {
     ToolCallStart { name: &'a str },
     /// A tool call finished executing.
     ToolCallEnd { name: &'a str },
+    /// The agent is requesting clarification from the user.
+    ClarificationNeeded { question: &'a str },
 }
 
 /// Result of a complete agent turn (user message → final assistant response).
@@ -41,6 +43,9 @@ pub struct AgentResult {
     /// Estimated cost in USD for this turn, if pricing is available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_cost: Option<f64>,
+    /// If set, the agent is paused waiting for user clarification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_clarification: Option<String>,
 }
 
 /// Configuration for the agent loop.
@@ -213,11 +218,29 @@ impl AgentLoop {
                     ));
 
                     // Execute each tool call and append results
+                    let mut clarification = None;
                     for tc in tool_calls {
                         tool_calls_made += 1;
-                        let result = self.execute_tool_call(tc).await?;
+                        let (result, requires_input) = self.execute_tool_call(tc).await?;
+                        if requires_input {
+                            clarification = Some(result.clone());
+                        }
                         self.messages
                             .push(ChatMessage::tool_result(&tc.id, result));
+                    }
+
+                    // If a tool requested user input, pause the agent loop
+                    if let Some(question) = clarification {
+                        return Ok(AgentResult {
+                            response: String::new(),
+                            turns_used,
+                            tool_calls_made,
+                            finished_naturally: false,
+                            total_input_tokens,
+                            total_output_tokens,
+                            estimated_cost: Some(self.cost.total_cost),
+                            pending_clarification: Some(question),
+                        });
                     }
 
                     // Continue the loop - send tool results back to LLM
@@ -241,6 +264,7 @@ impl AgentLoop {
                 total_input_tokens,
                 total_output_tokens,
                 estimated_cost: Some(self.cost.total_cost),
+                pending_clarification: None,
             });
         }
     }
@@ -319,12 +343,30 @@ impl AgentLoop {
                             streamed_tool_calls.clone(),
                         ));
 
+                        let mut clarification = None;
                         for tc in &streamed_tool_calls {
                             tool_calls_made += 1;
                             on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
-                            let result = self.execute_tool_call(tc).await?;
+                            let (result, requires_input) = self.execute_tool_call(tc).await?;
                             on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                            if requires_input {
+                                on_event(StreamEvent::ClarificationNeeded { question: &result });
+                                clarification = Some(result.clone());
+                            }
                             self.messages.push(ChatMessage::tool_result(&tc.id, result));
+                        }
+
+                        if let Some(question) = clarification {
+                            return Ok(AgentResult {
+                                response: String::new(),
+                                turns_used,
+                                tool_calls_made,
+                                finished_naturally: false,
+                                total_input_tokens,
+                                total_output_tokens,
+                                estimated_cost: Some(self.cost.total_cost),
+                                pending_clarification: Some(question),
+                            });
                         }
 
                         continue;
@@ -340,6 +382,7 @@ impl AgentLoop {
                         total_input_tokens,
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
+                        pending_clarification: None,
                     });
                 }
                 Err(_) => {
@@ -364,12 +407,30 @@ impl AgentLoop {
                                 tool_calls.clone(),
                             ));
 
+                            let mut clarification = None;
                             for tc in tool_calls {
                                 tool_calls_made += 1;
                                 on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
-                                let result = self.execute_tool_call(tc).await?;
+                                let (result, requires_input) = self.execute_tool_call(tc).await?;
                                 on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                                if requires_input {
+                                    on_event(StreamEvent::ClarificationNeeded { question: &result });
+                                    clarification = Some(result.clone());
+                                }
                                 self.messages.push(ChatMessage::tool_result(&tc.id, result));
+                            }
+
+                            if let Some(question) = clarification {
+                                return Ok(AgentResult {
+                                    response: String::new(),
+                                    turns_used,
+                                    tool_calls_made,
+                                    finished_naturally: false,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    estimated_cost: Some(self.cost.total_cost),
+                                    pending_clarification: Some(question),
+                                });
                             }
 
                             continue;
@@ -387,6 +448,7 @@ impl AgentLoop {
                         total_input_tokens,
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
+                        pending_clarification: None,
                     });
                 }
             }
@@ -428,9 +490,9 @@ impl AgentLoop {
 
     /// Execute a single tool call from the LLM response.
     ///
-    /// Returns the content string for the LLM and triggers subagent spawning
-    /// if the tool call was `spawn_subagent`.
-    async fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
+    /// Returns `(content, requires_input)` — the content string for the LLM
+    /// and whether the tool is requesting user input (e.g., clarification).
+    async fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<(String, bool), AgentError> {
         let span = info_span!(
             "agent.tool_call",
             tool_name = tc.function.name.as_str(),
@@ -457,7 +519,12 @@ impl AgentLoop {
                     "tool call succeeded"
                 );
                 self.maybe_spawn_subagent(&output);
-                Ok(output.content)
+                let requires_input = output
+                    .metadata
+                    .get("requires_input")
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                Ok((output.content, requires_input))
             }
             Err(err) => {
                 // Return tool errors as content so the LLM can see what went wrong
@@ -478,7 +545,7 @@ impl AgentLoop {
                             error = %err,
                             "tool call returned recoverable error content"
                         );
-                        Ok(format!("Error: {err}"))
+                        Ok((format!("Error: {err}"), false))
                     }
                 }
             }
@@ -849,7 +916,8 @@ mod tests {
             .await
             .expect("recoverable tool errors should return content");
 
-        assert!(result.starts_with("Error:"));
+        assert!(result.0.starts_with("Error:"));
+        assert!(!result.1, "error results should not require input");
     }
 
     #[tokio::test]
@@ -972,10 +1040,12 @@ mod tests {
             total_input_tokens: 100,
             total_output_tokens: 50,
             estimated_cost: Some(0.001),
+            pending_clarification: None,
         };
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(json.contains("\"response\":\"Hello!\""));
         assert!(json.contains("\"turns_used\":1"));
+        assert!(!json.contains("pending_clarification"));
     }
 
     #[tokio::test]
@@ -1103,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_result_skips_none_cost_in_json() {
+    fn agent_result_skips_none_fields_in_json() {
         let result = AgentResult {
             response: "Hi".to_owned(),
             turns_used: 1,
@@ -1112,6 +1182,7 @@ mod tests {
             total_input_tokens: 0,
             total_output_tokens: 0,
             estimated_cost: None,
+            pending_clarification: None,
         };
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(!json.contains("estimated_cost"));
