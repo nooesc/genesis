@@ -113,6 +113,24 @@ mod session_store_tests {
         assert_eq!(session.total_input_tokens, 0);
         assert_eq!(session.total_output_tokens, 0);
     }
+
+    #[test]
+    fn usage_stats_aggregates_all_sessions() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("s1", "cli", None).expect("create s1");
+        store.create_session("s2", "cli", None).expect("create s2");
+        store.add_usage("s1", 1000, 500).expect("add usage s1");
+        store.add_usage("s2", 2000, 800).expect("add usage s2");
+
+        let stats = store.usage_stats().expect("stats should work");
+        assert_eq!(stats.total_sessions, 2);
+        assert_eq!(stats.total_input_tokens, 3000);
+        assert_eq!(stats.total_output_tokens, 1300);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -529,6 +547,14 @@ pub struct SessionSummary {
     pub updated_at: String,
 }
 
+/// Aggregate token usage statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsageStats {
+    pub total_sessions: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+}
+
 /// Session persistence layer.
 pub struct SessionStore {
     database_path: PathBuf,
@@ -854,6 +880,26 @@ impl SessionStore {
                 source,
             })?;
         Ok(count as u64)
+    }
+
+    /// Aggregate token usage across all sessions.
+    pub fn usage_stats(&self) -> Result<UsageStats, StorageError> {
+        let connection = open(&self.database_path)?;
+        let (count, input, output): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) FROM sessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(UsageStats {
+            total_sessions: count as u64,
+            total_input_tokens: input as u64,
+            total_output_tokens: output as u64,
+        })
     }
 }
 

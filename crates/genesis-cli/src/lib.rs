@@ -16,7 +16,7 @@ use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
     bootstrap, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
-    StoredSchedule, SubagentStore, UserModelStore,
+    StoredSchedule, SubagentStore, UsageStats, UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -122,6 +122,8 @@ pub enum ConfigCommand {
     Path,
     #[command(about = "Print the resolved configuration")]
     Show,
+    #[command(about = "Open the config file in $EDITOR")]
+    Edit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -183,6 +185,8 @@ pub enum SessionsCommand {
         #[arg(help = "Session ID to delete")]
         id: String,
     },
+    #[command(about = "Show aggregate usage statistics across all sessions")]
+    Stats,
 }
 
 #[derive(Debug, Subcommand)]
@@ -302,6 +306,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
+        Command::Config(ConfigCommand::Edit) => {
+            let loaded = load(cli.config.as_deref())?;
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
+            let config_path = loaded.paths.config_path.display().to_string();
+            let status = std::process::Command::new(&editor)
+                .arg(&config_path)
+                .status()
+                .map_err(|e| CliError::Other(format!("failed to launch {editor}: {e}")))?;
+            if status.success() {
+                Ok(format!("config saved: {config_path}"))
+            } else {
+                Err(CliError::Other(format!("{editor} exited with status {status}")))
+            }
+        }
         Command::Storage(StorageCommand::Path) => {
             let loaded = load(cli.config.as_deref())?;
             Ok(loaded.config.storage.database_path.display().to_string())
@@ -374,6 +392,14 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format!("Deleted session {id}"))
                     } else {
                         Err(CliError::SessionNotFound(id))
+                    }
+                }
+                SessionsCommand::Stats => {
+                    let stats = store.usage_stats()?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&stats)?)
+                    } else {
+                        Ok(format_usage_stats(&stats))
                     }
                 }
             }
@@ -1362,6 +1388,16 @@ fn format_session_list(sessions: &[SessionSummary]) -> String {
     lines.join("\n")
 }
 
+fn format_usage_stats(stats: &UsageStats) -> String {
+    let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
+    let mut lines = vec!["genesis usage stats".to_owned()];
+    lines.push(format!("  sessions:      {}", stats.total_sessions));
+    lines.push(format!("  input tokens:  {}", stats.total_input_tokens));
+    lines.push(format!("  output tokens: {}", stats.total_output_tokens));
+    lines.push(format!("  total tokens:  {total_tokens}"));
+    lines.join("\n")
+}
+
 fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
     if messages.is_empty() {
         return format!("session {session_id}: no messages");
@@ -1560,15 +1596,15 @@ mod tests {
         context_template,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, export_session_markdown,
-        format_schedule_list, format_session_list,
+        format_schedule_list, format_session_list, format_usage_stats,
         format_session_messages, format_skill, format_skill_list, format_subagent,
         format_subagent_list, handle_chat_command, is_exit_command, run, BootstrapCommand, Cli,
-        Command, ContextCommand, McpCommand, ModelCommand, ScheduleCommand, SessionsCommand,
-        SkillsCommand, StorageCommand, SubagentsCommand,
+        Command, ConfigCommand, ContextCommand, McpCommand, ModelCommand, ScheduleCommand,
+        SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
-    use genesis_storage::{SessionSummary, StoredSchedule, StoredSkill};
+    use genesis_storage::{SessionSummary, StoredSchedule, StoredSkill, UsageStats};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2526,5 +2562,36 @@ storage:
         assert!(output.contains("subagent: sub-1"));
         assert!(output.contains("name: researcher"));
         assert!(output.contains("error: timeout"));
+    }
+
+    #[test]
+    fn parses_config_edit_command() {
+        let cli = Cli::try_parse_from(["genesis", "config", "edit"])
+            .expect("config edit should parse");
+        assert!(matches!(cli.command, Command::Config(ConfigCommand::Edit)));
+    }
+
+    #[test]
+    fn parses_sessions_stats_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "stats"])
+            .expect("sessions stats should parse");
+        assert!(matches!(
+            cli.command,
+            Command::Sessions(SessionsCommand::Stats)
+        ));
+    }
+
+    #[test]
+    fn format_usage_stats_displays_token_counts() {
+        let stats = UsageStats {
+            total_sessions: 42,
+            total_input_tokens: 100_000,
+            total_output_tokens: 50_000,
+        };
+        let output = format_usage_stats(&stats);
+        assert!(output.contains("sessions:      42"));
+        assert!(output.contains("input tokens:  100000"));
+        assert!(output.contains("output tokens: 50000"));
+        assert!(output.contains("total tokens:  150000"));
     }
 }
