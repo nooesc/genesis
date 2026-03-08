@@ -120,6 +120,7 @@ mod tests {
             profile: "test".to_owned(),
             data_dir: data_dir.to_owned(),
             allow_destructive_tools: false,
+            terminal_backend: None,
         }
     }
 

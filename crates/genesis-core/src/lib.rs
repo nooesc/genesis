@@ -128,6 +128,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             profile: execution_context.plan.profile.clone(),
             data_dir: execution_context.data_dir.clone(),
             allow_destructive_tools: execution_context.allow_destructive_tools,
+            terminal_backend: None,
         },
         mcp: None,
     }
@@ -306,6 +307,11 @@ impl ToolRuntime {
         self.registry.set_approval_handler(handler);
     }
 
+    /// Set the terminal backend for shell command execution.
+    pub fn set_terminal_backend(&mut self, backend: genesis_tools::TerminalBackend) {
+        self.context.terminal_backend = Some(backend);
+    }
+
     /// Create a new ToolRuntime with a different session ID.
     /// Used when spawning subagent workstreams.
     pub fn with_session_id(&self, session_id: impl Into<String>) -> Self {
@@ -361,6 +367,7 @@ mod tests {
                     allow_destructive_tools: false,
                     max_turns: 20,
                     max_context_messages: None,
+                    terminal: None,
                 },
             },
             paths: AppPaths {

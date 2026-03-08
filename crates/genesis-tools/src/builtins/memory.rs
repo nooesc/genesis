@@ -202,6 +202,7 @@ mod tests {
             profile: "operator".to_owned(),
             data_dir: data_dir.to_owned(),
             allow_destructive_tools: false,
+            terminal_backend: None,
         }
     }
 

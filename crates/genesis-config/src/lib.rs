@@ -78,6 +78,37 @@ pub struct RuntimeConfig {
     /// Max conversation messages kept in context. Oldest messages are pruned
     /// with a summary when exceeded. `None` means unlimited.
     pub max_context_messages: Option<usize>,
+    /// Terminal backend for shell_exec. Defaults to local shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalConfig>,
+}
+
+/// Terminal backend configuration for shell command execution.
+/// When configured, `shell_exec` routes commands through the specified backend
+/// instead of the local shell.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "backend")]
+pub enum TerminalConfig {
+    /// Execute in a Docker container.
+    #[serde(rename = "docker")]
+    Docker {
+        container: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// Execute on a remote host via SSH.
+    #[serde(rename = "ssh")]
+    Ssh {
+        host: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        identity_file: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +172,8 @@ struct FileRuntimeConfig {
     max_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_context_messages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<TerminalConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -211,6 +244,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             allow_destructive_tools: false,
             max_turns: 20,
             max_context_messages: None,
+            terminal: None,
         },
     })
 }
@@ -343,6 +377,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.max_context_messages),
+        terminal: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.terminal.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

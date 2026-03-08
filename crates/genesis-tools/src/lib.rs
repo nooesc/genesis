@@ -14,6 +14,35 @@ pub struct ToolContext {
     pub profile: String,
     pub data_dir: String,
     pub allow_destructive_tools: bool,
+    /// Terminal backend for shell command execution (local if None).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_backend: Option<TerminalBackend>,
+}
+
+/// Configurable terminal backend for shell command execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum TerminalBackend {
+    /// Execute inside a Docker container.
+    #[serde(rename = "docker")]
+    Docker {
+        container: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// Execute on a remote host via SSH.
+    #[serde(rename = "ssh")]
+    Ssh {
+        host: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        identity_file: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -681,6 +710,7 @@ mod tests {
             profile: "operator".to_owned(),
             data_dir: "/tmp/genesis".to_owned(),
             allow_destructive_tools: false,
+            terminal_backend: None,
         }
     }
 

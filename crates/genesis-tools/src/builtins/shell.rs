@@ -84,10 +84,67 @@ fn is_piped_download_to_shell(command: &str) -> bool {
     false
 }
 
+/// Build the appropriate Command based on the configured terminal backend.
+fn build_command(
+    command: &str,
+    working_dir: Option<&String>,
+    backend: &Option<crate::TerminalBackend>,
+) -> Command {
+    match backend {
+        Some(crate::TerminalBackend::Docker {
+            container,
+            user,
+            working_dir: default_dir,
+        }) => {
+            let mut cmd = Command::new("docker");
+            cmd.arg("exec");
+            // Use explicit working_dir if provided, otherwise use the configured default
+            if let Some(dir) = working_dir.or(default_dir.as_ref()) {
+                cmd.arg("-w").arg(dir);
+            }
+            if let Some(u) = user {
+                cmd.arg("-u").arg(u);
+            }
+            cmd.arg(container).arg("sh").arg("-c").arg(command);
+            cmd
+        }
+        Some(crate::TerminalBackend::Ssh {
+            host,
+            user,
+            port,
+            identity_file,
+        }) => {
+            let mut cmd = Command::new("ssh");
+            cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+            cmd.arg("-o").arg("ConnectTimeout=10");
+            if let Some(p) = port {
+                cmd.arg("-p").arg(p.to_string());
+            }
+            if let Some(key) = identity_file {
+                cmd.arg("-i").arg(key);
+            }
+            let destination = match user {
+                Some(u) => format!("{u}@{host}"),
+                None => host.clone(),
+            };
+            cmd.arg(&destination).arg(command);
+            cmd
+        }
+        None => {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(command);
+            if let Some(dir) = working_dir {
+                cmd.current_dir(dir);
+            }
+            cmd
+        }
+    }
+}
+
 pub struct ShellExecTool;
 
 impl ToolHandler for ShellExecTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let command = call
             .arguments
             .get("command")
@@ -118,15 +175,10 @@ impl ToolHandler for ShellExecTool {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
-
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-        }
+        let mut cmd = build_command(command, working_dir, &context.terminal_backend);
 
         // Use a thread + channel for timeout enforcement
-        let mut child = cmd
+        let child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -209,6 +261,7 @@ mod tests {
             profile: "test".to_owned(),
             data_dir: "/tmp".to_owned(),
             allow_destructive_tools: true,
+            terminal_backend: None,
         }
     }
 
@@ -367,5 +420,65 @@ mod tests {
 
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert_eq!(output.content.trim(), "fast");
+    }
+
+    #[test]
+    fn build_command_local_backend() {
+        let cmd = build_command("echo hi", None, &None);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "sh");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, ["-c", "echo hi"]);
+    }
+
+    #[test]
+    fn build_command_docker_backend() {
+        let backend = Some(crate::TerminalBackend::Docker {
+            container: "my-app".to_owned(),
+            user: Some("root".to_owned()),
+            working_dir: Some("/app".to_owned()),
+        });
+        let cmd = build_command("ls -la", None, &backend);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "docker");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("exec")));
+        assert!(args.contains(&std::ffi::OsStr::new("my-app")));
+        assert!(args.contains(&std::ffi::OsStr::new("-u")));
+        assert!(args.contains(&std::ffi::OsStr::new("root")));
+        assert!(args.contains(&std::ffi::OsStr::new("-w")));
+        assert!(args.contains(&std::ffi::OsStr::new("/app")));
+    }
+
+    #[test]
+    fn build_command_ssh_backend() {
+        let backend = Some(crate::TerminalBackend::Ssh {
+            host: "example.com".to_owned(),
+            user: Some("deploy".to_owned()),
+            port: Some(2222),
+            identity_file: None,
+        });
+        let cmd = build_command("uptime", None, &backend);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "ssh");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("deploy@example.com")));
+        assert!(args.contains(&std::ffi::OsStr::new("-p")));
+        assert!(args.contains(&std::ffi::OsStr::new("2222")));
+        assert!(args.contains(&std::ffi::OsStr::new("uptime")));
+    }
+
+    #[test]
+    fn build_command_docker_explicit_working_dir_overrides_default() {
+        let backend = Some(crate::TerminalBackend::Docker {
+            container: "my-app".to_owned(),
+            user: None,
+            working_dir: Some("/default".to_owned()),
+        });
+        let explicit_dir = "explicit".to_owned();
+        let cmd = build_command("pwd", Some(&explicit_dir), &backend);
+        let args: Vec<_> = cmd.get_args().collect();
+        // The explicit working dir should be used
+        assert!(args.contains(&std::ffi::OsStr::new("explicit")));
     }
 }

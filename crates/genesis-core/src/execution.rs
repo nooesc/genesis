@@ -2,7 +2,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
-use genesis_config::LoadedConfig;
+use genesis_config::{LoadedConfig, TerminalConfig};
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
 use genesis_storage::{
     bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, SubagentStore,
@@ -233,6 +233,11 @@ impl<'a> SessionExecutionService<'a> {
         // Attach MCP manager if we connected any servers at service creation
         if let Some(mcp) = &self.mcp {
             tool_runtime.set_mcp(Arc::clone(mcp));
+        }
+
+        // Set terminal backend if configured
+        if let Some(terminal) = &self.loaded.config.runtime.terminal {
+            tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
         }
 
         // Load skills, user model, and project context for prompt personalization
@@ -588,6 +593,32 @@ pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
     }
 }
 
+/// Convert a genesis_config::TerminalConfig to a genesis_tools::TerminalBackend.
+fn terminal_config_to_backend(config: &TerminalConfig) -> genesis_tools::TerminalBackend {
+    match config {
+        TerminalConfig::Docker {
+            container,
+            user,
+            working_dir,
+        } => genesis_tools::TerminalBackend::Docker {
+            container: container.clone(),
+            user: user.clone(),
+            working_dir: working_dir.clone(),
+        },
+        TerminalConfig::Ssh {
+            host,
+            user,
+            port,
+            identity_file,
+        } => genesis_tools::TerminalBackend::Ssh {
+            host: host.clone(),
+            user: user.clone(),
+            port: *port,
+            identity_file: identity_file.clone(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -813,6 +844,7 @@ mod tests {
                     allow_destructive_tools: false,
                     max_turns: 20,
                     max_context_messages: None,
+                    terminal: None,
                 },
             },
             paths: AppPaths {
