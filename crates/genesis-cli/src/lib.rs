@@ -219,6 +219,13 @@ pub enum SkillsCommand {
         #[arg(help = "Skill name to delete")]
         name: String,
     },
+    #[command(about = "Export all skills as JSON")]
+    Export,
+    #[command(about = "Import skills from a JSON file")]
+    Import {
+        #[arg(help = "Path to JSON file containing skills array")]
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -463,6 +470,31 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     }
 
                     Ok(format!("deleted skill {}", name))
+                }
+                SkillsCommand::Export => {
+                    let skills = store.list_all()?;
+                    Ok(serde_json::to_string_pretty(&skills)?)
+                }
+                SkillsCommand::Import { file } => {
+                    let contents = std::fs::read_to_string(&file)
+                        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", file.display())))?;
+                    let skills: Vec<genesis_storage::StoredSkill> = serde_json::from_str(&contents)
+                        .map_err(|e| CliError::Other(format!("invalid JSON: {e}")))?;
+
+                    let mut imported = 0;
+                    for skill in &skills {
+                        let tags: Vec<&str> = skill.tags.iter().map(|s| s.as_str()).collect();
+                        store.upsert(
+                            &skill.name,
+                            &skill.description,
+                            &skill.instructions,
+                            skill.trigger_hint.as_deref(),
+                            &tags,
+                        )?;
+                        imported += 1;
+                    }
+
+                    Ok(format!("imported {imported} skill(s) from {}", file.display()))
                 }
             }
         }
@@ -2772,5 +2804,27 @@ storage:
             cli.command,
             Command::Context(ContextCommand::Edit)
         ));
+    }
+
+    #[test]
+    fn parses_skills_export_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "export"])
+            .expect("skills export should parse");
+        assert!(matches!(
+            cli.command,
+            Command::Skills(SkillsCommand::Export)
+        ));
+    }
+
+    #[test]
+    fn parses_skills_import_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "import", "skills.json"])
+            .expect("skills import should parse");
+        match cli.command {
+            Command::Skills(SkillsCommand::Import { file }) => {
+                assert_eq!(file.to_str().unwrap(), "skills.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }
