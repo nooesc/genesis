@@ -113,6 +113,8 @@ pub enum Command {
         #[arg(long, help = "Stream output as it arrives (default: wait for full response)")]
         stream: bool,
     },
+    #[command(about = "Show status dashboard of all Genesis components")]
+    Status,
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
     #[command(subcommand, about = "Inspect and manage stored memories")]
@@ -641,6 +643,14 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Run { prompt, session_id, raw, system, stream } => {
             run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream).await
+        }
+        Command::Status => {
+            let loaded = load(cli.config.as_deref())?;
+            if cli.json {
+                Ok(serde_json::to_string_pretty(&build_status_json(&loaded))?)
+            } else {
+                Ok(build_status_text(&loaded))
+            }
         }
         Command::Update => run_update().await,
         Command::Memory(memory_command) => {
@@ -1731,6 +1741,99 @@ fn format_memory_list(memories: &[genesis_storage::StoredMemory]) -> String {
         lines.push(format!("[{}] {} ({})", m.kind, content_preview, m.created_at));
     }
     lines.join("\n")
+}
+
+fn build_status_text(loaded: &LoadedConfig) -> String {
+    let mut lines = vec!["genesis status".to_owned()];
+    lines.push(String::new());
+
+    // Config
+    let config_exists = loaded.paths.config_path.exists();
+    lines.push(format!(
+        "  config:    {} ({})",
+        loaded.paths.config_path.display(),
+        if config_exists { "found" } else { "not found" }
+    ));
+
+    // Provider
+    lines.push(format!(
+        "  provider:  {} / {}",
+        loaded.config.provider.backend, loaded.config.provider.model
+    ));
+
+    // Database
+    let db_exists = loaded.config.storage.database_path.exists();
+    lines.push(format!(
+        "  database:  {} ({})",
+        loaded.config.storage.database_path.display(),
+        if db_exists { "found" } else { "not found" }
+    ));
+
+    // Counts (best-effort)
+    if db_exists {
+        if let Ok(_) = bootstrap(&loaded.config.storage.database_path) {
+            let session_store = SessionStore::new(&loaded.config.storage.database_path);
+            let skill_store = genesis_storage::SkillStore::new(&loaded.config.storage.database_path);
+            let schedule_store =
+                genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
+            let memory_store =
+                genesis_storage::MemoryStore::new(&loaded.config.storage.database_path);
+
+            if let Ok(stats) = session_store.usage_stats() {
+                lines.push(format!("  sessions:  {}", stats.total_sessions));
+                let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
+                lines.push(format!("  tokens:    {total_tokens} total"));
+            }
+            if let Ok(skills) = skill_store.list_all() {
+                lines.push(format!("  skills:    {}", skills.len()));
+            }
+            if let Ok(schedules) = schedule_store.list_all() {
+                lines.push(format!("  schedules: {}", schedules.len()));
+            }
+            if let Ok(memories) = memory_store.list(usize::MAX) {
+                lines.push(format!("  memories:  {}", memories.len()));
+            }
+        }
+    }
+
+    // MCP servers
+    let mcp_count = loaded.config.mcp_servers.len();
+    lines.push(format!("  mcp:       {mcp_count} server(s) configured"));
+
+    // Runtime
+    lines.push(format!(
+        "  runtime:   max_turns={}, destructive={}",
+        loaded.config.runtime.max_turns, loaded.config.runtime.allow_destructive_tools
+    ));
+
+    lines.join("\n")
+}
+
+fn build_status_json(loaded: &LoadedConfig) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "config_path": loaded.paths.config_path.display().to_string(),
+        "config_exists": loaded.paths.config_path.exists(),
+        "database_path": loaded.config.storage.database_path.display().to_string(),
+        "database_exists": loaded.config.storage.database_path.exists(),
+        "provider_backend": loaded.config.provider.backend,
+        "provider_model": loaded.config.provider.model,
+        "mcp_servers": loaded.config.mcp_servers.len(),
+        "max_turns": loaded.config.runtime.max_turns,
+        "allow_destructive_tools": loaded.config.runtime.allow_destructive_tools,
+    });
+
+    if loaded.config.storage.database_path.exists() {
+        if let Ok(_) = bootstrap(&loaded.config.storage.database_path) {
+            let session_store = SessionStore::new(&loaded.config.storage.database_path);
+            if let Ok(stats) = session_store.usage_stats() {
+                data["total_sessions"] = serde_json::json!(stats.total_sessions);
+                data["total_tokens"] =
+                    serde_json::json!(stats.total_input_tokens + stats.total_output_tokens);
+            }
+        }
+    }
+
+    data
 }
 
 fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
@@ -3183,5 +3286,12 @@ storage:
     fn format_memory_list_empty() {
         let output = format_memory_list(&[]);
         assert_eq!(output, "no stored memories");
+    }
+
+    #[test]
+    fn parses_status_command() {
+        let cli = Cli::try_parse_from(["genesis", "status"])
+            .expect("status should parse");
+        assert!(matches!(cli.command, Command::Status));
     }
 }
