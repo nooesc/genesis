@@ -63,7 +63,21 @@ pub struct AgentLoopConfig {
     pub budget_limit: Option<f64>,
     /// Maximum number of tool calls to execute concurrently (default: 4).
     pub max_concurrency: usize,
+    /// After this many tool calls, inject a memory consolidation nudge asking
+    /// the agent to save useful observations. Set to `None` to disable.
+    /// Default: 15 tool calls.
+    pub memory_nudge_interval: Option<usize>,
 }
+
+/// Default number of tool calls between memory consolidation nudges.
+const DEFAULT_MEMORY_NUDGE_INTERVAL: usize = 15;
+
+/// The memory nudge message injected as a system message.
+const MEMORY_NUDGE: &str = "\
+[Memory consolidation reminder] You've been working for a while. \
+Consider saving any useful observations, patterns, or user preferences \
+you've noticed using `memory_create`. Focus on durable insights that \
+would be valuable in future sessions — not session-specific details.";
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
@@ -75,6 +89,7 @@ impl Default for AgentLoopConfig {
             max_context_messages: None,
             budget_limit: None,
             max_concurrency: 4,
+            memory_nudge_interval: Some(DEFAULT_MEMORY_NUDGE_INTERVAL),
         }
     }
 }
@@ -281,6 +296,9 @@ impl AgentLoop {
                         });
                     }
 
+                    // Inject memory nudge if due.
+                    self.maybe_inject_memory_nudge(tool_calls_made);
+
                     // Continue the loop - send tool results back to LLM
                     continue;
                 }
@@ -456,6 +474,7 @@ impl AgentLoop {
                             });
                         }
 
+                        self.maybe_inject_memory_nudge(tool_calls_made);
                         continue;
                     }
 
@@ -534,6 +553,7 @@ impl AgentLoop {
                                 });
                             }
 
+                            self.maybe_inject_memory_nudge(tool_calls_made);
                             continue;
                         }
                     }
@@ -555,6 +575,21 @@ impl AgentLoop {
                         pending_clarification: None,
                     });
                 }
+            }
+        }
+    }
+
+    /// Inject a memory nudge system message if enough tool calls have
+    /// accumulated since the last nudge.
+    fn maybe_inject_memory_nudge(&mut self, tool_calls_made: usize) {
+        if let Some(interval) = self.config.memory_nudge_interval {
+            if interval > 0 && tool_calls_made > 0 && tool_calls_made % interval == 0 {
+                debug!(
+                    tool_calls_made,
+                    interval, "injecting memory consolidation nudge"
+                );
+                self.messages
+                    .push(ChatMessage::system(MEMORY_NUDGE));
             }
         }
     }
@@ -997,6 +1032,42 @@ mod tests {
         assert_eq!(config.max_turns, 20);
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
+        assert_eq!(config.memory_nudge_interval, Some(15));
+    }
+
+    #[test]
+    fn memory_nudge_injects_at_interval() {
+        let mut agent = test_agent();
+        let initial_len = agent.messages().len();
+
+        // At 14 tool calls: no nudge
+        agent.maybe_inject_memory_nudge(14);
+        assert_eq!(agent.messages().len(), initial_len);
+
+        // At 15 tool calls (interval): nudge injected
+        agent.maybe_inject_memory_nudge(15);
+        assert_eq!(agent.messages().len(), initial_len + 1);
+        let last = agent.messages().last().unwrap();
+        assert_eq!(last.role, "system");
+        assert!(last.content_text().unwrap().contains("Memory consolidation"));
+
+        // At 16: no nudge
+        agent.maybe_inject_memory_nudge(16);
+        assert_eq!(agent.messages().len(), initial_len + 1);
+
+        // At 30: second nudge
+        agent.maybe_inject_memory_nudge(30);
+        assert_eq!(agent.messages().len(), initial_len + 2);
+    }
+
+    #[test]
+    fn memory_nudge_disabled_when_none() {
+        let mut agent = test_agent();
+        agent.config.memory_nudge_interval = None;
+        let initial_len = agent.messages().len();
+
+        agent.maybe_inject_memory_nudge(15);
+        assert_eq!(agent.messages().len(), initial_len, "no nudge when disabled");
     }
 
     #[test]
