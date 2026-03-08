@@ -5,6 +5,7 @@ pub mod execution;
 pub mod moa;
 pub mod nudge;
 pub mod prompt;
+pub mod sanitize;
 pub mod scheduler;
 pub mod skills;
 pub mod trajectory;

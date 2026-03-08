@@ -20,6 +20,7 @@ pub mod ssh;
 pub mod subagent;
 pub mod todo;
 pub mod trajectory;
+pub mod transcribe;
 pub mod tree;
 pub mod user_model;
 pub mod web;

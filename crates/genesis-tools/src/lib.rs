@@ -1001,6 +1001,25 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::glob::GlobSearchTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "transcribe".to_owned(),
+                description: "Transcribes audio files to text using OpenAI-compatible Whisper API. Supports mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg, and flac formats up to 25 MB.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path to the audio file to transcribe." },
+                        "model": { "type": "string", "description": "Whisper model to use (default: whisper-1)." },
+                        "language": { "type": "string", "description": "ISO-639-1 language code (e.g. 'en', 'es'). Auto-detected if omitted." },
+                        "prompt": { "type": "string", "description": "Optional context to guide transcription accuracy." },
+                        "api_base": { "type": "string", "description": "API base URL (default: https://api.openai.com/v1 or OPENAI_API_BASE env)." }
+                    },
+                    "required": ["file_path"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::transcribe::TranscribeTool,
         );
     registry
 }
@@ -1081,7 +1100,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 46);
+        assert_eq!(definitions.len(), 47);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

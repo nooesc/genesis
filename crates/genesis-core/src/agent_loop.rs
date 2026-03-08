@@ -14,6 +14,7 @@ use tracing::{debug, error, info, info_span, warn};
 use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
+use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
 
@@ -68,6 +69,11 @@ pub struct AgentLoopConfig {
     /// the agent to save useful observations. Set to `None` to disable.
     /// Default: 15 tool calls.
     pub memory_nudge_interval: Option<usize>,
+    /// Maximum input tokens before context compression triggers. When the last
+    /// API response reports prompt_tokens above this threshold, the middle
+    /// portion of the conversation is summarized and replaced. Protects the
+    /// first 3 and last 4 non-system messages. Set to `None` to disable.
+    pub max_context_tokens: Option<u32>,
     /// Enable trajectory recording for agent training data capture.
     pub enable_trajectory: bool,
     /// Directory to save trajectory files. When set with enable_trajectory,
@@ -96,6 +102,7 @@ impl Default for AgentLoopConfig {
             temperature: None,
             max_tokens: None,
             max_context_messages: None,
+            max_context_tokens: None,
             budget_limit: None,
             max_concurrency: 4,
             memory_nudge_interval: Some(DEFAULT_MEMORY_NUDGE_INTERVAL),
@@ -141,6 +148,9 @@ pub struct AgentLoop {
     subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
     cost: SessionCost,
     trajectory: TrajectoryRecorder,
+    /// Last reported prompt token count from the API. Used for token-aware
+    /// context compression.
+    last_prompt_tokens: u32,
 }
 
 impl AgentLoop {
@@ -181,6 +191,7 @@ impl AgentLoop {
             subagent_spawner: None,
             cost,
             trajectory,
+            last_prompt_tokens: 0,
         }
     }
 
@@ -273,6 +284,7 @@ impl AgentLoop {
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
+                self.last_prompt_tokens = usage.prompt_tokens;
                 self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
             }
 
@@ -312,6 +324,7 @@ impl AgentLoop {
 
                     let mut clarification = None;
                     for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
+                        let result = sanitize::sanitize_credentials(&result);
                         self.trajectory
                             .record_tool_result(&tc.function.name, &result);
                         if requires_input {
@@ -467,6 +480,7 @@ impl AgentLoop {
 
                     total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
                     total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
+                    self.last_prompt_tokens = turn_input_tokens;
                     self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)?;
 
                     if !streamed_tool_calls.is_empty() {
@@ -505,6 +519,7 @@ impl AgentLoop {
                         for (tc, (result, requires_input)) in
                             streamed_tool_calls.iter().zip(results)
                         {
+                            let result = sanitize::sanitize_credentials(&result);
                             on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
@@ -557,6 +572,7 @@ impl AgentLoop {
                             total_input_tokens.saturating_add(usage.prompt_tokens);
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
+                        self.last_prompt_tokens = usage.prompt_tokens;
                         self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
                     }
 
@@ -595,6 +611,7 @@ impl AgentLoop {
                             for (tc, (result, requires_input)) in
                                 tool_calls.iter().zip(results)
                             {
+                                let result = sanitize::sanitize_credentials(&result);
                                 on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
@@ -718,40 +735,43 @@ impl AgentLoop {
         }
     }
 
-    /// Prune messages to stay within `max_context_messages`, preserving the
-    /// system prompt at index 0 (if present) and the most recent messages.
+    /// Prune messages to stay within context limits, preserving the system
+    /// prompt at index 0 (if present) and the most recent messages.
+    ///
+    /// Two triggers:
+    /// 1. **Message count**: `max_context_messages` caps total non-system messages.
+    /// 2. **Token count**: `max_context_tokens` triggers when the last API call's
+    ///    prompt_tokens exceeds 85% of the limit, compressing the middle of the
+    ///    conversation while protecting the first 3 and last 4 non-system messages.
     ///
     /// Before dropping old messages, the agent calls the LLM to produce a
-    /// concise summary of the discarded conversation. This summary is
-    /// inserted as a system message right after the main system prompt so
-    /// the agent retains awareness of prior context.
+    /// concise summary. This summary is inserted as a system message right
+    /// after the main system prompt so the agent retains awareness of context.
     async fn prune_context(&mut self) {
-        let limit = match self.config.max_context_messages {
-            Some(limit) => limit,
-            None => return,
-        };
-
         let has_system = self
             .messages
             .first()
             .is_some_and(|m| m.role == "system");
+        let drop_start = if has_system { 1 } else { 0 };
+        let non_system_count = self.messages.len() - drop_start;
 
-        let non_system_count = if has_system {
-            self.messages.len() - 1
-        } else {
-            self.messages.len()
-        };
+        // Determine how many messages to drop.
+        let drop_count = self.compute_drop_count(non_system_count, drop_start);
 
-        if non_system_count <= limit {
+        if drop_count == 0 {
             return;
         }
-
-        let drop_count = non_system_count - limit;
-        let drop_start = if has_system { 1 } else { 0 };
 
         // Extract the messages we're about to drop and summarize them.
         let to_drop: Vec<ChatMessage> =
             self.messages[drop_start..drop_start + drop_count].to_vec();
+
+        info!(
+            drop_count,
+            remaining = non_system_count - drop_count,
+            trigger = if self.token_compression_needed() { "tokens" } else { "messages" },
+            "pruning conversation context"
+        );
 
         let summary = self.summarize_messages(&to_drop).await;
 
@@ -765,6 +785,46 @@ impl AgentLoop {
             ));
             self.messages.insert(drop_start, summary_msg);
         }
+    }
+
+    /// Check if token-based compression should trigger (>85% of max_context_tokens).
+    fn token_compression_needed(&self) -> bool {
+        if let Some(max_tokens) = self.config.max_context_tokens {
+            let threshold = (max_tokens as f64 * 0.85) as u32;
+            self.last_prompt_tokens > threshold
+        } else {
+            false
+        }
+    }
+
+    /// Compute how many messages to drop. Returns 0 if no pruning needed.
+    ///
+    /// Prefers token-based compression (protects first 3 + last 4) over
+    /// simple message-count pruning. If both triggers fire, uses whichever
+    /// drops more messages.
+    fn compute_drop_count(&self, non_system_count: usize, _drop_start: usize) -> usize {
+        let mut drop = 0;
+
+        // Message-count trigger.
+        if let Some(limit) = self.config.max_context_messages {
+            if non_system_count > limit {
+                drop = non_system_count - limit;
+            }
+        }
+
+        // Token-count trigger: protect first 3 and last 4 non-system messages.
+        if self.token_compression_needed() {
+            let protect_head = 3usize;
+            let protect_tail = 4usize;
+            let protected = protect_head + protect_tail;
+            if non_system_count > protected {
+                let token_drop = non_system_count - protected;
+                // Use whichever drops more to aggressively reclaim context.
+                drop = drop.max(token_drop);
+            }
+        }
+
+        drop
     }
 
     /// Ask the LLM to produce a compact summary of a slice of conversation
