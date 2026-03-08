@@ -227,9 +227,23 @@ async fn run_chat(
         }
 
         let start_index = agent.messages().len();
-        let result = agent.run_turn(trimmed).await?;
+        let mut streamed = false;
+        let result = agent
+            .run_turn_streaming(trimmed, |chunk| {
+                if !streamed {
+                    print!("eve> ");
+                    streamed = true;
+                }
+                print!("{chunk}");
+                let _ = io::stdout().flush();
+            })
+            .await?;
         persist_new_messages(&store, &session_id, &agent.messages()[start_index..])?;
-        println!("eve> {}", result.response);
+        if streamed {
+            println!();
+        } else {
+            println!("eve> {}", result.response);
+        }
     }
 
     Ok(format!("chat session saved as {session_id}"))

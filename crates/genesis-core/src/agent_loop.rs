@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
+use futures_util::StreamExt;
 use genesis_provider::{
-    ChatClient, ChatCompletionRequest, ChatMessage, ChatTool, ProviderError, ToolCallEntry,
+    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, ProviderError,
+    ToolCallEntry,
 };
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
@@ -174,6 +176,133 @@ impl AgentLoop {
         }
     }
 
+    pub async fn run_turn_streaming<F>(
+        &mut self,
+        user_message: &str,
+        mut on_chunk: F,
+    ) -> Result<AgentResult, AgentError>
+    where
+        F: FnMut(&str),
+    {
+        self.messages.push(ChatMessage::user(user_message));
+
+        let tool_defs: Vec<ChatTool> = self.tools.definitions().iter().map(ChatTool::from).collect();
+
+        let mut turns_used = 0;
+        let mut tool_calls_made = 0;
+        let mut total_input_tokens = 0u32;
+        let mut total_output_tokens = 0u32;
+
+        loop {
+            turns_used += 1;
+            if turns_used > self.config.max_turns {
+                return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
+            }
+
+            self.prune_context();
+            let mut request = ChatCompletionRequest::new("", self.messages.clone());
+            request.tools = tool_defs.clone();
+            request.temperature = self.config.temperature;
+            request.max_tokens = self.config.max_tokens;
+
+            match self.client.complete_stream(request.clone()).await {
+                Ok(mut stream) => {
+                    let mut response_text = String::new();
+                    let mut streamed_tool_calls = Vec::new();
+                    let mut finished_naturally = true;
+
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk?;
+                        let update = collect_stream_update(chunk);
+
+                        for content in update.contents {
+                            on_chunk(&content);
+                            response_text.push_str(&content);
+                        }
+
+                        if let Some(reason) = update.finish_reason {
+                            finished_naturally = reason != "length";
+                        }
+
+                        streamed_tool_calls.extend(update.tool_calls);
+                    }
+
+                    if !streamed_tool_calls.is_empty() {
+                        self.messages.push(ChatMessage::assistant_with_tool_calls(
+                            if response_text.is_empty() {
+                                None
+                            } else {
+                                Some(response_text.clone())
+                            },
+                            streamed_tool_calls.clone(),
+                        ));
+
+                        for tc in &streamed_tool_calls {
+                            tool_calls_made += 1;
+                            let result = self.execute_tool_call(tc)?;
+                            self.messages.push(ChatMessage::tool_result(&tc.id, result));
+                        }
+
+                        continue;
+                    }
+
+                    self.messages.push(ChatMessage::assistant(&response_text));
+
+                    return Ok(AgentResult {
+                        response: response_text,
+                        turns_used,
+                        tool_calls_made,
+                        finished_naturally,
+                        total_input_tokens,
+                        total_output_tokens,
+                    });
+                }
+                Err(_) => {
+                    let response = self.client.complete(request).await?;
+
+                    if let Some(usage) = &response.usage {
+                        total_input_tokens =
+                            total_input_tokens.saturating_add(usage.prompt_tokens);
+                        total_output_tokens =
+                            total_output_tokens.saturating_add(usage.completion_tokens);
+                    }
+
+                    let choice = &response.choices[0];
+                    let assistant_msg = &choice.message;
+
+                    if let Some(tool_calls) = &assistant_msg.tool_calls {
+                        if !tool_calls.is_empty() {
+                            self.messages.push(ChatMessage::assistant_with_tool_calls(
+                                assistant_msg.content.clone(),
+                                tool_calls.clone(),
+                            ));
+
+                            for tc in tool_calls {
+                                tool_calls_made += 1;
+                                let result = self.execute_tool_call(tc)?;
+                                self.messages.push(ChatMessage::tool_result(&tc.id, result));
+                            }
+
+                            continue;
+                        }
+                    }
+
+                    let response_text = assistant_msg.content.clone().unwrap_or_default();
+                    self.messages.push(ChatMessage::assistant(&response_text));
+
+                    return Ok(AgentResult {
+                        response: response_text,
+                        turns_used,
+                        tool_calls_made,
+                        finished_naturally: choice.finish_reason.as_deref() != Some("length"),
+                        total_input_tokens,
+                        total_output_tokens,
+                    });
+                }
+            }
+        }
+    }
+
     /// Execute a single tool call from the LLM response.
     fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
         let arguments = parse_tool_arguments(&tc.function.arguments)?;
@@ -231,6 +360,36 @@ impl AgentLoop {
     }
 }
 
+struct StreamUpdate {
+    contents: Vec<String>,
+    tool_calls: Vec<ToolCallEntry>,
+    finish_reason: Option<String>,
+}
+
+fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
+    let mut contents = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut finish_reason = None;
+
+    for choice in chunk.choices {
+        if let Some(content) = choice.delta.content {
+            contents.push(content);
+        }
+        if let Some(delta_tool_calls) = choice.delta.tool_calls {
+            tool_calls.extend(delta_tool_calls);
+        }
+        if choice.finish_reason.is_some() {
+            finish_reason = choice.finish_reason;
+        }
+    }
+
+    StreamUpdate {
+        contents,
+        tool_calls,
+        finish_reason,
+    }
+}
+
 /// Parse a JSON arguments string into a flat BTreeMap<String, String>.
 ///
 /// LLM tool call arguments come as a JSON string like `{"message":"hello"}`.
@@ -285,6 +444,26 @@ mod tests {
     fn parse_tool_arguments_rejects_invalid_json() {
         let result = parse_tool_arguments("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn collect_stream_update_gathers_content_and_finish_reason() {
+        let update = collect_stream_update(ChatCompletionChunk {
+            id: "chunk-1".to_owned(),
+            choices: vec![genesis_provider::ChatChunkChoice {
+                index: 0,
+                delta: genesis_provider::ChatChunkDelta {
+                    role: Some("assistant".to_owned()),
+                    content: Some("hello".to_owned()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_owned()),
+            }],
+        });
+
+        assert_eq!(update.contents, vec!["hello".to_owned()]);
+        assert_eq!(update.finish_reason.as_deref(), Some("stop"));
+        assert!(update.tool_calls.is_empty());
     }
 
     #[test]
