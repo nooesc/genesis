@@ -792,6 +792,112 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::reason::ReasonWithModelTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "list_tree".to_owned(),
+                description: "Recursively lists a directory as an indented tree. Skips noise directories (.git, node_modules, target, etc.) by default. Supports depth limiting, hidden files, and glob pattern filtering.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Directory to list." },
+                        "max_depth": { "type": "string", "description": "Maximum recursion depth (default: 3)." },
+                        "show_hidden": { "type": "string", "description": "Set to \"true\" to include hidden files (starting with '.')." },
+                        "pattern": { "type": "string", "description": "Glob-like suffix filter (e.g. \"*.rs\") to only show matching files." }
+                    },
+                    "required": ["path"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::tree::ListTreeTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "git_status".to_owned(),
+                description: "Shows the working tree status of a git repository. Returns branch info, staged/unstaged changes, and untracked files.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the git repository (defaults to current directory)." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::git::GitStatusTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "git_diff".to_owned(),
+                description: "Shows differences between commits, the working tree, and the index. Supports staged diffs, file filtering, name-only mode, and commit ranges.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the git repository (defaults to current directory)." },
+                        "staged": { "type": "string", "description": "Set to \"true\" to show staged changes (--cached)." },
+                        "name_only": { "type": "string", "description": "Set to \"true\" to only show file names." },
+                        "commit_range": { "type": "string", "description": "Commit range to diff (e.g. \"HEAD~3..HEAD\", \"main..feature\")." },
+                        "file_paths": { "type": "string", "description": "Space-separated file paths to restrict the diff to." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::git::GitDiffTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "git_log".to_owned(),
+                description: "Shows commit history. Returns one-line summaries with configurable count, path, author, and date filtering.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the git repository (defaults to current directory)." },
+                        "max_count": { "type": "string", "description": "Maximum number of commits to show (default: 20)." },
+                        "file_path": { "type": "string", "description": "Show only commits affecting this file path." },
+                        "author": { "type": "string", "description": "Filter commits by author name or email." },
+                        "since": { "type": "string", "description": "Show commits after this date (e.g. \"2024-01-01\", \"2 weeks ago\")." },
+                        "until": { "type": "string", "description": "Show commits before this date." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::git::GitLogTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "git_commit".to_owned(),
+                description: "Creates a git commit with the given message. By default commits only staged changes; set all to \"true\" to auto-stage tracked files.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the git repository (defaults to current directory)." },
+                        "message": { "type": "string", "description": "Commit message." },
+                        "all": { "type": "string", "description": "Set to \"true\" to auto-stage all modified tracked files (-a flag)." }
+                    },
+                    "required": ["message"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::git::GitCommitTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "git_branch".to_owned(),
+                description: "Manages git branches. Actions: list (default), create, switch, delete.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the git repository (defaults to current directory)." },
+                        "action": { "type": "string", "description": "Action: 'list' (default), 'create', 'switch', or 'delete'." },
+                        "name": { "type": "string", "description": "Branch name (required for create, switch, delete)." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::git::GitBranchTool,
         );
     registry
 }
@@ -872,7 +978,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 36);
+        assert_eq!(definitions.len(), 42);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
