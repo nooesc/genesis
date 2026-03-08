@@ -227,6 +227,8 @@ pub enum ContextCommand {
     Show,
     #[command(about = "Initialize a .genesis/context.md template in the current directory")]
     Init,
+    #[command(about = "Open the context file in $EDITOR")]
+    Edit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1154,6 +1156,28 @@ fn run_context(command: ContextCommand) -> Result<String, CliError> {
             std::fs::write(&context_path, context_template())?;
 
             Ok(format!("created context file: {}", context_path.display()))
+        }
+        ContextCommand::Edit => {
+            let context_dir = current_dir.join(".genesis");
+            let context_path = context_dir.join("context.md");
+
+            if !context_path.exists() {
+                // Create with template if it doesn't exist
+                std::fs::create_dir_all(&context_dir)?;
+                std::fs::write(&context_path, context_template())?;
+            }
+
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
+            let path_str = context_path.display().to_string();
+            let status = std::process::Command::new(&editor)
+                .arg(&path_str)
+                .status()
+                .map_err(|e| CliError::Other(format!("failed to launch {editor}: {e}")))?;
+            if status.success() {
+                Ok(format!("context saved: {path_str}"))
+            } else {
+                Err(CliError::Other(format!("{editor} exited with status {status}")))
+            }
         }
     }
 }
@@ -2738,5 +2762,15 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         genesis_storage::SessionStore::new(&db)
+    }
+
+    #[test]
+    fn parses_context_edit_command() {
+        let cli = Cli::try_parse_from(["genesis", "context", "edit"])
+            .expect("context edit should parse");
+        assert!(matches!(
+            cli.command,
+            Command::Context(ContextCommand::Edit)
+        ));
     }
 }
