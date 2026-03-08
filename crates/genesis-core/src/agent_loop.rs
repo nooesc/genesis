@@ -14,6 +14,7 @@ use tracing::{debug, error, info, info_span, warn};
 use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
+use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
@@ -67,6 +68,8 @@ pub struct AgentLoopConfig {
     /// the agent to save useful observations. Set to `None` to disable.
     /// Default: 15 tool calls.
     pub memory_nudge_interval: Option<usize>,
+    /// Enable trajectory recording for agent training data capture.
+    pub enable_trajectory: bool,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -90,6 +93,7 @@ impl Default for AgentLoopConfig {
             budget_limit: None,
             max_concurrency: 4,
             memory_nudge_interval: Some(DEFAULT_MEMORY_NUDGE_INTERVAL),
+            enable_trajectory: false,
         }
     }
 }
@@ -128,6 +132,7 @@ pub struct AgentLoop {
     messages: Vec<ChatMessage>,
     subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
     cost: SessionCost,
+    trajectory: TrajectoryRecorder,
 }
 
 impl AgentLoop {
@@ -151,6 +156,13 @@ impl AgentLoop {
 
         let cost = SessionCost::new(config.budget_limit);
 
+        let trajectory = if config.enable_trajectory {
+            let sys = config.system_prompt.as_deref().unwrap_or("");
+            TrajectoryRecorder::new("session", client.model(), sys)
+        } else {
+            TrajectoryRecorder::disabled()
+        };
+
         Self {
             client,
             tool_client: None,
@@ -159,6 +171,7 @@ impl AgentLoop {
             messages,
             subagent_spawner: None,
             cost,
+            trajectory,
         }
     }
 
@@ -201,6 +214,8 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
+        self.trajectory.record_user_message(user_message);
+
         if images.is_empty() {
             self.messages.push(ChatMessage::user(user_message));
         } else {
@@ -257,6 +272,11 @@ impl AgentLoop {
             // Check if the assistant wants to call tools
             if let Some(tool_calls) = &assistant_msg.tool_calls {
                 if !tool_calls.is_empty() {
+                    // Record assistant message with tool calls
+                    if let Some(text) = assistant_msg.content_text() {
+                        self.trajectory.record_assistant_message(text);
+                    }
+
                     // Append the assistant message (with tool_calls) to history
                     self.messages.push(ChatMessage::assistant_with_tool_calls(
                         assistant_msg.content.clone(),
@@ -265,6 +285,13 @@ impl AgentLoop {
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
+
+                    // Record each tool call
+                    for tc in tool_calls {
+                        self.trajectory
+                            .record_tool_call(&tc.function.name, &tc.function.arguments);
+                    }
+
                     let results = execute_tool_calls_parallel(
                         &self.tools,
                         &self.subagent_spawner,
@@ -275,6 +302,8 @@ impl AgentLoop {
 
                     let mut clarification = None;
                     for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
+                        self.trajectory
+                            .record_tool_result(&tc.function.name, &result);
                         if requires_input {
                             clarification = Some(result.clone());
                         }
@@ -310,6 +339,7 @@ impl AgentLoop {
                 .unwrap_or("")
                 .to_owned();
 
+            self.trajectory.record_assistant_message(&response_text);
             self.messages.push(ChatMessage::assistant(&response_text));
 
             return Ok(AgentResult {
@@ -347,6 +377,8 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
+        self.trajectory.record_user_message(user_message);
+
         if images.is_empty() {
             self.messages.push(ChatMessage::user(user_message));
         } else {
@@ -425,6 +457,11 @@ impl AgentLoop {
                     self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)?;
 
                     if !streamed_tool_calls.is_empty() {
+                        // Record assistant message if present
+                        if !response_text.is_empty() {
+                            self.trajectory.record_assistant_message(&response_text);
+                        }
+
                         self.messages.push(ChatMessage::assistant_with_tool_calls(
                             if response_text.is_empty() {
                                 None
@@ -434,9 +471,11 @@ impl AgentLoop {
                             streamed_tool_calls.clone(),
                         ));
 
-                        // Emit start events for all tool calls.
+                        // Emit start events and record tool calls.
                         for tc in &streamed_tool_calls {
                             on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                            self.trajectory
+                                .record_tool_call(&tc.function.name, &tc.function.arguments);
                         }
 
                         // Execute tool calls in parallel.
@@ -454,6 +493,8 @@ impl AgentLoop {
                             streamed_tool_calls.iter().zip(results)
                         {
                             on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                            self.trajectory
+                                .record_tool_result(&tc.function.name, &result);
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
@@ -478,6 +519,7 @@ impl AgentLoop {
                         continue;
                     }
 
+                    self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
                     return Ok(AgentResult {
@@ -508,14 +550,20 @@ impl AgentLoop {
 
                     if let Some(tool_calls) = &assistant_msg.tool_calls {
                         if !tool_calls.is_empty() {
+                            if let Some(text) = assistant_msg.content_text() {
+                                self.trajectory.record_assistant_message(text);
+                            }
+
                             self.messages.push(ChatMessage::assistant_with_tool_calls(
                                 assistant_msg.content.clone(),
                                 tool_calls.clone(),
                             ));
 
-                            // Emit start events for all tool calls.
+                            // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                                self.trajectory
+                                    .record_tool_call(&tc.function.name, &tc.function.arguments);
                             }
 
                             // Execute tool calls in parallel.
@@ -533,6 +581,8 @@ impl AgentLoop {
                                 tool_calls.iter().zip(results)
                             {
                                 on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                                self.trajectory
+                                    .record_tool_result(&tc.function.name, &result);
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded { question: &result });
                                     clarification = Some(result.clone());
@@ -562,6 +612,7 @@ impl AgentLoop {
                         .content_text()
                         .unwrap_or("")
                         .to_owned();
+                    self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
                     return Ok(AgentResult {
@@ -602,6 +653,16 @@ impl AgentLoop {
     /// Access the accumulated cost tracker.
     pub fn cost(&self) -> &SessionCost {
         &self.cost
+    }
+
+    /// Access the trajectory recorder.
+    pub fn trajectory(&self) -> &TrajectoryRecorder {
+        &self.trajectory
+    }
+
+    /// Access the trajectory recorder mutably.
+    pub fn trajectory_mut(&mut self) -> &mut TrajectoryRecorder {
+        &mut self.trajectory
     }
 
     /// Record token usage from an LLM turn and check the budget.
