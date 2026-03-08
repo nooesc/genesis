@@ -49,6 +49,8 @@ impl ChatClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300)) // 5 min for long completions
             .build()?;
 
         let base = provider.base_url.trim_end_matches('/');
