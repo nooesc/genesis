@@ -646,6 +646,7 @@ mod tests {
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key: String::new(),
             model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
         };
         let client = ChatClient::new(&provider).expect("client should build");
         let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
@@ -803,6 +804,7 @@ mod tests {
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key: String::new(),
             model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
         };
         let client = ChatClient::new(&provider).expect("client should build");
         let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
@@ -870,6 +872,7 @@ mod tests {
             base_url: "http://localhost:8000/v1".to_owned(),
             api_key: String::new(),
             model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
         };
         let client = ChatClient::new(&provider).expect("client should build");
         let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
@@ -948,6 +951,7 @@ mod tests {
             base_url: "http://localhost:9999/v1".to_owned(),
             api_key: String::new(),
             model: "cheap-model".to_owned(),
+            backend: "openai".to_owned(),
         };
         let tool_client = ChatClient::new(&tool_provider).expect("tool client should build");
         agent.set_tool_client(tool_client);
@@ -965,6 +969,7 @@ mod tests {
             base_url: "http://localhost:9999/v1".to_owned(),
             api_key: String::new(),
             model: "cheap-model".to_owned(),
+            backend: "openai".to_owned(),
         };
         let tool_client = ChatClient::new(&tool_provider).expect("tool client should build");
         agent.set_tool_client(tool_client);

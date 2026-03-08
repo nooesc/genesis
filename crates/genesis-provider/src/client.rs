@@ -29,6 +29,8 @@ pub struct ChatClient {
     http: reqwest::Client,
     endpoint: String,
     model: String,
+    /// The backend identifier for provider-specific optimizations.
+    backend: String,
 }
 
 impl ChatClient {
@@ -60,6 +62,7 @@ impl ChatClient {
             http,
             endpoint,
             model: provider.model.clone(),
+            backend: provider.backend.clone(),
         })
     }
 
@@ -325,6 +328,11 @@ impl ChatClient {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// Returns the backend identifier (e.g., "openai", "anthropic").
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
 }
 
 /// Whether an HTTP status code is transient and worth retrying.
@@ -390,11 +398,13 @@ mod tests {
             base_url: "https://api.openai.com/v1".to_owned(),
             api_key: "sk-test".to_owned(),
             model: "gpt-4".to_owned(),
+            backend: "openai".to_owned(),
         };
 
         let client = ChatClient::new(&provider).expect("should build client");
         assert_eq!(client.endpoint(), "https://api.openai.com/v1/chat/completions");
         assert_eq!(client.model(), "gpt-4");
+        assert_eq!(client.backend(), "openai");
     }
 
     #[test]
@@ -403,6 +413,7 @@ mod tests {
             base_url: "http://localhost:8000/v1/".to_owned(),
             api_key: String::new(),
             model: "llama-3".to_owned(),
+            backend: "vllm".to_owned(),
         };
 
         let client = ChatClient::new(&provider).expect("should build client");
@@ -418,6 +429,7 @@ mod tests {
             base_url: "http://localhost:11434/v1".to_owned(),
             api_key: String::new(),
             model: "llama-3".to_owned(),
+            backend: "ollama".to_owned(),
         };
 
         let client = ChatClient::new(&provider);

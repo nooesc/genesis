@@ -9,6 +9,9 @@ pub struct ResolvedProvider {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// The backend identifier (e.g., "openai", "anthropic", "openrouter").
+    /// Used for backend-specific optimizations like prompt caching.
+    pub backend: String,
 }
 
 /// Resolve provider credentials from config values and environment.
@@ -35,6 +38,7 @@ pub fn resolve(
         base_url: resolved_base_url,
         api_key,
         model: model.to_owned(),
+        backend: backend.trim().to_ascii_lowercase(),
     }
 }
 
