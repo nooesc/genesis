@@ -5,6 +5,7 @@ members = [
   "crates/genesis-config",
   "crates/genesis-core",
   "crates/genesis-gateway",
+  "crates/genesis-mcp",
   "crates/genesis-provider",
   "crates/genesis-storage",
   "crates/genesis-tools",

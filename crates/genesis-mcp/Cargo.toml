@@ -1,0 +1,16 @@
+[package]
+name = "genesis-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+genesis-types = { path = "../genesis-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "process", "io-util", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
