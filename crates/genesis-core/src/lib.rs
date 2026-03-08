@@ -6,6 +6,7 @@ pub mod nudge;
 pub mod prompt;
 pub mod scheduler;
 pub mod skills;
+pub mod trajectory;
 
 use std::path::Path;
 use std::sync::Arc;

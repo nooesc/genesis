@@ -898,6 +898,58 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::git::GitBranchTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "trajectory".to_owned(),
+                description: "Manages trajectory recording for agent training data. Actions: export (returns trajectory JSON or ShareGPT format), status (check recording state), tag (add a tag), set_outcome (mark success/failure/abandoned).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "Action: 'export', 'status', 'tag', or 'set_outcome'." },
+                        "format": { "type": "string", "description": "Export format: 'json' (default) or 'sharegpt'. Only used with export action." },
+                        "tag": { "type": "string", "description": "Tag to add (used with tag action)." },
+                        "outcome": { "type": "string", "description": "Outcome: 'success', 'failure', or 'abandoned' (used with set_outcome action)." },
+                        "reason": { "type": "string", "description": "Failure reason (optional, used with set_outcome when outcome is 'failure')." }
+                    },
+                    "required": ["action"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::trajectory::TrajectoryTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "list_processes".to_owned(),
+                description: "Lists running processes with optional filtering by name pattern, user, and sorting by CPU/memory/PID usage.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Filter processes by name/command (case-insensitive substring match)." },
+                        "user": { "type": "string", "description": "Filter by process owner username." },
+                        "sort": { "type": "string", "description": "Sort by: 'cpu' (default), 'mem', or 'pid'." },
+                        "limit": { "type": "string", "description": "Maximum number of processes to return (default: 20)." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::process::ListProcessesTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "system_info".to_owned(),
+                description: "Returns system resource information including CPU load, memory usage, disk space, and network interfaces.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "section": { "type": "string", "description": "Section to report: 'all' (default), 'cpu', 'memory', 'disk', or 'network'." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::process::SystemInfoTool,
         );
     registry
 }
@@ -978,7 +1030,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 42);
+        assert_eq!(definitions.len(), 45);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

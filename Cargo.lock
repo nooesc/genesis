@@ -696,6 +696,7 @@ dependencies = [
 name = "genesis-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "futures-util",
  "genesis-config",
  "genesis-mcp",
@@ -706,6 +707,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
