@@ -3,6 +3,8 @@
 //! Exposes a REST API so external services (webhooks, platform bots)
 //! can send messages to Eve and receive responses.
 
+pub mod platforms;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -113,10 +115,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
+    // Platform webhook routes (no API key — each platform has its own auth)
+    let platform_webhooks = Router::new()
+        .route("/telegram/webhook", post(platforms::telegram::webhook_handler))
+        .route("/discord/interactions", post(platforms::discord::interactions_handler))
+        .route("/slack/events", post(platforms::slack::events_handler));
+
     // Public routes
     Router::new()
         .route("/health", get(health_handler))
         .merge(protected)
+        .merge(platform_webhooks)
         .layer(cors)
         .with_state(state)
 }

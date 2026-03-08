@@ -13,6 +13,7 @@ genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }
 futures-util.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
