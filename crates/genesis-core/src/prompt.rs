@@ -54,11 +54,20 @@ progress with check_subagent.
 - For errors, explain what went wrong and suggest fixes.";
 
 /// Well-known context file paths, checked in order. The first file found wins.
+/// Supports Genesis-native paths plus common community formats.
 const CONTEXT_FILE_CANDIDATES: &[&str] = &[
     ".genesis/context.md",
     ".genesis/instructions.md",
     "genesis.md",
     ".genesis.md",
+    // Hermes-agent compatible
+    "SOUL.md",
+    "AGENTS.md",
+    // Other agent frameworks
+    ".cursorrules",
+    ".cursorignore",
+    "CLAUDE.md",
+    ".github/copilot-instructions.md",
 ];
 
 /// Build a system prompt for the agent from the current context.
@@ -182,6 +191,14 @@ pub fn build_system_prompt_with_memories(
     parts.push(
         "You can learn new skills using the skill_create tool. After completing a complex multi-step task successfully, consider saving the procedure as a skill for future reuse.".to_owned(),
     );
+
+    // Timestamp and platform hints
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M %Z").to_string();
+    let platform = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    parts.push(format!(
+        "Current time: {timestamp}. Platform: {platform}/{arch}."
+    ));
 
     parts.join("\n\n")
 }

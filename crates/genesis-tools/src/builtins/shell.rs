@@ -130,6 +130,25 @@ fn build_command(
             cmd.arg(&destination).arg(command);
             cmd
         }
+        Some(crate::TerminalBackend::Singularity {
+            image,
+            bind,
+            working_dir: default_dir,
+        }) => {
+            // Singularity/Apptainer: `singularity exec [--bind ...] [--pwd ...] image sh -c cmd`
+            let mut cmd = Command::new("singularity");
+            cmd.arg("exec");
+            if let Some(binds) = bind {
+                for b in binds {
+                    cmd.arg("--bind").arg(b);
+                }
+            }
+            if let Some(dir) = working_dir.or(default_dir.as_ref()) {
+                cmd.arg("--pwd").arg(dir);
+            }
+            cmd.arg(image).arg("sh").arg("-c").arg(command);
+            cmd
+        }
         None => {
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(command);
@@ -466,6 +485,39 @@ mod tests {
         assert!(args.contains(&std::ffi::OsStr::new("-p")));
         assert!(args.contains(&std::ffi::OsStr::new("2222")));
         assert!(args.contains(&std::ffi::OsStr::new("uptime")));
+    }
+
+    #[test]
+    fn build_command_singularity_backend() {
+        let backend = Some(crate::TerminalBackend::Singularity {
+            image: "ubuntu.sif".to_owned(),
+            bind: Some(vec!["/data:/data".to_owned(), "/scratch:/scratch".to_owned()]),
+            working_dir: Some("/workspace".to_owned()),
+        });
+        let cmd = build_command("python train.py", None, &backend);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "singularity");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("exec")));
+        assert!(args.contains(&std::ffi::OsStr::new("ubuntu.sif")));
+        assert!(args.contains(&std::ffi::OsStr::new("--bind")));
+        assert!(args.contains(&std::ffi::OsStr::new("/data:/data")));
+        assert!(args.contains(&std::ffi::OsStr::new("--pwd")));
+        assert!(args.contains(&std::ffi::OsStr::new("/workspace")));
+    }
+
+    #[test]
+    fn build_command_singularity_minimal() {
+        let backend = Some(crate::TerminalBackend::Singularity {
+            image: "pytorch.sif".to_owned(),
+            bind: None,
+            working_dir: None,
+        });
+        let cmd = build_command("echo hi", None, &backend);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(!args.contains(&std::ffi::OsStr::new("--bind")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--pwd")));
+        assert!(args.contains(&std::ffi::OsStr::new("pytorch.sif")));
     }
 
     #[test]

@@ -76,6 +76,15 @@ pub enum TerminalBackend {
         #[serde(skip_serializing_if = "Option::is_none")]
         identity_file: Option<String>,
     },
+    /// Execute inside a Singularity/Apptainer container (HPC environments).
+    #[serde(rename = "singularity")]
+    Singularity {
+        image: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bind: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
