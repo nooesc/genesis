@@ -316,6 +316,117 @@ where
     }
 }
 
+/// Update provider fields in the config file.  Creates the file (and parent
+/// directories) when it does not exist yet.  Only the supplied `Some` fields
+/// are written; `None` fields are left untouched.
+pub fn update_provider_in_file(
+    config_path: &Path,
+    backend: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<Option<&str>>,
+    api_key_env: Option<Option<&str>>,
+) -> Result<(), ConfigError> {
+    // Read existing partial config (or start fresh).
+    let mut file_config = read_config_file(config_path)?;
+
+    let provider = file_config.provider.get_or_insert_with(FileProviderConfig::default);
+
+    if let Some(b) = backend {
+        provider.backend = Some(b.to_owned());
+    }
+    if let Some(m) = model {
+        provider.model = Some(m.to_owned());
+    }
+    if let Some(url) = base_url {
+        provider.base_url = url.map(str::to_owned);
+    }
+    if let Some(key) = api_key_env {
+        provider.api_key_env = key.map(str::to_owned);
+    }
+
+    write_file_config(config_path, &file_config)
+}
+
+/// Serialisable version of `FileConfig` used only for writing back.
+#[derive(Debug, Clone, Serialize, Default)]
+struct WritableFileConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<WritableProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<WritableStorageConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<WritableRuntimeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct WritableProviderConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct WritableStorageConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct WritableRuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_concurrency: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_destructive_tools: Option<bool>,
+}
+
+fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let writable = WritableFileConfig {
+        schema_version: file_config.schema_version,
+        profile: file_config.profile.clone(),
+        provider: file_config.provider.as_ref().map(|p| WritableProviderConfig {
+            backend: p.backend.clone(),
+            model: p.model.clone(),
+            base_url: p.base_url.clone(),
+            api_key_env: p.api_key_env.clone(),
+        }),
+        storage: file_config.storage.as_ref().map(|s| WritableStorageConfig {
+            data_dir: s.data_dir.clone(),
+            database_path: s.database_path.clone(),
+        }),
+        runtime: file_config.runtime.as_ref().map(|r| WritableRuntimeConfig {
+            max_concurrency: r.max_concurrency,
+            allow_destructive_tools: r.allow_destructive_tools,
+        }),
+    };
+
+    let yaml = serde_yaml::to_string(&writable).map_err(|source| ConfigError::ParseYaml {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    fs::write(path, yaml).map_err(|source| ConfigError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::load_from_map;
@@ -379,5 +490,76 @@ runtime:
         assert!(rendered.contains("profile: default"));
         assert!(rendered.contains("backend: openai"));
         assert!(rendered.contains("model: gpt-4.1-mini"));
+    }
+
+    #[test]
+    fn update_provider_creates_config_file_when_missing() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("subdir").join("config.yaml");
+
+        super::update_provider_in_file(
+            &config_path,
+            Some("anthropic"),
+            Some("claude-sonnet-4-6"),
+            None,
+            None,
+        )
+        .expect("update should succeed");
+
+        let contents = fs::read_to_string(&config_path).expect("file should exist");
+        assert!(contents.contains("backend: anthropic"));
+        assert!(contents.contains("model: claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn update_provider_preserves_existing_fields() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "profile: operator\nprovider:\n  backend: openai\n  model: gpt-4.1-mini\n",
+        )
+        .expect("initial write");
+
+        super::update_provider_in_file(
+            &config_path,
+            None,
+            Some("gpt-5"),
+            None,
+            None,
+        )
+        .expect("update should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &std::collections::BTreeMap::new())
+            .expect("reload should work");
+        assert_eq!(loaded.config.profile, "operator");
+        assert_eq!(loaded.config.provider.backend, "openai");
+        assert_eq!(loaded.config.provider.model, "gpt-5");
+    }
+
+    #[test]
+    fn update_provider_changes_both_backend_and_model() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "provider:\n  backend: openai\n  model: gpt-4.1-mini\n")
+            .expect("initial write");
+
+        super::update_provider_in_file(
+            &config_path,
+            Some("openrouter"),
+            Some("nous/hermes-3"),
+            Some(Some("https://openrouter.ai/api/v1")),
+            None,
+        )
+        .expect("update should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &std::collections::BTreeMap::new())
+            .expect("reload should work");
+        assert_eq!(loaded.config.provider.backend, "openrouter");
+        assert_eq!(loaded.config.provider.model, "nous/hermes-3");
+        assert_eq!(
+            loaded.config.provider.base_url.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
     }
 }

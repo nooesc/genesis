@@ -61,6 +61,8 @@ pub enum Command {
         #[arg(long, default_value = "3000", help = "Port to listen on")]
         port: u16,
     },
+    #[command(subcommand, about = "Manage the active LLM provider and model")]
+    Model(ModelCommand),
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -79,6 +81,23 @@ pub enum StorageCommand {
     Path,
     #[command(about = "Create the sqlite schema and print the resulting health report")]
     Bootstrap,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelCommand {
+    #[command(about = "Show the active provider and model")]
+    Show,
+    #[command(about = "Switch the active model (persisted to config file)")]
+    Set {
+        #[arg(help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
+        model: String,
+        #[arg(long, help = "Provider backend (e.g. openai, openrouter, anthropic)")]
+        backend: Option<String>,
+        #[arg(long, help = "Base URL override for the provider API")]
+        base_url: Option<String>,
+        #[arg(long, help = "Environment variable holding the API key")]
+        api_key_env: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -228,6 +247,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
+        Command::Model(model_command) => run_model(cli.config, model_command, cli.json),
         Command::Serve { host, port } => run_serve(cli.config, &host, port).await,
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
@@ -377,6 +397,63 @@ async fn run_serve(
     })?;
 
     Ok("server stopped".to_owned())
+}
+
+fn run_model(
+    config_path: Option<PathBuf>,
+    command: ModelCommand,
+    json: bool,
+) -> Result<String, CliError> {
+    match command {
+        ModelCommand::Show => {
+            let loaded = load(config_path.as_deref())?;
+            if json {
+                Ok(serde_json::to_string_pretty(&loaded.config.provider)?)
+            } else {
+                let mut lines = vec![
+                    format!("backend: {}", loaded.config.provider.backend),
+                    format!("model: {}", loaded.config.provider.model),
+                ];
+                if let Some(url) = &loaded.config.provider.base_url {
+                    lines.push(format!("base_url: {url}"));
+                }
+                if let Some(key_env) = &loaded.config.provider.api_key_env {
+                    lines.push(format!("api_key_env: {key_env}"));
+                }
+                Ok(lines.join("\n"))
+            }
+        }
+        ModelCommand::Set {
+            model,
+            backend,
+            base_url,
+            api_key_env,
+        } => {
+            let loaded = load(config_path.as_deref())?;
+            let config_file = config_path
+                .unwrap_or_else(|| loaded.paths.config_path.clone());
+
+            genesis_config::update_provider_in_file(
+                &config_file,
+                backend.as_deref(),
+                Some(&model),
+                base_url.as_ref().map(|u| Some(u.as_str())),
+                api_key_env.as_ref().map(|k| Some(k.as_str())),
+            )?;
+
+            let updated = load(Some(&config_file))?;
+            if json {
+                Ok(serde_json::to_string_pretty(&updated.config.provider)?)
+            } else {
+                Ok(format!(
+                    "model set to {} / {}\nconfig: {}",
+                    updated.config.provider.backend,
+                    updated.config.provider.model,
+                    config_file.display()
+                ))
+            }
+        }
+    }
 }
 
 fn read_user_input(prompt: &str) -> Result<String, CliError> {
@@ -532,7 +609,7 @@ mod tests {
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, format_schedule_list,
         format_session_list, is_exit_command, run, BootstrapCommand, Cli, Command,
-        ScheduleCommand, SessionsCommand, StorageCommand,
+        ModelCommand, ScheduleCommand, SessionsCommand, StorageCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -824,5 +901,119 @@ storage:
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_model_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "model", "show"])
+            .expect("model show command should parse");
+
+        assert!(matches!(cli.command, Command::Model(ModelCommand::Show)));
+    }
+
+    #[test]
+    fn parses_model_set_command_minimal() {
+        let cli = Cli::try_parse_from(["genesis", "model", "set", "gpt-5"])
+            .expect("model set command should parse");
+
+        match cli.command {
+            Command::Model(ModelCommand::Set { model, backend, .. }) => {
+                assert_eq!(model, "gpt-5");
+                assert!(backend.is_none());
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_model_set_command_with_backend() {
+        let cli = Cli::try_parse_from([
+            "genesis", "model", "set", "claude-sonnet-4-6", "--backend", "anthropic",
+        ])
+        .expect("model set command should parse");
+
+        match cli.command {
+            Command::Model(ModelCommand::Set { model, backend, .. }) => {
+                assert_eq!(model, "claude-sonnet-4-6");
+                assert_eq!(backend.as_deref(), Some("anthropic"));
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_show_renders_current_provider() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openrouter\n  model: nous/hermes-3\n",
+        )
+        .expect("config should be written");
+
+        let output = run(Cli {
+            config: Some(config_path),
+            json: false,
+            command: Command::Model(ModelCommand::Show),
+        })
+        .await
+        .expect("model show should succeed");
+
+        assert!(output.contains("backend: openrouter"));
+        assert!(output.contains("model: nous/hermes-3"));
+    }
+
+    #[tokio::test]
+    async fn model_set_updates_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\n",
+        )
+        .expect("config should be written");
+
+        let output = run(Cli {
+            config: Some(config_path.clone()),
+            json: false,
+            command: Command::Model(ModelCommand::Set {
+                model: "gpt-5".to_owned(),
+                backend: Some("openai".to_owned()),
+                base_url: None,
+                api_key_env: None,
+            }),
+        })
+        .await
+        .expect("model set should succeed");
+
+        assert!(output.contains("model set to openai / gpt-5"));
+
+        // Verify persisted
+        let reloaded = genesis_config::load(Some(&config_path)).expect("reload");
+        assert_eq!(reloaded.config.provider.model, "gpt-5");
+    }
+
+    #[tokio::test]
+    async fn model_show_json_output() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: anthropic\n  model: claude-sonnet-4-6\n",
+        )
+        .expect("config should be written");
+
+        let output = run(Cli {
+            config: Some(config_path),
+            json: true,
+            command: Command::Model(ModelCommand::Show),
+        })
+        .await
+        .expect("model show json should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output should be valid json");
+        assert_eq!(parsed["backend"], "anthropic");
+        assert_eq!(parsed["model"], "claude-sonnet-4-6");
     }
 }
