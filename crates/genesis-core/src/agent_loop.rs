@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error, info, info_span, warn};
 
+use std::sync::Arc;
+
 use crate::ToolRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
@@ -63,6 +65,12 @@ pub enum AgentError {
     MaxTurnsExceeded(usize),
 }
 
+/// Callback for spawning subagent workstreams. Called when the agent
+/// invokes the `spawn_subagent` tool with the child session ID and task.
+pub trait SubagentSpawner: Send + Sync {
+    fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str);
+}
+
 /// The core agent loop that wires provider (LLM) and tool execution together.
 ///
 /// Flow: user message → LLM → [tool_calls → execute → LLM]* → final text
@@ -71,6 +79,7 @@ pub struct AgentLoop {
     tools: ToolRuntime,
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
+    subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
 }
 
 impl AgentLoop {
@@ -97,7 +106,13 @@ impl AgentLoop {
             tools,
             config,
             messages,
+            subagent_spawner: None,
         }
+    }
+
+    /// Attach a subagent spawner so the agent can spawn parallel workstreams.
+    pub fn set_subagent_spawner(&mut self, spawner: Arc<dyn SubagentSpawner>) {
+        self.subagent_spawner = Some(spawner);
     }
 
     /// Run a single user turn through the agent loop.
@@ -308,7 +323,43 @@ impl AgentLoop {
         }
     }
 
+    /// After executing a tool call, check if it was a subagent spawn and
+    /// trigger the spawner if configured.
+    fn maybe_spawn_subagent(&self, output: &genesis_tools::ToolOutput) {
+        let spawner = match &self.subagent_spawner {
+            Some(s) => s,
+            None => return,
+        };
+
+        if output.metadata.get("__subagent_spawn").map(String::as_str) != Some("true") {
+            return;
+        }
+
+        let child_session_id = match output.metadata.get("child_session_id") {
+            Some(id) => id,
+            None => return,
+        };
+        let subagent_id = match output.metadata.get("subagent_id") {
+            Some(id) => id,
+            None => return,
+        };
+        let task = match output.metadata.get("task") {
+            Some(t) => t,
+            None => return,
+        };
+
+        info!(
+            subagent_id = subagent_id.as_str(),
+            child_session_id = child_session_id.as_str(),
+            "spawning subagent workstream"
+        );
+        spawner.spawn(child_session_id, subagent_id, task);
+    }
+
     /// Execute a single tool call from the LLM response.
+    ///
+    /// Returns the content string for the LLM and triggers subagent spawning
+    /// if the tool call was `spawn_subagent`.
     fn execute_tool_call(&self, tc: &ToolCallEntry) -> Result<String, AgentError> {
         let _span = info_span!(
             "agent.tool_call",
@@ -332,6 +383,7 @@ impl AgentLoop {
                     output_bytes = output.content.len(),
                     "tool call succeeded"
                 );
+                self.maybe_spawn_subagent(&output);
                 Ok(output.content)
             }
             Err(err) => {

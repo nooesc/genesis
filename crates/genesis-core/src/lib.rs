@@ -247,6 +247,18 @@ impl ToolRuntime {
     pub fn execute(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         self.registry.execute(call, &self.context)
     }
+
+    /// Create a new ToolRuntime with a different session ID.
+    /// Used when spawning subagent workstreams.
+    pub fn with_session_id(&self, session_id: impl Into<String>) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            context: ToolContext {
+                session_id: session_id.into(),
+                ..self.context.clone()
+            },
+        }
+    }
 }
 
 /// Returns the number of tools in the default registry without constructing

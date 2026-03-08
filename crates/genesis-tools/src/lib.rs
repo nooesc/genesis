@@ -391,6 +391,50 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::user_model::UserModelTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "spawn_subagent".to_owned(),
+                description: "Spawns a subagent to work on a task concurrently. The subagent runs its own agent loop in the background and can use all available tools. Use check_subagent to monitor progress.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "The task for the subagent to accomplish. Be specific and include all relevant context." },
+                        "name": { "type": "string", "description": "A short name for this subagent (e.g. 'researcher', 'coder', 'reviewer'). Defaults to 'subagent'." }
+                    },
+                    "required": ["task"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::subagent::SpawnSubagentTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "check_subagent".to_owned(),
+                description: "Checks the status and result of a previously spawned subagent.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "subagent_id": { "type": "string", "description": "The ID of the subagent to check." }
+                    },
+                    "required": ["subagent_id"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::subagent::CheckSubagentTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "list_subagents".to_owned(),
+                description: "Lists all subagents spawned in the current session with their status.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::subagent::ListSubagentsTool,
         );
     registry
 }
@@ -470,7 +514,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 16);
+        assert_eq!(definitions.len(), 19);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

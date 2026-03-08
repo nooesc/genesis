@@ -213,6 +213,18 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS subagents (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT NOT NULL,
+                child_session_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                task TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                result TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
                 session_id UNINDEXED,
                 content
@@ -1286,6 +1298,168 @@ impl SkillStore {
     }
 }
 
+/// A stored subagent — a child agent loop spawned by a parent session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSubagent {
+    pub id: String,
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub name: String,
+    pub task: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+/// Subagent persistence layer.
+pub struct SubagentStore {
+    database_path: PathBuf,
+}
+
+impl SubagentStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Create a new subagent record with status "pending".
+    pub fn create(
+        &self,
+        id: &str,
+        parent_session_id: &str,
+        child_session_id: &str,
+        name: &str,
+        task: &str,
+    ) -> Result<StoredSubagent, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO subagents (id, parent_session_id, child_session_id, name, task, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                params![id, parent_session_id, child_session_id, name, task],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        self.get(id)?
+            .ok_or_else(|| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            })
+    }
+
+    /// Get a subagent by ID.
+    pub fn get(&self, id: &str) -> Result<Option<StoredSubagent>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT id, parent_session_id, child_session_id, name, task, status, result, error, created_at, completed_at
+                 FROM subagents WHERE id = ?1",
+                params![id],
+                Self::row_to_subagent,
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// List all subagents for a parent session.
+    pub fn list_by_parent(&self, parent_session_id: &str) -> Result<Vec<StoredSubagent>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, parent_session_id, child_session_id, name, task, status, result, error, created_at, completed_at
+                 FROM subagents WHERE parent_session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let subagents = stmt
+            .query_map(params![parent_session_id], Self::row_to_subagent)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(subagents)
+    }
+
+    /// Mark a subagent as running.
+    pub fn set_running(&self, id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "UPDATE subagents SET status = 'running' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Mark a subagent as completed with its result.
+    pub fn set_completed(&self, id: &str, result: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "UPDATE subagents SET status = 'completed', result = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![id, result],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Mark a subagent as failed with an error message.
+    pub fn set_failed(&self, id: &str, error: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "UPDATE subagents SET status = 'failed', error = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![id, error],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    fn row_to_subagent(row: &rusqlite::Row) -> Result<StoredSubagent, rusqlite::Error> {
+        Ok(StoredSubagent {
+            id: row.get(0)?,
+            parent_session_id: row.get(1)?,
+            child_session_id: row.get(2)?,
+            name: row.get(3)?,
+            task: row.get(4)?,
+            status: row.get(5)?,
+            result: row.get(6)?,
+            error: row.get(7)?,
+            created_at: row.get(8)?,
+            completed_at: row.get(9)?,
+        })
+    }
+}
+
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
     Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
@@ -1712,6 +1886,111 @@ mod tests {
         assert!(store.delete("temp").unwrap());
         assert!(!store.delete("temp").unwrap());
         assert!(store.get("temp").unwrap().is_none());
+    }
+
+    #[test]
+    fn subagent_store_creates_and_retrieves() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = SessionStore::new(&db_path);
+        session_store
+            .create_session("parent-1", "cli", None)
+            .expect("parent session");
+        session_store
+            .create_session("child-1", "subagent", Some("Subagent: worker"))
+            .expect("child session");
+
+        let store = super::SubagentStore::new(&db_path);
+        let record = store
+            .create("sub-1", "parent-1", "child-1", "worker", "do the thing")
+            .expect("create");
+
+        assert_eq!(record.id, "sub-1");
+        assert_eq!(record.parent_session_id, "parent-1");
+        assert_eq!(record.child_session_id, "child-1");
+        assert_eq!(record.name, "worker");
+        assert_eq!(record.task, "do the thing");
+        assert_eq!(record.status, "pending");
+        assert!(record.result.is_none());
+        assert!(record.error.is_none());
+
+        let fetched = store.get("sub-1").unwrap().expect("should exist");
+        assert_eq!(fetched.id, "sub-1");
+    }
+
+    #[test]
+    fn subagent_store_status_transitions() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = SessionStore::new(&db_path);
+        session_store.create_session("p", "cli", None).unwrap();
+        session_store.create_session("c", "subagent", None).unwrap();
+
+        let store = super::SubagentStore::new(&db_path);
+        store.create("sub-2", "p", "c", "runner", "build it").unwrap();
+
+        // pending -> running
+        assert!(store.set_running("sub-2").unwrap());
+        let r = store.get("sub-2").unwrap().unwrap();
+        assert_eq!(r.status, "running");
+
+        // running -> completed
+        assert!(store.set_completed("sub-2", "Built successfully!").unwrap());
+        let r = store.get("sub-2").unwrap().unwrap();
+        assert_eq!(r.status, "completed");
+        assert_eq!(r.result.as_deref(), Some("Built successfully!"));
+        assert!(r.completed_at.is_some());
+    }
+
+    #[test]
+    fn subagent_store_lists_by_parent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = SessionStore::new(&db_path);
+        session_store.create_session("p1", "cli", None).unwrap();
+        session_store.create_session("p2", "cli", None).unwrap();
+        session_store.create_session("c1", "subagent", None).unwrap();
+        session_store.create_session("c2", "subagent", None).unwrap();
+        session_store.create_session("c3", "subagent", None).unwrap();
+
+        let store = super::SubagentStore::new(&db_path);
+        store.create("s1", "p1", "c1", "a", "task a").unwrap();
+        store.create("s2", "p1", "c2", "b", "task b").unwrap();
+        store.create("s3", "p2", "c3", "c", "task c").unwrap();
+
+        let p1_subs = store.list_by_parent("p1").unwrap();
+        assert_eq!(p1_subs.len(), 2);
+
+        let p2_subs = store.list_by_parent("p2").unwrap();
+        assert_eq!(p2_subs.len(), 1);
+        assert_eq!(p2_subs[0].name, "c");
+    }
+
+    #[test]
+    fn subagent_store_set_failed() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = SessionStore::new(&db_path);
+        session_store.create_session("p", "cli", None).unwrap();
+        session_store.create_session("c", "subagent", None).unwrap();
+
+        let store = super::SubagentStore::new(&db_path);
+        store.create("sub-f", "p", "c", "failing", "crash").unwrap();
+        store.set_running("sub-f").unwrap();
+        store.set_failed("sub-f", "out of tokens").unwrap();
+
+        let r = store.get("sub-f").unwrap().unwrap();
+        assert_eq!(r.status, "failed");
+        assert_eq!(r.error.as_deref(), Some("out of tokens"));
+        assert!(r.completed_at.is_some());
     }
 
     #[test]

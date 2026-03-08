@@ -1,16 +1,18 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Instant;
 
 use genesis_config::LoadedConfig;
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
 use genesis_storage::{
-    bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, UserModelStore,
+    bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, SubagentStore,
+    UserModelStore,
 };
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
-use tracing::{debug, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult};
+use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::build_system_prompt_full;
 use crate::skills::load_skills_prompt;
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
@@ -206,7 +208,7 @@ impl<'a> SessionExecutionService<'a> {
             "built agent loop dependencies"
         );
 
-        Ok(AgentLoop::with_history(
+        let mut agent = AgentLoop::with_history(
             client,
             tool_runtime,
             AgentLoopConfig {
@@ -214,7 +216,14 @@ impl<'a> SessionExecutionService<'a> {
                 ..AgentLoopConfig::default()
             },
             history,
-        ))
+        );
+
+        // Attach subagent spawner so agent can spawn parallel workstreams
+        agent.set_subagent_spawner(Arc::new(ExecutionSubagentSpawner {
+            loaded: Arc::new(self.loaded.clone()),
+        }));
+
+        Ok(agent)
     }
 
     async fn run_turn_with_runner<F, Fut>(
@@ -281,6 +290,109 @@ impl<'a> SessionExecutionService<'a> {
             created_session,
             result: executed.result,
         })
+    }
+}
+
+/// Spawns child agent loops as background tokio tasks.
+///
+/// When the parent agent calls `spawn_subagent`, the agent loop detects
+/// the output metadata and calls `SubagentSpawner::spawn`, which creates
+/// a new `AgentLoop` and runs it in the background.
+struct ExecutionSubagentSpawner {
+    loaded: Arc<LoadedConfig>,
+}
+
+impl SubagentSpawner for ExecutionSubagentSpawner {
+    fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str) {
+        let loaded = Arc::clone(&self.loaded);
+        let child_session_id = child_session_id.to_owned();
+        let subagent_id = subagent_id.to_owned();
+        let task = task.to_owned();
+
+        tokio::spawn(async move {
+            let span = info_span!(
+                "subagent.run",
+                subagent_id = subagent_id.as_str(),
+                child_session_id = child_session_id.as_str(),
+            );
+
+            async {
+                let db_path = &loaded.config.storage.database_path;
+                let subagent_store = SubagentStore::new(db_path);
+
+                // Mark as running
+                if let Err(e) = subagent_store.set_running(&subagent_id) {
+                    error!(error = %e, "failed to mark subagent as running");
+                    return;
+                }
+
+                info!("subagent starting");
+
+                // Build the child agent loop
+                let execution_context = build_execution_context_from_loaded(
+                    &loaded,
+                    child_session_id.clone(),
+                    DeliveryPlatform::Cli,
+                );
+                let tool_runtime = build_default_tool_runtime(&execution_context);
+
+                let system_prompt = format!(
+                    "You are a subagent — a focused worker spawned by a parent agent to handle a specific task. \
+                     Complete the task below thoroughly and concisely. You have access to the same tools as the parent agent.\n\n\
+                     ## Your Task\n{task}"
+                );
+
+                let client = match client_from_config(
+                    &loaded.config.provider.backend,
+                    &loaded.config.provider.model,
+                    loaded.config.provider.base_url.as_deref(),
+                    loaded.config.provider.api_key_env.as_deref(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!(error = %e, "failed to create chat client for subagent");
+                        let _ = subagent_store.set_failed(&subagent_id, &e.to_string());
+                        return;
+                    }
+                };
+
+                let mut agent = AgentLoop::new(
+                    client,
+                    tool_runtime,
+                    AgentLoopConfig {
+                        system_prompt: Some(system_prompt),
+                        max_turns: 10, // Subagents get fewer turns to stay focused
+                        ..AgentLoopConfig::default()
+                    },
+                );
+
+                // Run the subagent turn
+                match agent.run_turn(&task).await {
+                    Ok(result) => {
+                        info!(
+                            turns_used = result.turns_used,
+                            tool_calls_made = result.tool_calls_made,
+                            "subagent completed successfully"
+                        );
+
+                        // Persist the subagent's messages
+                        let session_store = SessionStore::new(db_path);
+                        let emitted = agent.messages()[1..].to_vec(); // skip system prompt
+                        if let Err(e) = persist_new_messages(&session_store, &child_session_id, &emitted) {
+                            warn!(error = %e, "failed to persist subagent messages");
+                        }
+
+                        let _ = subagent_store.set_completed(&subagent_id, &result.response);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "subagent execution failed");
+                        let _ = subagent_store.set_failed(&subagent_id, &e.to_string());
+                    }
+                }
+            }
+            .instrument(span)
+            .await
+        });
     }
 }
 
