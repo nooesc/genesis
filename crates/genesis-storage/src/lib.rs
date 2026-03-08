@@ -2018,6 +2018,124 @@ impl SkillUsageStore {
     }
 }
 
+/// A stored memory (key-value note persisted by the agent).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMemory {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub kind: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// Memory persistence layer.
+pub struct MemoryStore {
+    database_path: PathBuf,
+}
+
+impl MemoryStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// List all stored memories, most recent first.
+    pub fn list(&self, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at
+                 FROM memories ORDER BY created_at DESC LIMIT ?1",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(StoredMemory {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Full-text search across stored memories.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Ensure FTS index exists (memory tools also create it, but this is defensive)
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                    memory_row_id UNINDEXED, kind, content
+                );",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT m.id, m.session_id, m.kind, m.content, m.created_at
+                 FROM memory_search ms
+                 JOIN memories m ON m.rowid = ms.memory_row_id
+                 WHERE memory_search MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![query, limit as i64], |row| {
+                Ok(StoredMemory {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Delete a memory by ID.
+    pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute("DELETE FROM memories WHERE id = ?1", params![id])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+}
+
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
     Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),

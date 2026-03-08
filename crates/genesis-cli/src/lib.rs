@@ -15,8 +15,8 @@ use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, InsightsData, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
-    StoredSchedule, SubagentStore, UsageStats, UserModelStore,
+    bootstrap, InsightsData, MemoryStore, ScheduleStore, SessionStore, SessionSummary, SkillStore,
+    StorageError, StoredSchedule, SubagentStore, UsageStats, UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -115,6 +115,8 @@ pub enum Command {
     },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
+    #[command(subcommand, about = "Inspect and manage stored memories")]
+    Memory(MemoryCommand),
     #[command(subcommand, about = "Inspect configured MCP servers")]
     Mcp(McpCommand),
 }
@@ -125,6 +127,27 @@ pub enum McpCommand {
     List,
     #[command(about = "Test connectivity to all configured MCP servers")]
     Test,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    #[command(about = "List stored memories")]
+    List {
+        #[arg(long, default_value = "50", help = "Maximum number of memories to show")]
+        limit: usize,
+    },
+    #[command(about = "Search memories using full-text search")]
+    Search {
+        /// Search query
+        query: String,
+        #[arg(long, default_value = "10", help = "Maximum results to return")]
+        limit: usize,
+    },
+    #[command(about = "Delete a memory by ID")]
+    Delete {
+        /// Memory ID to delete
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -620,6 +643,38 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream).await
         }
         Command::Update => run_update().await,
+        Command::Memory(memory_command) => {
+            let loaded = load(cli.config.as_deref())?;
+            bootstrap(&loaded.config.storage.database_path)?;
+            let store = genesis_storage::MemoryStore::new(&loaded.config.storage.database_path);
+            match memory_command {
+                MemoryCommand::List { limit } => {
+                    let memories = store.list(limit)?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&memories)?)
+                    } else {
+                        Ok(format_memory_list(&memories))
+                    }
+                }
+                MemoryCommand::Search { query, limit } => {
+                    let memories = store.search(&query, limit)?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&memories)?)
+                    } else if memories.is_empty() {
+                        Ok(format!("no memories matching \"{query}\""))
+                    } else {
+                        Ok(format_memory_list(&memories))
+                    }
+                }
+                MemoryCommand::Delete { id } => {
+                    if store.delete(&id)? {
+                        Ok(format!("deleted memory {id}"))
+                    } else {
+                        Err(CliError::Other(format!("memory not found: {id}")))
+                    }
+                }
+            }
+        }
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json).await,
     }
 }
@@ -1661,6 +1716,23 @@ fn format_insights(data: &InsightsData, model: &str) -> String {
     lines.join("\n")
 }
 
+fn format_memory_list(memories: &[genesis_storage::StoredMemory]) -> String {
+    if memories.is_empty() {
+        return "no stored memories".to_owned();
+    }
+
+    let mut lines = vec![format!("memories ({})", memories.len())];
+    for m in memories {
+        let content_preview = if m.content.len() > 80 {
+            format!("{}...", &m.content[..77])
+        } else {
+            m.content.clone()
+        };
+        lines.push(format!("[{}] {} ({})", m.kind, content_preview, m.created_at));
+    }
+    lines.join("\n")
+}
+
 fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
     if messages.is_empty() {
         return format!("session {session_id}: no messages");
@@ -1859,11 +1931,12 @@ mod tests {
         context_template,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, export_session_markdown,
-        format_insights, format_schedule_list, format_session_list, format_usage_stats,
-        format_session_messages, format_skill, format_skill_list, format_subagent,
-        format_subagent_list, handle_chat_command, is_exit_command, run, BootstrapCommand, Cli,
-        Command, ConfigCommand, ContextCommand, McpCommand, ModelCommand, ScheduleCommand,
-        SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand,
+        format_insights, format_memory_list, format_schedule_list, format_session_list,
+        format_usage_stats, format_session_messages, format_skill, format_skill_list,
+        format_subagent, format_subagent_list, handle_chat_command, is_exit_command, run,
+        BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand, MemoryCommand,
+        ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand, StorageCommand,
+        SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -3054,5 +3127,61 @@ storage:
         let result2 = handle_chat_command("/usage", "s1", &store);
         // Both should return something (even if session doesn't exist = None)
         assert_eq!(result1.is_some(), result2.is_some());
+    }
+
+    #[test]
+    fn parses_memory_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "memory", "list"])
+            .expect("memory list should parse");
+        match cli.command {
+            Command::Memory(MemoryCommand::List { limit }) => assert_eq!(limit, 50),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_memory_search_command() {
+        let cli = Cli::try_parse_from(["genesis", "memory", "search", "rust programming"])
+            .expect("memory search should parse");
+        match cli.command {
+            Command::Memory(MemoryCommand::Search { query, limit }) => {
+                assert_eq!(query, "rust programming");
+                assert_eq!(limit, 10);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_memory_delete_command() {
+        let cli = Cli::try_parse_from(["genesis", "memory", "delete", "mem-123"])
+            .expect("memory delete should parse");
+        match cli.command {
+            Command::Memory(MemoryCommand::Delete { id }) => {
+                assert_eq!(id, "mem-123");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_memory_list_shows_memories() {
+        let memories = vec![genesis_storage::StoredMemory {
+            id: "m1".to_owned(),
+            session_id: Some("s1".to_owned()),
+            kind: "user_preference".to_owned(),
+            content: "likes rust".to_owned(),
+            created_at: "2026-03-08 12:00:00".to_owned(),
+        }];
+        let output = format_memory_list(&memories);
+        assert!(output.contains("[user_preference]"));
+        assert!(output.contains("likes rust"));
+        assert!(output.contains("2026-03-08"));
+    }
+
+    #[test]
+    fn format_memory_list_empty() {
+        let output = format_memory_list(&[]);
+        assert_eq!(output, "no stored memories");
     }
 }
