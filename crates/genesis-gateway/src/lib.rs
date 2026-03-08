@@ -199,6 +199,7 @@ async fn chat_handler(
                 delivery_platform: delivery_platform_from_str(&request.platform),
                 prompt: &request.message,
                 title: None,
+                images: Vec::new(),
             })
             .await
             .map_err(|e| {
@@ -275,6 +276,7 @@ async fn chat_stream_handler(
                     delivery_platform: delivery_platform_from_str(&platform),
                     prompt: &message,
                     title: None,
+                    images: Vec::new(),
                 },
                 |event| {
                     match event {

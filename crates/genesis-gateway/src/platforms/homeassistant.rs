@@ -80,6 +80,7 @@ pub async fn webhook_handler(
             delivery_platform: DeliveryPlatform::HomeAssistant,
             prompt: &request.message,
             title: Some(title),
+            images: Vec::new(),
         })
         .instrument(span)
         .await

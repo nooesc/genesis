@@ -132,6 +132,7 @@ pub async fn webhook_handler(
                     delivery_platform: DeliveryPlatform::Telegram,
                     prompt: &text,
                     title: Some(&format!("Telegram: {user_name}")),
+                    images: Vec::new(),
                 })
                 .await;
 

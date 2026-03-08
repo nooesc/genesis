@@ -174,7 +174,21 @@ impl AgentLoop {
     /// iteratively, and returns once the LLM produces a text-only response
     /// or the turn limit is reached.
     pub async fn run_turn(&mut self, user_message: &str) -> Result<AgentResult, AgentError> {
-        self.messages.push(ChatMessage::user(user_message));
+        self.run_turn_with_images(user_message, Vec::new()).await
+    }
+
+    /// Run a single user turn with optional image attachments.
+    pub async fn run_turn_with_images(
+        &mut self,
+        user_message: &str,
+        images: Vec<genesis_provider::ImageUrl>,
+    ) -> Result<AgentResult, AgentError> {
+        if images.is_empty() {
+            self.messages.push(ChatMessage::user(user_message));
+        } else {
+            self.messages
+                .push(ChatMessage::user_with_images(user_message, images));
+        }
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -272,12 +286,31 @@ impl AgentLoop {
     pub async fn run_turn_streaming<F>(
         &mut self,
         user_message: &str,
+        on_event: F,
+    ) -> Result<AgentResult, AgentError>
+    where
+        F: FnMut(StreamEvent<'_>),
+    {
+        self.run_turn_streaming_with_images(user_message, Vec::new(), on_event)
+            .await
+    }
+
+    /// Run a streaming turn with optional image attachments.
+    pub async fn run_turn_streaming_with_images<F>(
+        &mut self,
+        user_message: &str,
+        images: Vec<genesis_provider::ImageUrl>,
         mut on_event: F,
     ) -> Result<AgentResult, AgentError>
     where
         F: FnMut(StreamEvent<'_>),
     {
-        self.messages.push(ChatMessage::user(user_message));
+        if images.is_empty() {
+            self.messages.push(ChatMessage::user(user_message));
+        } else {
+            self.messages
+                .push(ChatMessage::user_with_images(user_message, images));
+        }
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 

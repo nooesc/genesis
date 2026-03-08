@@ -160,6 +160,7 @@ pub async fn events_handler(
                     delivery_platform: DeliveryPlatform::Slack,
                     prompt: &text,
                     title: Some(&format!("Slack: {user}")),
+                    images: Vec::new(),
                 })
                 .await;
 

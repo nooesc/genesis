@@ -32,6 +32,9 @@ pub struct SessionTurnInput<'a> {
     pub delivery_platform: DeliveryPlatform,
     pub prompt: &'a str,
     pub title: Option<&'a str>,
+    /// Optional image URLs or base64 data URIs for multimodal prompts.
+    #[allow(clippy::vec_box)]
+    pub images: Vec<genesis_provider::ImageUrl>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,11 +156,12 @@ impl<'a> SessionExecutionService<'a> {
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
+        let images = input.images.clone();
 
         let outcome = self.run_turn_with_runner(input, |history| async move {
             let mut agent = self.build_agent_loop(session_id, platform, history)?;
             let start_index = agent.messages().len();
-            let result = agent.run_turn(&prompt).await?;
+            let result = agent.run_turn_with_images(&prompt, images).await?;
             Ok(ExecutedTurn {
                 result,
                 emitted_messages: agent.messages()[start_index..].to_vec(),
@@ -189,11 +193,12 @@ impl<'a> SessionExecutionService<'a> {
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
+        let images = input.images.clone();
 
         let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
             let mut agent = self.build_agent_loop(session_id, platform, history)?;
             let start_index = agent.messages().len();
-            let result = agent.run_turn_streaming(&prompt, on_chunk).await?;
+            let result = agent.run_turn_streaming_with_images(&prompt, images, on_chunk).await?;
             Ok(ExecutedTurn {
                 result,
                 emitted_messages: agent.messages()[start_index..].to_vec(),
@@ -743,6 +748,7 @@ mod tests {
                     delivery_platform: DeliveryPlatform::Cli,
                     prompt: "new prompt",
                     title: None,
+                    images: Vec::new(),
                 },
                 |history| async move {
                     assert_eq!(history.len(), 1);
@@ -796,6 +802,7 @@ mod tests {
                     delivery_platform: DeliveryPlatform::Cli,
                     prompt: "hello",
                     title: Some("scheduled"),
+                    images: Vec::new(),
                 },
                 |history| async move {
                     assert!(history.is_empty());

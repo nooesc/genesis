@@ -219,6 +219,7 @@ pub async fn webhook_handler(
                                 delivery_platform: DeliveryPlatform::WhatsApp,
                                 prompt: &text,
                                 title: Some(&format!("WhatsApp: {contact}")),
+                                images: Vec::new(),
                             })
                             .await;
 

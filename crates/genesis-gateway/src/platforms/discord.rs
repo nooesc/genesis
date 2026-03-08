@@ -207,6 +207,7 @@ pub async fn interactions_handler(
                         delivery_platform: DeliveryPlatform::Discord,
                         prompt: &message,
                         title: Some(&format!("Discord: {user_name}")),
+                        images: Vec::new(),
                     })
                     .await;
 

@@ -112,6 +112,8 @@ pub enum Command {
         system: Option<String>,
         #[arg(long, help = "Stream output as it arrives (default: wait for full response)")]
         stream: bool,
+        #[arg(short = 'i', long = "image", help = "Attach an image file or URL to the prompt (can be repeated)")]
+        images: Vec<String>,
     },
     #[command(about = "Show status dashboard of all Genesis components")]
     Status,
@@ -646,8 +648,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
-        Command::Run { prompt, session_id, raw, system, stream } => {
-            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream).await
+        Command::Run { prompt, session_id, raw, system, stream, images } => {
+            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream, &images).await
         }
         Command::Status => {
             let loaded = load(cli.config.as_deref())?;
@@ -800,6 +802,7 @@ async fn run_oneshot(
     json: bool,
     system_override: Option<String>,
     stream: bool,
+    image_paths: &[String],
 ) -> Result<String, CliError> {
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
@@ -809,6 +812,9 @@ async fn run_oneshot(
     } else {
         prompt.to_owned()
     };
+
+    // Resolve image paths/URLs to ImageUrl objects
+    let images = resolve_image_inputs(image_paths)?;
 
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -833,6 +839,7 @@ async fn run_oneshot(
             delivery_platform: DeliveryPlatform::Cli,
             prompt: &prompt,
             title: None,
+            images,
         })
         .await?;
 
@@ -899,6 +906,7 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
                     delivery_platform: delivery_platform_from_str(&schedule.destination),
                     prompt: &schedule.prompt,
                     title: Some(schedule.id.as_str()),
+                    images: Vec::new(),
                 })
                 .await?;
 
@@ -1629,6 +1637,51 @@ fn read_user_input(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Option<St
     }
 }
 
+/// Resolve image inputs (file paths or URLs) to ImageUrl objects.
+///
+/// Supports:
+/// - URLs (http/https) — passed through directly
+/// - Local file paths — read and encoded as base64 data URIs
+fn resolve_image_inputs(inputs: &[String]) -> Result<Vec<genesis_provider::ImageUrl>, CliError> {
+    use base64::Engine;
+
+    let mut images = Vec::new();
+    for input in inputs {
+        if input.starts_with("http://") || input.starts_with("https://") {
+            images.push(genesis_provider::ImageUrl {
+                url: input.clone(),
+                detail: None,
+            });
+        } else {
+            // Local file path — read and encode as data URI
+            let path = std::path::Path::new(input);
+            let data = std::fs::read(path)
+                .map_err(|e| CliError::Other(format!("failed to read image {input}: {e}")))?;
+
+            let mime = match path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|s| s.to_lowercase())
+                .as_deref()
+            {
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("gif") => "image/gif",
+                Some("webp") => "image/webp",
+                Some("svg") => "image/svg+xml",
+                _ => "image/png", // default
+            };
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+            images.push(genesis_provider::ImageUrl {
+                url: format!("data:{mime};base64,{encoded}"),
+                detail: None,
+            });
+        }
+    }
+    Ok(images)
+}
+
 fn default_session_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1674,6 +1727,7 @@ async fn run_streaming_turn(
             delivery_platform: DeliveryPlatform::Cli,
             prompt,
             title: None,
+            images: Vec::new(),
         },
         |event| match event {
             StreamEvent::Chunk(chunk) => {
@@ -3005,7 +3059,7 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "run", "hello world"])
             .expect("run command should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system, stream } => {
+            Command::Run { prompt, session_id, raw, system, stream, .. } => {
                 assert_eq!(prompt, "hello world");
                 assert!(session_id.is_none());
                 assert!(!raw);
@@ -3023,7 +3077,7 @@ storage:
         ])
         .expect("run command with flags should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system, stream } => {
+            Command::Run { prompt, session_id, raw, system, stream, .. } => {
                 assert_eq!(prompt, "what is 2+2");
                 assert_eq!(session_id.as_deref(), Some("my-session"));
                 assert!(raw);

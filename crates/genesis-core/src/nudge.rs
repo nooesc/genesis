@@ -73,6 +73,7 @@ pub async fn run_nudge(
             delivery_platform: genesis_types::DeliveryPlatform::Cli,
             prompt: &prompt,
             title: Some("Self-reflection nudge"),
+            images: Vec::new(),
         })
         .await?;
 
