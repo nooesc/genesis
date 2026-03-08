@@ -507,8 +507,14 @@ async fn run_chat(
         );
     }
 
+    let mut rl = rustyline::DefaultEditor::new()
+        .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
+
     loop {
-        let input = read_user_input("you> ")?;
+        let input = match read_user_input(&mut rl, "you> ") {
+            Some(input) => input,
+            None => break, // EOF or ctrl-c
+        };
         let trimmed = input.trim();
 
         if trimmed.is_empty() {
@@ -1073,17 +1079,21 @@ fn run_model(
     }
 }
 
-fn read_user_input(prompt: &str) -> Result<String, CliError> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    let bytes_read = io::stdin().read_line(&mut input)?;
-    if bytes_read == 0 {
-        return Ok("exit".to_owned());
+/// Read user input with readline support (history, line editing).
+/// Returns `None` on EOF (ctrl-d) or interrupt (ctrl-c).
+fn read_user_input(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Option<String> {
+    match rl.readline(prompt) {
+        Ok(line) => {
+            if !line.trim().is_empty() {
+                let _ = rl.add_history_entry(&line);
+            }
+            Some(line)
+        }
+        Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
+            None
+        }
+        Err(_) => None,
     }
-
-    Ok(input)
 }
 
 fn default_session_id() -> String {

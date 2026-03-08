@@ -14,6 +14,7 @@ genesis-gateway = { path = "../genesis-gateway" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }
+rustyline.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
