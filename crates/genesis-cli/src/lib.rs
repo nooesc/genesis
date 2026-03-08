@@ -525,6 +525,12 @@ async fn run_chat(
             break;
         }
 
+        // Handle in-chat slash commands
+        if let Some(handled) = handle_chat_command(trimmed, &session_id, &store) {
+            println!("{handled}");
+            continue;
+        }
+
         let mut streamed = false;
         let outcome = service
             .run_turn_streaming(
@@ -1079,6 +1085,53 @@ fn run_model(
     }
 }
 
+/// Handle in-chat slash commands. Returns Some(output) if handled.
+fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> Option<String> {
+    let cmd = input.strip_prefix('/')?;
+    let (name, _args) = cmd.split_once(' ').unwrap_or((cmd, ""));
+
+    match name {
+        "help" => Some(
+            "/help     - Show this help\n\
+             /history  - Show recent conversation history\n\
+             /export   - Export session as Markdown\n\
+             /tokens   - Show session token usage\n\
+             /session  - Show current session ID\n\
+             /clear    - Clear the screen"
+                .to_owned(),
+        ),
+        "history" => {
+            let messages = store.load_messages(session_id).ok()?;
+            let recent = if messages.len() > 10 {
+                &messages[messages.len() - 10..]
+            } else {
+                &messages
+            };
+            Some(format_session_messages(session_id, recent))
+        }
+        "export" => {
+            let messages = store.load_messages(session_id).ok()?;
+            Some(export_session_markdown(session_id, &messages))
+        }
+        "tokens" => {
+            let session = store.get_session(session_id).ok()??;
+            let total = session.total_input_tokens + session.total_output_tokens;
+            Some(format!(
+                "Session: {}\nInput tokens:  {}\nOutput tokens: {}\nTotal tokens:  {}",
+                session_id, session.total_input_tokens, session.total_output_tokens, total
+            ))
+        }
+        "session" => Some(format!("Current session: {session_id}")),
+        "clear" => {
+            // ANSI clear screen
+            print!("\x1b[2J\x1b[H");
+            let _ = io::stdout().flush();
+            Some(String::new())
+        }
+        _ => Some(format!("Unknown command: /{name}. Type /help for available commands.")),
+    }
+}
+
 /// Read user input with readline support (history, line editing).
 /// Returns `None` on EOF (ctrl-d) or interrupt (ctrl-c).
 fn read_user_input(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Option<String> {
@@ -1372,8 +1425,8 @@ mod tests {
         default_session_id, delivery_platform_from_str, export_session_markdown,
         format_schedule_list, format_session_list,
         format_session_messages, format_skill, format_skill_list, format_subagent,
-        format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command,
-        ContextCommand, McpCommand, ModelCommand, ScheduleCommand, SessionsCommand,
+        format_subagent_list, handle_chat_command, is_exit_command, run, BootstrapCommand, Cli,
+        Command, ContextCommand, McpCommand, ModelCommand, ScheduleCommand, SessionsCommand,
         SkillsCommand, StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
@@ -1983,6 +2036,59 @@ storage:
         assert!(output.contains("hello"));
         assert!(output.contains("## Assistant"));
         assert!(output.contains("hi there"));
+    }
+
+    #[test]
+    fn chat_command_help_returns_command_list() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+        store.create_session("s-1", "cli", None).expect("create session");
+
+        let result = handle_chat_command("/help", "s-1", &store);
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert!(output.contains("/history"));
+        assert!(output.contains("/tokens"));
+    }
+
+    #[test]
+    fn chat_command_session_shows_id() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+
+        let result = handle_chat_command("/session", "s-1", &store);
+        assert_eq!(result.as_deref(), Some("Current session: s-1"));
+    }
+
+    #[test]
+    fn chat_command_returns_none_for_non_slash() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+
+        assert!(handle_chat_command("hello world", "s-1", &store).is_none());
+    }
+
+    #[test]
+    fn chat_command_tokens_shows_usage() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+        store.create_session("s-tok", "cli", None).expect("create session");
+        store.add_usage("s-tok", 100, 50).expect("add usage");
+
+        let result = handle_chat_command("/tokens", "s-tok", &store);
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert!(output.contains("100"));
+        assert!(output.contains("50"));
+        assert!(output.contains("150"));
     }
 
     #[test]
