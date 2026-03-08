@@ -1499,6 +1499,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /tokens   - Show session token usage\n\
              /session  - Show current session ID\n\
              /new      - Start a new session\n\
+             /undo     - Undo last turn (remove last user-assistant exchange)\n\
              /compress - Trim old messages, keeping recent context\n\
              /tools    - List available tools\n\
              /skills   - List saved skills\n\
@@ -1580,6 +1581,32 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
         }
         "model" => {
             Some("Use `genesis model show` to see the active model.".to_owned())
+        }
+        "undo" => {
+            // Remove the last user-assistant exchange (user message + all
+            // subsequent assistant/tool messages until the next user or start).
+            let messages = store.load_messages(session_id).ok()?;
+            if messages.is_empty() {
+                return Some("Nothing to undo.".to_owned());
+            }
+            // Walk backwards to find the last user message, then count all
+            // messages from it to the end — that's the "turn" to remove.
+            let mut last_user_idx = None;
+            for (i, msg) in messages.iter().enumerate().rev() {
+                if msg.role == "user" {
+                    last_user_idx = Some(i);
+                    break;
+                }
+            }
+            let idx = match last_user_idx {
+                Some(i) => i,
+                None => return Some("No user messages to undo.".to_owned()),
+            };
+            let to_remove = messages.len() - idx;
+            match store.delete_last_n_messages(session_id, to_remove) {
+                Ok(n) => Some(format!("Undid last turn ({n} messages removed).")),
+                Err(e) => Some(format!("Undo failed: {e}")),
+            }
         }
         _ => Some(format!("Unknown command: /{name}. Type /help for available commands.")),
     }
@@ -3472,6 +3499,71 @@ storage:
         assert!(output.contains("echo"));
         assert!(output.contains("patch"));
         assert!(output.contains("todo"));
+    }
+
+    #[test]
+    fn chat_undo_removes_last_turn() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+        store.create_session("s-undo", "cli", None).expect("create");
+        store.append_message("s-undo", "system", Some("You are Eve."), None, None).unwrap();
+        store.append_message("s-undo", "user", Some("Hello"), None, None).unwrap();
+        store.append_message("s-undo", "assistant", Some("Hi!"), None, None).unwrap();
+        store.append_message("s-undo", "user", Some("How are you?"), None, None).unwrap();
+        store.append_message("s-undo", "assistant", Some("Great!"), None, None).unwrap();
+
+        let result = handle_chat_command("/undo", "s-undo", &store);
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert!(output.contains("2 messages removed"), "got: {output}");
+
+        // Should have system + first user + first assistant = 3 messages left
+        let remaining = store.load_messages("s-undo").unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[2].role, "assistant");
+    }
+
+    #[test]
+    fn chat_undo_removes_tool_call_turn() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+        store.create_session("s-undo2", "cli", None).expect("create");
+        store.append_message("s-undo2", "user", Some("search for X"), None, None).unwrap();
+        // assistant with tool call, tool result, then final assistant response
+        store.append_message("s-undo2", "assistant", None, Some(r#"[{"id":"t1","type":"function","function":{"name":"web_search","arguments":"{}"}}]"#), None).unwrap();
+        store.append_message("s-undo2", "tool", Some("result"), None, None).unwrap();
+        store.append_message("s-undo2", "assistant", Some("Here's what I found"), None, None).unwrap();
+
+        let result = handle_chat_command("/undo", "s-undo2", &store);
+        let output = result.unwrap();
+        assert!(output.contains("4 messages removed"), "got: {output}");
+
+        let remaining = store.load_messages("s-undo2").unwrap();
+        assert_eq!(remaining.len(), 0);
+    }
+
+    #[test]
+    fn chat_undo_empty_session() {
+        let dir = tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+        let store = genesis_storage::SessionStore::new(&db);
+        store.create_session("s-empty", "cli", None).expect("create");
+
+        let result = handle_chat_command("/undo", "s-empty", &store);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Nothing to undo"));
+    }
+
+    #[test]
+    fn chat_help_includes_undo() {
+        let result = handle_chat_command("/help", "s1", &stub_session_store());
+        let help = result.expect("help should return something");
+        assert!(help.contains("/undo"));
     }
 
     #[test]

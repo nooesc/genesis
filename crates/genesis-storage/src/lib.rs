@@ -916,6 +916,32 @@ impl SessionStore {
         Ok(to_delete)
     }
 
+    /// Delete the most recent `n` messages from a session (ordered by row ID).
+    /// Returns the number of messages actually deleted.
+    pub fn delete_last_n_messages(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> Result<usize, StorageError> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let connection = open(&self.database_path)?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1 AND id IN (
+                    SELECT id FROM messages WHERE session_id = ?1
+                    ORDER BY id DESC LIMIT ?2
+                )",
+                params![session_id, n],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted)
+    }
+
     /// Full-text search across session content. Returns matching session IDs
     /// with their summaries, ordered by relevance.
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>, StorageError> {
@@ -2826,5 +2852,48 @@ mod tests {
         assert!(!data.sessions_per_day.is_empty());
         assert!(data.platform_breakdown.iter().any(|(p, _)| p == "cli"));
         assert!(data.platform_breakdown.iter().any(|(p, _)| p == "api"));
+    }
+
+    #[test]
+    fn delete_last_n_messages_removes_most_recent() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-del", "cli", None).unwrap();
+        store.append_message("s-del", "system", Some("sys"), None, None).unwrap();
+        store.append_message("s-del", "user", Some("msg1"), None, None).unwrap();
+        store.append_message("s-del", "assistant", Some("resp1"), None, None).unwrap();
+        store.append_message("s-del", "user", Some("msg2"), None, None).unwrap();
+        store.append_message("s-del", "assistant", Some("resp2"), None, None).unwrap();
+
+        let deleted = store.delete_last_n_messages("s-del", 2).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = store.load_messages("s-del").unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining[0].role, "system");
+        assert_eq!(remaining[1].role, "user");
+        assert_eq!(remaining[2].role, "assistant");
+        assert_eq!(remaining[2].content.as_deref(), Some("resp1"));
+    }
+
+    #[test]
+    fn delete_last_n_messages_zero_is_noop() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-noop", "cli", None).unwrap();
+        store.append_message("s-noop", "user", Some("hello"), None, None).unwrap();
+
+        let deleted = store.delete_last_n_messages("s-noop", 0).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.load_messages("s-noop").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_last_n_messages_more_than_exists() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s-over", "cli", None).unwrap();
+        store.append_message("s-over", "user", Some("hello"), None, None).unwrap();
+
+        let deleted = store.delete_last_n_messages("s-over", 100).unwrap();
+        assert_eq!(deleted, 1);
+        assert_eq!(store.load_messages("s-over").unwrap().len(), 0);
     }
 }
