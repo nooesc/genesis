@@ -76,10 +76,11 @@ impl<'a> SessionExecutionService<'a> {
                 None
             } else {
                 let manager = McpManager::connect_all(configs).await;
-                if manager.tool_count().await > 0 {
+                let tool_count = manager.tool_count().await;
+                if tool_count > 0 {
                     info!(
                         servers = manager.server_count().await,
-                        tools = manager.tool_count().await,
+                        tools = tool_count,
                         "MCP tools registered"
                     );
                     Some(Arc::new(manager))

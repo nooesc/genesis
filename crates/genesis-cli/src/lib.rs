@@ -30,10 +30,9 @@ impl genesis_tools::ApprovalHandler for CliApprovalHandler {
     fn request_approval(&self, tool_name: &str, arguments: &std::collections::BTreeMap<String, String>) -> bool {
         eprintln!("\n[Tool approval required] {tool_name}");
         for (key, value) in arguments {
-            let display = if value.len() > 100 {
-                format!("{}...", &value[..100])
-            } else {
-                value.clone()
+            let display = match value.char_indices().nth(100) {
+                Some((i, _)) => format!("{}...", &value[..i]),
+                None => value.clone(),
             };
             eprintln!("  {key}: {display}");
         }
@@ -811,16 +810,17 @@ async fn run_chat(
         // Handle /retry — undo last turn and re-send the user message
         if trimmed == "/retry" {
             let messages = store.load_messages(&session_id).unwrap_or_default();
-            let last_user_msg = messages.iter().rev().find(|m| m.role == "user");
-            match last_user_msg {
-                Some(msg) => {
-                    let prompt_text = msg.content.clone().unwrap_or_default();
-                    // Undo the last turn first
-                    let idx = messages.iter().rposition(|m| m.role == "user").unwrap();
-                    let to_remove = messages.len() - idx;
-                    let _ = store.delete_last_n_messages(&session_id, to_remove);
-                    println!("Retrying: {prompt_text}");
-                    run_streaming_turn(&service, &session_id, &prompt_text, model).await?;
+            match messages.iter().rposition(|m| m.role == "user") {
+                Some(idx) => {
+                    let prompt_text = messages[idx].content.clone().unwrap_or_default();
+                    if prompt_text.is_empty() {
+                        println!("Last user message has no text content to retry.");
+                    } else {
+                        let to_remove = messages.len() - idx;
+                        let _ = store.delete_last_n_messages(&session_id, to_remove);
+                        println!("Retrying: {prompt_text}");
+                        run_streaming_turn(&service, &session_id, &prompt_text, model).await?;
+                    }
                 }
                 None => println!("No user message to retry."),
             }

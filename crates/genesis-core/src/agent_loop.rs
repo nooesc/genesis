@@ -627,10 +627,9 @@ impl AgentLoop {
             let role = &msg.role;
             let content = msg.content_text().unwrap_or("[tool call]");
             // Truncate very long tool results to keep the summarization prompt small.
-            let truncated = if content.len() > 500 {
-                format!("{}...", &content[..500])
-            } else {
-                content.to_owned()
+            let truncated = match content.char_indices().nth(500) {
+                Some((i, _)) => format!("{}...", &content[..i]),
+                None => content.to_owned(),
             };
             transcript.push_str(&format!("{role}: {truncated}\n"));
         }
