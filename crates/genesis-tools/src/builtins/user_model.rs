@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use genesis_storage::{bootstrap, UserModelStore};
+use genesis_storage::{bootstrap, format_user_traits, UserModelStore};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -96,28 +96,11 @@ impl ToolHandler for UserModelTool {
             });
         }
 
-        let mut lines = Vec::new();
-        let mut current_category = String::new();
-
-        for t in &traits {
-            if t.category != current_category {
-                if !current_category.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push(format!("## {}", t.category));
-                current_category.clone_from(&t.category);
-            }
-            lines.push(format!(
-                "- **{}**: {} (confidence: {:.0}%, {} observations)",
-                t.trait_key,
-                t.value,
-                t.confidence * 100.0,
-                t.evidence_count,
-            ));
-        }
+        // format_user_traits returns None only for empty slices, which we already handled above.
+        let formatted = format_user_traits(&traits).unwrap_or_default();
 
         Ok(ToolOutput {
-            content: lines.join("\n"),
+            content: formatted,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
                 ("count".to_owned(), traits.len().to_string()),

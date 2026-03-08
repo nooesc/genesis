@@ -45,13 +45,12 @@ fn default_platform() -> String {
 }
 
 fn default_api_session_id() -> String {
-    format!(
-        "api-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    )
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let seq = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    format!("api-{ts}-{seq}")
 }
 
 fn default_request_id() -> String {
@@ -137,10 +136,17 @@ async fn auth_middleware(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    match auth_header {
-        Some(value) if value.strip_prefix("Bearer ").is_some_and(|token| token == expected_key) => {
-            Ok(next.run(request).await)
+    let token = auth_header.and_then(|value| {
+        let lower = value.get(..7)?;
+        if lower.eq_ignore_ascii_case("bearer ") {
+            Some(&value[7..])
+        } else {
+            None
         }
+    });
+
+    match token {
+        Some(t) if t == expected_key => Ok(next.run(request).await),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }

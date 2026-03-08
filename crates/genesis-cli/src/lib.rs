@@ -53,6 +53,8 @@ pub enum Command {
     Storage(StorageCommand),
     #[command(subcommand, about = "Inspect recent saved sessions")]
     Sessions(SessionsCommand),
+    #[command(subcommand, about = "Inspect and manage saved skills")]
+    Skills(SkillsCommand),
     #[command(about = "List all available tools")]
     Tools,
     #[command(about = "Show system overview (profile, model, tools, sessions, skills)")]
@@ -125,6 +127,22 @@ pub enum SessionsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SkillsCommand {
+    #[command(about = "List saved skills")]
+    List,
+    #[command(about = "Show one skill")]
+    Show {
+        #[arg(help = "Skill name to display")]
+        name: String,
+    },
+    #[command(about = "Delete a skill by name")]
+    Delete {
+        #[arg(help = "Skill name to delete")]
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ScheduleCommand {
     #[command(about = "Create a schedule")]
     Create {
@@ -166,6 +184,8 @@ pub enum CliError {
     SessionNotFound(String),
     #[error("schedule `{0}` was not found")]
     ScheduleNotFound(String),
+    #[error("skill `{0}` was not found")]
+    SkillNotFound(String),
     #[error("failed to encode json output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
@@ -236,6 +256,39 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     } else {
                         Ok(format_session_messages(&session.id, display_messages))
                     }
+                }
+            }
+        }
+        Command::Skills(skills_command) => {
+            let loaded = load(cli.config.as_deref())?;
+            bootstrap(&loaded.config.storage.database_path)?;
+            let store = SkillStore::new(&loaded.config.storage.database_path);
+
+            match skills_command {
+                SkillsCommand::List => {
+                    let skills = store.list_all()?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&skills)?)
+                    } else {
+                        Ok(format_skill_list(&skills))
+                    }
+                }
+                SkillsCommand::Show { name } => {
+                    let skill = store
+                        .get(&name)?
+                        .ok_or_else(|| CliError::SkillNotFound(name.clone()))?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&skill)?)
+                    } else {
+                        Ok(format_skill(&skill))
+                    }
+                }
+                SkillsCommand::Delete { name } => {
+                    if !store.delete(&name)? {
+                        return Err(CliError::SkillNotFound(name));
+                    }
+
+                    Ok(format!("deleted skill {}", name))
                 }
             }
         }
@@ -440,16 +493,10 @@ fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError
     let loaded = load(config_path.as_deref())?;
     let db_path = &loaded.config.storage.database_path;
 
-    let ctx = genesis_core::build_execution_context_from_loaded(
-        &loaded,
-        "info".to_owned(),
-        DeliveryPlatform::Cli,
-    );
-    let tool_count = genesis_core::build_default_tool_runtime(&ctx).definitions().len();
+    let tool_count = genesis_core::default_tool_count();
 
     let session_count = SessionStore::new(db_path)
-        .list_recent_sessions(1000)
-        .map(|s| s.len())
+        .count_sessions()
         .unwrap_or(0);
 
     let skill_count = SkillStore::new(db_path)
@@ -666,6 +713,43 @@ fn format_session_messages(session_id: &str, messages: &[genesis_storage::Stored
     lines.join("\n")
 }
 
+fn format_skill_list(skills: &[genesis_storage::StoredSkill]) -> String {
+    if skills.is_empty() {
+        return "no saved skills".to_owned();
+    }
+
+    let mut lines = vec!["genesis skills".to_owned()];
+    for skill in skills {
+        lines.push(format!(
+            "{}\tv{}\t{}",
+            skill.name, skill.version, skill.description
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_skill(skill: &genesis_storage::StoredSkill) -> String {
+    let mut lines = vec![
+        format!("skill: {}", skill.name),
+        format!("description: {}", skill.description),
+        format!("version: {}", skill.version),
+        format!("created_at: {}", skill.created_at),
+        format!("updated_at: {}", skill.updated_at),
+    ];
+
+    if let Some(trigger_hint) = &skill.trigger_hint {
+        lines.push(format!("trigger_hint: {trigger_hint}"));
+    }
+
+    if !skill.tags.is_empty() {
+        lines.push(format!("tags: {}", skill.tags.join(", ")));
+    }
+
+    lines.push("instructions:".to_owned());
+    lines.push(skill.instructions.clone());
+    lines.join("\n")
+}
+
 fn format_created_schedule(schedule: &StoredSchedule) -> String {
     format!(
         "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ncreated_at: {}",
@@ -751,13 +835,14 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 mod tests {
     use super::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
-        default_session_id, delivery_platform_from_str, format_schedule_list,
-        format_session_list, format_session_messages, is_exit_command, run, BootstrapCommand,
-        Cli, Command, ModelCommand, ScheduleCommand, SessionsCommand, StorageCommand,
+        default_session_id, delivery_platform_from_str, format_schedule_list, format_session_list,
+        format_session_messages, format_skill, format_skill_list, is_exit_command, run,
+        BootstrapCommand, Cli, Command, ModelCommand, ScheduleCommand, SessionsCommand,
+        SkillsCommand, StorageCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
-    use genesis_storage::{SessionSummary, StoredSchedule};
+    use genesis_storage::{SessionSummary, StoredSchedule, StoredSkill};
     use std::fs;
     use tempfile::tempdir;
 
@@ -850,6 +935,80 @@ mod tests {
             Command::Sessions(SessionsCommand::List) => {}
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn parses_skills_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "list"])
+            .expect("skills list command should parse");
+
+        match cli.command {
+            Command::Skills(SkillsCommand::List) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_skills_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "show", "memory_store"])
+            .expect("skills show command should parse");
+
+        match cli.command {
+            Command::Skills(SkillsCommand::Show { name }) => {
+                assert_eq!(name, "memory_store");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_skills_delete_command() {
+        let cli = Cli::try_parse_from(["genesis", "skills", "delete", "memory_store"])
+            .expect("skills delete command should parse");
+
+        match cli.command {
+            Command::Skills(SkillsCommand::Delete { name }) => {
+                assert_eq!(name, "memory_store");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_skill_list_for_humans() {
+        let output = format_skill_list(&[StoredSkill {
+            name: "memory_store".to_owned(),
+            description: "Persist a reusable skill".to_owned(),
+            instructions: "Remember facts.".to_owned(),
+            trigger_hint: Some("when learning new facts".to_owned()),
+            tags: vec!["memory".to_owned(), "learning".to_owned()],
+            version: 2,
+            created_at: "2026-03-08 12:00:00".to_owned(),
+            updated_at: "2026-03-08 12:05:00".to_owned(),
+        }]);
+
+        assert!(output.contains("genesis skills"));
+        assert!(output.contains("memory_store\tv2\tPersist a reusable skill"));
+    }
+
+    #[test]
+    fn formats_skill_show_for_humans() {
+        let output = format_skill(&StoredSkill {
+            name: "memory_store".to_owned(),
+            description: "Persist a reusable skill".to_owned(),
+            instructions: "Remember facts.".to_owned(),
+            trigger_hint: Some("when learning new facts".to_owned()),
+            tags: vec!["memory".to_owned(), "learning".to_owned()],
+            version: 2,
+            created_at: "2026-03-08 12:00:00".to_owned(),
+            updated_at: "2026-03-08 12:05:00".to_owned(),
+        });
+
+        assert!(output.contains("skill: memory_store"));
+        assert!(output.contains("description: Persist a reusable skill"));
+        assert!(output.contains("trigger_hint: when learning new facts"));
+        assert!(output.contains("tags: memory, learning"));
+        assert!(output.contains("instructions:\nRemember facts."));
     }
 
     #[test]

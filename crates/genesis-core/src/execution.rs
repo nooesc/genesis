@@ -3,7 +3,9 @@ use std::time::Instant;
 
 use genesis_config::LoadedConfig;
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
-use genesis_storage::{bootstrap, SessionStore, StorageError, StoredMessage, UserModelStore};
+use genesis_storage::{
+    bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, UserModelStore,
+};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -163,30 +165,7 @@ impl<'a> SessionExecutionService<'a> {
         let db_path = &self.loaded.config.storage.database_path;
         let store = UserModelStore::new(db_path);
         let traits = store.confident_traits(0.5).ok()?;
-        if traits.is_empty() {
-            return None;
-        }
-
-        let mut lines = Vec::new();
-        let mut current_category = String::new();
-
-        for t in &traits {
-            if t.category != current_category {
-                if !current_category.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push(format!("### {}", t.category));
-                current_category.clone_from(&t.category);
-            }
-            lines.push(format!(
-                "- **{}**: {} (confidence: {:.0}%)",
-                t.trait_key,
-                t.value,
-                t.confidence * 100.0,
-            ));
-        }
-
-        Some(lines.join("\n"))
+        format_user_traits(&traits)
     }
 
     fn session_store(&self) -> SessionStore {

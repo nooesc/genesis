@@ -53,32 +53,45 @@ pub struct LoadedConfig {
     pub paths: AppPaths,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     schema_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<FileProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<FileStorageConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<FileRuntimeConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileProviderConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileStorageConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     data_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     database_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileRuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_concurrency: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     allow_destructive_tools: Option<bool>,
 }
 
@@ -107,6 +120,17 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
+    },
+    #[error("failed to write config file at {path}: {source}")]
+    WriteFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to serialize config: {source}")]
+    SerializeYaml {
+        #[source]
+        source: serde_yaml::Error,
     },
     #[error("invalid value for {name}: {value}")]
     InvalidEnvValue { name: &'static str, value: String },
@@ -275,14 +299,18 @@ fn default_data_dir() -> Result<PathBuf, ConfigError> {
 }
 
 fn read_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
-    if !path.exists() {
-        return Ok(FileConfig::default());
-    }
-
-    let raw = fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let raw = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FileConfig::default());
+        }
+        Err(source) => {
+            return Err(ConfigError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
 
     match path.extension().and_then(|extension| extension.to_str()) {
         Some("yaml") | Some("yml") => serde_yaml::from_str(&raw).map_err(|source| {
@@ -347,81 +375,17 @@ pub fn update_provider_in_file(
     write_file_config(config_path, &file_config)
 }
 
-/// Serialisable version of `FileConfig` used only for writing back.
-#[derive(Debug, Clone, Serialize, Default)]
-struct WritableFileConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    schema_version: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<WritableProviderConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    storage: Option<WritableStorageConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime: Option<WritableRuntimeConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-struct WritableProviderConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key_env: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-struct WritableStorageConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data_dir: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    database_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-struct WritableRuntimeConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_concurrency: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    allow_destructive_tools: Option<bool>,
-}
-
 fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ConfigError::ReadFile {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::WriteFile {
             path: path.to_path_buf(),
             source,
         })?;
     }
 
-    let writable = WritableFileConfig {
-        schema_version: file_config.schema_version,
-        profile: file_config.profile.clone(),
-        provider: file_config.provider.as_ref().map(|p| WritableProviderConfig {
-            backend: p.backend.clone(),
-            model: p.model.clone(),
-            base_url: p.base_url.clone(),
-            api_key_env: p.api_key_env.clone(),
-        }),
-        storage: file_config.storage.as_ref().map(|s| WritableStorageConfig {
-            data_dir: s.data_dir.clone(),
-            database_path: s.database_path.clone(),
-        }),
-        runtime: file_config.runtime.as_ref().map(|r| WritableRuntimeConfig {
-            max_concurrency: r.max_concurrency,
-            allow_destructive_tools: r.allow_destructive_tools,
-        }),
-    };
-
-    let yaml = serde_yaml::to_string(&writable).map_err(|source| ConfigError::ParseYaml {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    fs::write(path, yaml).map_err(|source| ConfigError::ReadFile {
+    let yaml =
+        serde_yaml::to_string(file_config).map_err(|source| ConfigError::SerializeYaml { source })?;
+    fs::write(path, yaml).map_err(|source| ConfigError::WriteFile {
         path: path.to_path_buf(),
         source,
     })

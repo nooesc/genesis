@@ -249,6 +249,12 @@ impl ToolRuntime {
     }
 }
 
+/// Returns the number of tools in the default registry without constructing
+/// a full `ExecutionContext`.
+pub fn default_tool_count() -> usize {
+    default_registry().definitions().len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

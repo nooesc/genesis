@@ -668,6 +668,17 @@ impl SessionStore {
 
         Ok(sessions)
     }
+
+    pub fn count_sessions(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(count as u64)
+    }
 }
 
 /// A persisted scheduled job.
@@ -861,6 +872,36 @@ pub struct StoredUserTrait {
     pub source_session: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Format user traits as a markdown section, grouped by category.
+/// Returns `None` if the list is empty.
+pub fn format_user_traits(traits: &[StoredUserTrait]) -> Option<String> {
+    if traits.is_empty() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    let mut current_category = String::new();
+
+    for t in traits {
+        if t.category != current_category {
+            if !current_category.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("## {}", t.category));
+            current_category.clone_from(&t.category);
+        }
+        lines.push(format!(
+            "- **{}**: {} (confidence: {:.0}%, {} observations)",
+            t.trait_key,
+            t.value,
+            t.confidence * 100.0,
+            t.evidence_count,
+        ));
+    }
+
+    Some(lines.join("\n"))
 }
 
 /// User model persistence layer.
