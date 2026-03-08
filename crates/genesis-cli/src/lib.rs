@@ -1996,7 +1996,10 @@ async fn run_batch_item(
         &loaded.config.storage.database_path,
         &item.prompt,
     );
-    let context_section = load_context_file(std::path::Path::new("."));
+    let context_section = load_context_file(
+        std::path::Path::new("."),
+        &loaded.config.runtime.context_security,
+    );
     let system_prompt = genesis_core::prompt::build_system_prompt_complete(
         &execution_context.plan.profile,
         &tool_runtime.definitions(),
@@ -2867,7 +2870,7 @@ fn run_context(command: ContextCommand) -> Result<String, CliError> {
     let current_dir = std::env::current_dir()?;
 
     match command {
-        ContextCommand::Show => Ok(match load_context_file(&current_dir) {
+        ContextCommand::Show => Ok(match load_context_file(&current_dir, &genesis_config::ContextSecurityPolicy::Warn) {
             Some(contents) => contents,
             None => "no context file found in current directory".to_owned(),
         }),

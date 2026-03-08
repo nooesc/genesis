@@ -296,7 +296,10 @@ impl<'a> SessionExecutionService<'a> {
             None => load_skills_prompt(db_path),
         };
         let user_model_section = self.load_user_model_section();
-        let context_section = load_context_file(std::path::Path::new("."));
+        let context_section = load_context_file(
+            std::path::Path::new("."),
+            &self.loaded.config.runtime.context_security,
+        );
         let memories_section = user_prompt.and_then(|prompt| self.recall_memories(prompt));
 
         let platform_str = delivery_platform_str(&execution_context.plan.platform);
@@ -996,6 +999,7 @@ mod tests {
                     terminal: None,
                     thinking_budget: None,
                     max_context_tokens: None,
+                    context_security: genesis_config::ContextSecurityPolicy::default(),
                 },
                 gateway: None,
             },

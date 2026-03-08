@@ -97,6 +97,24 @@ pub struct RuntimeConfig {
     /// portion of the conversation is summarized and replaced. `None` disables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
+    /// Context file security scanning policy.
+    #[serde(default)]
+    pub context_security: ContextSecurityPolicy,
+}
+
+/// Policy for handling detected threats in context files (AGENTS.md, SOUL.md, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSecurityPolicy {
+    /// Warn in the prompt but still include the file (default).
+    #[default]
+    Warn,
+    /// Block files with any high-severity threats entirely.
+    BlockHigh,
+    /// Block files with any threats (regardless of severity).
+    BlockAll,
+    /// Disable context security scanning.
+    Disabled,
 }
 
 /// Terminal backend configuration for shell command execution.
@@ -217,6 +235,8 @@ struct FileRuntimeConfig {
     thinking_budget: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_context_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_security: Option<ContextSecurityPolicy>,
 }
 
 #[derive(Debug, Error)]
@@ -291,6 +311,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             terminal: None,
             thinking_budget: None,
             max_context_tokens: None,
+            context_security: ContextSecurityPolicy::default(),
         },
         gateway: None,
     })
@@ -440,6 +461,11 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.max_context_tokens),
+        context_security: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.context_security.clone())
+            .unwrap_or_default(),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

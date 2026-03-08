@@ -318,11 +318,21 @@ pub fn build_system_prompt_with_memories(
 ///
 /// Context files are scanned for potential security issues (embedded secrets,
 /// suspicious patterns). Warnings are prepended to the returned content.
-pub fn load_context_file(project_dir: &Path) -> Option<String> {
+pub fn load_context_file(
+    project_dir: &Path,
+    policy: &genesis_config::ContextSecurityPolicy,
+) -> Option<String> {
+    use genesis_config::ContextSecurityPolicy;
+
     for candidate in CONTEXT_FILE_CANDIDATES {
         let path = project_dir.join(candidate);
         if let Ok(contents) = std::fs::read_to_string(&path) {
             if !contents.trim().is_empty() {
+                // Skip scanning entirely when disabled
+                if *policy == ContextSecurityPolicy::Disabled {
+                    return Some(contents);
+                }
+
                 // Run both basic secret scan and comprehensive injection scan
                 let mut warnings = scan_context_security(&contents);
 
@@ -341,6 +351,29 @@ pub fn load_context_file(project_dir: &Path) -> Option<String> {
                 if warnings.is_empty() {
                     return Some(contents);
                 }
+
+                // Block mode: refuse to load files with threats
+                let should_block = match policy {
+                    ContextSecurityPolicy::BlockAll => true,
+                    ContextSecurityPolicy::BlockHigh => scan.has_high_severity(),
+                    _ => false,
+                };
+
+                if should_block {
+                    tracing::warn!(
+                        file = candidate,
+                        threats = warnings.len(),
+                        "Blocked context file due to security threats"
+                    );
+                    let block_msg = format!(
+                        "[BLOCKED] Context file {} was not loaded due to security threats:\n{}\n\n\
+                         Set `runtime.context_security: warn` in config to include it with warnings.",
+                        candidate,
+                        warnings.join("\n")
+                    );
+                    return Some(block_msg);
+                }
+
                 let warning_block = format!(
                     "SECURITY WARNINGS for {}:\n{}\n\n---\n\n",
                     candidate,
@@ -542,7 +575,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("genesis.md"), "Use Rust for everything.")
             .expect("write");
-        let context = load_context_file(dir.path());
+        let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn);
         assert_eq!(context.as_deref(), Some("Use Rust for everything."));
     }
 
@@ -557,21 +590,21 @@ mod tests {
         .expect("write context");
         std::fs::write(dir.path().join("genesis.md"), "From genesis.md").expect("write root");
 
-        let context = load_context_file(dir.path());
+        let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn);
         assert_eq!(context.as_deref(), Some("From .genesis/context.md"));
     }
 
     #[test]
     fn load_context_file_returns_none_when_no_files() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(load_context_file(dir.path()).is_none());
+        assert!(load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none());
     }
 
     #[test]
     fn load_context_file_skips_empty_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("genesis.md"), "   \n  ").expect("write");
-        assert!(load_context_file(dir.path()).is_none());
+        assert!(load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none());
     }
 
     #[test]
@@ -662,9 +695,44 @@ mod tests {
             "Use API key sk-proj-abc123 for auth.",
         )
         .expect("write");
-        let context = load_context_file(dir.path()).expect("should load");
+        let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).expect("should load");
         assert!(context.contains("SECURITY WARNINGS"));
         assert!(context.contains("sk-proj-abc123")); // original content preserved
+    }
+
+    #[test]
+    fn load_context_file_blocks_on_block_all_policy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("genesis.md"),
+            "Use API key sk-proj-abc123 for auth.",
+        )
+        .expect("write");
+        let context = load_context_file(
+            dir.path(),
+            &genesis_config::ContextSecurityPolicy::BlockAll,
+        )
+        .expect("should load blocked message");
+        assert!(context.contains("[BLOCKED]"));
+        assert!(!context.contains("sk-proj-abc123")); // original content NOT included
+    }
+
+    #[test]
+    fn load_context_file_disabled_skips_scanning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("genesis.md"),
+            "Use API key sk-proj-abc123 for auth.",
+        )
+        .expect("write");
+        let context = load_context_file(
+            dir.path(),
+            &genesis_config::ContextSecurityPolicy::Disabled,
+        )
+        .expect("should load");
+        assert!(!context.contains("SECURITY WARNINGS"));
+        assert!(!context.contains("[BLOCKED]"));
+        assert!(context.contains("sk-proj-abc123")); // content loaded as-is
     }
 
     #[test]

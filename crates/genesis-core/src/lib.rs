@@ -710,6 +710,7 @@ mod tests {
                     terminal: None,
                     thinking_budget: None,
                     max_context_tokens: None,
+                    context_security: genesis_config::ContextSecurityPolicy::default(),
                 },
                 gateway: None,
             },

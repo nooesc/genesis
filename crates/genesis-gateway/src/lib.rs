@@ -24,7 +24,7 @@ use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
-use genesis_storage::{MemoryStore, SessionStore, SkillStore};
+use genesis_storage::{MemoryStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -256,6 +256,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/memories", get(list_memories_handler))
         .route("/memories/search", get(search_memories_handler))
         .route("/memories/{id}", delete(delete_memory_handler))
+        // Schedule management
+        .route("/schedules", get(list_schedules_handler).post(create_schedule_handler))
+        .route("/schedules/{id}", get(get_schedule_handler).delete(delete_schedule_handler))
+        .route("/schedules/{id}/enabled", patch(set_schedule_enabled_handler))
+        // User model (traits/preferences)
+        .route("/user/traits", get(list_user_traits_handler).post(observe_user_trait_handler))
+        .route("/user/traits/{key}", get(get_user_trait_handler).delete(delete_user_trait_handler))
+        // Subagents
+        .route("/subagents/{id}", get(get_subagent_handler))
+        .route("/sessions/{id}/subagents", get(list_session_subagents_handler))
+        // Skill usage stats
+        .route("/skills/{name}/usage", get(skill_usage_stats_handler))
+        .route("/skills/{name}/usage/recent", get(skill_usage_recent_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -779,6 +792,271 @@ async fn delete_memory_handler(
     } else {
         Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
     }
+}
+
+// ── Schedule management ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateScheduleRequest {
+    pub id: String,
+    pub cron_expression: String,
+    pub destination: String,
+    pub prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListSchedulesQuery {
+    #[serde(default)]
+    pub enabled_only: bool,
+}
+
+async fn list_schedules_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListSchedulesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
+    let schedules = if params.enabled_only {
+        store.list_enabled()
+    } else {
+        store.list_all()
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = schedules.len();
+    Ok(Json(serde_json::json!({
+        "schedules": schedules,
+        "count": count,
+    })))
+}
+
+async fn get_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
+    let schedule = store
+        .get(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match schedule {
+        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        None => Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
+    }
+}
+
+async fn create_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateScheduleRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
+    let schedule = store
+        .create(&request.id, &request.cron_expression, &request.destination, &request.prompt)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(schedule).unwrap())))
+}
+
+async fn delete_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
+    let deleted = store
+        .delete(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))
+    }
+}
+
+async fn set_schedule_enabled_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SetEnabledRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
+    let updated = store
+        .set_enabled(&id, request.enabled)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if updated {
+        Ok(Json(serde_json::json!({
+            "id": id,
+            "enabled": request.enabled,
+            "updated": true,
+        })))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))
+    }
+}
+
+// ── User model (traits/preferences) ─────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ObserveTraitRequest {
+    pub trait_key: String,
+    pub category: String,
+    pub value: String,
+    pub source_session: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListTraitsQuery {
+    pub category: Option<String>,
+    pub min_confidence: Option<f64>,
+}
+
+async fn list_user_traits_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
+    let traits = if let Some(category) = &params.category {
+        store.list_by_category(category)
+    } else if let Some(threshold) = params.min_confidence {
+        store.confident_traits(threshold)
+    } else {
+        store.list_all()
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = traits.len();
+    Ok(Json(serde_json::json!({
+        "traits": traits,
+        "count": count,
+    })))
+}
+
+async fn get_user_trait_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
+    let user_trait = store
+        .get(&key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match user_trait {
+        Some(t) => Ok(Json(serde_json::to_value(t).unwrap())),
+        None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
+    }
+}
+
+async fn observe_user_trait_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ObserveTraitRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
+    let observed = store
+        .observe(
+            &request.trait_key,
+            &request.category,
+            &request.value,
+            request.source_session.as_deref(),
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok((StatusCode::OK, Json(serde_json::to_value(observed).unwrap())))
+}
+
+async fn delete_user_trait_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
+    let deleted = store
+        .delete(&key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found")))
+    }
+}
+
+// ── Subagents ────────────────────────────────────────────────────────
+
+async fn get_subagent_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SubagentStore::new(&state.loaded.config.storage.database_path);
+    let subagent = store
+        .get(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match subagent {
+        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        None => Err((StatusCode::NOT_FOUND, format!("subagent '{id}' not found"))),
+    }
+}
+
+async fn list_session_subagents_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SubagentStore::new(&state.loaded.config.storage.database_path);
+    let subagents = store
+        .list_by_parent(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = subagents.len();
+    Ok(Json(serde_json::json!({
+        "session_id": id,
+        "subagents": subagents,
+        "count": count,
+    })))
+}
+
+// ── Skill usage stats ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SkillUsageRecentQuery {
+    #[serde(default = "default_usage_limit")]
+    pub limit: usize,
+}
+
+fn default_usage_limit() -> usize {
+    20
+}
+
+async fn skill_usage_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
+    let stats = store
+        .stats(&name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::to_value(stats).unwrap()))
+}
+
+async fn skill_usage_recent_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<SkillUsageRecentQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
+    let usages = store
+        .recent_usages(&name, params.limit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let count = usages.len();
+    Ok(Json(serde_json::json!({
+        "skill_name": name,
+        "usages": usages,
+        "count": count,
+    })))
 }
 
 async fn chat_handler(
