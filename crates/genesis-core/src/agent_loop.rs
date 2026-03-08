@@ -679,6 +679,7 @@ impl AgentLoop {
             max_tokens: Some(256),
             stream: None,
             stream_options: None,
+            response_format: None,
             extra_body: None,
         };
 

@@ -16,7 +16,30 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+}
+
+/// Specifies the format that the model must output.
+///
+/// Supported by OpenAI, Anthropic (via proxy), and most local providers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResponseFormat {
+    /// Model output will be valid JSON. The model is instructed to only
+    /// produce JSON. Note: you should also instruct the model in the
+    /// system/user message to produce JSON.
+    #[serde(rename = "json_object")]
+    JsonObject,
+    /// Model output follows a specific JSON Schema.
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        json_schema: JsonSchemaSpec,
+    },
+    /// Default text mode — no format constraint.
+    #[serde(rename = "text")]
+    Text,
 }
 
 /// Options for streaming responses.
@@ -98,6 +121,18 @@ impl<'de> Deserialize<'de> for MessageContent {
             )),
         }
     }
+}
+
+/// JSON Schema specification for structured output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonSchemaSpec {
+    /// Name of the schema (used for identification).
+    pub name: String,
+    /// The JSON Schema definition.
+    pub schema: serde_json::Value,
+    /// Whether the model must strictly follow the schema (default: true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 /// A single content part in a multimodal message.
@@ -309,8 +344,27 @@ impl ChatCompletionRequest {
             max_tokens: None,
             stream: None,
             stream_options: None,
+            response_format: None,
             extra_body: None,
         }
+    }
+
+    /// Set the response format to JSON object mode.
+    pub fn with_json_mode(mut self) -> Self {
+        self.response_format = Some(ResponseFormat::JsonObject);
+        self
+    }
+
+    /// Set the response format to a specific JSON schema.
+    pub fn with_json_schema(mut self, name: impl Into<String>, schema: serde_json::Value) -> Self {
+        self.response_format = Some(ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaSpec {
+                name: name.into(),
+                schema,
+                strict: Some(true),
+            },
+        });
+        self
     }
 }
 
@@ -589,5 +643,59 @@ mod tests {
     fn message_content_from_string() {
         let content: MessageContent = "hello".into();
         assert_eq!(content.text(), Some("hello"));
+    }
+
+    #[test]
+    fn json_mode_serializes_correctly() {
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("return JSON")])
+            .with_json_mode();
+        let json = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(json["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn json_schema_serializes_correctly() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" },
+                "confidence": { "type": "number" }
+            },
+            "required": ["answer", "confidence"]
+        });
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("answer")])
+            .with_json_schema("answer_schema", schema.clone());
+        let json = serde_json::to_value(&request).expect("should serialize");
+        assert_eq!(json["response_format"]["type"], "json_schema");
+        assert_eq!(json["response_format"]["json_schema"]["name"], "answer_schema");
+        assert_eq!(json["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(json["response_format"]["json_schema"]["schema"], schema);
+    }
+
+    #[test]
+    fn response_format_omitted_when_none() {
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hi")]);
+        let json = serde_json::to_value(&request).expect("should serialize");
+        assert!(!json.as_object().unwrap().contains_key("response_format"));
+    }
+
+    #[test]
+    fn response_format_round_trips() {
+        let fmt = ResponseFormat::JsonSchema {
+            json_schema: JsonSchemaSpec {
+                name: "test".to_owned(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: Some(true),
+            },
+        };
+        let json = serde_json::to_string(&fmt).expect("serialize");
+        let decoded: ResponseFormat = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ResponseFormat::JsonSchema { json_schema } => {
+                assert_eq!(json_schema.name, "test");
+                assert_eq!(json_schema.strict, Some(true));
+            }
+            _ => panic!("expected JsonSchema variant"),
+        }
     }
 }
