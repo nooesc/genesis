@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod execution;
+pub mod moa;
 pub mod nudge;
 pub mod prompt;
 pub mod scheduler;
