@@ -1,6 +1,6 @@
 use std::io::{self, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use genesis_config::load;
@@ -8,7 +8,7 @@ use genesis_core::agent_loop::{AgentError, AgentLoop, AgentLoopConfig};
 use genesis_core::prompt::{agent_name, build_system_prompt};
 use genesis_core::{build_default_tool_runtime, build_execution_context_from_loaded, run_doctor};
 use genesis_provider::{client_from_config, ChatMessage, ProviderError};
-use genesis_storage::{bootstrap, SessionStore, StorageError};
+use genesis_storage::{bootstrap, SessionStore, SessionSummary, StorageError, StoredMessage};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 
@@ -29,6 +29,8 @@ pub enum Command {
     Chat {
         #[arg(long, help = "Override the generated session id")]
         session_id: Option<String>,
+        #[arg(long, help = "Resume an existing session instead of creating a new one")]
+        resume: Option<String>,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -39,6 +41,8 @@ pub enum Command {
     Config(ConfigCommand),
     #[command(subcommand, about = "Inspect and bootstrap storage paths")]
     Storage(StorageCommand),
+    #[command(subcommand, about = "Inspect recent saved sessions")]
+    Sessions(SessionsCommand),
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -65,6 +69,12 @@ pub enum BootstrapCommand {
     Config,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommand {
+    #[command(about = "List recent sessions")]
+    List,
+}
+
 #[derive(Debug, Error)]
 pub enum CliError {
     #[error(transparent)]
@@ -79,6 +89,8 @@ pub enum CliError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error("session `{0}` was not found")]
+    SessionNotFound(String),
     #[error("failed to encode json output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
@@ -87,7 +99,7 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id } => run_chat(cli.config, session_id).await,
+        Command::Chat { session_id, resume } => run_chat(cli.config, session_id, resume).await,
         Command::Doctor { bootstrap_storage } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
             if cli.json {
@@ -120,6 +132,16 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(format_bootstrap_report(&report))
             }
         }
+        Command::Sessions(SessionsCommand::List) => {
+            let loaded = load(cli.config.as_deref())?;
+            let store = SessionStore::new(&loaded.config.storage.database_path);
+            let sessions = store.list_recent_sessions(20)?;
+            if cli.json {
+                Ok(serde_json::to_string_pretty(&sessions)?)
+            } else {
+                Ok(format_session_list(&sessions))
+            }
+        }
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
@@ -134,11 +156,23 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
 async fn run_chat(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
+    resume: Option<String>,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
+    let store = SessionStore::new(&loaded.config.storage.database_path);
 
-    let session_id = session_id.unwrap_or_else(default_session_id);
+    let (session_id, existing_messages, is_resumed) = match resume {
+        Some(resume_id) => {
+            let session = store
+                .get_session(&resume_id)?
+                .ok_or_else(|| CliError::SessionNotFound(resume_id.clone()))?;
+            let messages = store.load_messages(&resume_id)?;
+            (session.id, restore_chat_history(messages)?, true)
+        }
+        None => (session_id.unwrap_or_else(default_session_id), Vec::new(), false),
+    };
+
     let execution_context =
         build_execution_context_from_loaded(&loaded, session_id.clone(), DeliveryPlatform::Cli);
     let tool_runtime = build_default_tool_runtime(&execution_context);
@@ -154,22 +188,31 @@ async fn run_chat(
         loaded.config.provider.base_url.as_deref(),
         loaded.config.provider.api_key_env.as_deref(),
     )?;
-    let mut agent = AgentLoop::new(
+    let mut agent = AgentLoop::with_history(
         client,
         tool_runtime,
         AgentLoopConfig {
             system_prompt: Some(system_prompt),
             ..AgentLoopConfig::default()
         },
+        existing_messages,
     );
 
-    let store = SessionStore::new(&loaded.config.storage.database_path);
-    store.create_session(&session_id, "cli", None)?;
+    if !is_resumed {
+        store.create_session(&session_id, "cli", None)?;
+    }
 
-    println!(
-        "Starting session `{session_id}` with {}. Type `exit` or `quit` to leave.",
-        agent_name()
-    );
+    if is_resumed {
+        println!(
+            "Resuming session `{session_id}` with {}. Type `exit` or `quit` to leave.",
+            agent_name()
+        );
+    } else {
+        println!(
+            "Starting session `{session_id}` with {}. Type `exit` or `quit` to leave.",
+            agent_name()
+        );
+    }
 
     loop {
         let input = read_user_input("you> ")?;
@@ -229,6 +272,27 @@ fn persist_new_messages(
     Ok(())
 }
 
+fn restore_chat_history(messages: Vec<StoredMessage>) -> Result<Vec<ChatMessage>, CliError> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let tool_calls = message
+                .tool_calls_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+
+            Ok(ChatMessage {
+                role: message.role,
+                content: message.content,
+                tool_calls,
+                tool_call_id: message.tool_call_id,
+                name: None,
+            })
+        })
+        .collect()
+}
+
 fn default_session_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -239,6 +303,21 @@ fn default_session_id() -> String {
 
 fn is_exit_command(input: &str) -> bool {
     matches!(input, "exit" | "quit" | "/exit" | "/quit")
+}
+
+fn format_session_list(sessions: &[SessionSummary]) -> String {
+    if sessions.is_empty() {
+        return "no saved sessions".to_owned();
+    }
+
+    let mut lines = vec!["genesis sessions".to_owned()];
+    for session in sessions {
+        lines.push(format!(
+            "{}\t{}\t{}",
+            session.id, session.platform, session.created_at
+        ));
+    }
+    lines.join("\n")
 }
 
 fn format_doctor_report(report: &genesis_core::DoctorReport) -> String {
@@ -298,22 +377,64 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_session_id, is_exit_command, run, BootstrapCommand, Cli, Command, StorageCommand};
+    use super::{
+        default_session_id, format_session_list, is_exit_command, restore_chat_history, run,
+        BootstrapCommand, Cli, Command, SessionsCommand, StorageCommand,
+    };
     use clap::Parser;
+    use genesis_storage::{SessionSummary, StoredMessage};
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
     fn parses_chat_command() {
-        let cli = Cli::try_parse_from(["genesis", "chat", "--session-id", "session-42"])
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "chat",
+            "--session-id",
+            "session-42",
+            "--resume",
+            "session-1",
+        ])
             .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id } => {
+            Command::Chat { session_id, resume } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
+                assert_eq!(resume.as_deref(), Some("session-1"));
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn restores_chat_history_from_stored_messages() {
+        let messages = restore_chat_history(vec![StoredMessage {
+            id: 1,
+            session_id: "session-1".to_owned(),
+            role: "assistant".to_owned(),
+            content: Some("hello".to_owned()),
+            tool_call_id: Some("tool-1".to_owned()),
+            tool_calls_json: Some(
+                r#"[{"id":"tool-1","type":"function","function":{"name":"echo","arguments":"{\"message\":\"hi\"}"}}]"#
+                    .to_owned(),
+            ),
+            created_at: "2026-03-08 12:00:00".to_owned(),
+        }])
+        .expect("history should restore");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(
+            messages[0]
+                .tool_calls
+                .as_ref()
+                .expect("tool calls should restore")[0]
+                .function
+                .name,
+            "echo"
+        );
     }
 
     #[test]
@@ -347,6 +468,31 @@ mod tests {
 
         match cli.command {
             Command::Bootstrap(BootstrapCommand::Config) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_session_list_for_humans() {
+        let output = format_session_list(&[SessionSummary {
+            id: "session-1".to_owned(),
+            title: None,
+            platform: "cli".to_owned(),
+            created_at: "2026-03-08 12:00:00".to_owned(),
+            updated_at: "2026-03-08 12:05:00".to_owned(),
+        }]);
+
+        assert!(output.contains("genesis sessions"));
+        assert!(output.contains("session-1\tcli\t2026-03-08 12:00:00"));
+    }
+
+    #[tokio::test]
+    async fn parses_sessions_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "list"])
+            .expect("sessions list command should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::List) => {}
             other => panic!("unexpected command parsed: {other:?}"),
         }
     }

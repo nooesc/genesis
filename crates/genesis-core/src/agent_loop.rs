@@ -66,11 +66,22 @@ pub struct AgentLoop {
 
 impl AgentLoop {
     pub fn new(client: ChatClient, tools: ToolRuntime, config: AgentLoopConfig) -> Self {
+        Self::with_history(client, tools, config, Vec::new())
+    }
+
+    pub fn with_history(
+        client: ChatClient,
+        tools: ToolRuntime,
+        config: AgentLoopConfig,
+        history: Vec<ChatMessage>,
+    ) -> Self {
         let mut messages = Vec::new();
 
         if let Some(system_prompt) = &config.system_prompt {
             messages.push(ChatMessage::system(system_prompt));
         }
+
+        messages.extend(history);
 
         Self {
             client,
@@ -248,6 +259,48 @@ mod tests {
         assert_eq!(config.max_turns, 20);
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
+    }
+
+    #[test]
+    fn with_history_keeps_system_prompt_and_appends_prior_messages() {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "session-1".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp/genesis".to_owned(),
+            database_path: "/tmp/genesis/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let agent = AgentLoop::with_history(
+            client,
+            tools,
+            AgentLoopConfig {
+                system_prompt: Some("system".to_owned()),
+                ..AgentLoopConfig::default()
+            },
+            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        );
+
+        assert_eq!(agent.messages().len(), 3);
+        assert_eq!(agent.messages()[0].role, "system");
+        assert_eq!(agent.messages()[1].role, "user");
+        assert_eq!(agent.messages()[2].role, "assistant");
     }
 
     #[test]

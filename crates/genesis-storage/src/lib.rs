@@ -611,6 +611,43 @@ impl SessionStore {
                 source,
             })
     }
+
+    pub fn list_recent_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, title, platform, created_at, updated_at
+                 FROM sessions
+                 ORDER BY updated_at DESC, created_at DESC, id DESC
+                 LIMIT ?1",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let sessions = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(SessionSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    platform: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(sessions)
+    }
 }
 
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
