@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use genesis_provider::{
-    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, ProviderError,
-    ToolCallEntry,
+    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent,
+    ProviderError, ToolCallEntry,
 };
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
@@ -250,9 +250,9 @@ impl AgentLoop {
 
             // No tool calls - this is the final text response
             let response_text = assistant_msg
-                .content
-                .clone()
-                .unwrap_or_default();
+                .content_text()
+                .unwrap_or("")
+                .to_owned();
 
             self.messages.push(ChatMessage::assistant(&response_text));
 
@@ -338,7 +338,7 @@ impl AgentLoop {
                             if response_text.is_empty() {
                                 None
                             } else {
-                                Some(response_text.clone())
+                                Some(MessageContent::Text(response_text.clone()))
                             },
                             streamed_tool_calls.clone(),
                         ));
@@ -437,7 +437,10 @@ impl AgentLoop {
                         }
                     }
 
-                    let response_text = assistant_msg.content.clone().unwrap_or_default();
+                    let response_text = assistant_msg
+                        .content_text()
+                        .unwrap_or("")
+                        .to_owned();
                     self.messages.push(ChatMessage::assistant(&response_text));
 
                     return Ok(AgentResult {
@@ -648,7 +651,7 @@ impl AgentLoop {
         let mut transcript = String::new();
         for msg in messages {
             let role = &msg.role;
-            let content = msg.content.as_deref().unwrap_or("[tool call]");
+            let content = msg.content_text().unwrap_or("[tool call]");
             // Truncate very long tool results to keep the summarization prompt small.
             let truncated = if content.len() > 500 {
                 format!("{}...", &content[..500])
@@ -681,7 +684,7 @@ impl AgentLoop {
                 let text = response
                     .choices
                     .first()
-                    .and_then(|c| c.message.content.clone())
+                    .and_then(|c| c.message.content_text().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 if text.is_empty() {
                     None
@@ -975,15 +978,15 @@ mod tests {
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[0].role, "system");
         assert_eq!(
-            agent.messages()[1].content.as_deref(),
+            agent.messages()[1].content_text(),
             Some("msg2")
         );
         assert_eq!(
-            agent.messages()[2].content.as_deref(),
+            agent.messages()[2].content_text(),
             Some("reply2")
         );
         assert_eq!(
-            agent.messages()[3].content.as_deref(),
+            agent.messages()[3].content_text(),
             Some("msg3")
         );
     }

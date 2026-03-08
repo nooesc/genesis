@@ -25,12 +25,109 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
+/// Message content that can be plain text or multimodal (text + images).
+///
+/// Serializes as a JSON string for text-only, or as an array of content parts
+/// for multimodal messages. Deserializes from both formats.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageContent {
+    /// Plain text content (serialized as a JSON string).
+    Text(String),
+    /// Multimodal content parts (serialized as a JSON array).
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract the text content, joining text parts for multimodal messages.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(s) => Some(s.as_str()),
+            MessageContent::Parts(parts) => {
+                // Return the first text part
+                parts.iter().find_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+            }
+        }
+    }
+
+    /// Check if this content contains any image parts.
+    pub fn has_images(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Parts(parts) => parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+        }
+    }
+}
+
+impl<S: Into<String>> From<S> for MessageContent {
+    fn from(s: S) -> Self {
+        MessageContent::Text(s.into())
+    }
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            MessageContent::Text(s) => serializer.serialize_str(s),
+            MessageContent::Parts(parts) => parts.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(s) => Ok(MessageContent::Text(s)),
+            serde_json::Value::Array(_) => {
+                let parts: Vec<ContentPart> =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(MessageContent::Parts(parts))
+            }
+            serde_json::Value::Null => Ok(MessageContent::Text(String::new())),
+            _ => Err(serde::de::Error::custom(
+                "content must be a string or array of content parts",
+            )),
+        }
+    }
+}
+
+/// A single content part in a multimodal message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image via URL or base64 data URI.
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL reference for vision models.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageUrl {
+    /// The image URL. Can be a regular URL or `data:image/png;base64,...`.
+    pub url: String,
+    /// Detail level: "auto", "low", or "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// A single message in the chat conversation (OpenAI wire format).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,7 +140,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".to_owned(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -53,7 +150,24 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_owned(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// Create a user message with text and one or more images.
+    pub fn user_with_images(text: impl Into<String>, image_urls: Vec<ImageUrl>) -> Self {
+        let mut parts = vec![ContentPart::Text {
+            text: text.into(),
+        }];
+        for img in image_urls {
+            parts.push(ContentPart::ImageUrl { image_url: img });
+        }
+        Self {
+            role: "user".to_owned(),
+            content: Some(MessageContent::Parts(parts)),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -63,7 +177,7 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_owned(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -71,7 +185,7 @@ impl ChatMessage {
     }
 
     pub fn assistant_with_tool_calls(
-        content: Option<String>,
+        content: Option<MessageContent>,
         tool_calls: Vec<ToolCallEntry>,
     ) -> Self {
         Self {
@@ -86,11 +200,17 @@ impl ChatMessage {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".to_owned(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
         }
+    }
+
+    /// Extract the text content from this message, regardless of content type.
+    /// For multimodal messages, returns the first text part.
+    pub fn content_text(&self) -> Option<&str> {
+        self.content.as_ref().and_then(|c| c.text())
     }
 }
 
@@ -220,6 +340,94 @@ mod tests {
     }
 
     #[test]
+    fn content_text_returns_text_for_simple_message() {
+        let msg = ChatMessage::user("hello");
+        assert_eq!(msg.content_text(), Some("hello"));
+    }
+
+    #[test]
+    fn content_text_returns_text_for_multimodal_message() {
+        let msg = ChatMessage::user_with_images(
+            "describe this",
+            vec![ImageUrl {
+                url: "https://example.com/img.png".to_owned(),
+                detail: None,
+            }],
+        );
+        assert_eq!(msg.content_text(), Some("describe this"));
+    }
+
+    #[test]
+    fn text_content_serializes_as_string() {
+        let msg = ChatMessage::user("hello");
+        let json = serde_json::to_value(&msg).expect("should serialize");
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn multimodal_content_serializes_as_array() {
+        let msg = ChatMessage::user_with_images(
+            "what is this?",
+            vec![ImageUrl {
+                url: "data:image/png;base64,abc".to_owned(),
+                detail: Some("high".to_owned()),
+            }],
+        );
+        let json = serde_json::to_value(&msg).expect("should serialize");
+        let content = json["content"].as_array().expect("should be array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is this?");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,abc");
+        assert_eq!(content[1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn text_content_round_trips_through_json() {
+        let msg = ChatMessage::user("hello world");
+        let json = serde_json::to_string(&msg).expect("should serialize");
+        let decoded: ChatMessage = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(decoded.content_text(), Some("hello world"));
+    }
+
+    #[test]
+    fn multimodal_content_round_trips_through_json() {
+        let msg = ChatMessage::user_with_images(
+            "describe",
+            vec![ImageUrl {
+                url: "https://example.com/cat.jpg".to_owned(),
+                detail: None,
+            }],
+        );
+        let json = serde_json::to_string(&msg).expect("should serialize");
+        let decoded: ChatMessage = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(decoded.content_text(), Some("describe"));
+        match &decoded.content {
+            Some(MessageContent::Parts(parts)) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
+            }
+            other => panic!("expected Parts, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn has_images_detects_image_parts() {
+        let text_msg = ChatMessage::user("hello");
+        assert!(!text_msg.content.as_ref().unwrap().has_images());
+
+        let img_msg = ChatMessage::user_with_images(
+            "look",
+            vec![ImageUrl {
+                url: "data:image/png;base64,xyz".to_owned(),
+                detail: None,
+            }],
+        );
+        assert!(img_msg.content.as_ref().unwrap().has_images());
+    }
+
+    #[test]
     fn request_serializes_without_empty_tools() {
         let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hello")]);
         let json = serde_json::to_value(&request).expect("should serialize");
@@ -266,7 +474,7 @@ mod tests {
         assert_eq!(response.id, "chatcmpl-test");
         assert_eq!(response.choices.len(), 1);
         assert_eq!(
-            response.choices[0].message.content.as_deref(),
+            response.choices[0].message.content_text(),
             Some("Hello!")
         );
         assert_eq!(
@@ -368,5 +576,18 @@ mod tests {
         assert_eq!(params["type"], "object");
         assert_eq!(params["properties"]["command"]["type"], "string");
         assert_eq!(params["required"][0], "command");
+    }
+
+    #[test]
+    fn null_content_deserializes() {
+        let raw = r#"{"role": "assistant", "content": null}"#;
+        let msg: ChatMessage = serde_json::from_str(raw).expect("should deserialize null content");
+        assert!(msg.content.is_none());
+    }
+
+    #[test]
+    fn message_content_from_string() {
+        let content: MessageContent = "hello".into();
+        assert_eq!(content.text(), Some("hello"));
     }
 }

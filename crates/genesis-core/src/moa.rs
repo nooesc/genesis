@@ -139,7 +139,7 @@ pub async fn run_moa(
     let content = response
         .choices
         .first()
-        .and_then(|c| c.message.content.as_deref())
+        .and_then(|c| c.message.content_text())
         .unwrap_or("")
         .to_owned();
 
@@ -196,7 +196,7 @@ async fn run_proposer_layer(
             let content = response
                 .choices
                 .first()
-                .and_then(|c| c.message.content.as_deref())
+                .and_then(|c| c.message.content_text())
                 .unwrap_or("")
                 .to_owned();
 

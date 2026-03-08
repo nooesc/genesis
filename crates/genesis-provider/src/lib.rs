@@ -7,7 +7,7 @@ mod resolve;
 pub use api_types::{
     ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatChoice, ChatMessage, ChatTool, ChatToolFunction, ChatUsage,
-    FunctionCall, ToolCallEntry,
+    ContentPart, FunctionCall, ImageUrl, MessageContent, ToolCallEntry,
 };
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;

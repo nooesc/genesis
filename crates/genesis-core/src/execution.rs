@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use genesis_config::{LoadedConfig, TerminalConfig};
-use genesis_provider::{client_from_config, ChatMessage, ProviderError};
+use genesis_provider::{client_from_config, ChatMessage, MessageContent, ProviderError};
 use genesis_storage::{
     bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, SubagentStore,
     UserModelStore,
@@ -527,7 +527,7 @@ pub fn persist_new_messages(
         store.append_message(
             session_id,
             &message.role,
-            message.content.as_deref(),
+            message.content_text(),
             message.tool_call_id.as_deref(),
             tool_calls_json.as_deref(),
         )?;
@@ -552,7 +552,7 @@ pub fn restore_chat_history(
 
             Ok(ChatMessage {
                 role: message.role,
-                content: message.content,
+                content: message.content.map(MessageContent::Text),
                 tool_calls,
                 tool_call_id: message.tool_call_id,
                 name: None,
@@ -627,6 +627,7 @@ mod tests {
         restore_chat_history, ExecutedTurn, SessionExecutionService, SessionTurnInput,
     };
     use crate::agent_loop::AgentResult;
+    use genesis_provider::MessageContent;
     use genesis_config::{
         AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
     };
@@ -683,7 +684,7 @@ mod tests {
         .expect("tool calls should parse");
         let messages = vec![ChatMessage {
             role: "assistant".to_owned(),
-            content: Some("hello".to_owned()),
+            content: Some(MessageContent::Text("hello".to_owned())),
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
@@ -745,7 +746,7 @@ mod tests {
                 },
                 |history| async move {
                     assert_eq!(history.len(), 1);
-                    assert_eq!(history[0].content.as_deref(), Some("prior context"));
+                    assert_eq!(history[0].content_text(), Some("prior context"));
 
                     Ok(ExecutedTurn {
                         result: AgentResult {
