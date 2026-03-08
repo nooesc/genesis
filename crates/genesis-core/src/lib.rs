@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod prompt;
+pub mod scheduler;
 
 use std::path::Path;
 
