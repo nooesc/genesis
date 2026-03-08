@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use clap::{Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
-use genesis_core::agent_loop::AgentError;
+use genesis_core::agent_loop::{AgentError, StreamEvent};
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
 };
@@ -1318,12 +1318,22 @@ async fn run_streaming_turn(
             prompt,
             title: None,
         },
-        |chunk| {
-            if !streamed.swap(true, Ordering::Relaxed) {
-                print!("eve> ");
+        |event| match event {
+            StreamEvent::Chunk(chunk) => {
+                if !streamed.swap(true, Ordering::Relaxed) {
+                    print!("eve> ");
+                }
+                print!("{chunk}");
+                let _ = io::stdout().flush();
             }
-            print!("{chunk}");
-            let _ = io::stdout().flush();
+            StreamEvent::ToolCallStart { name } => {
+                if streamed.load(Ordering::Relaxed) {
+                    println!();
+                }
+                println!("     [calling {name}...]");
+                streamed.store(false, Ordering::Relaxed);
+            }
+            StreamEvent::ToolCallEnd { .. } => {}
         },
     );
 

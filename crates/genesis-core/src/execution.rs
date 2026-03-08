@@ -178,7 +178,7 @@ impl<'a> SessionExecutionService<'a> {
         on_chunk: F,
     ) -> Result<SessionTurnOutcome, SessionExecutionError>
     where
-        F: FnMut(&str),
+        F: FnMut(crate::agent_loop::StreamEvent<'_>),
     {
         let span = info_span!(
             "session.run_turn_streaming",
@@ -355,7 +355,7 @@ impl<'a> SessionExecutionService<'a> {
     where
         F: FnOnce(Vec<ChatMessage>, G) -> Fut,
         Fut: Future<Output = Result<ExecutedTurn, SessionExecutionError>>,
-        G: FnMut(&str),
+        G: FnMut(crate::agent_loop::StreamEvent<'_>),
     {
         let created_session =
             self.ensure_session(input.session_id, input.session_platform, input.title)?;

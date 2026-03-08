@@ -17,6 +17,17 @@ use crate::ToolRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
 
+/// Events emitted during streaming execution.
+#[derive(Debug, Clone)]
+pub enum StreamEvent<'a> {
+    /// A text content chunk from the LLM.
+    Chunk(&'a str),
+    /// A tool call is about to be executed.
+    ToolCallStart { name: &'a str },
+    /// A tool call finished executing.
+    ToolCallEnd { name: &'a str },
+}
+
 /// Result of a complete agent turn (user message → final assistant response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResult {
@@ -222,10 +233,10 @@ impl AgentLoop {
     pub async fn run_turn_streaming<F>(
         &mut self,
         user_message: &str,
-        mut on_chunk: F,
+        mut on_event: F,
     ) -> Result<AgentResult, AgentError>
     where
-        F: FnMut(&str),
+        F: FnMut(StreamEvent<'_>),
     {
         self.messages.push(ChatMessage::user(user_message));
 
@@ -261,7 +272,7 @@ impl AgentLoop {
                         let update = collect_stream_update(chunk);
 
                         for content in update.contents {
-                            on_chunk(&content);
+                            on_event(StreamEvent::Chunk(&content));
                             response_text.push_str(&content);
                         }
 
@@ -289,7 +300,9 @@ impl AgentLoop {
 
                         for tc in &streamed_tool_calls {
                             tool_calls_made += 1;
+                            on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
                             let result = self.execute_tool_call(tc).await?;
+                            on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                             self.messages.push(ChatMessage::tool_result(&tc.id, result));
                         }
 
@@ -330,7 +343,9 @@ impl AgentLoop {
 
                             for tc in tool_calls {
                                 tool_calls_made += 1;
+                                on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
                                 let result = self.execute_tool_call(tc).await?;
+                                on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
                                 self.messages.push(ChatMessage::tool_result(&tc.id, result));
                             }
 

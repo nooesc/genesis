@@ -15,6 +15,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
@@ -274,12 +275,25 @@ async fn chat_stream_handler(
                     prompt: &message,
                     title: None,
                 },
-                |chunk| {
-                    if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
-                        session_id: session_id.clone(),
-                        content: chunk.to_owned(),
-                    }) {
-                        let _ = tx.send(Ok(Event::default().event("chunk").data(payload)));
+                |event| {
+                    match event {
+                        StreamEvent::Chunk(chunk) => {
+                            if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
+                                session_id: session_id.clone(),
+                                content: chunk.to_owned(),
+                            }) {
+                                let _ = tx.send(Ok(Event::default().event("chunk").data(payload)));
+                            }
+                        }
+                        StreamEvent::ToolCallStart { name } => {
+                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                                "session_id": &session_id,
+                                "tool": name,
+                            })) {
+                                let _ = tx.send(Ok(Event::default().event("tool_call").data(payload)));
+                            }
+                        }
+                        StreamEvent::ToolCallEnd { .. } => {}
                     }
                 },
             )
