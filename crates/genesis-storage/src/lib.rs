@@ -658,6 +658,42 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Delete a session and all its messages and search index entries.
+    pub fn delete_session(&self, session_id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        // Delete FTS entries
+        connection
+            .execute(
+                "DELETE FROM session_search WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        // Delete messages
+        connection
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        // Delete session
+        let deleted = connection
+            .execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted > 0)
+    }
+
     /// Load all messages for a session in chronological order.
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StorageError> {
         let connection = open(&self.database_path)?;

@@ -174,6 +174,11 @@ pub enum SessionsCommand {
         #[arg(help = "Search query")]
         query: String,
     },
+    #[command(about = "Delete a session and its messages")]
+    Delete {
+        #[arg(help = "Session ID to delete")]
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -357,6 +362,14 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format!("No sessions found matching '{query}'"))
                     } else {
                         Ok(format_session_list(&results))
+                    }
+                }
+                SessionsCommand::Delete { id } => {
+                    let deleted = store.delete_session(&id)?;
+                    if deleted {
+                        Ok(format!("Deleted session {id}"))
+                    } else {
+                        Err(CliError::SessionNotFound(id))
                     }
                 }
             }
@@ -695,9 +708,13 @@ async fn run_serve(
     })?;
 
     println!("genesis gateway listening on {addr}");
-    axum::serve(listener, router).await.map_err(|e| {
-        CliError::Io(e)
-    })?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            println!("\nshutting down gateway...");
+        })
+        .await
+        .map_err(|e| CliError::Io(e))?;
 
     Ok("server stopped".to_owned())
 }
@@ -2121,6 +2138,19 @@ storage:
         match cli.command {
             Command::Sessions(SessionsCommand::Search { query }) => {
                 assert_eq!(query, "hello world");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_delete_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "delete", "session-42"])
+            .expect("sessions delete should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Delete { id }) => {
+                assert_eq!(id, "session-42");
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
