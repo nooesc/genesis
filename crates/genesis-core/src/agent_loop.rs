@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -148,6 +149,8 @@ pub enum AgentError {
     MaxTurnsExceeded(usize),
     #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
     BudgetExceeded { used: f64, limit: f64 },
+    #[error("agent loop was cancelled")]
+    Cancelled,
 }
 
 /// Callback for spawning subagent workstreams. Called when the agent
@@ -178,6 +181,9 @@ pub struct AgentLoop {
     /// `STUCK_LOOP_THRESHOLD` times in a row, a system nudge tells the LLM
     /// to try a different approach.
     tool_failure_counts: HashMap<String, usize>,
+    /// Cancellation flag. When set to `true`, the loop exits gracefully
+    /// at the next turn boundary.
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Number of consecutive failures for the same tool before injecting a
@@ -224,7 +230,14 @@ impl AgentLoop {
             trajectory,
             last_prompt_tokens: 0,
             tool_failure_counts: HashMap::new(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns a cancellation handle that can be used to stop the agent loop
+    /// from another task. Call `handle.store(true, Ordering::Relaxed)` to cancel.
+    pub fn cancellation_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
     }
 
     /// Set an optional cheaper client for tool-calling turns.
@@ -283,6 +296,22 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            // Check cancellation at each turn boundary
+            if self.cancelled.load(Ordering::Relaxed) {
+                info!("agent loop cancelled by external signal");
+                self.save_trajectory();
+                return Ok(AgentResult {
+                    response: "The operation was cancelled.".to_owned(),
+                    turns_used,
+                    tool_calls_made,
+                    finished_naturally: false,
+                    total_input_tokens,
+                    total_output_tokens,
+                    estimated_cost: Some(self.cost.total_cost),
+                    pending_clarification: None,
+                });
+            }
+
             turns_used += 1;
             if turns_used > self.config.max_turns {
                 warn!(max_turns = self.config.max_turns, "agent loop reached turn limit");
@@ -467,6 +496,21 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            if self.cancelled.load(Ordering::Relaxed) {
+                info!("agent loop cancelled by external signal (streaming)");
+                self.save_trajectory();
+                return Ok(AgentResult {
+                    response: "The operation was cancelled.".to_owned(),
+                    turns_used,
+                    tool_calls_made,
+                    finished_naturally: false,
+                    total_input_tokens,
+                    total_output_tokens,
+                    estimated_cost: Some(self.cost.total_cost),
+                    pending_clarification: None,
+                });
+            }
+
             turns_used += 1;
             if turns_used > self.config.max_turns {
                 warn!(max_turns = self.config.max_turns, "agent loop reached turn limit (streaming)");
@@ -1436,6 +1480,17 @@ mod tests {
 
         agent.maybe_inject_memory_nudge(15);
         assert_eq!(agent.messages().len(), initial_len, "no nudge when disabled");
+    }
+
+    #[test]
+    fn cancellation_handle_returns_shared_flag() {
+        let agent = test_agent();
+        let handle = agent.cancellation_handle();
+        assert!(!handle.load(Ordering::Relaxed));
+
+        // Setting it from outside should be visible to the agent
+        handle.store(true, Ordering::Relaxed);
+        assert!(agent.cancelled.load(Ordering::Relaxed));
     }
 
     #[test]
