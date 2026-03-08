@@ -15,7 +15,8 @@ use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, ScheduleStore, SessionStore, SessionSummary, StorageError, StoredSchedule,
+    bootstrap, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
+    StoredSchedule, UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -54,6 +55,8 @@ pub enum Command {
     Sessions(SessionsCommand),
     #[command(about = "List all available tools")]
     Tools,
+    #[command(about = "Show system overview (profile, model, tools, sessions, skills)")]
+    Info,
     #[command(subcommand, about = "Manage scheduled prompts")]
     Schedule(ScheduleCommand),
     #[command(about = "Start the HTTP API server")]
@@ -237,6 +240,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Tools => run_tools(cli.config, cli.json),
+        Command::Info => run_info(cli.config, cli.json),
         Command::Schedule(schedule_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -429,6 +433,74 @@ async fn run_serve(
     })?;
 
     Ok("server stopped".to_owned())
+}
+
+fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    let db_path = &loaded.config.storage.database_path;
+
+    let ctx = genesis_core::build_execution_context_from_loaded(
+        &loaded,
+        "info".to_owned(),
+        DeliveryPlatform::Cli,
+    );
+    let tool_count = genesis_core::build_default_tool_runtime(&ctx).definitions().len();
+
+    let session_count = SessionStore::new(db_path)
+        .list_recent_sessions(1000)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    let skill_count = SkillStore::new(db_path)
+        .list_all()
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    let trait_count = UserModelStore::new(db_path)
+        .list_all()
+        .map(|t| t.len())
+        .unwrap_or(0);
+
+    let schedule_count = ScheduleStore::new(db_path)
+        .list_all()
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    if json {
+        let info = serde_json::json!({
+            "profile": loaded.config.profile,
+            "provider": {
+                "backend": loaded.config.provider.backend,
+                "model": loaded.config.provider.model,
+            },
+            "tools": tool_count,
+            "sessions": session_count,
+            "skills": skill_count,
+            "user_traits": trait_count,
+            "schedules": schedule_count,
+            "config_path": loaded.paths.config_path.display().to_string(),
+            "database_path": db_path.display().to_string(),
+        });
+        Ok(serde_json::to_string_pretty(&info)?)
+    } else {
+        Ok(format!(
+            "genesis info\n\
+             profile:    {}\n\
+             provider:   {} / {}\n\
+             tools:      {tool_count}\n\
+             sessions:   {session_count}\n\
+             skills:     {skill_count}\n\
+             user traits: {trait_count}\n\
+             schedules:  {schedule_count}\n\
+             config:     {}\n\
+             database:   {}",
+            loaded.config.profile,
+            loaded.config.provider.backend,
+            loaded.config.provider.model,
+            loaded.paths.config_path.display(),
+            db_path.display(),
+        ))
+    }
 }
 
 fn run_tools(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
@@ -1157,5 +1229,44 @@ storage:
         let output = format_session_messages("s-1", &messages);
         assert!(output.contains("..."));
         assert!(output.len() < 400);
+    }
+
+    #[test]
+    fn parses_info_command() {
+        let cli = Cli::try_parse_from(["genesis", "info"])
+            .expect("info command should parse");
+        assert!(matches!(cli.command, Command::Info));
+    }
+
+    #[tokio::test]
+    async fn info_command_shows_system_overview() {
+        let output = run(Cli {
+            config: None,
+            json: false,
+            command: Command::Info,
+        })
+        .await
+        .expect("info command should succeed");
+
+        assert!(output.contains("genesis info"));
+        assert!(output.contains("profile:"));
+        assert!(output.contains("provider:"));
+        assert!(output.contains("tools:"));
+    }
+
+    #[tokio::test]
+    async fn info_command_json_output() {
+        let output = run(Cli {
+            config: None,
+            json: true,
+            command: Command::Info,
+        })
+        .await
+        .expect("info json should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output should be valid json");
+        assert!(parsed["tools"].as_u64().unwrap() > 0);
+        assert!(parsed["profile"].is_string());
     }
 }
