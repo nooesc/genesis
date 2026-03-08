@@ -29,6 +29,10 @@ pub struct AgentLoopConfig {
     pub max_turns: usize,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    /// Maximum number of conversation messages to keep in context (excluding
+    /// the system prompt). When the history exceeds this limit, the oldest
+    /// non-system messages are dropped. Set to `None` for unlimited.
+    pub max_context_messages: Option<usize>,
 }
 
 impl Default for AgentLoopConfig {
@@ -38,6 +42,7 @@ impl Default for AgentLoopConfig {
             max_turns: DEFAULT_MAX_TURNS,
             temperature: None,
             max_tokens: None,
+            max_context_messages: None,
         }
     }
 }
@@ -112,6 +117,7 @@ impl AgentLoop {
                 return Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
             }
 
+            self.prune_context();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
@@ -194,6 +200,34 @@ impl AgentLoop {
     /// Access the full conversation history.
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
+    }
+
+    /// Prune messages to stay within `max_context_messages`, preserving the
+    /// system prompt at index 0 (if present) and the most recent messages.
+    fn prune_context(&mut self) {
+        let limit = match self.config.max_context_messages {
+            Some(limit) => limit,
+            None => return,
+        };
+
+        let has_system = self
+            .messages
+            .first()
+            .is_some_and(|m| m.role == "system");
+
+        let non_system_count = if has_system {
+            self.messages.len() - 1
+        } else {
+            self.messages.len()
+        };
+
+        if non_system_count <= limit {
+            return;
+        }
+
+        let drop_count = non_system_count - limit;
+        let drop_start = if has_system { 1 } else { 0 };
+        self.messages.drain(drop_start..drop_start + drop_count);
     }
 }
 
@@ -301,6 +335,112 @@ mod tests {
         assert_eq!(agent.messages()[0].role, "system");
         assert_eq!(agent.messages()[1].role, "user");
         assert_eq!(agent.messages()[2].role, "assistant");
+    }
+
+    #[test]
+    fn prune_context_keeps_system_prompt_and_recent_messages() {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "s".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "m".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp".to_owned(),
+            database_path: "/tmp/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let mut agent = AgentLoop::with_history(
+            client,
+            tools,
+            AgentLoopConfig {
+                system_prompt: Some("system".to_owned()),
+                max_context_messages: Some(3),
+                ..AgentLoopConfig::default()
+            },
+            vec![
+                ChatMessage::user("msg1"),
+                ChatMessage::assistant("reply1"),
+                ChatMessage::user("msg2"),
+                ChatMessage::assistant("reply2"),
+                ChatMessage::user("msg3"),
+            ],
+        );
+
+        // 1 system + 5 history = 6 messages total
+        assert_eq!(agent.messages().len(), 6);
+
+        agent.prune_context();
+
+        // Should keep system + 3 most recent
+        assert_eq!(agent.messages().len(), 4);
+        assert_eq!(agent.messages()[0].role, "system");
+        assert_eq!(
+            agent.messages()[1].content.as_deref(),
+            Some("msg2")
+        );
+        assert_eq!(
+            agent.messages()[2].content.as_deref(),
+            Some("reply2")
+        );
+        assert_eq!(
+            agent.messages()[3].content.as_deref(),
+            Some("msg3")
+        );
+    }
+
+    #[test]
+    fn prune_context_noop_when_under_limit() {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:8000/v1".to_owned(),
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "s".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "m".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp".to_owned(),
+            database_path: "/tmp/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        let mut agent = AgentLoop::with_history(
+            client,
+            tools,
+            AgentLoopConfig {
+                system_prompt: Some("system".to_owned()),
+                max_context_messages: Some(10),
+                ..AgentLoopConfig::default()
+            },
+            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        );
+
+        agent.prune_context();
+        assert_eq!(agent.messages().len(), 3); // system + 2 unchanged
     }
 
     #[test]
