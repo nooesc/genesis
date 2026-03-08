@@ -18,6 +18,3 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
