@@ -130,6 +130,13 @@ pub enum ConfigCommand {
     Show,
     #[command(about = "Open the config file in $EDITOR")]
     Edit,
+    #[command(about = "Set a config value (dot-notation: provider.model, runtime.max_turns, etc.)")]
+    Set {
+        /// Config key in dot-notation (e.g. provider.model, runtime.max_turns)
+        key: String,
+        /// Value to set
+        value: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -346,6 +353,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             } else {
                 Err(CliError::Other(format!("{editor} exited with status {status}")))
             }
+        }
+        Command::Config(ConfigCommand::Set { key, value }) => {
+            let loaded = load(cli.config.as_deref())?;
+            genesis_config::set_value_in_file(&loaded.paths.config_path, &key, &value)?;
+            Ok(format!("set {key} = {value}"))
         }
         Command::Storage(StorageCommand::Path) => {
             let loaded = load(cli.config.as_deref())?;
@@ -2850,6 +2862,21 @@ storage:
         match cli.command {
             Command::Skills(SkillsCommand::Import { file }) => {
                 assert_eq!(file.to_str().unwrap(), "skills.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_config_set_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "config", "set", "provider.model", "gpt-5",
+        ])
+        .expect("config set should parse");
+        match cli.command {
+            Command::Config(ConfigCommand::Set { key, value }) => {
+                assert_eq!(key, "provider.model");
+                assert_eq!(value, "gpt-5");
             }
             other => panic!("unexpected command: {other:?}"),
         }

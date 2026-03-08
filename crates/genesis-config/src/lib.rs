@@ -470,6 +470,99 @@ pub fn update_provider_in_file(
     write_file_config(config_path, &file_config)
 }
 
+/// Set a configuration value using dot-notation keys.
+///
+/// Supported keys:
+///   profile, provider.backend, provider.model, provider.base_url,
+///   provider.api_key_env, runtime.max_turns, runtime.max_concurrency,
+///   runtime.allow_destructive_tools, runtime.max_context_messages
+pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
+    let mut file_config = read_config_file(config_path)?;
+
+    match key {
+        "profile" => {
+            file_config.profile = Some(value.to_owned());
+        }
+        "provider.backend" => {
+            file_config
+                .provider
+                .get_or_insert_with(FileProviderConfig::default)
+                .backend = Some(value.to_owned());
+        }
+        "provider.model" => {
+            file_config
+                .provider
+                .get_or_insert_with(FileProviderConfig::default)
+                .model = Some(value.to_owned());
+        }
+        "provider.base_url" => {
+            file_config
+                .provider
+                .get_or_insert_with(FileProviderConfig::default)
+                .base_url = Some(value.to_owned());
+        }
+        "provider.api_key_env" => {
+            file_config
+                .provider
+                .get_or_insert_with(FileProviderConfig::default)
+                .api_key_env = Some(value.to_owned());
+        }
+        "runtime.max_turns" => {
+            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.max_turns",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_turns = Some(v);
+        }
+        "runtime.max_concurrency" => {
+            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.max_concurrency",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_concurrency = Some(v);
+        }
+        "runtime.allow_destructive_tools" => {
+            let v: bool = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.allow_destructive_tools",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .allow_destructive_tools = Some(v);
+        }
+        "runtime.max_context_messages" => {
+            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.max_context_messages",
+                value: value.to_owned(),
+            })?;
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_context_messages = Some(v);
+        }
+        _ => {
+            return Err(ConfigError::InvalidEnvValue {
+                name: "key",
+                value: format!(
+                    "unknown key `{key}`. Supported: profile, provider.backend, provider.model, \
+                     provider.base_url, provider.api_key_env, runtime.max_turns, \
+                     runtime.max_concurrency, runtime.allow_destructive_tools, \
+                     runtime.max_context_messages"
+                ),
+            });
+        }
+    }
+
+    write_file_config(config_path, &file_config)
+}
+
 fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| ConfigError::WriteFile {
@@ -709,5 +802,55 @@ mcp_servers:
     fn mcp_servers_empty_when_not_configured() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn set_value_in_file_sets_provider_model() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "provider:\n  backend: openai\n  model: gpt-4.1-mini\n")
+            .expect("initial write");
+
+        super::set_value_in_file(&config_path, "provider.model", "gpt-5")
+            .expect("set should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
+            .expect("reload should work");
+        assert_eq!(loaded.config.provider.model, "gpt-5");
+        assert_eq!(loaded.config.provider.backend, "openai");
+    }
+
+    #[test]
+    fn set_value_in_file_sets_runtime_max_turns() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_value_in_file(&config_path, "runtime.max_turns", "50")
+            .expect("set should succeed");
+
+        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
+            .expect("reload should work");
+        assert_eq!(loaded.config.runtime.max_turns, 50);
+    }
+
+    #[test]
+    fn set_value_in_file_rejects_unknown_key() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let result = super::set_value_in_file(&config_path, "nonexistent.key", "value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_value_in_file_rejects_invalid_number() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let result = super::set_value_in_file(&config_path, "runtime.max_turns", "not_a_number");
+        assert!(result.is_err());
     }
 }

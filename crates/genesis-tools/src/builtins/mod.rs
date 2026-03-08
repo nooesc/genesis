@@ -1,11 +1,13 @@
 pub mod docker;
 pub mod fs;
 pub mod memory;
+pub mod patch;
 pub mod search;
 pub mod session;
 pub mod shell;
 pub mod skill;
 pub mod ssh;
 pub mod subagent;
+pub mod todo;
 pub mod user_model;
 pub mod web;

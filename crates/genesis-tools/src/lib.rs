@@ -516,6 +516,42 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "patch".to_owned(),
+                description: "Applies a targeted find-and-replace within a file. More efficient than write_file for small edits — only send the text to find and its replacement. The old_text must match exactly once unless replace_all is set.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the file to patch." },
+                        "old_text": { "type": "string", "description": "The exact text to find in the file. Must match exactly once (including whitespace and indentation)." },
+                        "new_text": { "type": "string", "description": "The text to replace old_text with." },
+                        "replace_all": { "type": "string", "description": "Set to 'true' to replace all occurrences. Default: replace only unique match." }
+                    },
+                    "required": ["path", "old_text", "new_text"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::patch::PatchTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "todo".to_owned(),
+                description: "In-memory task list for planning complex work. Use to decompose tasks, track progress, and report status. Actions: add (text), update (id, status), list, clear. Status values: pending, in_progress, done.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "Action to perform: add, update, list, or clear." },
+                        "text": { "type": "string", "description": "Text of the todo item (required for add)." },
+                        "id": { "type": "string", "description": "ID of the todo item (required for update)." },
+                        "status": { "type": "string", "description": "New status: pending, in_progress, or done (required for update)." }
+                    },
+                    "required": ["action"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::todo::TodoTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "spawn_subagent".to_owned(),
                 description: "Spawns a subagent to work on a task concurrently. The subagent runs its own agent loop in the background and can use all available tools. Use check_subagent to monitor progress.".to_owned(),
                 parameters: Some(json!({
@@ -636,7 +672,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 24);
+        assert_eq!(definitions.len(), 26);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
