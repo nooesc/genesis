@@ -19,10 +19,12 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use axum::extract::Path;
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
+use genesis_storage::SessionStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -231,6 +233,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
+        .route("/sessions", get(list_sessions_handler))
+        .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
+        .route("/usage", get(usage_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -380,6 +385,78 @@ async fn mcp_status_handler(
             total_tools: 0,
         }),
     }
+}
+
+/// Query parameters for listing sessions.
+#[derive(Debug, Deserialize)]
+struct ListSessionsQuery {
+    #[serde(default = "default_session_limit")]
+    limit: usize,
+    search: Option<String>,
+}
+
+fn default_session_limit() -> usize {
+    50
+}
+
+async fn list_sessions_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let sessions = if let Some(query) = &params.search {
+        store.search_sessions(query)
+    } else {
+        store.list_recent_sessions(params.limit)
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "sessions": sessions,
+        "count": sessions.len(),
+    })))
+}
+
+async fn get_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let session = store
+        .get_session(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    match session {
+        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
+    }
+}
+
+async fn delete_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let deleted = store
+        .delete_session(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("session '{id}' not found")))
+    }
+}
+
+async fn usage_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let stats = store
+        .usage_stats()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    Ok(Json(serde_json::to_value(stats).unwrap()))
 }
 
 async fn chat_handler(
