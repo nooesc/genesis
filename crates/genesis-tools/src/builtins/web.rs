@@ -1,10 +1,23 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 const TIMEOUT_SECS: u64 = 30;
+
+/// Shared blocking HTTP client for web requests.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(TIMEOUT_SECS))
+            .user_agent("genesis-agent/0.1")
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
 
 pub struct WebRequestTool;
 
@@ -27,14 +40,7 @@ impl ToolHandler for WebRequestTool {
         let body = call.arguments.get("body");
         let headers_json = call.arguments.get("headers");
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("genesis-agent/0.1")
-            .build()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to create HTTP client: {e}"),
-            })?;
+        let client = http_client();
 
         let mut request = match method.as_str() {
             "GET" => client.get(url),
