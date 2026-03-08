@@ -452,6 +452,19 @@ pub enum EvalCommand {
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
     },
+    #[command(about = "Build or show a dataset manifest (dataset.json) for a trajectory directory")]
+    Manifest {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Dataset name")]
+        name: Option<String>,
+        #[arg(long, help = "Dataset description")]
+        description: Option<String>,
+        #[arg(long, help = "Write the manifest to dataset.json in the directory")]
+        save: bool,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+    },
     #[command(about = "Validate trajectory files for structural integrity")]
     Validate {
         #[arg(help = "Directory containing trajectory JSON files")]
@@ -994,6 +1007,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 seed,
                 recursive,
             } => run_eval_split(&dir, &train, &test, ratio, seed, recursive),
+            EvalCommand::Manifest {
+                dir,
+                name,
+                description,
+                save,
+                recursive,
+            } => run_eval_manifest(
+                &dir,
+                name.as_deref().unwrap_or("unnamed"),
+                description.as_deref().unwrap_or(""),
+                save,
+                recursive,
+                cli.json,
+            ),
             EvalCommand::Validate {
                 dir,
                 recursive,
@@ -3959,6 +3986,67 @@ fn run_eval_sample(
         "sampled {actual_count}/{} trajectories into {output}",
         files.len()
     ))
+}
+
+fn run_eval_manifest(
+    dir: &str,
+    name: &str,
+    description: &str,
+    save: bool,
+    recursive: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let manifest = genesis_core::dataset::build_manifest(
+        name,
+        description,
+        std::path::Path::new(dir),
+        recursive,
+    )
+    .map_err(|e| CliError::Other(format!("failed to build manifest: {e}")))?;
+
+    if save {
+        genesis_core::dataset::save_manifest(&manifest, std::path::Path::new(dir))
+            .map_err(|e| CliError::Other(format!("failed to save manifest: {e}")))?;
+    }
+
+    if json || save {
+        return Ok(serde_json::to_string_pretty(&manifest)?);
+    }
+
+    let mut lines = vec![
+        format!("dataset: {}", manifest.name),
+        format!("files: {}", manifest.file_count),
+        format!("total steps: {}", manifest.total_steps),
+        format!(
+            "avg steps: {:.1}",
+            manifest.statistics.avg_steps_per_trajectory
+        ),
+        format!(
+            "step range: {}–{}",
+            manifest.statistics.min_steps, manifest.statistics.max_steps
+        ),
+        format!("models: {}", manifest.models.join(", ")),
+    ];
+
+    if let Some(q) = manifest.statistics.avg_quality_score {
+        lines.push(format!("avg quality: {q:.3}"));
+    }
+
+    if !manifest.statistics.outcome_counts.is_empty() {
+        let outcomes: Vec<String> = manifest
+            .statistics
+            .outcome_counts
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        lines.push(format!("outcomes: {}", outcomes.join(", ")));
+    }
+
+    if save {
+        lines.push(format!("saved to {dir}/dataset.json"));
+    }
+
+    Ok(lines.join("\n"))
 }
 
 fn run_eval_validate(
@@ -9540,6 +9628,49 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_eval_manifest_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "manifest", "src", "--name", "my-dataset",
+            "--description", "test set", "--save",
+        ])
+        .expect("manifest should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Manifest {
+                dir, name, description, save, ..
+            }) => {
+                assert_eq!(dir, "src");
+                assert_eq!(name.as_deref(), Some("my-dataset"));
+                assert_eq!(description.as_deref(), Some("test set"));
+                assert!(save);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_manifest_shows_stats() {
+        let dir = tempdir().expect("tempdir");
+        let t = serde_json::json!({
+            "session_id": "s1", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
+            "outcome": {"type": "success"}, "tags": ["test"]
+        });
+        std::fs::write(
+            dir.path().join("s1.json"),
+            serde_json::to_string(&t).unwrap(),
+        ).unwrap();
+
+        let result = crate::run_eval_manifest(
+            dir.path().to_str().unwrap(), "test-ds", "a test", false, false, false,
+        ).expect("manifest should succeed");
+
+        assert!(result.contains("test-ds"));
+        assert!(result.contains("files: 1"));
+        assert!(result.contains("gpt-4"));
     }
 
     #[test]

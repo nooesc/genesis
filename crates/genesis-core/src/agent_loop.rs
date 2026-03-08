@@ -15,6 +15,7 @@ use tracing::{debug, info, info_span, warn};
 use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
+use crate::hooks::{load_hooks, HookConfig, HookEvent, HookResult, HookRunner};
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
@@ -92,6 +93,8 @@ pub struct AgentLoopConfig {
     /// Timeout for individual tool calls in seconds. When a tool exceeds this
     /// duration, it is cancelled and the LLM receives a timeout error. Default: 120s.
     pub tool_timeout_secs: u64,
+    /// Shell hook configurations executed at lifecycle boundaries.
+    pub hooks: Vec<HookConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -133,6 +136,7 @@ impl Default for AgentLoopConfig {
             thinking: None,
             response_format: None,
             tool_timeout_secs: 120,
+            hooks: Vec::new(),
         }
     }
 }
@@ -225,6 +229,8 @@ pub struct AgentLoop {
     messages: Vec<ChatMessage>,
     subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
     hooks: Arc<dyn AgentHooks>,
+    hook_runner: HookRunner,
+    hook_results: Vec<HookResult>,
     cost: SessionCost,
     trajectory: TrajectoryRecorder,
     /// Last reported prompt token count from the API. Used for token-aware
@@ -263,6 +269,7 @@ impl AgentLoop {
         messages.extend(history);
 
         let cost = SessionCost::new(config.budget_limit);
+        let hook_runner = load_hooks(config.hooks.clone());
 
         let trajectory = if config.enable_trajectory {
             let sys = config.system_prompt.as_deref().unwrap_or("");
@@ -280,6 +287,8 @@ impl AgentLoop {
             messages,
             subagent_spawner: None,
             hooks: Arc::new(NoopHooks),
+            hook_runner,
+            hook_results: Vec::new(),
             cost,
             trajectory,
             last_prompt_tokens: 0,
@@ -307,6 +316,11 @@ impl AgentLoop {
     /// Attach lifecycle hooks for monitoring, logging, or integration.
     pub fn set_hooks(&mut self, hooks: Arc<dyn AgentHooks>) {
         self.hooks = hooks;
+    }
+
+    /// Access recorded shell hook executions for inspection/testing.
+    pub fn hook_results(&self) -> &[HookResult] {
+        &self.hook_results
     }
 
     /// Pick the right client for the current turn. Uses the tool client when
@@ -338,6 +352,16 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        self.fire_shell_hooks(
+            HookEvent::PreTurn,
+            serde_json::json!({
+                "session_id": hook_session,
+                "user_message": user_message,
+                "image_count": images.len(),
+            }),
+        );
+
         self.trajectory.record_user_message(user_message);
 
         if images.is_empty() {
@@ -348,7 +372,6 @@ impl AgentLoop {
         }
 
         // Fire turn-start hook
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
         self.hooks.on_turn_start(&hook_session, user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
@@ -363,7 +386,7 @@ impl AgentLoop {
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal");
                 self.save_trajectory();
-                return Ok(AgentResult {
+                let result = AgentResult {
                     response: "The operation was cancelled.".to_owned(),
                     turns_used,
                     tool_calls_made,
@@ -372,14 +395,17 @@ impl AgentLoop {
                     total_output_tokens,
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
-                });
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.hooks.on_turn_end(&hook_session, &result);
+                return Ok(result);
             }
 
             turns_used += 1;
             if turns_used > self.config.max_turns {
                 warn!(max_turns = self.config.max_turns, "agent loop reached turn limit");
                 self.save_trajectory();
-                return Ok(AgentResult {
+                let result = AgentResult {
                     response: format!(
                         "I've reached the maximum of {} turns for this request. \
                          The work so far has been saved. You can continue by sending another message.",
@@ -392,7 +418,10 @@ impl AgentLoop {
                     total_output_tokens,
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
-                });
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.hooks.on_turn_end(&hook_session, &result);
+                return Ok(result);
             }
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
@@ -406,13 +435,20 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
 
             self.hooks.on_llm_request(&hook_session, client.model(), turns_used);
-            let response = client.complete(request).await?;
+            let response = match client.complete(request).await {
+                Ok(response) => response,
+                Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
+            };
 
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
                 self.last_prompt_tokens = usage.prompt_tokens;
-                self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
+                if let Err(err) =
+                    self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)
+                {
+                    return Err(self.report_error(&hook_session, "usage_record", err));
+                }
                 self.hooks.on_llm_response(
                     &hook_session,
                     client.model(),
@@ -446,17 +482,36 @@ impl AgentLoop {
                         self.trajectory
                             .record_tool_call(&tc.function.name, &tc.function.arguments);
                         self.hooks.on_tool_call_start(&hook_session, &tc.function.name);
+                        self.fire_shell_hooks(
+                            HookEvent::PreToolCall,
+                            serde_json::json!({
+                                "session_id": hook_session,
+                                "tool_name": tc.function.name,
+                                "tool_call_id": tc.id,
+                                "arguments": tc.function.arguments,
+                            }),
+                        );
                     }
 
                     let tool_start = Instant::now();
-                    let results = execute_tool_calls_parallel(
+                    let results = match execute_tool_calls_parallel(
                         &self.tools,
                         &self.subagent_spawner,
                         tool_calls,
                         self.config.max_concurrency,
                         self.config.tool_timeout_secs,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(results) => results,
+                        Err(err) => {
+                            return Err(self.report_error(
+                                &hook_session,
+                                "tool_execution",
+                                err,
+                            ))
+                        }
+                    };
                     let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
                     let mut clarification = None;
@@ -481,6 +536,18 @@ impl AgentLoop {
                             success,
                             tool_elapsed_ms,
                         );
+                        self.fire_shell_hooks(
+                            HookEvent::PostToolCall,
+                            serde_json::json!({
+                                "session_id": hook_session,
+                                "tool_name": tc.function.name,
+                                "tool_call_id": tc.id,
+                                "success": success,
+                                "result": result,
+                                "requires_input": requires_input,
+                                "duration_ms": tool_elapsed_ms,
+                            }),
+                        );
                         if requires_input {
                             clarification = Some(result.clone());
                         }
@@ -494,7 +561,7 @@ impl AgentLoop {
                     // If a tool requested user input, pause the agent loop
                     if let Some(question) = clarification {
                         self.save_trajectory();
-                        return Ok(AgentResult {
+                        let result = AgentResult {
                             response: String::new(),
                             turns_used,
                             tool_calls_made,
@@ -503,7 +570,10 @@ impl AgentLoop {
                             total_output_tokens,
                             estimated_cost: Some(self.cost.total_cost),
                             pending_clarification: Some(question),
-                        });
+                        };
+                        self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                        self.hooks.on_turn_end(&hook_session, &result);
+                        return Ok(result);
                     }
 
                     // Inject memory nudge if due.
@@ -534,6 +604,8 @@ impl AgentLoop {
                 estimated_cost: Some(self.cost.total_cost),
                 pending_clarification: None,
             };
+            self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+            self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
             self.hooks.on_turn_end(&hook_session, &result);
             return Ok(result);
         }
@@ -561,6 +633,17 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
+        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        self.fire_shell_hooks(
+            HookEvent::PreTurn,
+            serde_json::json!({
+                "session_id": hook_session,
+                "user_message": user_message,
+                "image_count": images.len(),
+                "streaming": true,
+            }),
+        );
+
         self.trajectory.record_user_message(user_message);
 
         if images.is_empty() {
@@ -571,7 +654,6 @@ impl AgentLoop {
         }
 
         // Fire turn-start hook (streaming)
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
         self.hooks.on_turn_start(&hook_session, user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
@@ -585,7 +667,7 @@ impl AgentLoop {
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal (streaming)");
                 self.save_trajectory();
-                return Ok(AgentResult {
+                let result = AgentResult {
                     response: "The operation was cancelled.".to_owned(),
                     turns_used,
                     tool_calls_made,
@@ -594,7 +676,10 @@ impl AgentLoop {
                     total_output_tokens,
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
-                });
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.hooks.on_turn_end(&hook_session, &result);
+                return Ok(result);
             }
 
             turns_used += 1;
@@ -607,7 +692,7 @@ impl AgentLoop {
                 );
                 on_event(StreamEvent::Chunk(&msg));
                 self.save_trajectory();
-                return Ok(AgentResult {
+                let result = AgentResult {
                     response: msg,
                     turns_used: turns_used - 1,
                     tool_calls_made,
@@ -616,7 +701,10 @@ impl AgentLoop {
                     total_output_tokens,
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
-                });
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.hooks.on_turn_end(&hook_session, &result);
+                return Ok(result);
             }
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
@@ -639,7 +727,16 @@ impl AgentLoop {
                     let mut turn_output_tokens = 0u32;
 
                     while let Some(chunk) = stream.next().await {
-                        let chunk = chunk?;
+                        let chunk = match chunk {
+                            Ok(chunk) => chunk,
+                            Err(err) => {
+                                return Err(self.report_error(
+                                    &hook_session,
+                                    "stream_chunk",
+                                    err.into(),
+                                ))
+                            }
+                        };
                         let update = collect_stream_update(chunk);
 
                         for content in update.contents {
@@ -662,7 +759,11 @@ impl AgentLoop {
                     total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
                     total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
                     self.last_prompt_tokens = turn_input_tokens;
-                    self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)?;
+                    if let Err(err) =
+                        self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)
+                    {
+                        return Err(self.report_error(&hook_session, "usage_record", err));
+                    }
                     self.hooks.on_llm_response(
                         &hook_session,
                         client.model(),
@@ -690,18 +791,38 @@ impl AgentLoop {
                             on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
                             self.trajectory
                                 .record_tool_call(&tc.function.name, &tc.function.arguments);
+                            self.fire_shell_hooks(
+                                HookEvent::PreToolCall,
+                                serde_json::json!({
+                                    "session_id": hook_session,
+                                    "tool_name": tc.function.name,
+                                    "tool_call_id": tc.id,
+                                    "arguments": tc.function.arguments,
+                                    "streaming": true,
+                                }),
+                            );
                         }
 
                         // Execute tool calls in parallel.
                         tool_calls_made += streamed_tool_calls.len();
-                        let results = execute_tool_calls_parallel(
+                        let results = match execute_tool_calls_parallel(
                             &self.tools,
                             &self.subagent_spawner,
                             &streamed_tool_calls,
                             self.config.max_concurrency,
                             self.config.tool_timeout_secs,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(results) => results,
+                            Err(err) => {
+                                return Err(self.report_error(
+                                    &hook_session,
+                                    "tool_execution",
+                                    err,
+                                ))
+                            }
+                        };
 
                         let mut clarification = None;
                         for (tc, (result, requires_input)) in
@@ -717,6 +838,18 @@ impl AgentLoop {
                             } else {
                                 self.tool_failure_counts.remove(&tc.function.name);
                             }
+                            self.fire_shell_hooks(
+                                HookEvent::PostToolCall,
+                                serde_json::json!({
+                                    "session_id": hook_session,
+                                    "tool_name": tc.function.name,
+                                    "tool_call_id": tc.id,
+                                    "success": !result.starts_with("Error:"),
+                                    "result": result,
+                                    "requires_input": requires_input,
+                                    "streaming": true,
+                                }),
+                            );
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
@@ -728,7 +861,7 @@ impl AgentLoop {
 
                         if let Some(question) = clarification {
                             self.save_trajectory();
-                            return Ok(AgentResult {
+                            let result = AgentResult {
                                 response: String::new(),
                                 turns_used,
                                 tool_calls_made,
@@ -737,7 +870,10 @@ impl AgentLoop {
                                 total_output_tokens,
                                 estimated_cost: Some(self.cost.total_cost),
                                 pending_clarification: Some(question),
-                            });
+                            };
+                            self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                            self.hooks.on_turn_end(&hook_session, &result);
+                            return Ok(result);
                         }
 
                         self.maybe_inject_memory_nudge(tool_calls_made);
@@ -759,12 +895,23 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
+                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
                     self.hooks.on_turn_end(&hook_session, &result);
                     return Ok(result);
                 }
                 Err(_) => {
                     warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
-                    let response = client.complete(request).await?;
+                    let response = match client.complete(request).await {
+                        Ok(response) => response,
+                        Err(err) => {
+                            return Err(self.report_error(
+                                &hook_session,
+                                "llm_request_fallback",
+                                err.into(),
+                            ))
+                        }
+                    };
 
                     if let Some(usage) = &response.usage {
                         total_input_tokens =
@@ -772,7 +919,11 @@ impl AgentLoop {
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
                         self.last_prompt_tokens = usage.prompt_tokens;
-                        self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)?;
+                        if let Err(err) =
+                            self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)
+                        {
+                            return Err(self.report_error(&hook_session, "usage_record", err));
+                        }
                     }
 
                     let choice = &response.choices[0];
@@ -794,18 +945,38 @@ impl AgentLoop {
                                 on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
                                 self.trajectory
                                     .record_tool_call(&tc.function.name, &tc.function.arguments);
+                                self.fire_shell_hooks(
+                                    HookEvent::PreToolCall,
+                                    serde_json::json!({
+                                        "session_id": hook_session,
+                                        "tool_name": tc.function.name,
+                                        "tool_call_id": tc.id,
+                                        "arguments": tc.function.arguments,
+                                        "streaming": false,
+                                    }),
+                                );
                             }
 
                             // Execute tool calls in parallel.
                             tool_calls_made += tool_calls.len();
-                            let results = execute_tool_calls_parallel(
+                            let results = match execute_tool_calls_parallel(
                                 &self.tools,
                                 &self.subagent_spawner,
                                 tool_calls,
                                 self.config.max_concurrency,
                                 self.config.tool_timeout_secs,
                             )
-                            .await?;
+                            .await
+                            {
+                                Ok(results) => results,
+                                Err(err) => {
+                                    return Err(self.report_error(
+                                        &hook_session,
+                                        "tool_execution",
+                                        err,
+                                    ))
+                                }
+                            };
 
                             let mut clarification = None;
                             for (tc, (result, requires_input)) in
@@ -821,6 +992,18 @@ impl AgentLoop {
                                 } else {
                                     self.tool_failure_counts.remove(&tc.function.name);
                                 }
+                                self.fire_shell_hooks(
+                                    HookEvent::PostToolCall,
+                                    serde_json::json!({
+                                        "session_id": hook_session,
+                                        "tool_name": tc.function.name,
+                                        "tool_call_id": tc.id,
+                                        "success": !result.starts_with("Error:"),
+                                        "result": result,
+                                        "requires_input": requires_input,
+                                        "streaming": false,
+                                    }),
+                                );
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded { question: &result });
                                     clarification = Some(result.clone());
@@ -832,7 +1015,7 @@ impl AgentLoop {
 
                             if let Some(question) = clarification {
                                 self.save_trajectory();
-                                return Ok(AgentResult {
+                                let result = AgentResult {
                                     response: String::new(),
                                     turns_used,
                                     tool_calls_made,
@@ -841,7 +1024,10 @@ impl AgentLoop {
                                     total_output_tokens,
                                     estimated_cost: Some(self.cost.total_cost),
                                     pending_clarification: Some(question),
-                                });
+                                };
+                                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                                self.hooks.on_turn_end(&hook_session, &result);
+                                return Ok(result);
                             }
 
                             self.maybe_inject_memory_nudge(tool_calls_made);
@@ -858,7 +1044,7 @@ impl AgentLoop {
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
-                    return Ok(AgentResult {
+                    let result = AgentResult {
                         response: response_text,
                         turns_used,
                         tool_calls_made,
@@ -867,7 +1053,11 @@ impl AgentLoop {
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
-                    });
+                    };
+                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
+                    self.hooks.on_turn_end(&hook_session, &result);
+                    return Ok(result);
                 }
             }
         }
@@ -967,6 +1157,37 @@ impl AgentLoop {
     /// Access the trajectory recorder mutably.
     pub fn trajectory_mut(&mut self) -> &mut TrajectoryRecorder {
         &mut self.trajectory
+    }
+
+    fn fire_shell_hooks(&mut self, event: HookEvent, context: serde_json::Value) {
+        let results = self.hook_runner.run_hooks(event, &context);
+        self.hook_results.extend(results);
+    }
+
+    fn report_error(&mut self, session_id: &str, stage: &str, error: AgentError) -> AgentError {
+        self.fire_shell_hooks(
+            HookEvent::OnError,
+            serde_json::json!({
+                "session_id": session_id,
+                "stage": stage,
+                "error": error.to_string(),
+            }),
+        );
+        error
+    }
+
+    fn turn_result_context(&self, session_id: &str, result: &AgentResult) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "response": result.response,
+            "turns_used": result.turns_used,
+            "tool_calls_made": result.tool_calls_made,
+            "finished_naturally": result.finished_naturally,
+            "total_input_tokens": result.total_input_tokens,
+            "total_output_tokens": result.total_output_tokens,
+            "estimated_cost": result.estimated_cost,
+            "pending_clarification": result.pending_clarification,
+        })
     }
 
     /// Record token usage from an LLM turn and check the budget.
@@ -1435,6 +1656,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     fn test_agent() -> AgentLoop {
         let provider = genesis_provider::ResolvedProvider {
@@ -1467,10 +1689,70 @@ mod tests {
             tools,
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
+                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
             Vec::new(),
         )
+    }
+
+    fn test_agent_with_endpoint(base_url: String, hooks: Vec<HookConfig>) -> AgentLoop {
+        let provider = genesis_provider::ResolvedProvider {
+            base_url,
+            api_key: String::new(),
+            model: "test-model".to_owned(),
+            backend: "openai".to_owned(),
+        };
+        let client = ChatClient::new(&provider).expect("client should build");
+        let tools = crate::build_default_tool_runtime(&crate::ExecutionContext {
+            plan: crate::SessionPlan {
+                session_id: "session-hooks".to_owned(),
+                profile: "default".to_owned(),
+                platform: genesis_types::DeliveryPlatform::Cli,
+                model: genesis_types::ModelSelection {
+                    provider: genesis_types::ModelProviderKind::OpenAi,
+                    model: "test-model".to_owned(),
+                    base_url: None,
+                },
+                initial_events: Vec::new(),
+            },
+            data_dir: "/tmp/genesis".to_owned(),
+            database_path: "/tmp/genesis/genesis.db".to_owned(),
+            max_concurrency: 4,
+            allow_destructive_tools: false,
+        });
+
+        AgentLoop::with_history(
+            client,
+            tools,
+            AgentLoopConfig {
+                system_prompt: Some("system".to_owned()),
+                session_id: Some("session-hooks".to_owned()),
+                hooks,
+                ..AgentLoopConfig::default()
+            },
+            Vec::new(),
+        )
+    }
+
+    fn start_mock_server(responses: Vec<String>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buffer = [0u8; 8192];
+                let _ = stream.read(&mut buffer);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+                stream.flush().expect("flush");
+            }
+        });
+        format!("http://{addr}/v1")
     }
 
     #[test]
@@ -1842,6 +2124,7 @@ mod tests {
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
                 max_context_messages: Some(3),
+                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
             vec![
@@ -1910,6 +2193,7 @@ mod tests {
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
                 max_context_messages: Some(10),
+                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
@@ -2043,6 +2327,7 @@ mod tests {
             tools,
             AgentLoopConfig {
                 budget_limit: Some(0.001), // very tight budget
+                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
         );
@@ -2161,5 +2446,178 @@ mod tests {
         agent.set_hooks(hooks);
         // Should compile and not panic
         agent.hooks.on_turn_start("test", "custom hooks set");
+    }
+
+    #[tokio::test]
+    async fn shell_hooks_fire_for_successful_turn() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![response]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreTurn,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostTurn,
+                    command: "echo post-turn".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::OnComplete,
+                    command: "echo complete".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done");
+
+        let events = agent
+            .hook_results()
+            .iter()
+            .map(|result| result.event.clone())
+            .collect::<Vec<_>>();
+        assert!(events.contains(&HookEvent::PreTurn));
+        assert!(events.contains(&HookEvent::PostTurn));
+        assert!(events.contains(&HookEvent::OnComplete));
+        assert!(agent.hook_results()[0]
+            .stdout
+            .contains("\"user_message\":\"hello\""));
+    }
+
+    #[tokio::test]
+    async fn shell_hooks_fire_for_tool_calls() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+
+        let result = agent.run_turn("use a tool").await.expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let pre = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreToolCall)
+            .expect("pre tool hook");
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool hook");
+
+        assert!(pre.stdout.contains("\"tool_name\":\"echo\""));
+        assert!(post.stdout.contains("\"tool_name\":\"echo\""));
+        assert!(post.stdout.contains("\"success\":true"));
+    }
+
+    #[tokio::test]
+    async fn shell_hooks_fire_on_error() {
+        let mut agent = test_agent_with_endpoint(
+            "http://127.0.0.1:1/v1".to_owned(),
+            vec![
+                HookConfig {
+                    event: HookEvent::PreTurn,
+                    command: "echo pre".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::OnError,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+
+        let result = agent.run_turn("hello").await;
+        assert!(result.is_err());
+
+        let error_hook = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::OnError)
+            .expect("error hook");
+        assert!(error_hook.stdout.contains("\"stage\":\"llm_request\""));
     }
 }
