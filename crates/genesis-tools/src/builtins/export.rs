@@ -59,10 +59,13 @@ impl ToolHandler for SessionExportTool {
         let content = match format.as_str() {
             "json" => export_json(&session_id, session_title.as_deref(), &messages),
             "markdown" | "md" => export_markdown(&session_id, session_title.as_deref(), &messages),
+            "chatml" => export_chatml(&messages),
             _ => {
                 return Err(ToolError::ExecutionFailed {
                     tool: call.name.clone(),
-                    reason: format!("unsupported format '{format}'; use 'markdown' or 'json'"),
+                    reason: format!(
+                        "unsupported format '{format}'; use 'markdown', 'json', or 'chatml'"
+                    ),
                 })
             }
         };
@@ -173,6 +176,33 @@ fn export_json(
     serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_owned())
 }
 
+fn export_chatml(messages: &[(String, Option<String>, Option<String>, String)]) -> String {
+    let mut output = String::new();
+
+    for (role, content, tool_calls, _) in messages {
+        let role = match role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            "system" => "system",
+            "tool" => "tool",
+            other => other,
+        };
+
+        let text = match (content.as_deref(), tool_calls.as_deref()) {
+            (Some(text), Some(tc)) if !text.is_empty() && !tc.is_empty() && tc != "null" => {
+                format!("{text}\n{tc}")
+            }
+            (Some(text), _) if !text.is_empty() => text.to_owned(),
+            (_, Some(tc)) if !tc.is_empty() && tc != "null" => tc.to_owned(),
+            _ => String::new(),
+        };
+
+        output.push_str(&format!("<|im_start|>{role}\n{text}<|im_end|>\n"));
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +276,42 @@ mod tests {
         let md = export_markdown("s-1", None, &messages);
         assert!(md.contains("```json"));
         assert!(md.contains("echo"));
+    }
+
+    #[test]
+    fn export_chatml_formats_roles_and_tool_calls() {
+        let messages = vec![
+            (
+                "system".to_owned(),
+                Some("You are helpful.".to_owned()),
+                None,
+                "2024-01-01 10:00:00".to_owned(),
+            ),
+            (
+                "user".to_owned(),
+                Some("Hello!".to_owned()),
+                None,
+                "2024-01-01 10:00:01".to_owned(),
+            ),
+            (
+                "assistant".to_owned(),
+                Some("Let me check.".to_owned()),
+                Some(r#"[{"name":"echo","arguments":{"message":"hi"}}]"#.to_owned()),
+                "2024-01-01 10:00:02".to_owned(),
+            ),
+            (
+                "tool".to_owned(),
+                Some("echo: hi".to_owned()),
+                None,
+                "2024-01-01 10:00:03".to_owned(),
+            ),
+        ];
+
+        let chatml = export_chatml(&messages);
+        assert!(chatml.contains("<|im_start|>system\nYou are helpful.<|im_end|>\n"));
+        assert!(chatml.contains("<|im_start|>user\nHello!<|im_end|>\n"));
+        assert!(chatml.contains("<|im_start|>assistant\nLet me check.\n[{\"name\":\"echo\",\"arguments\":{\"message\":\"hi\"}}]<|im_end|>\n"));
+        assert!(chatml.contains("<|im_start|>tool\necho: hi<|im_end|>\n"));
     }
 
     #[test]

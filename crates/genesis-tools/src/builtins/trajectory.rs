@@ -132,65 +132,8 @@ impl TrajectoryTool {
         let trajectory = load_trajectory(context, &call.name)?;
 
         let content = match format {
-            "sharegpt" => {
-                let entries: Vec<serde_json::Value> = trajectory
-                    .steps
-                    .iter()
-                    .filter_map(|step| {
-                        let action_type = step.get("action_type")?.as_str()?;
-                        let from = match action_type {
-                            "user_message" => "human",
-                            "assistant_message" => "gpt",
-                            "tool_call" => "tool_call",
-                            "tool_result" => "tool_result",
-                            "system_message" => "system",
-                            _ => return None,
-                        };
-
-                        let value = match action_type {
-                            "tool_call" => {
-                                let name = step
-                                    .get("tool_name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                let args = step
-                                    .get("tool_arguments")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("{}");
-                                format!("{name}: {args}")
-                            }
-                            "tool_result" => {
-                                let name = step
-                                    .get("tool_name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                let result = step
-                                    .get("tool_result")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                format!("{name}: {result}")
-                            }
-                            _ => step
-                                .get("content")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_owned(),
-                        };
-
-                        Some(serde_json::json!({
-                            "from": from,
-                            "value": value,
-                        }))
-                    })
-                    .collect();
-
-                serde_json::to_string_pretty(&entries).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: call.name.clone(),
-                        reason: format!("failed to serialize sharegpt format: {e}"),
-                    }
-                })?
-            }
+            "sharegpt" => export_sharegpt(&trajectory, &call.name)?,
+            "chatml" => export_chatml(&trajectory),
             "json" => {
                 serde_json::to_string_pretty(&trajectory).map_err(|e| {
                     ToolError::ExecutionFailed {
@@ -202,7 +145,9 @@ impl TrajectoryTool {
             other => {
                 return Err(ToolError::ExecutionFailed {
                     tool: call.name.clone(),
-                    reason: format!("unknown format: {other}. Use 'json' or 'sharegpt'."),
+                    reason: format!(
+                        "unknown format: {other}. Use 'json', 'sharegpt', or 'chatml'."
+                    ),
                 });
             }
         };
@@ -350,6 +295,92 @@ impl TrajectoryTool {
             ]),
         })
     }
+}
+
+fn format_step_value(step: &serde_json::Value, action_type: &str) -> String {
+    match action_type {
+        "tool_call" => {
+            let name = step
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let args = step
+                .get("tool_arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            format!("{name}: {args}")
+        }
+        "tool_result" => {
+            let name = step
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let result = step
+                .get("tool_result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("{name}: {result}")
+        }
+        _ => step
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+    }
+}
+
+fn export_sharegpt(trajectory: &TrajectoryData, tool_name: &str) -> Result<String, ToolError> {
+    let entries: Vec<serde_json::Value> = trajectory
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let action_type = step.get("action_type")?.as_str()?;
+            let from = match action_type {
+                "user_message" => "human",
+                "assistant_message" => "gpt",
+                "tool_call" => "tool_call",
+                "tool_result" => "tool_result",
+                "system_message" => "system",
+                _ => return None,
+            };
+
+            Some(serde_json::json!({
+                "from": from,
+                "value": format_step_value(step, action_type),
+            }))
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&entries).map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("failed to serialize sharegpt format: {e}"),
+    })
+}
+
+fn export_chatml(trajectory: &TrajectoryData) -> String {
+    let mut output = String::new();
+
+    for step in &trajectory.steps {
+        let Some(action_type) = step.get("action_type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let role = match action_type {
+            "user_message" => "user",
+            "assistant_message" => "assistant",
+            "tool_call" => "assistant",
+            "tool_result" => "tool",
+            "system_message" => "system",
+            _ => continue,
+        };
+
+        output.push_str(&format!(
+            "<|im_start|>{role}\n{}<|im_end|>\n",
+            format_step_value(step, action_type)
+        ));
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -516,6 +547,90 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("file contents here"));
+    }
+
+    #[test]
+    fn export_chatml_format() {
+        let dir = tempdir().expect("tempdir");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+        let trajectory = serde_json::json!({
+            "session_id": context.session_id,
+            "model": "gpt-4",
+            "system_prompt_hash": "abc123",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "completed_at": null,
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "action_type": "system_message",
+                    "content": "Follow the operator playbook."
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-01-01T00:00:01+00:00",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 2,
+                    "timestamp": "2026-01-01T00:00:02+00:00",
+                    "action_type": "assistant_message",
+                    "content": "hi there"
+                },
+                {
+                    "step_index": 3,
+                    "timestamp": "2026-01-01T00:00:03+00:00",
+                    "action_type": "tool_call",
+                    "content": "tool_call: read_file",
+                    "tool_name": "read_file",
+                    "tool_arguments": "{\"path\":\"/tmp/f.txt\"}"
+                },
+                {
+                    "step_index": 4,
+                    "timestamp": "2026-01-01T00:00:04+00:00",
+                    "action_type": "tool_result",
+                    "content": "tool_result: read_file",
+                    "tool_name": "read_file",
+                    "tool_result": "file contents here"
+                }
+            ],
+            "outcome": null,
+            "tags": ["demo"]
+        });
+        let path = std::path::Path::new(&context.data_dir)
+            .join("trajectories")
+            .join(format!("{}.json", context.session_id));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("should create trajectories dir");
+        std::fs::write(path, serde_json::to_string_pretty(&trajectory).unwrap())
+            .expect("should write trajectory");
+
+        let output = TrajectoryTool
+            .run(
+                &ToolCall {
+                    name: "trajectory".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("action".to_owned(), "export".to_owned()),
+                        ("format".to_owned(), "chatml".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("chatml export should succeed");
+
+        assert!(output
+            .content
+            .contains("<|im_start|>system\nFollow the operator playbook.<|im_end|>\n"));
+        assert!(output.content.contains("<|im_start|>user\nhello<|im_end|>\n"));
+        assert!(output
+            .content
+            .contains("<|im_start|>assistant\nhi there<|im_end|>\n"));
+        assert!(output.content.contains(
+            "<|im_start|>assistant\nread_file: {\"path\":\"/tmp/f.txt\"}<|im_end|>\n"
+        ));
+        assert!(output.content.contains(
+            "<|im_start|>tool\nread_file: file contents here<|im_end|>\n"
+        ));
     }
 
     #[test]

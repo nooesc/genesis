@@ -53,6 +53,40 @@ pub struct Trajectory {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayEventMetadata {
+    pub step_index: usize,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayEvent {
+    User {
+        metadata: ReplayEventMetadata,
+        content: String,
+    },
+    Assistant {
+        metadata: ReplayEventMetadata,
+        content: String,
+    },
+    ToolCall {
+        metadata: ReplayEventMetadata,
+        tool_name: Option<String>,
+        arguments: Option<String>,
+        content: String,
+    },
+    ToolResult {
+        metadata: ReplayEventMetadata,
+        tool_name: Option<String>,
+        result: Option<String>,
+        content: String,
+    },
+    System {
+        metadata: ReplayEventMetadata,
+        content: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TrajectoryOutcome {
@@ -85,6 +119,55 @@ fn truncate_field(s: &str) -> String {
         let mut t = s[..MAX_STEP_CONTENT].to_string();
         t.push_str("... (truncated)");
         t
+    }
+}
+
+impl Trajectory {
+    pub fn replay_events(&self) -> Vec<ReplayEvent> {
+        let mut steps = self.steps.iter().collect::<Vec<_>>();
+        steps.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then(left.step_index.cmp(&right.step_index))
+        });
+
+        steps.into_iter().map(ReplayEvent::from).collect()
+    }
+}
+
+impl From<&TrajectoryStep> for ReplayEvent {
+    fn from(step: &TrajectoryStep) -> Self {
+        let metadata = ReplayEventMetadata {
+            step_index: step.step_index,
+            timestamp: step.timestamp.clone(),
+        };
+
+        match step.action_type {
+            ActionType::UserMessage => Self::User {
+                metadata,
+                content: step.content.clone(),
+            },
+            ActionType::AssistantMessage => Self::Assistant {
+                metadata,
+                content: step.content.clone(),
+            },
+            ActionType::ToolCall => Self::ToolCall {
+                metadata,
+                tool_name: step.tool_name.clone(),
+                arguments: step.tool_arguments.clone(),
+                content: step.content.clone(),
+            },
+            ActionType::ToolResult => Self::ToolResult {
+                metadata,
+                tool_name: step.tool_name.clone(),
+                result: step.tool_result.clone(),
+                content: step.content.clone(),
+            },
+            ActionType::SystemMessage => Self::System {
+                metadata,
+                content: step.content.clone(),
+            },
+        }
     }
 }
 
@@ -750,5 +833,168 @@ mod tests {
                 serde_json::from_str(&json).expect("should deserialize");
             assert_eq!(parsed, outcome);
         }
+    }
+
+    #[test]
+    fn replay_events_extract_all_event_types_in_chronological_order() {
+        let trajectory = Trajectory {
+            session_id: "session-1".to_owned(),
+            model: "gpt-4".to_owned(),
+            system_prompt_hash: "hash".to_owned(),
+            started_at: "2026-03-08T00:00:00Z".to_owned(),
+            completed_at: None,
+            steps: vec![
+                TrajectoryStep {
+                    step_index: 3,
+                    timestamp: "2026-03-08T00:00:03Z".to_owned(),
+                    action_type: ActionType::ToolResult,
+                    content: "tool_result: shell_exec".to_owned(),
+                    tool_name: Some("shell_exec".to_owned()),
+                    tool_arguments: None,
+                    tool_result: Some("{\"stdout\":\"done\"}".to_owned()),
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 0,
+                    timestamp: "2026-03-08T00:00:00Z".to_owned(),
+                    action_type: ActionType::SystemMessage,
+                    content: "system prompt".to_owned(),
+                    tool_name: None,
+                    tool_arguments: None,
+                    tool_result: None,
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 4,
+                    timestamp: "2026-03-08T00:00:04Z".to_owned(),
+                    action_type: ActionType::AssistantMessage,
+                    content: "done".to_owned(),
+                    tool_name: None,
+                    tool_arguments: None,
+                    tool_result: None,
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 1,
+                    timestamp: "2026-03-08T00:00:01Z".to_owned(),
+                    action_type: ActionType::UserMessage,
+                    content: "run echo".to_owned(),
+                    tool_name: None,
+                    tool_arguments: None,
+                    tool_result: None,
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 2,
+                    timestamp: "2026-03-08T00:00:02Z".to_owned(),
+                    action_type: ActionType::ToolCall,
+                    content: "tool_call: shell_exec".to_owned(),
+                    tool_name: Some("shell_exec".to_owned()),
+                    tool_arguments: Some("{\"cmd\":\"echo hi\"}".to_owned()),
+                    tool_result: None,
+                    tokens: None,
+                },
+            ],
+            outcome: None,
+            tags: Vec::new(),
+        };
+
+        let events = trajectory.replay_events();
+
+        assert_eq!(
+            events,
+            vec![
+                ReplayEvent::System {
+                    metadata: ReplayEventMetadata {
+                        step_index: 0,
+                        timestamp: "2026-03-08T00:00:00Z".to_owned(),
+                    },
+                    content: "system prompt".to_owned(),
+                },
+                ReplayEvent::User {
+                    metadata: ReplayEventMetadata {
+                        step_index: 1,
+                        timestamp: "2026-03-08T00:00:01Z".to_owned(),
+                    },
+                    content: "run echo".to_owned(),
+                },
+                ReplayEvent::ToolCall {
+                    metadata: ReplayEventMetadata {
+                        step_index: 2,
+                        timestamp: "2026-03-08T00:00:02Z".to_owned(),
+                    },
+                    tool_name: Some("shell_exec".to_owned()),
+                    arguments: Some("{\"cmd\":\"echo hi\"}".to_owned()),
+                    content: "tool_call: shell_exec".to_owned(),
+                },
+                ReplayEvent::ToolResult {
+                    metadata: ReplayEventMetadata {
+                        step_index: 3,
+                        timestamp: "2026-03-08T00:00:03Z".to_owned(),
+                    },
+                    tool_name: Some("shell_exec".to_owned()),
+                    result: Some("{\"stdout\":\"done\"}".to_owned()),
+                    content: "tool_result: shell_exec".to_owned(),
+                },
+                ReplayEvent::Assistant {
+                    metadata: ReplayEventMetadata {
+                        step_index: 4,
+                        timestamp: "2026-03-08T00:00:04Z".to_owned(),
+                    },
+                    content: "done".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_events_break_timestamp_ties_with_step_index() {
+        let trajectory = Trajectory {
+            session_id: "session-1".to_owned(),
+            model: "gpt-4".to_owned(),
+            system_prompt_hash: "hash".to_owned(),
+            started_at: "2026-03-08T00:00:00Z".to_owned(),
+            completed_at: None,
+            steps: vec![
+                TrajectoryStep {
+                    step_index: 2,
+                    timestamp: "2026-03-08T00:00:00Z".to_owned(),
+                    action_type: ActionType::ToolResult,
+                    content: "tool_result: read_file".to_owned(),
+                    tool_name: Some("read_file".to_owned()),
+                    tool_arguments: None,
+                    tool_result: Some("hello".to_owned()),
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 0,
+                    timestamp: "2026-03-08T00:00:00Z".to_owned(),
+                    action_type: ActionType::UserMessage,
+                    content: "read the file".to_owned(),
+                    tool_name: None,
+                    tool_arguments: None,
+                    tool_result: None,
+                    tokens: None,
+                },
+                TrajectoryStep {
+                    step_index: 1,
+                    timestamp: "2026-03-08T00:00:00Z".to_owned(),
+                    action_type: ActionType::ToolCall,
+                    content: "tool_call: read_file".to_owned(),
+                    tool_name: Some("read_file".to_owned()),
+                    tool_arguments: Some("{\"path\":\"/tmp/demo.txt\"}".to_owned()),
+                    tool_result: None,
+                    tokens: None,
+                },
+            ],
+            outcome: None,
+            tags: Vec::new(),
+        };
+
+        let events = trajectory.replay_events();
+
+        assert!(matches!(events[0], ReplayEvent::User { .. }));
+        assert!(matches!(events[1], ReplayEvent::ToolCall { .. }));
+        assert!(matches!(events[2], ReplayEvent::ToolResult { .. }));
     }
 }

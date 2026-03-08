@@ -857,12 +857,12 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "session_export".to_owned(),
-                description: "Exports a conversation session to Markdown or JSON format. Can write to a file or return the content directly.".to_owned(),
+                description: "Exports a conversation session to Markdown, JSON, or ChatML format. Can write to a file or return the content directly.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "session_id": { "type": "string", "description": "ID of the session to export. Defaults to current session." },
-                        "format": { "type": "string", "description": "Export format: 'markdown' (default) or 'json'." },
+                        "format": { "type": "string", "description": "Export format: 'markdown' (default), 'json', or 'chatml'." },
                         "path": { "type": "string", "description": "Optional file path to write the export to. If omitted, content is returned directly." }
                     },
                     "required": []
@@ -1020,12 +1020,12 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "trajectory".to_owned(),
-                description: "Manages trajectory recording for agent training data. Actions: export (returns trajectory JSON or ShareGPT format), status (check recording state), tag (add a tag), set_outcome (mark success/failure/abandoned).".to_owned(),
+                description: "Manages trajectory recording for agent training data. Actions: export (returns trajectory JSON, ShareGPT, or ChatML format), status (check recording state), tag (add a tag), set_outcome (mark success/failure/abandoned).".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "description": "Action: 'export', 'status', 'tag', or 'set_outcome'." },
-                        "format": { "type": "string", "description": "Export format: 'json' (default) or 'sharegpt'. Only used with export action." },
+                        "format": { "type": "string", "description": "Export format: 'json' (default), 'sharegpt', or 'chatml'. Only used with export action." },
                         "tag": { "type": "string", "description": "Tag to add (used with tag action)." },
                         "outcome": { "type": "string", "description": "Outcome: 'success', 'failure', or 'abandoned' (used with set_outcome action)." },
                         "reason": { "type": "string", "description": "Failure reason (optional, used with set_outcome when outcome is 'failure')." }
