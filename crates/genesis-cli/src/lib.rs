@@ -452,6 +452,19 @@ pub enum EvalCommand {
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
     },
+    #[command(about = "Random sample of trajectories from a directory")]
+    Sample {
+        #[arg(help = "Source directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Output directory for sampled trajectories")]
+        output: String,
+        #[arg(long, help = "Number of trajectories to sample")]
+        count: usize,
+        #[arg(long, help = "Random seed for reproducibility")]
+        seed: Option<u64>,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -972,6 +985,13 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 seed,
                 recursive,
             } => run_eval_split(&dir, &train, &test, ratio, seed, recursive),
+            EvalCommand::Sample {
+                dir,
+                output,
+                count,
+                seed,
+                recursive,
+            } => run_eval_sample(&dir, &output, count, seed, recursive),
         },
         Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -3879,6 +3899,51 @@ fn run_eval_split(
         files.len(),
         train_files.len(),
         test_files.len()
+    ))
+}
+
+fn run_eval_sample(
+    dir: &str,
+    output: &str,
+    count: usize,
+    seed: Option<u64>,
+    recursive: bool,
+) -> Result<String, CliError> {
+    std::fs::create_dir_all(output)
+        .map_err(|e| CliError::Other(format!("failed to create {output}: {e}")))?;
+
+    let mut files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    if files.is_empty() {
+        return Ok("no trajectory files found".to_owned());
+    }
+
+    let actual_count = count.min(files.len());
+
+    files.sort();
+    use rand::seq::SliceRandom;
+    let mut rng = match seed {
+        Some(s) => {
+            use rand::SeedableRng;
+            rand::rngs::StdRng::seed_from_u64(s)
+        }
+        None => {
+            use rand::SeedableRng;
+            rand::rngs::StdRng::from_os_rng()
+        }
+    };
+    files.shuffle(&mut rng);
+
+    for path in &files[..actual_count] {
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let dest = std::path::Path::new(output).join(&filename);
+        std::fs::copy(path, &dest).map_err(|e| {
+            CliError::Other(format!("failed to copy {}: {e}", path.display()))
+        })?;
+    }
+
+    Ok(format!(
+        "sampled {actual_count}/{} trajectories into {output}",
+        files.len()
     ))
 }
 
@@ -9384,6 +9449,72 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_eval_sample_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "sample", "src", "--output", "out",
+            "--count", "100", "--seed", "42",
+        ])
+        .expect("sample should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Sample {
+                dir, output, count, seed, ..
+            }) => {
+                assert_eq!(dir, "src");
+                assert_eq!(output, "out");
+                assert_eq!(count, 100);
+                assert_eq!(seed, Some(42));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_sample_selects_subset() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for i in 0..10 {
+            let t = serde_json::json!({
+                "session_id": format!("s{i}"), "model": "m", "system_prompt_hash": "h",
+                "started_at": "2026-01-01T00:00:00Z", "steps": [], "tags": []
+            });
+            std::fs::write(
+                src.join(format!("s{i}.json")),
+                serde_json::to_string(&t).unwrap(),
+            ).unwrap();
+        }
+
+        let result = crate::run_eval_sample(
+            src.to_str().unwrap(), out.to_str().unwrap(), 3, Some(42), false,
+        ).expect("sample should succeed");
+
+        assert!(result.contains("sampled 3/10"));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn run_eval_sample_caps_at_available() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let t = serde_json::json!({
+            "session_id": "s1", "model": "m", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [], "tags": []
+        });
+        std::fs::write(src.join("s1.json"), serde_json::to_string(&t).unwrap()).unwrap();
+
+        let result = crate::run_eval_sample(
+            src.to_str().unwrap(), out.to_str().unwrap(), 100, Some(1), false,
+        ).expect("sample should succeed");
+
+        assert!(result.contains("sampled 1/1"));
     }
 
     #[test]
