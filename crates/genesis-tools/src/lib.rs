@@ -296,6 +296,68 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::web::WebRequestTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_create".to_owned(),
+                description: "Creates or updates a reusable skill. Skills are persistent procedures that can be invoked later.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Unique name for the skill (e.g. 'code_review', 'deploy_app')." },
+                        "description": { "type": "string", "description": "Short description of what the skill does." },
+                        "instructions": { "type": "string", "description": "Step-by-step instructions for executing the skill." },
+                        "trigger_hint": { "type": "string", "description": "When should this skill be triggered (e.g. 'when user asks to review code')." },
+                        "tags": { "type": "string", "description": "Comma-separated tags for categorization (e.g. 'dev,review')." }
+                    },
+                    "required": ["name", "description", "instructions"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill::SkillCreateTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_list".to_owned(),
+                description: "Lists all saved skills with their descriptions and version numbers.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill::SkillListTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_get".to_owned(),
+                description: "Retrieves a specific skill's full instructions by name.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Name of the skill to retrieve." }
+                    },
+                    "required": ["name"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill::SkillGetTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "skill_delete".to_owned(),
+                description: "Deletes a saved skill by name.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Name of the skill to delete." }
+                    },
+                    "required": ["name"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::skill::SkillDeleteTool,
         );
     registry
 }
@@ -375,7 +437,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 10);
+        assert_eq!(definitions.len(), 14);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -386,6 +448,10 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "memory_recall"));
         assert!(definitions.iter().any(|tool| tool.name == "search_files"));
         assert!(definitions.iter().any(|tool| tool.name == "web_request"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_create"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
     }
 
     #[test]
