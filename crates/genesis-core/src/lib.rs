@@ -14,6 +14,7 @@ pub mod scheduler;
 pub mod skills;
 pub mod skills_hub;
 pub mod quality;
+pub mod redact;
 pub mod skill_manifest;
 pub mod tagger;
 pub mod toolset;
