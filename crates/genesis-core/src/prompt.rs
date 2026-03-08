@@ -1,7 +1,17 @@
+use std::path::Path;
+
 use genesis_types::ToolDefinition;
 
 const DEFAULT_AGENT_NAME: &str = "Eve";
 const DEFAULT_AGENT_IDENTITY: &str = "You are Eve, an intelligent AI agent built on the Genesis framework. You are helpful, thoughtful, and precise. You have access to tools that extend your capabilities.";
+
+/// Well-known context file paths, checked in order. The first file found wins.
+const CONTEXT_FILE_CANDIDATES: &[&str] = &[
+    ".genesis/context.md",
+    ".genesis/instructions.md",
+    "genesis.md",
+    ".genesis.md",
+];
 
 /// Build a system prompt for the agent from the current context.
 pub fn build_system_prompt(
@@ -30,6 +40,25 @@ pub fn build_system_prompt_full(
     skills_section: Option<&str>,
     user_model_section: Option<&str>,
 ) -> String {
+    build_system_prompt_complete(
+        profile,
+        tools,
+        custom_identity,
+        skills_section,
+        user_model_section,
+        None,
+    )
+}
+
+/// Build a system prompt with all optional sections including project context.
+pub fn build_system_prompt_complete(
+    profile: &str,
+    tools: &[ToolDefinition],
+    custom_identity: Option<&str>,
+    skills_section: Option<&str>,
+    user_model_section: Option<&str>,
+    context_section: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
 
     // Identity section
@@ -41,6 +70,13 @@ pub fn build_system_prompt_full(
 
     // Profile
     parts.push(format!("Current profile: {profile}"));
+
+    // Project context files
+    if let Some(context) = context_section {
+        parts.push(format!(
+            "## Project Context\n\nThe following instructions come from the project's context file. Follow them carefully.\n\n{context}"
+        ));
+    }
 
     // User model section (what the agent knows about the user)
     if let Some(user_model) = user_model_section {
@@ -69,6 +105,23 @@ pub fn build_system_prompt_full(
     );
 
     parts.join("\n\n")
+}
+
+/// Load project context from well-known file locations relative to a directory.
+///
+/// Checks `.genesis/context.md`, `.genesis/instructions.md`, `genesis.md`,
+/// and `.genesis.md` in order. Returns the contents of the first file found,
+/// or `None` if none exist.
+pub fn load_context_file(project_dir: &Path) -> Option<String> {
+    for candidate in CONTEXT_FILE_CANDIDATES {
+        let path = project_dir.join(candidate);
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if !contents.trim().is_empty() {
+                return Some(contents);
+            }
+        }
+    }
+    None
 }
 
 /// Returns the default agent name.
@@ -159,5 +212,57 @@ mod tests {
     fn prompt_without_user_model_omits_section() {
         let prompt = build_system_prompt_full("default", &[], None, None, None);
         assert!(!prompt.contains("What you know about the user"));
+    }
+
+    #[test]
+    fn prompt_with_context_section_includes_project_context() {
+        let context = "Always use tabs for indentation.\nPrefer async/await over callbacks.";
+        let prompt = build_system_prompt_complete("default", &[], None, None, None, Some(context));
+        assert!(prompt.contains("## Project Context"));
+        assert!(prompt.contains("Always use tabs"));
+        assert!(prompt.contains("Follow them carefully"));
+    }
+
+    #[test]
+    fn prompt_without_context_omits_section() {
+        let prompt = build_system_prompt_complete("default", &[], None, None, None, None);
+        assert!(!prompt.contains("Project Context"));
+    }
+
+    #[test]
+    fn load_context_file_finds_genesis_md() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("genesis.md"), "Use Rust for everything.")
+            .expect("write");
+        let context = load_context_file(dir.path());
+        assert_eq!(context.as_deref(), Some("Use Rust for everything."));
+    }
+
+    #[test]
+    fn load_context_file_prefers_dot_genesis_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".genesis")).expect("mkdir");
+        std::fs::write(
+            dir.path().join(".genesis/context.md"),
+            "From .genesis/context.md",
+        )
+        .expect("write context");
+        std::fs::write(dir.path().join("genesis.md"), "From genesis.md").expect("write root");
+
+        let context = load_context_file(dir.path());
+        assert_eq!(context.as_deref(), Some("From .genesis/context.md"));
+    }
+
+    #[test]
+    fn load_context_file_returns_none_when_no_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(load_context_file(dir.path()).is_none());
+    }
+
+    #[test]
+    fn load_context_file_skips_empty_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("genesis.md"), "   \n  ").expect("write");
+        assert!(load_context_file(dir.path()).is_none());
     }
 }
