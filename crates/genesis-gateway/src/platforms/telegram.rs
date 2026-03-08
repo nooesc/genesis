@@ -17,7 +17,7 @@ use axum::Json;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::AppState;
 
@@ -99,6 +99,125 @@ struct TelegramApiResponse {
     description: Option<String>,
 }
 
+/// Response from Telegram `getFile` API.
+#[derive(Debug, Deserialize)]
+struct GetFileResponse {
+    ok: bool,
+    result: Option<TelegramFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+    file_path: Option<String>,
+}
+
+/// Whisper API transcription response.
+#[derive(Debug, Deserialize)]
+struct WhisperResponse {
+    text: String,
+}
+
+// --- Voice/Audio transcription helpers ---
+
+/// Download a file from Telegram by file_id, then transcribe via Whisper API.
+/// Returns the transcribed text, or an error description.
+async fn transcribe_telegram_audio(token: &str, file_id: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    // Step 1: Get the file path from Telegram.
+    let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
+    let resp = client
+        .post(&get_file_url)
+        .json(&serde_json::json!({ "file_id": file_id }))
+        .send()
+        .await
+        .map_err(|e| format!("getFile request failed: {e}"))?;
+
+    let file_resp: GetFileResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse getFile response: {e}"))?;
+
+    if !file_resp.ok {
+        return Err("Telegram getFile returned not ok".to_owned());
+    }
+
+    let file_path = file_resp
+        .result
+        .and_then(|r| r.file_path)
+        .ok_or_else(|| "no file_path in getFile response".to_owned())?;
+
+    // Step 2: Download the actual audio file.
+    let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let audio_bytes = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("file download failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read audio bytes: {e}"))?;
+
+    if audio_bytes.is_empty() {
+        return Err("downloaded audio file is empty".to_owned());
+    }
+
+    // Step 3: Transcribe via Whisper API.
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| "OPENAI_API_KEY not set, cannot transcribe".to_owned())?;
+
+    let api_base = std::env::var("OPENAI_API_BASE")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+
+    // Determine file extension from file_path.
+    let ext = file_path
+        .rsplit('.')
+        .next()
+        .unwrap_or("ogg");
+    let mime = match ext {
+        "ogg" | "oga" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "webm" => "audio/webm",
+        "flac" => "audio/flac",
+        _ => "audio/ogg", // Telegram voice messages default to ogg/opus
+    };
+
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+        .file_name(format!("voice.{ext}"))
+        .mime_str(mime)
+        .map_err(|e| format!("failed to build multipart: {e}"))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", "whisper-1")
+        .text("response_format", "json");
+
+    let whisper_url = format!("{}/audio/transcriptions", api_base.trim_end_matches('/'));
+
+    let whisper_resp = client
+        .post(&whisper_url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Whisper API request failed: {e}"))?;
+
+    let status = whisper_resp.status();
+    if !status.is_success() {
+        let body = whisper_resp.text().await.unwrap_or_default();
+        return Err(format!("Whisper API returned {status}: {body}"));
+    }
+
+    let result: WhisperResponse = whisper_resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse Whisper response: {e}"))?;
+
+    Ok(result.text)
+}
+
 // --- Handler ---
 
 /// Webhook handler for Telegram updates.
@@ -132,13 +251,11 @@ pub async fn webhook_handler(
             false,
         )
     } else if let Some(voice) = &message.voice {
-        // Voice message — tell the agent about it so it can use transcription tools.
+        // Voice message — will attempt auto-transcription in background task.
         (
             format!(
-                "[Voice message received: {}s audio, file_id={}. \
-                 Use the transcribe tool if audio transcription is needed, \
-                 or acknowledge that you received a voice message.]",
-                voice.duration, voice.file_id
+                "__voice:{}:{}",
+                voice.file_id, voice.duration
             ),
             true,
         )
@@ -147,16 +264,15 @@ pub async fn webhook_handler(
         let dur = audio.duration.unwrap_or(0);
         (
             format!(
-                "[Audio file received: \"{name}\", {dur}s, file_id={}. \
-                 Use the transcribe tool if transcription is needed.]",
-                audio.file_id
+                "__audio:{}:{}:{name}",
+                audio.file_id, dur
             ),
             true,
         )
     } else {
         return StatusCode::OK; // Ignore unsupported message types
     };
-    let _ = is_voice; // May be used for richer handling later.
+    let _ = is_voice;
 
     let chat_id = message.chat.id;
     let message_id = message.message_id;
@@ -190,6 +306,50 @@ pub async fn webhook_handler(
     let state = Arc::clone(&state);
     tokio::spawn(
         async move {
+            // Auto-transcribe voice/audio messages before sending to agent.
+            let prompt = if let Some(rest) = text.strip_prefix("__voice:") {
+                // Parse: file_id:duration
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                let file_id = parts[0];
+                let duration = parts.get(1).unwrap_or(&"0");
+                match transcribe_telegram_audio(&token, file_id).await {
+                    Ok(transcript) => {
+                        info!(duration, "voice message transcribed successfully");
+                        format!("[Voice message transcription ({duration}s)]: {transcript}")
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "voice transcription failed, falling back to metadata");
+                        format!(
+                            "[Voice message received: {duration}s audio, file_id={file_id}. \
+                             Auto-transcription failed: {e}. \
+                             Use the transcribe tool if needed.]"
+                        )
+                    }
+                }
+            } else if let Some(rest) = text.strip_prefix("__audio:") {
+                // Parse: file_id:duration:name
+                let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                let file_id = parts[0];
+                let duration = parts.get(1).unwrap_or(&"0");
+                let name = parts.get(2).unwrap_or(&"audio");
+                match transcribe_telegram_audio(&token, file_id).await {
+                    Ok(transcript) => {
+                        info!(file_name = name, "audio file transcribed successfully");
+                        format!("[Audio \"{name}\" transcription ({duration}s)]: {transcript}")
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "audio transcription failed, falling back to metadata");
+                        format!(
+                            "[Audio file received: \"{name}\", {duration}s, file_id={file_id}. \
+                             Auto-transcription failed: {e}. \
+                             Use the transcribe tool if needed.]"
+                        )
+                    }
+                }
+            } else {
+                text.clone()
+            };
+
             let service = SessionExecutionService::new(&state.loaded);
 
             let result = service
@@ -197,7 +357,7 @@ pub async fn webhook_handler(
                     session_id: &session_id,
                     session_platform: "telegram",
                     delivery_platform: DeliveryPlatform::Telegram,
-                    prompt: &text,
+                    prompt: &prompt,
                     title: Some(&format!("Telegram: {user_name}")),
                     images: Vec::new(),
                 })
@@ -434,5 +594,49 @@ mod tests {
         let chat_id: i64 = 12345;
         let session_id = format!("tg-{chat_id}");
         assert_eq!(session_id, "tg-12345");
+    }
+
+    #[test]
+    fn voice_marker_format_parseable() {
+        let marker = format!("__voice:{}:{}", "AwACAgIAAxkBAAIB", 12);
+        let rest = marker.strip_prefix("__voice:").unwrap();
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        assert_eq!(parts[0], "AwACAgIAAxkBAAIB");
+        assert_eq!(parts[1], "12");
+    }
+
+    #[test]
+    fn audio_marker_format_parseable() {
+        let marker = format!("__audio:{}:{}:{}", "CQACAgI", 180, "podcast.mp3");
+        let rest = marker.strip_prefix("__audio:").unwrap();
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        assert_eq!(parts[0], "CQACAgI");
+        assert_eq!(parts[1], "180");
+        assert_eq!(parts[2], "podcast.mp3");
+    }
+
+    #[test]
+    fn get_file_response_deserializes() {
+        let json = r#"{
+            "ok": true,
+            "result": {
+                "file_id": "abc",
+                "file_unique_id": "def",
+                "file_path": "voice/file_0.oga"
+            }
+        }"#;
+        let resp: GetFileResponse = serde_json::from_str(json).expect("should parse");
+        assert!(resp.ok);
+        assert_eq!(
+            resp.result.unwrap().file_path.as_deref(),
+            Some("voice/file_0.oga")
+        );
+    }
+
+    #[test]
+    fn whisper_response_deserializes() {
+        let json = r#"{"text": "Hello world, this is a test."}"#;
+        let resp: WhisperResponse = serde_json::from_str(json).expect("should parse");
+        assert_eq!(resp.text, "Hello world, this is a test.");
     }
 }
