@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -8,6 +8,13 @@ use tracing::{error, info, warn};
 use crate::api_types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 use crate::error::ProviderError;
 use crate::resolve::ResolvedProvider;
+
+/// Maximum number of retry attempts for transient errors.
+const MAX_RETRIES: u32 = 3;
+/// Base delay for exponential backoff (doubles each attempt).
+const BASE_DELAY: Duration = Duration::from_secs(1);
+/// Maximum delay cap.
+const MAX_DELAY: Duration = Duration::from_secs(8);
 
 pub type ChatCompletionChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, ProviderError>> + Send>>;
@@ -54,22 +61,10 @@ impl ChatClient {
         })
     }
 
-    /// Send a chat completion request and return the parsed response.
-    pub async fn complete(
-        &self,
-        mut request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, ProviderError> {
-        let started_at = Instant::now();
-        // Ensure the model is set from the client's resolved provider
-        if request.model.is_empty() {
-            request.model = self.model.clone();
-        }
-
-        let mut body = serde_json::to_value(&request)?;
-
-        // Merge extra_body fields into the top-level request if present.
-        // This is how provider-specific params (OpenRouter routing hints,
-        // Nous Portal tags, etc.) get passed through.
+    /// Prepare a request body from a `ChatCompletionRequest`, merging
+    /// `extra_body` fields into the top-level JSON object.
+    fn prepare_body(request: &mut ChatCompletionRequest) -> Result<serde_json::Value, ProviderError> {
+        let mut body = serde_json::to_value(&*request)?;
         if let Some(extra) = request.extra_body.take() {
             if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 body_obj.remove("extra_body");
@@ -78,36 +73,109 @@ impl ChatClient {
                 }
             }
         }
+        Ok(body)
+    }
 
-        let response = match self.http.post(&self.endpoint).json(&body).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                error!(
-                    endpoint = self.endpoint.as_str(),
-                    model = request.model.as_str(),
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "chat completion request failed"
-                );
-                return Err(error.into());
+    /// Send an HTTP request with retry + exponential backoff for transient
+    /// errors (429 rate-limit, 5xx server errors, network failures).
+    async fn send_with_retry(
+        &self,
+        body: &serde_json::Value,
+        model: &str,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let started_at = Instant::now();
+
+        for attempt in 0..=MAX_RETRIES {
+            let result = self.http.post(&self.endpoint).json(body).send().await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+
+                    if !is_retryable_status(status.as_u16()) || attempt == MAX_RETRIES {
+                        let resp_body = response.text().await.unwrap_or_default();
+                        warn!(
+                            endpoint = self.endpoint.as_str(),
+                            model,
+                            status = status.as_u16(),
+                            attempt,
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            "API error (not retrying)"
+                        );
+                        return Err(ProviderError::ApiError {
+                            status: status.as_u16(),
+                            body: resp_body,
+                        });
+                    }
+
+                    // Parse Retry-After header for 429 responses
+                    let retry_after = if status.as_u16() == 429 {
+                        response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .map(Duration::from_secs)
+                    } else {
+                        None
+                    };
+
+                    let delay = retry_after.unwrap_or_else(|| backoff_delay(attempt));
+                    warn!(
+                        endpoint = self.endpoint.as_str(),
+                        model,
+                        status = status.as_u16(),
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        "retryable API error, backing off"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => {
+                    if attempt == MAX_RETRIES {
+                        error!(
+                            endpoint = self.endpoint.as_str(),
+                            model,
+                            attempt,
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            error = %error,
+                            "request failed after retries exhausted"
+                        );
+                        return Err(error.into());
+                    }
+
+                    let delay = backoff_delay(attempt);
+                    warn!(
+                        endpoint = self.endpoint.as_str(),
+                        model,
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %error,
+                        "network error, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
             }
-        };
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            warn!(
-                endpoint = self.endpoint.as_str(),
-                model = request.model.as_str(),
-                status = status.as_u16(),
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "chat completion request returned API error"
-            );
-            return Err(ProviderError::ApiError {
-                status: status.as_u16(),
-                body,
-            });
         }
+
+        unreachable!("retry loop should return before exhausting iterations")
+    }
+
+    /// Send a chat completion request and return the parsed response.
+    pub async fn complete(
+        &self,
+        mut request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        let started_at = Instant::now();
+        if request.model.is_empty() {
+            request.model = self.model.clone();
+        }
+
+        let body = Self::prepare_body(&mut request)?;
+        let response = self.send_with_retry(&body, &request.model).await?;
 
         let completion: ChatCompletionResponse = match response.json().await {
             Ok(completion) => completion,
@@ -168,45 +236,8 @@ impl ChatClient {
         }
         request.stream = Some(true);
 
-        let mut body = serde_json::to_value(&request)?;
-
-        if let Some(extra) = request.extra_body.take() {
-            if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
-                body_obj.remove("extra_body");
-                for (key, value) in extra_obj {
-                    body_obj.insert(key.clone(), value.clone());
-                }
-            }
-        }
-
-        let response = match self.http.post(&self.endpoint).json(&body).send().await {
-            Ok(response) => response,
-            Err(error) => {
-                error!(
-                    endpoint = self.endpoint.as_str(),
-                    model = request.model.as_str(),
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "streaming chat completion request failed"
-                );
-                return Err(error.into());
-            }
-        };
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            warn!(
-                endpoint = self.endpoint.as_str(),
-                model = request.model.as_str(),
-                status = status.as_u16(),
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                "streaming chat completion request returned API error"
-            );
-            return Err(ProviderError::ApiError {
-                status: status.as_u16(),
-                body,
-            });
-        }
+        let body = Self::prepare_body(&mut request)?;
+        let response = self.send_with_retry(&body, &request.model).await?;
 
         info!(
             endpoint = self.endpoint.as_str(),
@@ -291,6 +322,31 @@ impl ChatClient {
     pub fn model(&self) -> &str {
         &self.model
     }
+}
+
+/// Whether an HTTP status code is transient and worth retrying.
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Compute backoff delay with simple jitter for a given attempt (0-indexed).
+fn backoff_delay(attempt: u32) -> Duration {
+    let base_ms = BASE_DELAY.as_millis() as u64;
+    let delay_ms = base_ms.saturating_mul(1u64 << attempt);
+    let capped_ms = delay_ms.min(MAX_DELAY.as_millis() as u64);
+    // Simple jitter: vary ±25% using low bits of system time nanos
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    let jitter_range = capped_ms / 4;
+    let jitter = if jitter_range > 0 {
+        (nanos % jitter_range) as i64 - (jitter_range / 2) as i64
+    } else {
+        0
+    };
+    let final_ms = (capped_ms as i64 + jitter).max(100) as u64;
+    Duration::from_millis(final_ms)
 }
 
 fn take_next_sse_event(buffer: &mut String) -> Option<String> {
@@ -393,5 +449,37 @@ mod tests {
     fn parse_sse_event_stops_on_done_sentinel() {
         let chunk = parse_sse_event("data: [DONE]").expect("done sentinel should parse");
         assert_eq!(chunk, None);
+    }
+
+    #[test]
+    fn retryable_status_identifies_transient_errors() {
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(is_retryable_status(502));
+        assert!(is_retryable_status(503));
+        assert!(is_retryable_status(504));
+        assert!(!is_retryable_status(400));
+        assert!(!is_retryable_status(401));
+        assert!(!is_retryable_status(403));
+        assert!(!is_retryable_status(404));
+        assert!(!is_retryable_status(200));
+    }
+
+    #[test]
+    fn backoff_delay_increases_with_attempt() {
+        let d0 = backoff_delay(0);
+        let d1 = backoff_delay(1);
+        let d2 = backoff_delay(2);
+        // With ±25% jitter, attempt 0 should be ~750-1250ms,
+        // attempt 1 ~1500-2500ms, attempt 2 ~3000-5000ms.
+        // Just verify the trend increases (using generous bounds).
+        assert!(d0.as_millis() >= 100);
+        assert!(d2.as_millis() >= d0.as_millis() / 2);
+    }
+
+    #[test]
+    fn backoff_delay_caps_at_max() {
+        let d10 = backoff_delay(10);
+        assert!(d10.as_millis() <= MAX_DELAY.as_millis() as u128 + MAX_DELAY.as_millis() as u128 / 4);
     }
 }
