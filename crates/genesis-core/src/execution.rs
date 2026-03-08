@@ -354,6 +354,7 @@ impl<'a> SessionExecutionService<'a> {
                 response_format: self.response_format.clone(),
                 ..AgentLoopConfig::default()
             },
+            crate::hooks::HookRunner::default(),
             history,
         );
 
@@ -559,6 +560,7 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                         max_turns: 10, // Subagents get fewer turns to stay focused
                         ..AgentLoopConfig::default()
                     },
+                    crate::hooks::HookRunner::default(),
                 );
 
                 // Run the subagent turn

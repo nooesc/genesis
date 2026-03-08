@@ -2892,6 +2892,7 @@ async fn run_batch_item(
             session_id: Some(session_id.to_owned()),
             ..genesis_core::agent_loop::AgentLoopConfig::default()
         },
+        genesis_core::hooks::HookRunner::default(),
     );
 
     if let Some(tp) = &loaded.config.tool_provider {

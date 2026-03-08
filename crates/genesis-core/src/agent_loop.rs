@@ -15,7 +15,7 @@ use tracing::{debug, info, info_span, warn};
 use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
-use crate::hooks::{load_hooks, HookConfig, HookEvent, HookResult, HookRunner};
+use crate::hooks::{HookConfig, HookEvent, HookResult, HookRunner};
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
@@ -93,8 +93,6 @@ pub struct AgentLoopConfig {
     /// Timeout for individual tool calls in seconds. When a tool exceeds this
     /// duration, it is cancelled and the LLM receives a timeout error. Default: 120s.
     pub tool_timeout_secs: u64,
-    /// Shell hook configurations executed at lifecycle boundaries.
-    pub hooks: Vec<HookConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -136,7 +134,6 @@ impl Default for AgentLoopConfig {
             thinking: None,
             response_format: None,
             tool_timeout_secs: 120,
-            hooks: Vec::new(),
         }
     }
 }
@@ -250,14 +247,20 @@ pub struct AgentLoop {
 const STUCK_LOOP_THRESHOLD: usize = 3;
 
 impl AgentLoop {
-    pub fn new(client: ChatClient, tools: ToolRuntime, config: AgentLoopConfig) -> Self {
-        Self::with_history(client, tools, config, Vec::new())
+    pub fn new(
+        client: ChatClient,
+        tools: ToolRuntime,
+        config: AgentLoopConfig,
+        hook_runner: HookRunner,
+    ) -> Self {
+        Self::with_history(client, tools, config, hook_runner, Vec::new())
     }
 
     pub fn with_history(
         client: ChatClient,
         tools: ToolRuntime,
         config: AgentLoopConfig,
+        hook_runner: HookRunner,
         history: Vec<ChatMessage>,
     ) -> Self {
         let mut messages = Vec::new();
@@ -269,7 +272,6 @@ impl AgentLoop {
         messages.extend(history);
 
         let cost = SessionCost::new(config.budget_limit);
-        let hook_runner = load_hooks(config.hooks.clone());
 
         let trajectory = if config.enable_trajectory {
             let sys = config.system_prompt.as_deref().unwrap_or("");
@@ -1689,9 +1691,9 @@ mod tests {
             tools,
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
-                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
+            HookRunner::default(),
             Vec::new(),
         )
     }
@@ -1728,9 +1730,9 @@ mod tests {
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
                 session_id: Some("session-hooks".to_owned()),
-                hooks,
                 ..AgentLoopConfig::default()
             },
+            HookRunner::new(hooks),
             Vec::new(),
         )
     }
@@ -2124,9 +2126,9 @@ mod tests {
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
                 max_context_messages: Some(3),
-                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
+            HookRunner::default(),
             vec![
                 ChatMessage::user("msg1"),
                 ChatMessage::assistant("reply1"),
@@ -2193,9 +2195,9 @@ mod tests {
             AgentLoopConfig {
                 system_prompt: Some("system".to_owned()),
                 max_context_messages: Some(10),
-                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
+            HookRunner::default(),
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         );
 
@@ -2327,9 +2329,9 @@ mod tests {
             tools,
             AgentLoopConfig {
                 budget_limit: Some(0.001), // very tight budget
-                hooks: vec![],
                 ..AgentLoopConfig::default()
             },
+            HookRunner::default(),
         );
 
         // gpt-4.1-mini: $0.40/M input, $1.60/M output
