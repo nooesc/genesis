@@ -181,6 +181,11 @@ pub enum StorageCommand {
 pub enum ModelCommand {
     #[command(about = "Show the active provider and model")]
     Show,
+    #[command(about = "List popular models grouped by provider")]
+    List {
+        #[arg(long, help = "Filter by provider backend (e.g. openai, anthropic, google)")]
+        backend: Option<String>,
+    },
     #[command(about = "Switch the active model (persisted to config file)")]
     Set {
         #[arg(help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
@@ -1358,6 +1363,62 @@ fn run_model(
                 Ok(lines.join("\n"))
             }
         }
+        ModelCommand::List { backend } => {
+            let models = known_models();
+            if json {
+                let filtered: Vec<_> = if let Some(ref b) = backend {
+                    models
+                        .iter()
+                        .filter(|(provider, _, _)| provider.eq_ignore_ascii_case(b))
+                        .collect()
+                } else {
+                    models.iter().collect()
+                };
+                let json_models: Vec<_> = filtered
+                    .iter()
+                    .map(|(provider, model, desc)| {
+                        serde_json::json!({
+                            "provider": provider,
+                            "model": model,
+                            "description": desc,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::to_string_pretty(&json_models)?)
+            } else {
+                let loaded = load(config_path.as_deref()).ok();
+                let active_model = loaded.as_ref().map(|l| l.config.provider.model.as_str());
+                let mut current_provider = String::new();
+                let mut lines = Vec::new();
+                for (provider, model, desc) in &models {
+                    if let Some(ref b) = backend {
+                        if !provider.eq_ignore_ascii_case(b) {
+                            continue;
+                        }
+                    }
+                    if *provider != current_provider {
+                        if !current_provider.is_empty() {
+                            lines.push(String::new());
+                        }
+                        lines.push(format!("[{provider}]"));
+                        current_provider = provider.to_string();
+                    }
+                    let marker = if active_model == Some(model) {
+                        " *"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!("  {model}{marker}  — {desc}"));
+                }
+                if lines.is_empty() {
+                    Ok("No models found for the specified backend.".to_owned())
+                } else {
+                    lines.push(String::new());
+                    lines.push("* = currently active".to_owned());
+                    Ok(lines.join("\n"))
+                }
+            }
+        }
         ModelCommand::Set {
             model,
             backend,
@@ -1389,6 +1450,32 @@ fn run_model(
             }
         }
     }
+}
+
+/// Well-known models grouped by provider.
+/// Returns (provider, model_id, short_description).
+fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        // Anthropic
+        ("anthropic", "claude-opus-4-6", "Most capable, complex reasoning"),
+        ("anthropic", "claude-sonnet-4-6", "Balanced speed and capability"),
+        ("anthropic", "claude-haiku-4-5-20251001", "Fastest, lightweight tasks"),
+        // OpenAI
+        ("openai", "gpt-4.1", "Flagship GPT model"),
+        ("openai", "gpt-4.1-mini", "Fast and affordable"),
+        ("openai", "gpt-4.1-nano", "Fastest, simplest tasks"),
+        ("openai", "o3", "Advanced reasoning"),
+        ("openai", "o4-mini", "Fast reasoning"),
+        // Google
+        ("google", "gemini-2.5-pro", "Best for complex tasks"),
+        ("google", "gemini-2.5-flash", "Fast and versatile"),
+        // OpenRouter (aggregator — any model)
+        ("openrouter", "anthropic/claude-sonnet-4-6", "Claude via OpenRouter"),
+        ("openrouter", "openai/gpt-4.1", "GPT-4.1 via OpenRouter"),
+        ("openrouter", "google/gemini-2.5-pro", "Gemini via OpenRouter"),
+        ("openrouter", "deepseek/deepseek-r1", "DeepSeek R1 reasoning"),
+        ("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick"),
+    ]
 }
 
 /// Handle in-chat slash commands. Returns Some(output) if handled.
@@ -2090,10 +2177,10 @@ mod tests {
         default_session_id, delivery_platform_from_str, export_session_markdown,
         format_insights, format_memory_list, format_schedule_list, format_session_list,
         format_usage_stats, format_session_messages, format_skill, format_skill_list,
-        format_subagent, format_subagent_list, handle_chat_command, is_exit_command, run,
-        BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand, MemoryCommand,
-        ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand, StorageCommand,
-        SubagentsCommand,
+        format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
+        run, BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
+        MemoryCommand, ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand,
+        StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -2610,6 +2697,62 @@ storage:
             serde_json::from_str(&output).expect("output should be valid json");
         assert_eq!(parsed["backend"], "anthropic");
         assert_eq!(parsed["model"], "claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn model_list_shows_providers() {
+        let output = run(Cli {
+            config: None,
+            json: false,
+            command: Command::Model(ModelCommand::List { backend: None }),
+        })
+        .await
+        .expect("model list should succeed");
+
+        assert!(output.contains("[anthropic]"));
+        assert!(output.contains("[openai]"));
+        assert!(output.contains("claude-sonnet-4-6"));
+        assert!(output.contains("gpt-4.1"));
+    }
+
+    #[tokio::test]
+    async fn model_list_filters_by_backend() {
+        let output = run(Cli {
+            config: None,
+            json: false,
+            command: Command::Model(ModelCommand::List {
+                backend: Some("openai".to_owned()),
+            }),
+        })
+        .await
+        .expect("model list filtered should succeed");
+
+        assert!(output.contains("[openai]"));
+        assert!(!output.contains("[anthropic]"));
+        assert!(output.contains("gpt-4.1"));
+    }
+
+    #[tokio::test]
+    async fn model_list_json_output() {
+        let output = run(Cli {
+            config: None,
+            json: true,
+            command: Command::Model(ModelCommand::List { backend: None }),
+        })
+        .await
+        .expect("model list json should succeed");
+
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&output).expect("output should be valid json array");
+        assert!(!parsed.is_empty());
+        assert!(parsed[0]["provider"].is_string());
+        assert!(parsed[0]["model"].is_string());
+    }
+
+    #[test]
+    fn known_models_not_empty() {
+        let models = known_models();
+        assert!(models.len() >= 10);
     }
 
     #[test]
