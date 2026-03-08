@@ -411,6 +411,37 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "session_search".to_owned(),
+                description: "Searches your past conversation sessions using full-text search. Returns matching session IDs and titles.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query to match against past conversation content." }
+                    },
+                    "required": ["query"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::session::SessionSearchTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "session_history".to_owned(),
+                description: "Loads recent messages from a specific past session. Use session_search first to find relevant sessions.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "ID of the session to load messages from." },
+                        "limit": { "type": "integer", "description": "Maximum number of recent messages to return (default: 20)." }
+                    },
+                    "required": ["session_id"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::session::SessionHistoryTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "spawn_subagent".to_owned(),
                 description: "Spawns a subagent to work on a task concurrently. The subagent runs its own agent loop in the background and can use all available tools. Use check_subagent to monitor progress.".to_owned(),
                 parameters: Some(json!({
@@ -531,7 +562,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 20);
+        assert_eq!(definitions.len(), 22);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
