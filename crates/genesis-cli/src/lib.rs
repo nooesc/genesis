@@ -330,6 +330,32 @@ pub enum EvalCommand {
         #[arg(long, help = "Directory to write trajectory JSON files into")]
         output: String,
     },
+    #[command(about = "Compute dataset statistics for a directory of trajectories")]
+    Stats {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        recursive: bool,
+        #[arg(long, help = "Only include trajectories for this model")]
+        model: Option<String>,
+        #[arg(long, help = "Only include trajectories tagged with this value")]
+        tag: Option<String>,
+        #[arg(long, help = "Only include trajectories that used this tool")]
+        tool: Option<String>,
+        #[arg(long, help = "Only include trajectories whose outcome is failure")]
+        failures_only: bool,
+    },
+    #[command(about = "Score trajectory quality for training data filtering")]
+    Quality {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Minimum quality score to pass (0.0-1.0, default: show all)")]
+        min_score: Option<f64>,
+        #[arg(long, help = "Sort by score ascending (worst first) instead of descending")]
+        worst_first: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -759,6 +785,36 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             EvalCommand::ImportChatml { file, output } => {
                 run_eval_import_chatml(&file, &output)
             }
+            EvalCommand::Stats {
+                dir,
+                recursive,
+                model,
+                tag,
+                tool,
+                failures_only,
+            } => {
+                let stats = compute_eval_stats(
+                    &dir,
+                    recursive,
+                    model.as_deref(),
+                    tag.as_deref(),
+                    tool.as_deref(),
+                    failures_only,
+                )?;
+                if cli.json {
+                    Ok(serde_json::to_string_pretty(&eval_stats_to_json(&stats))?)
+                } else {
+                    Ok(format_eval_stats(&stats))
+                }
+            }
+            EvalCommand::Quality {
+                dir,
+                recursive,
+                min_score,
+                worst_first,
+            } => {
+                run_eval_quality(&dir, recursive, min_score, worst_first, cli.json)
+            }
         },
         Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1116,6 +1172,29 @@ struct EvalSummary {
     tools: Vec<AggregatedToolUsage>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct EvalStats {
+    directory: String,
+    recursive: bool,
+    model_filter: Option<String>,
+    tag_filter: Option<String>,
+    tool_filter: Option<String>,
+    failures_only: bool,
+    total_trajectories: usize,
+    total_turns: usize,
+    average_turns_per_trajectory: f64,
+    min_turns: usize,
+    max_turns: usize,
+    p50_turns: usize,
+    p90_turns: usize,
+    p99_turns: usize,
+    average_tool_calls_per_trajectory: f64,
+    tool_usage: Vec<AggregatedToolUsage>,
+    model_distribution: Vec<(String, usize)>,
+    tag_distribution: Vec<(String, usize)>,
+    outcome_distribution: Vec<(String, usize)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReplayEventDelta {
     user: i64,
@@ -1162,43 +1241,16 @@ fn summarize_replay_reports(
     warnings_only: bool,
     min_warnings: Option<usize>,
 ) -> Result<EvalSummary, CliError> {
-    let mut reports = Vec::new();
-
-    for path in collect_eval_files(PathBuf::from(dir), recursive)? {
-        let report = load_and_report(&path).map_err(|e| CliError::Replay(e.to_string()))?;
-        if let Some(model_filter) = model_filter {
-            if report.model != model_filter {
-                continue;
-            }
-        }
-        if let Some(tag_filter) = tag_filter {
-            if !report.tags.iter().any(|tag| tag == tag_filter) {
-                continue;
-            }
-        }
-        if let Some(tool_filter) = tool_filter {
-            if !report.tool_usage.iter().any(|tool| tool.name == tool_filter) {
-                continue;
-            }
-        }
-        if failures_only
-            && !matches!(
-                report.outcome,
-                Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. })
-            )
-        {
-            continue;
-        }
-        if warnings_only && report.warnings.is_empty() {
-            continue;
-        }
-        if let Some(min_warnings) = min_warnings {
-            if report.warnings.len() < min_warnings {
-                continue;
-            }
-        }
-        reports.push(report);
-    }
+    let reports = load_filtered_replay_reports(
+        dir,
+        recursive,
+        model_filter,
+        tag_filter,
+        tool_filter,
+        failures_only,
+        warnings_only,
+        min_warnings,
+    )?;
 
     let mut model_counts = BTreeMap::<String, usize>::new();
     let mut tag_counts = BTreeMap::<String, usize>::new();
@@ -1300,6 +1352,163 @@ fn summarize_replay_reports(
         models: model_counts.into_iter().collect(),
         tags: tag_counts.into_iter().collect(),
         tools,
+    })
+}
+
+fn load_filtered_replay_reports(
+    dir: &str,
+    recursive: bool,
+    model_filter: Option<&str>,
+    tag_filter: Option<&str>,
+    tool_filter: Option<&str>,
+    failures_only: bool,
+    warnings_only: bool,
+    min_warnings: Option<usize>,
+) -> Result<Vec<ReplayReport>, CliError> {
+    let mut reports = Vec::new();
+
+    for path in collect_eval_files(PathBuf::from(dir), recursive)? {
+        let report = load_and_report(&path).map_err(|e| CliError::Replay(e.to_string()))?;
+        if let Some(model_filter) = model_filter {
+            if report.model != model_filter {
+                continue;
+            }
+        }
+        if let Some(tag_filter) = tag_filter {
+            if !report.tags.iter().any(|tag| tag == tag_filter) {
+                continue;
+            }
+        }
+        if let Some(tool_filter) = tool_filter {
+            if !report.tool_usage.iter().any(|tool| tool.name == tool_filter) {
+                continue;
+            }
+        }
+        if failures_only
+            && !matches!(
+                report.outcome,
+                Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. })
+            )
+        {
+            continue;
+        }
+        if warnings_only && report.warnings.is_empty() {
+            continue;
+        }
+        if let Some(min_warnings) = min_warnings {
+            if report.warnings.len() < min_warnings {
+                continue;
+            }
+        }
+        reports.push(report);
+    }
+
+    Ok(reports)
+}
+
+fn compute_eval_stats(
+    dir: &str,
+    recursive: bool,
+    model_filter: Option<&str>,
+    tag_filter: Option<&str>,
+    tool_filter: Option<&str>,
+    failures_only: bool,
+) -> Result<EvalStats, CliError> {
+    let reports = load_filtered_replay_reports(
+        dir,
+        recursive,
+        model_filter,
+        tag_filter,
+        tool_filter,
+        failures_only,
+        false,
+        None,
+    )?;
+
+    let total_trajectories = reports.len();
+    let mut turn_counts = reports.iter().map(|r| r.total_events).collect::<Vec<_>>();
+    turn_counts.sort_unstable();
+
+    let total_turns = turn_counts.iter().sum::<usize>();
+    let min_turns = turn_counts.first().copied().unwrap_or(0);
+    let max_turns = turn_counts.last().copied().unwrap_or(0);
+    let average_turns_per_trajectory = if total_trajectories == 0 {
+        0.0
+    } else {
+        total_turns as f64 / total_trajectories as f64
+    };
+
+    let total_tool_calls = reports
+        .iter()
+        .map(|report| report.event_counts.tool_call)
+        .sum::<usize>();
+    let average_tool_calls_per_trajectory = if total_trajectories == 0 {
+        0.0
+    } else {
+        total_tool_calls as f64 / total_trajectories as f64
+    };
+
+    let mut tool_usage = BTreeMap::<String, AggregatedToolUsage>::new();
+    let mut model_distribution = BTreeMap::<String, usize>::new();
+    let mut tag_distribution = BTreeMap::<String, usize>::new();
+    let mut outcome_distribution = BTreeMap::<String, usize>::new();
+
+    for report in &reports {
+        *model_distribution.entry(report.model.clone()).or_default() += 1;
+        for tag in &report.tags {
+            *tag_distribution.entry(tag.clone()).or_default() += 1;
+        }
+
+        let outcome = match &report.outcome {
+            Some(genesis_core::trajectory::TrajectoryOutcome::Success) => "success",
+            Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. }) => "failure",
+            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => "abandoned",
+            None => "missing",
+        };
+        *outcome_distribution.entry(outcome.to_owned()).or_default() += 1;
+
+        for tool in &report.tool_usage {
+            let entry = tool_usage
+                .entry(tool.name.clone())
+                .or_insert_with(|| AggregatedToolUsage {
+                    name: tool.name.clone(),
+                    call_count: 0,
+                    result_count: 0,
+                });
+            entry.call_count += tool.call_count;
+            entry.result_count += tool.result_count;
+        }
+    }
+
+    let mut tool_usage = tool_usage.into_values().collect::<Vec<_>>();
+    tool_usage.sort_by(|left, right| {
+        right
+            .call_count
+            .cmp(&left.call_count)
+            .then(right.result_count.cmp(&left.result_count))
+            .then(left.name.cmp(&right.name))
+    });
+
+    Ok(EvalStats {
+        directory: dir.to_owned(),
+        recursive,
+        model_filter: model_filter.map(str::to_owned),
+        tag_filter: tag_filter.map(str::to_owned),
+        tool_filter: tool_filter.map(str::to_owned),
+        failures_only,
+        total_trajectories,
+        total_turns,
+        average_turns_per_trajectory,
+        min_turns,
+        max_turns,
+        p50_turns: percentile(&turn_counts, 50.0),
+        p90_turns: percentile(&turn_counts, 90.0),
+        p99_turns: percentile(&turn_counts, 99.0),
+        average_tool_calls_per_trajectory,
+        tool_usage,
+        model_distribution: model_distribution.into_iter().collect(),
+        tag_distribution: tag_distribution.into_iter().collect(),
+        outcome_distribution: outcome_distribution.into_iter().collect(),
     })
 }
 
@@ -1602,6 +1811,71 @@ fn format_eval_comparison(comparison: &EvalComparison) -> String {
     output
 }
 
+fn format_eval_stats(stats: &EvalStats) -> String {
+    let mut output = String::new();
+    output.push_str("genesis eval stats\n");
+    output.push_str(&format!("directory:                 {}\n", stats.directory));
+    output.push_str(&format!("recursive:                 {}\n", stats.recursive));
+    output.push_str(&format!(
+        "model filter:              {}\n",
+        stats.model_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!(
+        "tag filter:                {}\n",
+        stats.tag_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!(
+        "tool filter:               {}\n",
+        stats.tool_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!("failures only:             {}\n", stats.failures_only));
+    output.push_str(&format!("total trajectories:        {}\n", stats.total_trajectories));
+    output.push_str(&format!("total turns:               {}\n", stats.total_turns));
+    output.push_str(&format!(
+        "avg turns / trajectory:    {:.2}\n",
+        stats.average_turns_per_trajectory
+    ));
+    output.push_str(&format!("min turns:                 {}\n", stats.min_turns));
+    output.push_str(&format!("max turns:                 {}\n", stats.max_turns));
+    output.push_str(&format!("p50 turns:                 {}\n", stats.p50_turns));
+    output.push_str(&format!("p90 turns:                 {}\n", stats.p90_turns));
+    output.push_str(&format!("p99 turns:                 {}\n", stats.p99_turns));
+    output.push_str(&format!(
+        "avg tool calls / traj:     {:.2}\n",
+        stats.average_tool_calls_per_trajectory
+    ));
+
+    if !stats.tool_usage.is_empty() {
+        output.push_str("tool usage:\n");
+        for tool in &stats.tool_usage {
+            output.push_str(&format!(
+                "  - {}\tcall={} result={}\n",
+                tool.name, tool.call_count, tool.result_count
+            ));
+        }
+    }
+    if !stats.model_distribution.is_empty() {
+        output.push_str("model distribution:\n");
+        for (model, count) in &stats.model_distribution {
+            output.push_str(&format!("  - {model}: {count}\n"));
+        }
+    }
+    if !stats.tag_distribution.is_empty() {
+        output.push_str("tag distribution:\n");
+        for (tag, count) in &stats.tag_distribution {
+            output.push_str(&format!("  - {tag}: {count}\n"));
+        }
+    }
+    if !stats.outcome_distribution.is_empty() {
+        output.push_str("outcome distribution:\n");
+        for (outcome, count) in &stats.outcome_distribution {
+            output.push_str(&format!("  - {outcome}: {count}\n"));
+        }
+    }
+
+    output
+}
+
 fn eval_summary_to_json(summary: &EvalSummary) -> serde_json::Value {
     serde_json::json!({
         "directory": summary.directory,
@@ -1691,6 +1965,59 @@ fn eval_comparison_to_json(comparison: &EvalComparison) -> serde_json::Value {
         "left_only_tags": comparison.left_only_tags,
         "right_only_tags": comparison.right_only_tags,
     })
+}
+
+fn eval_stats_to_json(stats: &EvalStats) -> serde_json::Value {
+    serde_json::json!({
+        "directory": stats.directory,
+        "recursive": stats.recursive,
+        "model_filter": stats.model_filter,
+        "tag_filter": stats.tag_filter,
+        "tool_filter": stats.tool_filter,
+        "failures_only": stats.failures_only,
+        "total_trajectories": stats.total_trajectories,
+        "total_turns": stats.total_turns,
+        "average_turns_per_trajectory": stats.average_turns_per_trajectory,
+        "min_turns": stats.min_turns,
+        "max_turns": stats.max_turns,
+        "p50_turns": stats.p50_turns,
+        "p90_turns": stats.p90_turns,
+        "p99_turns": stats.p99_turns,
+        "average_tool_calls_per_trajectory": stats.average_tool_calls_per_trajectory,
+        "tool_usage": stats.tool_usage.iter().map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "call_count": tool.call_count,
+                "result_count": tool.result_count,
+            })
+        }).collect::<Vec<_>>(),
+        "model_distribution": stats.model_distribution.iter().map(|(model, count)| {
+            serde_json::json!({
+                "model": model,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+        "tag_distribution": stats.tag_distribution.iter().map(|(tag, count)| {
+            serde_json::json!({
+                "tag": tag,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+        "outcome_distribution": stats.outcome_distribution.iter().map(|(outcome, count)| {
+            serde_json::json!({
+                "outcome": outcome,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn percentile(values: &[usize], pct: f64) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    let rank = ((pct / 100.0) * (values.len().saturating_sub(1) as f64)).ceil() as usize;
+    values[rank.min(values.len() - 1)]
 }
 
 async fn run_chat(
@@ -2549,6 +2876,143 @@ fn sanitize_session_id_for_filename(session_id: &str) -> String {
             _ => '_',
         })
         .collect()
+}
+
+fn run_eval_quality(
+    dir: &str,
+    recursive: bool,
+    min_score: Option<f64>,
+    worst_first: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+
+    if files.is_empty() {
+        return Ok("No trajectory files found.".to_owned());
+    }
+
+    let mut scored: Vec<(String, genesis_core::quality::QualityScore)> = Vec::new();
+
+    for path in &files {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+        let trajectory: genesis_core::trajectory::Trajectory =
+            serde_json::from_str(&raw).map_err(|e| {
+                CliError::Other(format!(
+                    "invalid trajectory JSON in {}: {e}",
+                    path.display()
+                ))
+            })?;
+
+        let quality = genesis_core::quality::score(&trajectory);
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_owned();
+
+        if let Some(threshold) = min_score {
+            if quality.overall < threshold {
+                continue;
+            }
+        }
+
+        scored.push((name, quality));
+    }
+
+    // Sort by overall score
+    if worst_first {
+        scored.sort_by(|a, b| a.1.overall.partial_cmp(&b.1.overall).unwrap());
+    } else {
+        scored.sort_by(|a, b| b.1.overall.partial_cmp(&a.1.overall).unwrap());
+    }
+
+    if json {
+        let entries: Vec<serde_json::Value> = scored
+            .iter()
+            .map(|(name, q)| {
+                serde_json::json!({
+                    "file": name,
+                    "overall": (q.overall * 100.0).round() / 100.0,
+                    "outcome": (q.dimensions.outcome * 100.0).round() / 100.0,
+                    "signal_to_noise": (q.dimensions.signal_to_noise * 100.0).round() / 100.0,
+                    "tool_diversity": (q.dimensions.tool_diversity * 100.0).round() / 100.0,
+                    "depth": (q.dimensions.depth * 100.0).round() / 100.0,
+                    "efficiency": (q.dimensions.efficiency * 100.0).round() / 100.0,
+                    "completeness": (q.dimensions.completeness * 100.0).round() / 100.0,
+                    "issues": q.issues,
+                })
+            })
+            .collect();
+
+        let total = files.len();
+        let passed = scored.len();
+        let avg_score = if scored.is_empty() {
+            0.0
+        } else {
+            scored.iter().map(|(_, q)| q.overall).sum::<f64>() / scored.len() as f64
+        };
+
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "total_files": total,
+            "scored": passed,
+            "filtered_out": total - passed,
+            "average_score": (avg_score * 100.0).round() / 100.0,
+            "trajectories": entries,
+        }))?)
+    } else {
+        let mut lines = Vec::new();
+
+        let total = files.len();
+        let passed = scored.len();
+        let avg_score = if scored.is_empty() {
+            0.0
+        } else {
+            scored.iter().map(|(_, q)| q.overall).sum::<f64>() / scored.len() as f64
+        };
+
+        lines.push(format!(
+            "Quality report: {passed}/{total} trajectories{}",
+            if let Some(t) = min_score {
+                format!(" (min score: {t:.2})")
+            } else {
+                String::new()
+            }
+        ));
+        lines.push(format!("Average score: {avg_score:.2}"));
+        lines.push(String::new());
+        lines.push(format!(
+            "{:<40} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+            "FILE", "SCORE", "OUTCM", "S/N", "TOOLS", "DEPTH", "EFFIC", "COMPL"
+        ));
+
+        for (name, q) in &scored {
+            let truncated_name = if name.len() > 38 {
+                format!("{}...", &name[..35])
+            } else {
+                name.clone()
+            };
+            lines.push(format!(
+                "{:<40} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2}",
+                truncated_name,
+                q.overall,
+                q.dimensions.outcome,
+                q.dimensions.signal_to_noise,
+                q.dimensions.tool_diversity,
+                q.dimensions.depth,
+                q.dimensions.efficiency,
+                q.dimensions.completeness,
+            ));
+
+            if !q.issues.is_empty() {
+                for issue in &q.issues {
+                    lines.push(format!("  -> {issue}"));
+                }
+            }
+        }
+
+        Ok(lines.join("\n"))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4619,7 +5083,7 @@ mod tests {
         format_insights, format_memory_list, format_schedule_list, format_session_list,
         format_usage_stats, format_session_messages, format_skill, format_skill_list,
         format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
-        run, run_compress, run_eval_export_chatml, run_toolset,
+        run, run_compress, run_eval_export_chatml, run_eval_quality, run_toolset,
         BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
         MemoryCommand, ModelCommand, PairingCommand, ScheduleCommand, SessionsCommand,
         SkillsCommand, StorageCommand, SubagentsCommand, ToolsetCommand,
@@ -6001,6 +6465,125 @@ storage:
     }
 
     #[test]
+    fn parses_eval_quality_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "quality",
+            "trajectories",
+            "--min-score",
+            "0.5",
+            "--worst-first",
+        ])
+        .expect("should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Quality {
+                dir,
+                min_score,
+                worst_first,
+                ..
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert_eq!(min_score, Some(0.5));
+                assert!(worst_first);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_quality_scores_trajectories() {
+        let dir = tempdir().expect("tempdir");
+        // Write a good trajectory
+        let good = serde_json::json!({
+            "session_id": "test-good",
+            "model": "gpt-4",
+            "system_prompt_hash": "abc",
+            "started_at": "2025-01-01T00:00:00Z",
+            "completed_at": "2025-01-01T00:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2025-01-01T00:00:00Z", "action_type": "user_message", "content": "Hello"},
+                {"step_index": 1, "timestamp": "2025-01-01T00:00:01Z", "action_type": "assistant_message", "content": "Hi there!"}
+            ],
+            "outcome": {"type": "success"},
+            "tags": ["test"]
+        });
+        fs::write(
+            dir.path().join("good.json"),
+            serde_json::to_string_pretty(&good).unwrap(),
+        )
+        .unwrap();
+
+        // Write a bad trajectory
+        let bad = serde_json::json!({
+            "session_id": "test-bad",
+            "model": "",
+            "system_prompt_hash": "",
+            "started_at": "2025-01-01T00:00:00Z",
+            "completed_at": null,
+            "steps": [],
+            "outcome": {"type": "failure", "reason": "broke"},
+            "tags": []
+        });
+        fs::write(
+            dir.path().join("bad.json"),
+            serde_json::to_string_pretty(&bad).unwrap(),
+        )
+        .unwrap();
+
+        let result = run_eval_quality(dir.path().to_str().unwrap(), false, None, false, false)
+            .expect("should succeed");
+        assert!(result.contains("Quality report: 2/2"));
+        assert!(result.contains("good"));
+        assert!(result.contains("bad"));
+    }
+
+    #[test]
+    fn run_eval_quality_filters_by_min_score() {
+        let dir = tempdir().expect("tempdir");
+        let good = serde_json::json!({
+            "session_id": "test-good",
+            "model": "gpt-4",
+            "system_prompt_hash": "abc",
+            "started_at": "2025-01-01T00:00:00Z",
+            "completed_at": "2025-01-01T00:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2025-01-01T00:00:00Z", "action_type": "user_message", "content": "Hello"},
+                {"step_index": 1, "timestamp": "2025-01-01T00:00:01Z", "action_type": "assistant_message", "content": "Hi there!"}
+            ],
+            "outcome": {"type": "success"},
+            "tags": ["test"]
+        });
+        fs::write(
+            dir.path().join("good.json"),
+            serde_json::to_string_pretty(&good).unwrap(),
+        )
+        .unwrap();
+
+        let bad = serde_json::json!({
+            "session_id": "test-bad",
+            "model": "",
+            "system_prompt_hash": "",
+            "started_at": "2025-01-01T00:00:00Z",
+            "completed_at": null,
+            "steps": [],
+            "outcome": {"type": "failure", "reason": "broke"},
+            "tags": []
+        });
+        fs::write(
+            dir.path().join("bad.json"),
+            serde_json::to_string_pretty(&bad).unwrap(),
+        )
+        .unwrap();
+
+        let result = run_eval_quality(dir.path().to_str().unwrap(), false, Some(0.5), false, false)
+            .expect("should succeed");
+        assert!(result.contains("1/2"));
+        assert!(result.contains("good"));
+        assert!(!result.contains(" bad"));
+    }
+
+    #[test]
     fn batch_input_line_defaults_tags() {
         let parsed =
             parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
@@ -6558,6 +7141,43 @@ storage:
     }
 
     #[test]
+    fn parses_eval_stats_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "stats",
+            "trajectories",
+            "--recursive",
+            "--model",
+            "gpt-4.1-mini",
+            "--tag",
+            "offline_eval",
+            "--tool",
+            "shell",
+            "--failures-only",
+        ])
+        .expect("eval stats should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Stats {
+                dir,
+                recursive,
+                model,
+                tag,
+                tool,
+                failures_only,
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+                assert_eq!(model.as_deref(), Some("gpt-4.1-mini"));
+                assert_eq!(tag.as_deref(), Some("offline_eval"));
+                assert_eq!(tool.as_deref(), Some("shell"));
+                assert!(failures_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn summarize_replay_reports_aggregates_directory() {
         let dir = tempdir().expect("tempdir");
         let file_one = dir.path().join("one.json");
@@ -6973,6 +7593,96 @@ storage:
         assert_eq!(parsed["steps"][0]["action_type"], "system_message");
         assert_eq!(parsed["steps"][1]["action_type"], "user_message");
         assert_eq!(parsed["steps"][2]["action_type"], "assistant_message");
+    }
+
+    #[test]
+    fn compute_eval_stats_reports_dataset_metrics() {
+        let dir = tempdir().expect("tempdir");
+        let write = |name: &str, value: serde_json::Value| {
+            let path = dir.path().join(name);
+            std::fs::write(path, serde_json::to_string_pretty(&value).unwrap())
+                .expect("write trajectory");
+        };
+
+        write("a.json", serde_json::json!({
+            "session_id": "a",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-a",
+            "started_at": "2026-03-08T10:00:00Z",
+            "completed_at": "2026-03-08T10:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T10:00:00Z", "action_type": "user_message", "content": "u1"},
+                {"step_index": 1, "timestamp": "2026-03-08T10:00:01Z", "action_type": "assistant_message", "content": "a1"},
+                {"step_index": 2, "timestamp": "2026-03-08T10:00:02Z", "action_type": "tool_call", "content": "tool_call: shell", "tool_name": "shell", "tool_arguments": "{\"cmd\":\"pwd\"}"},
+                {"step_index": 3, "timestamp": "2026-03-08T10:00:03Z", "action_type": "tool_result", "content": "tool_result: shell", "tool_name": "shell", "tool_result": "/tmp"}
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["offline_eval", "baseline"]
+        }));
+
+        write("b.json", serde_json::json!({
+            "session_id": "b",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-b",
+            "started_at": "2026-03-08T11:00:00Z",
+            "completed_at": "2026-03-08T11:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T11:00:00Z", "action_type": "user_message", "content": "u2"},
+                {"step_index": 1, "timestamp": "2026-03-08T11:00:01Z", "action_type": "assistant_message", "content": "a2"}
+            ],
+            "outcome": { "type": "failure", "reason": "tool broke" },
+            "tags": ["offline_eval"]
+        }));
+
+        write("c.json", serde_json::json!({
+            "session_id": "c",
+            "model": "claude-sonnet-4-6",
+            "system_prompt_hash": "hash-c",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "u3"},
+                {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "a3"},
+                {"step_index": 2, "timestamp": "2026-03-08T12:00:02Z", "action_type": "assistant_message", "content": "a4"}
+            ],
+            "outcome": { "type": "abandoned" },
+            "tags": ["other"]
+        }));
+
+        let stats = crate::compute_eval_stats(
+            dir.path().to_str().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("stats should compute");
+
+        assert_eq!(stats.total_trajectories, 3);
+        assert_eq!(stats.total_turns, 9);
+        assert!((stats.average_turns_per_trajectory - 3.0).abs() < f64::EPSILON);
+        assert_eq!(stats.min_turns, 2);
+        assert_eq!(stats.max_turns, 4);
+        assert_eq!(stats.p50_turns, 3);
+        assert_eq!(stats.p90_turns, 4);
+        assert_eq!(stats.p99_turns, 4);
+        assert!((stats.average_tool_calls_per_trajectory - (1.0 / 3.0)).abs() < 0.0001);
+        assert_eq!(stats.model_distribution.len(), 2);
+        assert!(stats
+            .tag_distribution
+            .contains(&("offline_eval".to_owned(), 2)));
+        assert!(stats
+            .outcome_distribution
+            .contains(&("success".to_owned(), 1)));
+        assert!(stats
+            .outcome_distribution
+            .contains(&("failure".to_owned(), 1)));
+        assert!(stats
+            .outcome_distribution
+            .contains(&("abandoned".to_owned(), 1)));
+        assert_eq!(stats.tool_usage[0].name, "shell");
+        assert_eq!(stats.tool_usage[0].call_count, 1);
     }
 
     #[test]
