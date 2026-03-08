@@ -120,6 +120,19 @@ pub struct ChatRequest {
     #[serde(default = "default_platform")]
     pub platform: String,
     pub session_id: Option<String>,
+    /// Optional image URLs for multimodal prompts.
+    #[serde(default)]
+    pub images: Vec<ImageInput>,
+}
+
+/// An image input for multimodal chat requests.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageInput {
+    /// Image URL (http/https) or base64 data URI.
+    pub url: String,
+    /// Optional detail level: "low", "high", or "auto" (default).
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 fn default_platform() -> String {
@@ -182,6 +195,20 @@ pub struct HealthResponse {
     pub mcp_servers: usize,
 }
 
+/// Detailed MCP server status response.
+#[derive(Debug, Serialize)]
+pub struct McpStatusResponse {
+    pub servers: Vec<McpServerStatus>,
+    pub total_tools: usize,
+}
+
+/// Status of a single MCP server.
+#[derive(Debug, Serialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub connected: bool,
+}
+
 /// Build the axum Router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -218,6 +245,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Public routes
     Router::new()
         .route("/health", get(health_handler))
+        .route("/health/mcp", get(mcp_status_handler))
         .merge(rate_limited)
         .layer(cors)
         .with_state(state)
@@ -320,6 +348,29 @@ async fn health_handler(
     })
 }
 
+async fn mcp_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<McpStatusResponse> {
+    match &state.mcp {
+        Some(mcp) => {
+            let status = mcp.server_status().await;
+            let total_tools = mcp.tool_count().await;
+            let servers = status
+                .into_iter()
+                .map(|(name, connected)| McpServerStatus { name, connected })
+                .collect();
+            Json(McpStatusResponse {
+                servers,
+                total_tools,
+            })
+        }
+        None => Json(McpStatusResponse {
+            servers: vec![],
+            total_tools: 0,
+        }),
+    }
+}
+
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
@@ -337,6 +388,15 @@ async fn chat_handler(
         session_id = session_id.as_str(),
         platform = request.platform.as_str()
     );
+    let images: Vec<genesis_provider::ImageUrl> = request
+        .images
+        .iter()
+        .map(|img| genesis_provider::ImageUrl {
+            url: img.url.clone(),
+            detail: img.detail.clone(),
+        })
+        .collect();
+
     async move {
         info!("received chat request");
         let outcome = service
@@ -346,7 +406,7 @@ async fn chat_handler(
                 delivery_platform: delivery_platform_from_str(&request.platform),
                 prompt: &request.message,
                 title: None,
-                images: Vec::new(),
+                images,
             })
             .await
             .map_err(|e| {
@@ -391,6 +451,14 @@ async fn chat_stream_handler(
 
     let platform = request.platform;
     let message = request.message;
+    let images: Vec<genesis_provider::ImageUrl> = request
+        .images
+        .into_iter()
+        .map(|img| genesis_provider::ImageUrl {
+            url: img.url,
+            detail: img.detail,
+        })
+        .collect();
     let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
     let state_for_task = Arc::clone(&state);
     let session_id_for_task = session_id.clone();
@@ -423,7 +491,7 @@ async fn chat_stream_handler(
                     delivery_platform: delivery_platform_from_str(&platform),
                     prompt: &message,
                     title: None,
-                    images: Vec::new(),
+                    images,
                 },
                 |event| {
                     match event {
@@ -534,6 +602,23 @@ mod tests {
         assert_eq!(req.message, "hi");
         assert_eq!(req.platform, "telegram");
         assert_eq!(req.session_id.as_deref(), Some("s-1"));
+        assert!(req.images.is_empty());
+    }
+
+    #[test]
+    fn chat_request_deserializes_with_images() {
+        let json = r#"{
+            "message": "What is in this image?",
+            "images": [
+                {"url": "https://example.com/photo.jpg", "detail": "high"},
+                {"url": "data:image/png;base64,iVBOR..."}
+            ]
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.images.len(), 2);
+        assert_eq!(req.images[0].url, "https://example.com/photo.jpg");
+        assert_eq!(req.images[0].detail.as_deref(), Some("high"));
+        assert!(req.images[1].detail.is_none());
     }
 
     #[test]
@@ -621,6 +706,33 @@ mod tests {
         assert!(limiter.check(ip_b), "ip_b should still be allowed");
         assert!(limiter.check(ip_b));
         assert!(!limiter.check(ip_b), "ip_b should now be blocked");
+    }
+
+    #[test]
+    fn mcp_status_response_serializes_empty() {
+        let resp = McpStatusResponse {
+            servers: vec![],
+            total_tools: 0,
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(json.contains("\"servers\":[]"));
+        assert!(json.contains("\"total_tools\":0"));
+    }
+
+    #[test]
+    fn mcp_status_response_serializes_with_servers() {
+        let resp = McpStatusResponse {
+            servers: vec![
+                McpServerStatus { name: "filesystem".to_owned(), connected: true },
+                McpServerStatus { name: "github".to_owned(), connected: false },
+            ],
+            total_tools: 5,
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(json.contains("\"filesystem\""));
+        assert!(json.contains("\"connected\":true"));
+        assert!(json.contains("\"connected\":false"));
+        assert!(json.contains("\"total_tools\":5"));
     }
 
     #[test]
