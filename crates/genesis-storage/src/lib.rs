@@ -601,6 +601,19 @@ pub struct UsageStats {
     pub total_output_tokens: u64,
 }
 
+/// Usage insights for a period — sessions per day, platform breakdown, etc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InsightsData {
+    pub period_days: u32,
+    pub sessions_count: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    /// Sessions per day (date string → count).
+    pub sessions_per_day: Vec<(String, u64)>,
+    /// Sessions per platform (platform → count).
+    pub platform_breakdown: Vec<(String, u64)>,
+}
+
 /// Session persistence layer.
 pub struct SessionStore {
     database_path: PathBuf,
@@ -999,6 +1012,77 @@ impl SessionStore {
             total_sessions: count as u64,
             total_input_tokens: input as u64,
             total_output_tokens: output as u64,
+        })
+    }
+
+    /// Gather usage insights for the last N days.
+    pub fn insights(&self, days: u32) -> Result<InsightsData, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Aggregate totals for the period
+        let (count, input, output): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
+                 FROM sessions WHERE created_at >= datetime('now', ?)",
+                [format!("-{days} days")],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Sessions per day
+        let mut stmt = connection
+            .prepare(
+                "SELECT date(created_at) as day, COUNT(*) \
+                 FROM sessions WHERE created_at >= datetime('now', ?) \
+                 GROUP BY day ORDER BY day",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let sessions_per_day: Vec<(String, u64)> = stmt
+            .query_map([format!("-{days} days")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Platform breakdown
+        let mut stmt = connection
+            .prepare(
+                "SELECT platform, COUNT(*) \
+                 FROM sessions WHERE created_at >= datetime('now', ?) \
+                 GROUP BY platform ORDER BY COUNT(*) DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let platform_breakdown: Vec<(String, u64)> = stmt
+            .query_map([format!("-{days} days")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(InsightsData {
+            period_days: days,
+            sessions_count: count as u64,
+            total_input_tokens: input as u64,
+            total_output_tokens: output as u64,
+            sessions_per_day,
+            platform_breakdown,
         })
     }
 }
@@ -2564,5 +2648,23 @@ mod tests {
             .expect("load should work");
 
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn insights_returns_data_for_recent_sessions() {
+        let (_dir, store) = bootstrapped_store();
+        store.create_session("s1", "cli", None).unwrap();
+        store.create_session("s2", "api", None).unwrap();
+        store.add_usage("s1", 100, 50).unwrap();
+        store.add_usage("s2", 200, 100).unwrap();
+
+        let data = store.insights(30).unwrap();
+        assert_eq!(data.period_days, 30);
+        assert_eq!(data.sessions_count, 2);
+        assert_eq!(data.total_input_tokens, 300);
+        assert_eq!(data.total_output_tokens, 150);
+        assert!(!data.sessions_per_day.is_empty());
+        assert!(data.platform_breakdown.iter().any(|(p, _)| p == "cli"));
+        assert!(data.platform_breakdown.iter().any(|(p, _)| p == "api"));
     }
 }

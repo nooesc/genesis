@@ -15,7 +15,7 @@ use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
+    bootstrap, InsightsData, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
     StoredSchedule, SubagentStore, UsageStats, UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
@@ -82,6 +82,11 @@ pub enum Command {
     Subagents(SubagentsCommand),
     #[command(about = "Run a self-reflection nudge to consolidate learning")]
     Nudge,
+    #[command(about = "Show usage insights and analytics")]
+    Insights {
+        #[arg(long, default_value = "30", help = "Number of days to analyze (default: 30)")]
+        days: u32,
+    },
     #[command(about = "Initialize Genesis (creates config, bootstraps storage, verifies provider)")]
     Init {
         #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
@@ -586,6 +591,17 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Model(model_command) => run_model(cli.config, model_command, cli.json),
         Command::Serve { host, port } => run_serve(cli.config, &host, port).await,
         Command::Nudge => run_nudge(cli.config).await,
+        Command::Insights { days } => {
+            let loaded = load(cli.config.as_deref())?;
+            bootstrap(&loaded.config.storage.database_path)?;
+            let store = SessionStore::new(&loaded.config.storage.database_path);
+            let insights = store.insights(days)?;
+            if cli.json {
+                Ok(serde_json::to_string_pretty(&insights)?)
+            } else {
+                Ok(format_insights(&insights, &loaded.config.provider.model))
+            }
+        }
         Command::Init {
             backend,
             model,
@@ -662,6 +678,7 @@ async fn run_chat(
         .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
 
     let model = &loaded.config.provider.model;
+    let mut session_id = session_id;
 
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
@@ -682,6 +699,14 @@ async fn run_chat(
 
         if is_exit_command(trimmed) {
             break;
+        }
+
+        // Handle /new — start a fresh session
+        if trimmed == "/new" {
+            session_id = default_session_id();
+            service.ensure_session(&session_id, "cli", None)?;
+            println!("Started new session: {session_id}");
+            continue;
         }
 
         // Handle in-chat slash commands
@@ -1304,6 +1329,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /export   - Export session as Markdown\n\
              /tokens   - Show session token usage\n\
              /session  - Show current session ID\n\
+             /new      - Start a new session\n\
              /tools    - List available tools\n\
              /skills   - List saved skills\n\
              /model    - Show active model\n\
@@ -1577,6 +1603,64 @@ fn format_usage_stats(stats: &UsageStats) -> String {
     lines.join("\n")
 }
 
+fn format_insights(data: &InsightsData, model: &str) -> String {
+    let total_tokens = data.total_input_tokens + data.total_output_tokens;
+    let avg_per_session = if data.sessions_count > 0 {
+        total_tokens / data.sessions_count
+    } else {
+        0
+    };
+
+    let mut lines = vec![format!(
+        "genesis insights (last {} days)",
+        data.period_days
+    )];
+    lines.push(format!("  model:           {model}"));
+    lines.push(format!("  sessions:        {}", data.sessions_count));
+    lines.push(format!("  input tokens:    {}", data.total_input_tokens));
+    lines.push(format!("  output tokens:   {}", data.total_output_tokens));
+    lines.push(format!("  total tokens:    {total_tokens}"));
+    lines.push(format!("  avg per session: {avg_per_session}"));
+
+    if let Some(cost) = genesis_provider::pricing::estimate_cost(
+        model,
+        data.total_input_tokens as u32,
+        data.total_output_tokens as u32,
+    ) {
+        lines.push(format!("  estimated cost:  ~{cost}"));
+    }
+
+    if !data.platform_breakdown.is_empty() {
+        lines.push(String::new());
+        lines.push("  platforms:".to_owned());
+        for (platform, count) in &data.platform_breakdown {
+            lines.push(format!("    {platform}: {count} sessions"));
+        }
+    }
+
+    if !data.sessions_per_day.is_empty() {
+        lines.push(String::new());
+        lines.push("  activity:".to_owned());
+        let max_count = data
+            .sessions_per_day
+            .iter()
+            .map(|(_, c)| *c)
+            .max()
+            .unwrap_or(1);
+        for (day, count) in &data.sessions_per_day {
+            let bar_len = if max_count > 0 {
+                ((*count as f64 / max_count as f64) * 20.0) as usize
+            } else {
+                0
+            };
+            let bar: String = std::iter::repeat_n('#', bar_len).collect();
+            lines.push(format!("    {day}  {bar} ({count})"));
+        }
+    }
+
+    lines.join("\n")
+}
+
 fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
     if messages.is_empty() {
         return format!("session {session_id}: no messages");
@@ -1775,7 +1859,7 @@ mod tests {
         context_template,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, export_session_markdown,
-        format_schedule_list, format_session_list, format_usage_stats,
+        format_insights, format_schedule_list, format_session_list, format_usage_stats,
         format_session_messages, format_skill, format_skill_list, format_subagent,
         format_subagent_list, handle_chat_command, is_exit_command, run, BootstrapCommand, Cli,
         Command, ConfigCommand, ContextCommand, McpCommand, ModelCommand, ScheduleCommand,
@@ -1783,7 +1867,7 @@ mod tests {
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
-    use genesis_storage::{SessionSummary, StoredSchedule, StoredSkill, UsageStats};
+    use genesis_storage::{InsightsData, SessionSummary, StoredSchedule, StoredSkill, UsageStats};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2899,5 +2983,76 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_insights_command() {
+        let cli = Cli::try_parse_from(["genesis", "insights"])
+            .expect("insights should parse");
+        match cli.command {
+            Command::Insights { days } => assert_eq!(days, 30),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_insights_with_custom_days() {
+        let cli = Cli::try_parse_from(["genesis", "insights", "--days", "7"])
+            .expect("insights with days should parse");
+        match cli.command {
+            Command::Insights { days } => assert_eq!(days, 7),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_insights_displays_summary() {
+        let data = InsightsData {
+            period_days: 30,
+            sessions_count: 10,
+            total_input_tokens: 5000,
+            total_output_tokens: 3000,
+            sessions_per_day: vec![
+                ("2026-03-07".to_owned(), 3),
+                ("2026-03-08".to_owned(), 7),
+            ],
+            platform_breakdown: vec![
+                ("cli".to_owned(), 8),
+                ("api".to_owned(), 2),
+            ],
+        };
+        let output = format_insights(&data, "gpt-4.1-mini");
+        assert!(output.contains("sessions:        10"));
+        assert!(output.contains("input tokens:    5000"));
+        assert!(output.contains("total tokens:    8000"));
+        assert!(output.contains("avg per session: 800"));
+        assert!(output.contains("cli: 8 sessions"));
+        assert!(output.contains("2026-03-08"));
+    }
+
+    #[test]
+    fn chat_help_includes_new_command() {
+        let result = handle_chat_command("/help", "s1", &stub_session_store());
+        let help = result.expect("help should return something");
+        assert!(help.contains("/new"));
+        assert!(help.contains("/tools"));
+    }
+
+    #[test]
+    fn chat_tools_lists_available_tools() {
+        let result = handle_chat_command("/tools", "s1", &stub_session_store());
+        let output = result.expect("should return tool list");
+        assert!(output.contains("echo"));
+        assert!(output.contains("patch"));
+        assert!(output.contains("todo"));
+    }
+
+    #[test]
+    fn chat_usage_is_alias_for_tokens() {
+        let store = stub_session_store();
+        let result1 = handle_chat_command("/tokens", "s1", &store);
+        let result2 = handle_chat_command("/usage", "s1", &store);
+        // Both should return something (even if session doesn't exist = None)
+        assert_eq!(result1.is_some(), result2.is_some());
     }
 }
