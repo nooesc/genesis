@@ -768,6 +768,26 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::export::SessionExportTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "reason_with_model".to_owned(),
+                description: "Queries a secondary LLM for a second opinion or specialized reasoning. Use when you want to cross-check your work, get a different perspective, or leverage a model that may be better at a specific task (e.g., math, code review, creative writing).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string", "description": "The prompt to send to the secondary model." },
+                        "model": { "type": "string", "description": "Model identifier (e.g., 'gpt-4.1', 'claude-sonnet-4-6', 'llama-3')." },
+                        "backend": { "type": "string", "description": "Provider backend: 'openai' (default), 'anthropic', 'openrouter', etc." },
+                        "system": { "type": "string", "description": "Optional system prompt for the secondary model." },
+                        "temperature": { "type": "string", "description": "Temperature (0.0-2.0). Default: model default." },
+                        "max_tokens": { "type": "string", "description": "Maximum tokens in the response." }
+                    },
+                    "required": ["prompt", "model"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::reason::ReasonWithModelTool,
         );
     registry
 }
@@ -848,7 +868,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 35);
+        assert_eq!(definitions.len(), 36);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

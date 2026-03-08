@@ -6,6 +6,7 @@ pub mod export;
 pub mod fs;
 pub mod memory;
 pub mod patch;
+pub mod reason;
 pub mod schedule;
 pub mod search;
 pub mod send_message;
