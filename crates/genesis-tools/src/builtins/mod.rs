@@ -19,6 +19,7 @@ pub mod send_message;
 pub mod session;
 pub mod shell;
 pub mod skill;
+pub mod skill_file;
 pub mod ssh;
 pub mod subagent;
 pub mod todo;

@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -307,6 +307,14 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS skill_files (
+                skill_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (skill_name, file_path),
+                FOREIGN KEY(skill_name) REFERENCES skills(name) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS user_model (
                 trait_key TEXT PRIMARY KEY,
@@ -1922,6 +1930,112 @@ impl SkillStore {
     }
 }
 
+/// Supporting files associated with a skill, stored in SQLite.
+pub struct SkillFileStore {
+    database_path: PathBuf,
+}
+
+impl SkillFileStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    pub fn store_file(
+        &self,
+        skill_name: &str,
+        file_path: &str,
+        content: &str,
+    ) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO skill_files (skill_name, file_path, content, created_at)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                 ON CONFLICT(skill_name, file_path) DO UPDATE SET
+                    content = excluded.content,
+                    created_at = CURRENT_TIMESTAMP",
+                params![skill_name, file_path, content],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    pub fn get_file(
+        &self,
+        skill_name: &str,
+        file_path: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT content FROM skill_files WHERE skill_name = ?1 AND file_path = ?2",
+                params![skill_name, file_path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    pub fn list_files(&self, skill_name: &str) -> Result<Vec<String>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT file_path FROM skill_files WHERE skill_name = ?1 ORDER BY file_path ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![skill_name], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    pub fn delete_file(&self, skill_name: &str, file_path: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "DELETE FROM skill_files WHERE skill_name = ?1 AND file_path = ?2",
+                params![skill_name, file_path],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_all_files(&self, skill_name: &str) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "DELETE FROM skill_files WHERE skill_name = ?1",
+                params![skill_name],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows as u64)
+    }
+}
+
 /// Compute a relevance score for a skill against tokenized prompt words.
 /// Higher score = more relevant. Returns 0.0 if no match.
 fn skill_match_score(skill: &StoredSkill, prompt_words: &[String]) -> f64 {
@@ -3483,6 +3597,95 @@ mod tests {
 
         let recent = store.recent_usages("many", 3).unwrap();
         assert_eq!(recent.len(), 3);
+    }
+
+    #[test]
+    fn skill_file_store_round_trip_and_list() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("deploy", "Deploy app", "Run deploy", None, &[])
+            .unwrap();
+
+        let store = super::SkillFileStore::new(&db_path);
+        store
+            .store_file("deploy", "references/api.md", "# API\n...")
+            .unwrap();
+        store
+            .store_file("deploy", "examples/example.txt", "hello")
+            .unwrap();
+
+        let content = store
+            .get_file("deploy", "references/api.md")
+            .unwrap()
+            .expect("content");
+        assert_eq!(content, "# API\n...");
+
+        let files = store.list_files("deploy").unwrap();
+        assert_eq!(
+            files,
+            vec![
+                "examples/example.txt".to_owned(),
+                "references/api.md".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_file_store_delete_one_and_all() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("review", "Review code", "Read file", None, &[])
+            .unwrap();
+
+        let store = super::SkillFileStore::new(&db_path);
+        store
+            .store_file("review", "refs/a.md", "a")
+            .unwrap();
+        store
+            .store_file("review", "refs/b.md", "b")
+            .unwrap();
+
+        assert!(store.delete_file("review", "refs/a.md").unwrap());
+        assert_eq!(store.get_file("review", "refs/a.md").unwrap(), None);
+
+        let deleted = store.delete_all_files("review").unwrap();
+        assert_eq!(deleted, 1);
+        assert!(store.list_files("review").unwrap().is_empty());
+    }
+
+    #[test]
+    fn skill_file_store_updates_existing_file() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("test", "Test skill", "Do test", None, &[])
+            .unwrap();
+
+        let store = super::SkillFileStore::new(&db_path);
+        store
+            .store_file("test", "refs/doc.md", "v1")
+            .unwrap();
+        store
+            .store_file("test", "refs/doc.md", "v2")
+            .unwrap();
+
+        let content = store
+            .get_file("test", "refs/doc.md")
+            .unwrap()
+            .expect("content");
+        assert_eq!(content, "v2");
+        assert_eq!(store.list_files("test").unwrap().len(), 1);
     }
 
     #[test]

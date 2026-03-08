@@ -549,6 +549,22 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "skill_view_file".to_owned(),
+                description: "Reads a supporting file attached to a skill, such as a reference doc or example file.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": { "type": "string", "description": "Name of the skill owning the supporting file." },
+                        "file_path": { "type": "string", "description": "Relative file path stored under the skill, e.g. 'references/api.md'." }
+                    },
+                    "required": ["skill_name", "file_path"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill_file::SkillViewFileTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "skill_delete".to_owned(),
                 description: "Deletes a saved skill by name.".to_owned(),
                 parameters: Some(json!({
@@ -1321,7 +1337,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 56);
+        assert_eq!(definitions.len(), 57);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -1336,6 +1352,7 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_create"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
+        assert!(definitions.iter().any(|tool| tool.name == "skill_view_file"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
         assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
         assert!(definitions.iter().any(|tool| tool.name == "user_model"));
