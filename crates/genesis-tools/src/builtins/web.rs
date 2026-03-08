@@ -109,7 +109,12 @@ impl ToolHandler for WebRequestTool {
         })?;
 
         let truncated = if response_body.len() > MAX_RESPONSE_BYTES {
-            let mut t = response_body[..MAX_RESPONSE_BYTES].to_string();
+            // Find the nearest char boundary at or before the byte limit
+            let mut end = MAX_RESPONSE_BYTES;
+            while end > 0 && !response_body.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut t = response_body[..end].to_string();
             t.push_str("\n... (response truncated)");
             t
         } else {

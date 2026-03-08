@@ -676,6 +676,51 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "schedule_create".to_owned(),
+                description: "Creates a recurring scheduled prompt that runs on a cron schedule. The prompt will be executed automatically at the specified interval.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "cron": { "type": "string", "description": "Cron expression (5 fields: minute hour day month weekday). Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am)." },
+                        "prompt": { "type": "string", "description": "The prompt to execute on each trigger." },
+                        "destination": { "type": "string", "description": "Delivery destination: 'cli' (default), 'telegram', 'discord', 'slack'." }
+                    },
+                    "required": ["cron", "prompt"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::schedule::ScheduleCreateTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "schedule_list".to_owned(),
+                description: "Lists all scheduled prompts with their cron expressions, destinations, and status.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::schedule::ScheduleListTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "schedule_delete".to_owned(),
+                description: "Deletes a scheduled prompt by its ID.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The schedule ID to delete." }
+                    },
+                    "required": ["id"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::schedule::ScheduleDeleteTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "code_execution".to_owned(),
                 description: "Executes code in a sandboxed subprocess with no access to host environment variables or secrets. Use for computation, data analysis, and scripting. Supports Python (default), Node.js, and Ruby.".to_owned(),
                 parameters: Some(json!({
@@ -787,7 +832,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 31);
+        assert_eq!(definitions.len(), 34);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
