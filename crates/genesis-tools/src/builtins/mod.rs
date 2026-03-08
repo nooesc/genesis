@@ -5,6 +5,7 @@ pub mod docker;
 pub mod export;
 pub mod fs;
 pub mod git;
+pub mod glob;
 pub mod memory;
 pub mod patch;
 pub mod process;

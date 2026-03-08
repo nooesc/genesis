@@ -70,6 +70,12 @@ pub struct AgentLoopConfig {
     pub memory_nudge_interval: Option<usize>,
     /// Enable trajectory recording for agent training data capture.
     pub enable_trajectory: bool,
+    /// Directory to save trajectory files. When set with enable_trajectory,
+    /// trajectories are auto-saved after each turn. Files are written to
+    /// `{trajectory_dir}/{session_id}.json`.
+    pub trajectory_dir: Option<String>,
+    /// Session ID for trajectory file naming.
+    pub session_id: Option<String>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -94,6 +100,8 @@ impl Default for AgentLoopConfig {
             max_concurrency: 4,
             memory_nudge_interval: Some(DEFAULT_MEMORY_NUDGE_INTERVAL),
             enable_trajectory: false,
+            trajectory_dir: None,
+            session_id: None,
         }
     }
 }
@@ -158,7 +166,8 @@ impl AgentLoop {
 
         let trajectory = if config.enable_trajectory {
             let sys = config.system_prompt.as_deref().unwrap_or("");
-            TrajectoryRecorder::new("session", client.model(), sys)
+            let session_id = config.session_id.as_deref().unwrap_or("session");
+            TrajectoryRecorder::new(session_id, client.model(), sys)
         } else {
             TrajectoryRecorder::disabled()
         };
@@ -234,6 +243,7 @@ impl AgentLoop {
             turns_used += 1;
             if turns_used > self.config.max_turns {
                 warn!(max_turns = self.config.max_turns, "agent loop reached turn limit");
+                self.save_trajectory();
                 return Ok(AgentResult {
                     response: format!(
                         "I've reached the maximum of {} turns for this request. \
@@ -313,6 +323,7 @@ impl AgentLoop {
 
                     // If a tool requested user input, pause the agent loop
                     if let Some(question) = clarification {
+                        self.save_trajectory();
                         return Ok(AgentResult {
                             response: String::new(),
                             turns_used,
@@ -342,6 +353,7 @@ impl AgentLoop {
             self.trajectory.record_assistant_message(&response_text);
             self.messages.push(ChatMessage::assistant(&response_text));
 
+            self.save_trajectory();
             return Ok(AgentResult {
                 response: response_text,
                 turns_used,
@@ -403,6 +415,7 @@ impl AgentLoop {
                     self.config.max_turns
                 );
                 on_event(StreamEvent::Chunk(&msg));
+                self.save_trajectory();
                 return Ok(AgentResult {
                     response: msg,
                     turns_used: turns_used - 1,
@@ -503,6 +516,7 @@ impl AgentLoop {
                         }
 
                         if let Some(question) = clarification {
+                            self.save_trajectory();
                             return Ok(AgentResult {
                                 response: String::new(),
                                 turns_used,
@@ -522,6 +536,7 @@ impl AgentLoop {
                     self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
+                    self.save_trajectory();
                     return Ok(AgentResult {
                         response: response_text,
                         turns_used,
@@ -591,6 +606,7 @@ impl AgentLoop {
                             }
 
                             if let Some(question) = clarification {
+                                self.save_trajectory();
                                 return Ok(AgentResult {
                                     response: String::new(),
                                     turns_used,
@@ -615,6 +631,7 @@ impl AgentLoop {
                     self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 
+                    self.save_trajectory();
                     return Ok(AgentResult {
                         response: response_text,
                         turns_used,
@@ -641,6 +658,17 @@ impl AgentLoop {
                 );
                 self.messages
                     .push(ChatMessage::system(MEMORY_NUDGE));
+            }
+        }
+    }
+
+    /// Save the trajectory to disk if a trajectory directory is configured.
+    fn save_trajectory(&self) {
+        if let Some(dir) = &self.config.trajectory_dir {
+            let session_id = self.config.session_id.as_deref().unwrap_or("unknown");
+            let path = std::path::Path::new(dir).join(format!("{session_id}.json"));
+            if let Err(e) = self.trajectory.save_to_file(&path) {
+                warn!(error = %e, "failed to save trajectory");
             }
         }
     }

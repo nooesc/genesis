@@ -251,6 +251,19 @@ impl TrajectoryRecorder {
         &self.trajectory
     }
 
+    /// Save the trajectory to a JSON file. Creates the parent directory if needed.
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&self.trajectory)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, json)
+    }
+
     /// Consume the recorder and return the trajectory.
     pub fn into_trajectory(self) -> Trajectory {
         self.trajectory
@@ -633,6 +646,56 @@ mod tests {
             ts.ends_with('Z') || ts.contains('+'),
             "timestamp should end with Z or have offset: {ts}"
         );
+    }
+
+    #[test]
+    fn save_to_file_creates_file() {
+        let dir = tempfile::tempdir().expect("should create temp dir");
+        let path = dir.path().join("trajectories").join("test.json");
+
+        let mut recorder = TrajectoryRecorder::new("s-1", "gpt-4", "system");
+        recorder.record_user_message("hello");
+        recorder.record_assistant_message("hi");
+        recorder.finish();
+
+        recorder.save_to_file(&path).expect("save_to_file should succeed");
+        assert!(path.exists(), "trajectory file should exist");
+    }
+
+    #[test]
+    fn save_to_file_disabled_is_noop() {
+        let dir = tempfile::tempdir().expect("should create temp dir");
+        let path = dir.path().join("should_not_exist.json");
+
+        let recorder = TrajectoryRecorder::disabled();
+        recorder.save_to_file(&path).expect("save_to_file should succeed for disabled");
+        assert!(!path.exists(), "file should not be created for disabled recorder");
+    }
+
+    #[test]
+    fn save_to_file_produces_valid_json() {
+        let dir = tempfile::tempdir().expect("should create temp dir");
+        let path = dir.path().join("valid.json");
+
+        let mut recorder = TrajectoryRecorder::new("s-42", "claude-sonnet-4-20250514", "You are Eve.");
+        recorder.record_user_message("What files are here?");
+        recorder.record_tool_call("shell_exec", r#"{"command":"ls"}"#);
+        recorder.record_tool_result("shell_exec", "foo.txt\nbar.txt");
+        recorder.record_assistant_message("Found foo.txt and bar.txt.");
+        recorder.set_outcome(TrajectoryOutcome::Success);
+        recorder.finish();
+
+        recorder.save_to_file(&path).expect("save_to_file should succeed");
+
+        let contents = std::fs::read_to_string(&path).expect("should read file");
+        let parsed: Trajectory =
+            serde_json::from_str(&contents).expect("file contents should deserialize as Trajectory");
+
+        assert_eq!(parsed.session_id, "s-42");
+        assert_eq!(parsed.model, "claude-sonnet-4-20250514");
+        assert_eq!(parsed.steps.len(), 4);
+        assert_eq!(parsed.outcome, Some(TrajectoryOutcome::Success));
+        assert!(parsed.completed_at.is_some());
     }
 
     #[test]

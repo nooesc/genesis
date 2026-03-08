@@ -950,6 +950,24 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::process::SystemInfoTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "glob_search".to_owned(),
+                description: "Finds files matching a glob pattern. Supports recursive patterns like **/*.rs. Skips hidden files and noise directories (.git, node_modules, target) by default.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern to match (e.g. \"**/*.rs\", \"src/**/*.ts\", \"*.json\")." },
+                        "path": { "type": "string", "description": "Base directory to search from (defaults to current directory)." },
+                        "type": { "type": "string", "description": "Filter by type: 'file', 'dir', or 'any' (default)." },
+                        "limit": { "type": "string", "description": "Maximum number of results (default: 100)." }
+                    },
+                    "required": ["pattern"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::glob::GlobSearchTool,
         );
     registry
 }
@@ -1030,7 +1048,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 45);
+        assert_eq!(definitions.len(), 46);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
