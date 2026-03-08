@@ -3,6 +3,7 @@ pub mod compress;
 pub mod context_security;
 pub mod cost;
 pub mod execution;
+pub mod hooks;
 pub mod moa;
 pub mod nudge;
 pub mod prompt;

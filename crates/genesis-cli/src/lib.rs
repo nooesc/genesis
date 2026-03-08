@@ -410,6 +410,48 @@ pub enum EvalCommand {
         #[arg(long, help = "Delete duplicate files, keeping the first file in each group")]
         remove: bool,
     },
+    #[command(about = "Filter trajectories by criteria and copy matching files to output")]
+    Filter {
+        #[arg(help = "Source directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Output directory for matching trajectories")]
+        output: String,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+        #[arg(long, help = "Only include trajectories for this model")]
+        model: Option<String>,
+        #[arg(long, help = "Only include trajectories with this tag")]
+        tag: Option<String>,
+        #[arg(long, help = "Minimum quality score (0.0-1.0)")]
+        min_quality: Option<f64>,
+        #[arg(long, help = "Maximum quality score (0.0-1.0)")]
+        max_quality: Option<f64>,
+        #[arg(long, help = "Only include successful trajectories")]
+        success_only: bool,
+        #[arg(long, help = "Only include failed trajectories")]
+        failure_only: bool,
+        #[arg(long, help = "Minimum number of steps")]
+        min_steps: Option<usize>,
+        #[arg(long, help = "Maximum number of steps")]
+        max_steps: Option<usize>,
+        #[arg(long, help = "Only include trajectories that used this tool")]
+        tool: Option<String>,
+    },
+    #[command(about = "Split a trajectory directory into train/test sets")]
+    Split {
+        #[arg(help = "Source directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Output directory for train set")]
+        train: String,
+        #[arg(long, help = "Output directory for test set")]
+        test: String,
+        #[arg(long, default_value = "0.8", help = "Fraction of data for training (0.0-1.0)")]
+        ratio: f64,
+        #[arg(long, help = "Random seed for reproducibility")]
+        seed: Option<u64>,
+        #[arg(long, help = "Recursively scan nested directories")]
+        recursive: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -904,6 +946,32 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             EvalCommand::Deduplicate { dir, recursive, remove } => {
                 run_eval_deduplicate(&dir, recursive, remove, cli.json)
             }
+            EvalCommand::Filter {
+                dir,
+                output,
+                recursive,
+                model,
+                tag,
+                min_quality,
+                max_quality,
+                success_only,
+                failure_only,
+                min_steps,
+                max_steps,
+                tool,
+            } => run_eval_filter(
+                &dir, &output, recursive, model.as_deref(), tag.as_deref(),
+                min_quality, max_quality, success_only, failure_only,
+                min_steps, max_steps, tool.as_deref(),
+            ),
+            EvalCommand::Split {
+                dir,
+                train,
+                test,
+                ratio,
+                seed,
+                recursive,
+            } => run_eval_split(&dir, &train, &test, ratio, seed, recursive),
         },
         Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -3639,6 +3707,179 @@ fn run_eval_tag_stats(dir: &str, recursive: bool, json: bool) -> Result<String, 
 struct DeduplicateGroup {
     key: String,
     files: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_eval_filter(
+    dir: &str,
+    output: &str,
+    recursive: bool,
+    model: Option<&str>,
+    tag: Option<&str>,
+    min_quality: Option<f64>,
+    max_quality: Option<f64>,
+    success_only: bool,
+    failure_only: bool,
+    min_steps: Option<usize>,
+    max_steps: Option<usize>,
+    tool: Option<&str>,
+) -> Result<String, CliError> {
+    std::fs::create_dir_all(output)
+        .map_err(|e| CliError::Other(format!("failed to create {output}: {e}")))?;
+
+    let files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    let mut matched = 0usize;
+    let mut total = 0usize;
+
+    for path in files {
+        total += 1;
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            CliError::Other(format!("failed to read {}: {e}", path.display()))
+        })?;
+        let traj: genesis_core::trajectory::Trajectory = match serde_json::from_str(&raw) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Apply filters
+        if let Some(m) = model {
+            if !traj.model.contains(m) {
+                continue;
+            }
+        }
+        if let Some(t) = tag {
+            if !traj.tags.iter().any(|tag| tag == t) {
+                continue;
+            }
+        }
+        if success_only {
+            if !matches!(
+                traj.outcome,
+                Some(genesis_core::trajectory::TrajectoryOutcome::Success)
+            ) {
+                continue;
+            }
+        }
+        if failure_only {
+            if !matches!(
+                traj.outcome,
+                Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. })
+            ) {
+                continue;
+            }
+        }
+        if let Some(min) = min_steps {
+            if traj.steps.len() < min {
+                continue;
+            }
+        }
+        if let Some(max) = max_steps {
+            if traj.steps.len() > max {
+                continue;
+            }
+        }
+        if let Some(tool_name) = tool {
+            let has_tool = traj.steps.iter().any(|s| {
+                s.tool_name.as_deref() == Some(tool_name)
+            });
+            if !has_tool {
+                continue;
+            }
+        }
+        if min_quality.is_some() || max_quality.is_some() {
+            let score = genesis_core::quality::score(&traj).overall;
+            if let Some(min) = min_quality {
+                if score < min {
+                    continue;
+                }
+            }
+            if let Some(max) = max_quality {
+                if score > max {
+                    continue;
+                }
+            }
+        }
+
+        // Passed all filters — copy to output
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let dest = std::path::Path::new(output).join(&filename);
+        std::fs::copy(&path, &dest).map_err(|e| {
+            CliError::Other(format!(
+                "failed to copy {} -> {}: {e}",
+                path.display(),
+                dest.display()
+            ))
+        })?;
+        matched += 1;
+    }
+
+    Ok(format!(
+        "filtered {matched}/{total} trajectories into {output}"
+    ))
+}
+
+fn run_eval_split(
+    dir: &str,
+    train_dir: &str,
+    test_dir: &str,
+    ratio: f64,
+    seed: Option<u64>,
+    recursive: bool,
+) -> Result<String, CliError> {
+    if !(0.0..=1.0).contains(&ratio) {
+        return Err(CliError::Other(format!(
+            "ratio must be between 0.0 and 1.0, got {ratio}"
+        )));
+    }
+
+    std::fs::create_dir_all(train_dir)
+        .map_err(|e| CliError::Other(format!("failed to create {train_dir}: {e}")))?;
+    std::fs::create_dir_all(test_dir)
+        .map_err(|e| CliError::Other(format!("failed to create {test_dir}: {e}")))?;
+
+    let mut files = collect_eval_files(PathBuf::from(dir), recursive)?;
+    if files.is_empty() {
+        return Ok("no trajectory files found".to_owned());
+    }
+
+    // Sort for deterministic ordering, then shuffle with seed
+    files.sort();
+    use rand::seq::SliceRandom;
+    let mut rng = match seed {
+        Some(s) => {
+            use rand::SeedableRng;
+            rand::rngs::StdRng::seed_from_u64(s)
+        }
+        None => {
+            use rand::SeedableRng;
+            rand::rngs::StdRng::from_os_rng()
+        }
+    };
+    files.shuffle(&mut rng);
+
+    let split_point = (files.len() as f64 * ratio).round() as usize;
+    let (train_files, test_files) = files.split_at(split_point);
+
+    for path in train_files {
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        std::fs::copy(path, std::path::Path::new(train_dir).join(&filename)).map_err(|e| {
+            CliError::Other(format!("failed to copy {}: {e}", path.display()))
+        })?;
+    }
+
+    for path in test_files {
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        std::fs::copy(path, std::path::Path::new(test_dir).join(&filename)).map_err(|e| {
+            CliError::Other(format!("failed to copy {}: {e}", path.display()))
+        })?;
+    }
+
+    Ok(format!(
+        "split {} trajectories: {} train, {} test (ratio {ratio})",
+        files.len(),
+        train_files.len(),
+        test_files.len()
+    ))
 }
 
 fn run_eval_deduplicate(
@@ -8945,6 +9186,201 @@ storage:
                 assert_eq!(sources, vec!["dir1", "dir2"]);
                 assert_eq!(output, "merged");
                 assert!(dedup);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_eval_filter_by_model_and_success() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let t1 = serde_json::json!({
+            "session_id": "s1", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [],
+            "outcome": {"type": "success"}, "tags": ["test"]
+        });
+        let t2 = serde_json::json!({
+            "session_id": "s2", "model": "claude", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [],
+            "outcome": {"type": "success"}, "tags": []
+        });
+        let t3 = serde_json::json!({
+            "session_id": "s3", "model": "gpt-4", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [],
+            "outcome": {"type": "failure", "reason": "oops"}, "tags": []
+        });
+        std::fs::write(src.join("s1.json"), serde_json::to_string(&t1).unwrap()).unwrap();
+        std::fs::write(src.join("s2.json"), serde_json::to_string(&t2).unwrap()).unwrap();
+        std::fs::write(src.join("s3.json"), serde_json::to_string(&t3).unwrap()).unwrap();
+
+        let result = crate::run_eval_filter(
+            src.to_str().unwrap(), out.to_str().unwrap(), false,
+            Some("gpt-4"), None, None, None, true, false, None, None, None,
+        )
+        .expect("filter should succeed");
+
+        assert!(result.contains("1/3"));
+        assert!(out.join("s1.json").exists());
+        assert!(!out.join("s2.json").exists());
+        assert!(!out.join("s3.json").exists());
+    }
+
+    #[test]
+    fn run_eval_filter_by_tag() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let t1 = serde_json::json!({
+            "session_id": "s1", "model": "m", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [],
+            "tags": ["coding", "debug"]
+        });
+        let t2 = serde_json::json!({
+            "session_id": "s2", "model": "m", "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z", "steps": [],
+            "tags": ["research"]
+        });
+        std::fs::write(src.join("s1.json"), serde_json::to_string(&t1).unwrap()).unwrap();
+        std::fs::write(src.join("s2.json"), serde_json::to_string(&t2).unwrap()).unwrap();
+
+        let result = crate::run_eval_filter(
+            src.to_str().unwrap(), out.to_str().unwrap(), false,
+            None, Some("coding"), None, None, false, false, None, None, None,
+        )
+        .expect("filter should succeed");
+
+        assert!(result.contains("1/2"));
+        assert!(out.join("s1.json").exists());
+    }
+
+    #[test]
+    fn run_eval_split_creates_train_test() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let train = dir.path().join("train");
+        let test = dir.path().join("test");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for i in 0..10 {
+            let t = serde_json::json!({
+                "session_id": format!("s{i}"), "model": "m", "system_prompt_hash": "h",
+                "started_at": "2026-01-01T00:00:00Z", "steps": [], "tags": []
+            });
+            std::fs::write(
+                src.join(format!("s{i}.json")),
+                serde_json::to_string(&t).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let result = crate::run_eval_split(
+            src.to_str().unwrap(),
+            train.to_str().unwrap(),
+            test.to_str().unwrap(),
+            0.8,
+            Some(42),
+            false,
+        )
+        .expect("split should succeed");
+
+        assert!(result.contains("8 train"));
+        assert!(result.contains("2 test"));
+
+        let train_count = std::fs::read_dir(&train).unwrap().count();
+        let test_count = std::fs::read_dir(&test).unwrap().count();
+        assert_eq!(train_count, 8);
+        assert_eq!(test_count, 2);
+    }
+
+    #[test]
+    fn run_eval_split_deterministic_with_seed() {
+        let dir = tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        for i in 0..5 {
+            let t = serde_json::json!({
+                "session_id": format!("s{i}"), "model": "m", "system_prompt_hash": "h",
+                "started_at": "2026-01-01T00:00:00Z", "steps": [], "tags": []
+            });
+            std::fs::write(
+                src.join(format!("s{i}.json")),
+                serde_json::to_string(&t).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let train1 = dir.path().join("t1");
+        let test1 = dir.path().join("e1");
+        let train2 = dir.path().join("t2");
+        let test2 = dir.path().join("e2");
+
+        crate::run_eval_split(
+            src.to_str().unwrap(), train1.to_str().unwrap(), test1.to_str().unwrap(),
+            0.6, Some(99), false,
+        ).unwrap();
+
+        crate::run_eval_split(
+            src.to_str().unwrap(), train2.to_str().unwrap(), test2.to_str().unwrap(),
+            0.6, Some(99), false,
+        ).unwrap();
+
+        let names1: Vec<String> = std::fs::read_dir(&train1).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let names2: Vec<String> = std::fs::read_dir(&train2).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(names1, names2);
+    }
+
+    #[test]
+    fn parses_eval_filter_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "filter", "src", "--output", "out",
+            "--model", "gpt-4", "--success-only", "--min-quality", "0.5",
+        ])
+        .expect("filter should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Filter {
+                dir, output, model, success_only, min_quality, ..
+            }) => {
+                assert_eq!(dir, "src");
+                assert_eq!(output, "out");
+                assert_eq!(model.as_deref(), Some("gpt-4"));
+                assert!(success_only);
+                assert_eq!(min_quality, Some(0.5));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_split_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "eval", "split", "src", "--train", "train", "--test", "test",
+            "--ratio", "0.7", "--seed", "42",
+        ])
+        .expect("split should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Split {
+                dir, train, test, ratio, seed, ..
+            }) => {
+                assert_eq!(dir, "src");
+                assert_eq!(train, "train");
+                assert_eq!(test, "test");
+                assert!((ratio - 0.7).abs() < f64::EPSILON);
+                assert_eq!(seed, Some(42));
             }
             other => panic!("unexpected command: {other:?}"),
         }
