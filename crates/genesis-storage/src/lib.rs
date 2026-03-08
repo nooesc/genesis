@@ -340,6 +340,21 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS pairing_approved (
+                platform TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
+                approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS pairing_pending (
+                platform TEXT NOT NULL,
+                code TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                user_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, code)
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
                 session_id UNINDEXED,
                 content
@@ -2445,6 +2460,405 @@ where
     candidates.find(|path| path.is_dir())
 }
 
+// ===========================================================================
+// PairingStore — DM pairing system for messaging platform authorization
+// ===========================================================================
+
+/// An approved (paired) user on a messaging platform.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovedUser {
+    pub platform: String,
+    pub user_id: String,
+    pub user_name: String,
+    pub approved_at: String,
+}
+
+/// A pending pairing request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingPairing {
+    pub platform: String,
+    pub code: String,
+    pub user_id: String,
+    pub user_name: String,
+    pub created_at: String,
+}
+
+/// Code-based approval flow for authorizing users on messaging platforms.
+///
+/// Instead of static allowlists, unknown users receive a one-time pairing
+/// code that the bot owner approves via the CLI or API.
+pub struct PairingStore {
+    database_path: PathBuf,
+}
+
+/// Unambiguous alphabet for pairing codes (no 0/O, 1/I).
+const PAIRING_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const PAIRING_CODE_LENGTH: usize = 8;
+/// Codes expire after 1 hour.
+const PAIRING_CODE_TTL_SECS: i64 = 3600;
+/// Max pending codes per platform.
+const MAX_PENDING_PER_PLATFORM: usize = 3;
+
+fn generate_pairing_code() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Use a combination of time-based entropy and process-level randomness.
+    // Not cryptographic, but adequate for pairing codes with short TTL.
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut state = seed ^ (std::process::id() as u128) ^ 0xDEAD_BEEF_CAFE_BABE;
+    let mut code = String::with_capacity(PAIRING_CODE_LENGTH);
+    for _ in 0..PAIRING_CODE_LENGTH {
+        // xorshift-style mixing
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let idx = (state as usize) % PAIRING_ALPHABET.len();
+        code.push(PAIRING_ALPHABET[idx] as char);
+    }
+    code
+}
+
+impl PairingStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Check if a user is approved (paired) on a platform.
+    pub fn is_approved(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pairing_approved
+                 WHERE platform = ?1 AND user_id = ?2",
+                params![platform, user_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(count > 0)
+    }
+
+    /// List all approved users, optionally filtered by platform.
+    pub fn list_approved(
+        &self,
+        platform: Option<&str>,
+    ) -> Result<Vec<ApprovedUser>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+
+        if let Some(p) = platform {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, user_id, user_name, approved_at
+                     FROM pairing_approved WHERE platform = ?1
+                     ORDER BY approved_at DESC",
+                )
+                .map_err(me)?;
+            let users = stmt
+                .query_map(params![p], |row| {
+                    Ok(ApprovedUser {
+                        platform: row.get(0)?,
+                        user_id: row.get(1)?,
+                        user_name: row.get(2)?,
+                        approved_at: row.get(3)?,
+                    })
+                })
+                .map_err(me)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(me)?;
+            Ok(users)
+        } else {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, user_id, user_name, approved_at
+                     FROM pairing_approved
+                     ORDER BY platform, approved_at DESC",
+                )
+                .map_err(me)?;
+            let users = stmt
+                .query_map([], |row| {
+                    Ok(ApprovedUser {
+                        platform: row.get(0)?,
+                        user_id: row.get(1)?,
+                        user_name: row.get(2)?,
+                        approved_at: row.get(3)?,
+                    })
+                })
+                .map_err(me)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(me)?;
+            Ok(users)
+        }
+    }
+
+    /// Generate a pairing code for a new user.
+    ///
+    /// Returns `None` if the platform already has the max number of pending
+    /// codes, or if the user is already approved.
+    pub fn generate_code(
+        &self,
+        platform: &str,
+        user_id: &str,
+        user_name: &str,
+    ) -> Result<Option<String>, StorageError> {
+        // Don't generate if already approved
+        if self.is_approved(platform, user_id)? {
+            return Ok(None);
+        }
+
+        let connection = open(&self.database_path)?;
+
+        // Clean up expired codes
+        connection
+            .execute(
+                "DELETE FROM pairing_pending
+                 WHERE created_at < datetime('now', ?1)",
+                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Check if we've hit the max pending for this platform
+        let pending_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pairing_pending WHERE platform = ?1",
+                params![platform],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        if pending_count as usize >= MAX_PENDING_PER_PLATFORM {
+            return Ok(None);
+        }
+
+        let code = generate_pairing_code();
+
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO pairing_pending
+                 (platform, code, user_id, user_name, created_at)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
+                params![platform, &code, user_id, user_name],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(Some(code))
+    }
+
+    /// Approve a pairing code, moving the user to the approved list.
+    ///
+    /// Returns the approved user info, or `None` if the code is invalid/expired.
+    pub fn approve_code(
+        &self,
+        platform: &str,
+        code: &str,
+    ) -> Result<Option<ApprovedUser>, StorageError> {
+        let code = code.to_uppercase();
+        let connection = open(&self.database_path)?;
+
+        // Clean up expired codes first
+        connection
+            .execute(
+                "DELETE FROM pairing_pending
+                 WHERE created_at < datetime('now', ?1)",
+                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Find the pending code
+        let pending = connection
+            .query_row(
+                "SELECT user_id, user_name FROM pairing_pending
+                 WHERE platform = ?1 AND code = ?2",
+                params![platform, &code],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let Some((user_id, user_name)) = pending else {
+            return Ok(None);
+        };
+
+        // Remove the pending code
+        connection
+            .execute(
+                "DELETE FROM pairing_pending WHERE platform = ?1 AND code = ?2",
+                params![platform, &code],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Add to approved users
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO pairing_approved
+                 (platform, user_id, user_name, approved_at)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)",
+                params![platform, &user_id, &user_name],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        // Retrieve the approved user for the return value
+        let approved = connection
+            .query_row(
+                "SELECT platform, user_id, user_name, approved_at
+                 FROM pairing_approved WHERE platform = ?1 AND user_id = ?2",
+                params![platform, &user_id],
+                |row| {
+                    Ok(ApprovedUser {
+                        platform: row.get(0)?,
+                        user_id: row.get(1)?,
+                        user_name: row.get(2)?,
+                        approved_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(approved)
+    }
+
+    /// List pending pairing requests, optionally filtered by platform.
+    pub fn list_pending(
+        &self,
+        platform: Option<&str>,
+    ) -> Result<Vec<PendingPairing>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+
+        // Clean up expired first
+        connection
+            .execute(
+                "DELETE FROM pairing_pending
+                 WHERE created_at < datetime('now', ?1)",
+                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
+            )
+            .map_err(me)?;
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<PendingPairing> {
+            Ok(PendingPairing {
+                platform: row.get(0)?,
+                code: row.get(1)?,
+                user_id: row.get(2)?,
+                user_name: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        };
+
+        if let Some(p) = platform {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, code, user_id, user_name, created_at
+                     FROM pairing_pending WHERE platform = ?1
+                     ORDER BY created_at DESC",
+                )
+                .map_err(me)?;
+            let pending = stmt
+                .query_map(params![p], map_row)
+                .map_err(me)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(me)?;
+            Ok(pending)
+        } else {
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, code, user_id, user_name, created_at
+                     FROM pairing_pending
+                     ORDER BY platform, created_at DESC",
+                )
+                .map_err(me)?;
+            let pending = stmt
+                .query_map([], map_row)
+                .map_err(me)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(me)?;
+            Ok(pending)
+        }
+    }
+
+    /// Revoke an approved user's access.
+    pub fn revoke(
+        &self,
+        platform: &str,
+        user_id: &str,
+    ) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "DELETE FROM pairing_approved WHERE platform = ?1 AND user_id = ?2",
+                params![platform, user_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Clear all pending codes, optionally filtered by platform.
+    pub fn clear_pending(&self, platform: Option<&str>) -> Result<usize, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = if let Some(p) = platform {
+            connection
+                .execute(
+                    "DELETE FROM pairing_pending WHERE platform = ?1",
+                    params![p],
+                )
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?
+        } else {
+            connection
+                .execute("DELETE FROM pairing_pending", [])
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?
+        };
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3252,5 +3666,164 @@ mod tests {
 
         let stored = store.load_messages("import-empty").expect("load should work");
         assert_eq!(stored.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // PairingStore
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pairing_store_basic_flow() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+
+        // Initially no one is approved
+        assert!(!store.is_approved("telegram", "user123").unwrap());
+        assert!(store.list_approved(None).unwrap().is_empty());
+
+        // Generate a code
+        let code = store
+            .generate_code("telegram", "user123", "Alice")
+            .unwrap()
+            .expect("should get a code");
+        assert_eq!(code.len(), 8);
+
+        // Check pending list
+        let pending = store.list_pending(None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].platform, "telegram");
+        assert_eq!(pending[0].user_id, "user123");
+        assert_eq!(pending[0].user_name, "Alice");
+
+        // Approve the code
+        let approved = store
+            .approve_code("telegram", &code)
+            .unwrap()
+            .expect("should approve");
+        assert_eq!(approved.user_id, "user123");
+        assert_eq!(approved.user_name, "Alice");
+
+        // Now the user is approved
+        assert!(store.is_approved("telegram", "user123").unwrap());
+
+        // Pending should be empty
+        assert!(store.list_pending(None).unwrap().is_empty());
+
+        // Approved list should have one entry
+        let approved_list = store.list_approved(None).unwrap();
+        assert_eq!(approved_list.len(), 1);
+    }
+
+    #[test]
+    fn pairing_store_approve_wrong_code() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+        store.generate_code("discord", "u1", "Bob").unwrap();
+
+        // Wrong code returns None
+        let result = store.approve_code("discord", "WRONGCODE").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pairing_store_revoke() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+        let code = store.generate_code("slack", "u2", "Carol").unwrap().unwrap();
+        store.approve_code("slack", &code).unwrap();
+
+        assert!(store.is_approved("slack", "u2").unwrap());
+        assert!(store.revoke("slack", "u2").unwrap());
+        assert!(!store.is_approved("slack", "u2").unwrap());
+
+        // Revoking again returns false
+        assert!(!store.revoke("slack", "u2").unwrap());
+    }
+
+    #[test]
+    fn pairing_store_max_pending() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+
+        // Generate max codes
+        for i in 0..3 {
+            store
+                .generate_code("telegram", &format!("user{i}"), "")
+                .unwrap()
+                .expect("should generate");
+        }
+
+        // Fourth should fail (max pending reached)
+        let result = store.generate_code("telegram", "user99", "").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pairing_store_clear_pending() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+        store.generate_code("telegram", "u1", "").unwrap();
+        store.generate_code("discord", "u2", "").unwrap();
+
+        let cleared = store.clear_pending(Some("telegram")).unwrap();
+        assert_eq!(cleared, 1);
+
+        // Discord pending still exists
+        let pending = store.list_pending(None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].platform, "discord");
+    }
+
+    #[test]
+    fn pairing_store_no_code_for_approved_user() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+        let code = store.generate_code("telegram", "u1", "").unwrap().unwrap();
+        store.approve_code("telegram", &code).unwrap();
+
+        // Generating a code for an already-approved user returns None
+        let result = store.generate_code("telegram", "u1", "").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pairing_store_platform_isolation() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::PairingStore::new(&db_path);
+
+        // Approve on telegram
+        let code = store.generate_code("telegram", "u1", "").unwrap().unwrap();
+        store.approve_code("telegram", &code).unwrap();
+
+        // Not approved on discord
+        assert!(store.is_approved("telegram", "u1").unwrap());
+        assert!(!store.is_approved("discord", "u1").unwrap());
+
+        // Platform-filtered list
+        let tg = store.list_approved(Some("telegram")).unwrap();
+        assert_eq!(tg.len(), 1);
+        let dc = store.list_approved(Some("discord")).unwrap();
+        assert_eq!(dc.len(), 0);
     }
 }
