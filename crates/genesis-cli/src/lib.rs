@@ -105,6 +105,8 @@ pub enum Command {
         raw: bool,
         #[arg(long, help = "Override the system prompt / agent identity")]
         system: Option<String>,
+        #[arg(long, help = "Stream output as it arrives (default: wait for full response)")]
+        stream: bool,
     },
     #[command(about = "Update Genesis to the latest version from source")]
     Update,
@@ -586,8 +588,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
-        Command::Run { prompt, session_id, raw, system } => {
-            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system).await
+        Command::Run { prompt, session_id, raw, system, stream } => {
+            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream).await
         }
         Command::Update => run_update().await,
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json).await,
@@ -690,6 +692,7 @@ async fn run_oneshot(
     raw: bool,
     json: bool,
     system_override: Option<String>,
+    stream: bool,
 ) -> Result<String, CliError> {
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
@@ -709,6 +712,12 @@ async fn run_oneshot(
 
     let session_id = session_id.unwrap_or_else(default_session_id);
     service.ensure_session(&session_id, "cli", None)?;
+
+    if stream && !json {
+        // Streaming mode — print output as it arrives
+        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model).await?;
+        return Ok(String::new());
+    }
 
     let outcome = service
         .run_turn(SessionTurnInput {
@@ -2508,11 +2517,12 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "run", "hello world"])
             .expect("run command should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system } => {
+            Command::Run { prompt, session_id, raw, system, stream } => {
                 assert_eq!(prompt, "hello world");
                 assert!(session_id.is_none());
                 assert!(!raw);
                 assert!(system.is_none());
+                assert!(!stream);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2525,11 +2535,12 @@ storage:
         ])
         .expect("run command with flags should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system } => {
+            Command::Run { prompt, session_id, raw, system, stream } => {
                 assert_eq!(prompt, "what is 2+2");
                 assert_eq!(session_id.as_deref(), Some("my-session"));
                 assert!(raw);
                 assert!(system.is_none());
+                assert!(!stream);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -2559,6 +2570,22 @@ storage:
             Command::Run { prompt, system, .. } => {
                 assert_eq!(prompt, "what is 2+2");
                 assert_eq!(system.as_deref(), Some("You are a calculator."));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_run_with_stream() {
+        let cli = Cli::try_parse_from([
+            "genesis", "run", "--stream", "tell me a story",
+        ])
+        .expect("run with --stream should parse");
+        match cli.command {
+            Command::Run { prompt, stream, raw, .. } => {
+                assert_eq!(prompt, "tell me a story");
+                assert!(stream);
+                assert!(!raw);
             }
             other => panic!("unexpected command: {other:?}"),
         }

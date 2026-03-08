@@ -536,6 +536,7 @@ dependencies = [
  "genesis-config",
  "genesis-core",
  "genesis-gateway",
+ "genesis-mcp",
  "genesis-provider",
  "genesis-storage",
  "genesis-types",
