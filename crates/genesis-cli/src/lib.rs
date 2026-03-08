@@ -160,6 +160,13 @@ pub enum SessionsCommand {
         #[arg(long, default_value = "50", help = "Max messages to display")]
         limit: usize,
     },
+    #[command(about = "Export a session as JSON or Markdown")]
+    Export {
+        #[arg(help = "Session ID to export")]
+        id: String,
+        #[arg(long, default_value = "json", help = "Output format: json or md")]
+        format: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -317,6 +324,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(serde_json::to_string_pretty(&display_messages)?)
                     } else {
                         Ok(format_session_messages(&session.id, display_messages))
+                    }
+                }
+                SessionsCommand::Export { id, format } => {
+                    let _session = store
+                        .get_session(&id)?
+                        .ok_or_else(|| CliError::SessionNotFound(id.clone()))?;
+                    let messages = store.load_messages(&id)?;
+
+                    match format.as_str() {
+                        "json" => Ok(serde_json::to_string_pretty(&messages)?),
+                        "md" | "markdown" => Ok(export_session_markdown(&id, &messages)),
+                        other => Err(CliError::Other(format!(
+                            "unknown export format '{other}', expected 'json' or 'md'"
+                        ))),
                     }
                 }
             }
@@ -1159,6 +1180,25 @@ fn format_session_messages(session_id: &str, messages: &[genesis_storage::Stored
     lines.join("\n")
 }
 
+fn export_session_markdown(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+    let mut lines = vec![format!("# Session {session_id}\n")];
+    for msg in messages {
+        let role = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            "tool" => "Tool Result",
+            other => other,
+        };
+        lines.push(format!("## {role}\n"));
+        if let Some(content) = &msg.content {
+            lines.push(content.clone());
+            lines.push(String::new());
+        }
+    }
+    lines.join("\n")
+}
+
 fn format_skill_list(skills: &[genesis_storage::StoredSkill]) -> String {
     if skills.is_empty() {
         return "no saved skills".to_owned();
@@ -1319,7 +1359,8 @@ mod tests {
     use super::{
         context_template,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
-        default_session_id, delivery_platform_from_str, format_schedule_list, format_session_list,
+        default_session_id, delivery_platform_from_str, export_session_markdown,
+        format_schedule_list, format_session_list,
         format_session_messages, format_skill, format_skill_list, format_subagent,
         format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command,
         ContextCommand, McpCommand, ModelCommand, ScheduleCommand, SessionsCommand,
@@ -1873,6 +1914,65 @@ storage:
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_sessions_export_command() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "export", "session-42"])
+            .expect("sessions export command should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Export { id, format }) => {
+                assert_eq!(id, "session-42");
+                assert_eq!(format, "json"); // default
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_sessions_export_markdown() {
+        let cli = Cli::try_parse_from(["genesis", "sessions", "export", "s-1", "--format", "md"])
+            .expect("sessions export md should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Export { id, format }) => {
+                assert_eq!(id, "s-1");
+                assert_eq!(format, "md");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_session_markdown_formats_conversation() {
+        let messages = vec![
+            genesis_storage::StoredMessage {
+                id: 1,
+                session_id: "s-1".to_owned(),
+                role: "user".to_owned(),
+                content: Some("hello".to_owned()),
+                tool_call_id: None,
+                tool_calls_json: None,
+                created_at: "2026-03-08 12:00:00".to_owned(),
+            },
+            genesis_storage::StoredMessage {
+                id: 2,
+                session_id: "s-1".to_owned(),
+                role: "assistant".to_owned(),
+                content: Some("hi there".to_owned()),
+                tool_call_id: None,
+                tool_calls_json: None,
+                created_at: "2026-03-08 12:00:01".to_owned(),
+            },
+        ];
+
+        let output = export_session_markdown("s-1", &messages);
+        assert!(output.contains("# Session s-1"));
+        assert!(output.contains("## User"));
+        assert!(output.contains("hello"));
+        assert!(output.contains("## Assistant"));
+        assert!(output.contains("hi there"));
     }
 
     #[test]

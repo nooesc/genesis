@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn backoff_delay_increases_with_attempt() {
         let d0 = backoff_delay(0);
-        let d1 = backoff_delay(1);
+        let _d1 = backoff_delay(1);
         let d2 = backoff_delay(2);
         // With ±25% jitter, attempt 0 should be ~750-1250ms,
         // attempt 1 ~1500-2500ms, attempt 2 ~3000-5000ms.
