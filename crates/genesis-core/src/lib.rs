@@ -11,6 +11,7 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod skills;
 pub mod quality;
+pub mod tagger;
 pub mod toolset;
 pub mod trajectory;
 

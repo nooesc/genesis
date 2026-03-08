@@ -332,6 +332,15 @@ pub enum EvalCommand {
         #[arg(long, help = "Directory to write trajectory JSON files into")]
         output: String,
     },
+    #[command(about = "Convert between trajectory JSON, ChatML JSONL, and ShareGPT JSONL")]
+    Convert {
+        #[arg(long, help = "Input file to convert")]
+        input: String,
+        #[arg(long, help = "Output file to write")]
+        output: String,
+        #[arg(long, help = "Target format: json, chatml, or sharegpt")]
+        format: String,
+    },
     #[command(about = "Compute dataset statistics for a directory of trajectories")]
     Stats {
         #[arg(help = "Directory containing trajectory JSON files")]
@@ -795,6 +804,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
             EvalCommand::ImportChatml { file, output } => {
                 run_eval_import_chatml(&file, &output)
+            }
+            EvalCommand::Convert { input, output, format } => {
+                run_eval_convert(&input, &output, &format)
             }
             EvalCommand::Stats {
                 dir,
@@ -2835,6 +2847,120 @@ fn run_eval_import_chatml(file: &str, output_dir: &str) -> Result<String, CliErr
     Ok(format!("imported {imported} trajectories into {output_dir}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalFileFormat {
+    TrajectoryJson,
+    ChatmlJsonl,
+    SharegptJsonl,
+}
+
+fn run_eval_convert(input: &str, output: &str, format: &str) -> Result<String, CliError> {
+    let target = format.trim().to_ascii_lowercase();
+    let input_format = detect_eval_input_format(input)?;
+
+    let rendered = match (input_format, target.as_str()) {
+        (EvalFileFormat::TrajectoryJson, "json") => {
+            let raw = std::fs::read_to_string(input)
+                .map_err(|e| CliError::Other(format!("failed to read {input}: {e}")))?;
+            let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("invalid trajectory JSON in {input}: {e}")))?;
+            serde_json::to_string_pretty(&trajectory)?
+        }
+        (EvalFileFormat::TrajectoryJson, "chatml") => {
+            let compressed =
+                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            serde_json::to_string(&serde_json::json!({
+                "session_id": compressed.session_id,
+                "model": compressed.model,
+                "tags": compressed.tags,
+                "outcome": compressed.outcome,
+                "chatml": genesis_core::compress::to_chatml(&compressed),
+            }))?
+        }
+        (EvalFileFormat::TrajectoryJson, "sharegpt") => {
+            let compressed =
+                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            serde_json::to_string(&serde_json::json!({
+                "session_id": compressed.session_id,
+                "model": compressed.model,
+                "tags": compressed.tags,
+                "outcome": compressed.outcome,
+                "sharegpt": genesis_core::compress::to_sharegpt(&compressed),
+            }))?
+        }
+        (EvalFileFormat::ChatmlJsonl, "json") => {
+            let entry = load_single_jsonl_entry(input)?;
+            let trajectory = trajectory_from_chatml_entry(&entry, 0)?;
+            serde_json::to_string_pretty(&trajectory)?
+        }
+        (EvalFileFormat::SharegptJsonl, "json") => {
+            let entry = load_single_jsonl_entry(input)?;
+            let trajectory = trajectory_from_sharegpt_entry(&entry, 0)?;
+            serde_json::to_string_pretty(&trajectory)?
+        }
+        (_, other) => {
+            return Err(CliError::Other(format!(
+                "unsupported conversion to '{other}' from input {input}"
+            )))
+        }
+    };
+
+    if let Some(parent) = std::path::Path::new(output).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CliError::Other(format!(
+                    "failed to create parent directory for {output}: {e}"
+                ))
+            })?;
+        }
+    }
+    std::fs::write(output, rendered)
+        .map_err(|e| CliError::Other(format!("failed to write {output}: {e}")))?;
+
+    Ok(format!("converted {input} -> {output} ({target})"))
+}
+
+fn detect_eval_input_format(input: &str) -> Result<EvalFileFormat, CliError> {
+    let path = std::path::Path::new(input);
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => Ok(EvalFileFormat::TrajectoryJson),
+        Some("jsonl") => {
+            let entry = load_single_jsonl_entry(input)?;
+            if entry.get("chatml").is_some() {
+                Ok(EvalFileFormat::ChatmlJsonl)
+            } else if entry.get("sharegpt").is_some() {
+                Ok(EvalFileFormat::SharegptJsonl)
+            } else {
+                Err(CliError::Other(format!(
+                    "cannot detect JSONL format for {input}: expected 'chatml' or 'sharegpt' field"
+                )))
+            }
+        }
+        _ => Err(CliError::Other(format!(
+            "cannot detect input format for {input}: expected .json or .jsonl"
+        ))),
+    }
+}
+
+fn load_single_jsonl_entry(input: &str) -> Result<serde_json::Value, CliError> {
+    let contents = std::fs::read_to_string(input)
+        .map_err(|e| CliError::Other(format!("failed to read {input}: {e}")))?;
+    let lines = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    if lines.len() != 1 {
+        return Err(CliError::Other(format!(
+            "expected exactly 1 JSONL record in {input}, found {}",
+            lines.len()
+        )));
+    }
+
+    serde_json::from_str(lines[0])
+        .map_err(|e| CliError::Other(format!("invalid JSONL in {input}: {e}")))
+}
+
 fn load_training_compressed_trajectory(
     path: &std::path::Path,
 ) -> Result<genesis_core::compress::CompressedTrajectory, CliError> {
@@ -2913,6 +3039,87 @@ fn trajectory_from_chatml_entry(
         session_id,
         model,
         system_prompt_hash: sha256_hex(chatml),
+        started_at: now.clone(),
+        completed_at: Some(now),
+        steps,
+        outcome,
+        tags,
+    })
+}
+
+fn trajectory_from_sharegpt_entry(
+    entry: &serde_json::Value,
+    index: usize,
+) -> Result<genesis_core::trajectory::Trajectory, CliError> {
+    let sharegpt = entry
+        .get("sharegpt")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            CliError::Other(format!("JSONL line {} missing 'sharegpt' field", index + 1))
+        })?;
+
+    let session_id = entry
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("sharegpt-import-{}", index + 1));
+    let model = entry
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("imported-sharegpt")
+        .to_owned();
+    let tags = entry
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| tag.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let outcome = entry
+        .get("outcome")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| CliError::Other(format!("invalid outcome on line {}: {e}", index + 1)))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let steps = sharegpt
+        .iter()
+        .enumerate()
+        .map(|(step_index, item)| {
+            let from = item
+                .get("from")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| CliError::Other("ShareGPT item missing 'from'".to_owned()))?;
+            let value = item
+                .get("value")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| CliError::Other("ShareGPT item missing 'value'".to_owned()))?;
+            let action_type = match from {
+                "human" => genesis_core::trajectory::ActionType::UserMessage,
+                "gpt" | "thought" => genesis_core::trajectory::ActionType::AssistantMessage,
+                _ => genesis_core::trajectory::ActionType::AssistantMessage,
+            };
+
+            Ok(genesis_core::trajectory::TrajectoryStep {
+                step_index,
+                timestamp: now.clone(),
+                action_type,
+                content: value.to_owned(),
+                tool_name: None,
+                tool_arguments: None,
+                tool_result: None,
+                tokens: None,
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+
+    Ok(genesis_core::trajectory::Trajectory {
+        session_id,
+        model,
+        system_prompt_hash: sha256_hex(&serde_json::to_string(sharegpt).unwrap_or_default()),
         started_at: now.clone(),
         completed_at: Some(now),
         steps,
@@ -7458,6 +7665,30 @@ storage:
     }
 
     #[test]
+    fn parses_eval_convert_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "convert",
+            "--input",
+            "trajectory.json",
+            "--output",
+            "out.jsonl",
+            "--format",
+            "chatml",
+        ])
+        .expect("eval convert should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Convert { input, output, format }) => {
+                assert_eq!(input, "trajectory.json");
+                assert_eq!(output, "out.jsonl");
+                assert_eq!(format, "chatml");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_eval_stats_command() {
         let cli = Cli::try_parse_from([
             "genesis",
@@ -7910,6 +8141,131 @@ storage:
         assert_eq!(parsed["steps"][0]["action_type"], "system_message");
         assert_eq!(parsed["steps"][1]["action_type"], "user_message");
         assert_eq!(parsed["steps"][2]["action_type"], "assistant_message");
+    }
+
+    #[test]
+    fn run_eval_convert_trajectory_to_chatml() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("trajectory.json");
+        let output = dir.path().join("out.jsonl");
+        let trajectory = serde_json::json!({
+            "session_id": "convert-chatml",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-chatml",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "hello"},
+                {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "hi"}
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["dataset"]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
+
+        crate::run_eval_convert(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "chatml",
+        )
+        .expect("conversion should succeed");
+
+        let raw = std::fs::read_to_string(output).expect("read output");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json line");
+        assert_eq!(parsed["session_id"], "convert-chatml");
+        assert!(parsed["chatml"].as_str().unwrap().contains("<|im_start|>user"));
+    }
+
+    #[test]
+    fn run_eval_convert_trajectory_to_sharegpt() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("trajectory.json");
+        let output = dir.path().join("out.jsonl");
+        let trajectory = serde_json::json!({
+            "session_id": "convert-sharegpt",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-sharegpt",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "hello"},
+                {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "hi"}
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["dataset"]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
+
+        crate::run_eval_convert(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "sharegpt",
+        )
+        .expect("conversion should succeed");
+
+        let raw = std::fs::read_to_string(output).expect("read output");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json line");
+        assert_eq!(parsed["session_id"], "convert-sharegpt");
+        assert_eq!(parsed["sharegpt"][0]["from"], "human");
+    }
+
+    #[test]
+    fn run_eval_convert_chatml_to_json() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("input.jsonl");
+        let output = dir.path().join("out.json");
+        let line = serde_json::json!({
+            "session_id": "chatml-session",
+            "model": "gpt-4.1-mini",
+            "tags": ["dataset"],
+            "outcome": { "type": "success" },
+            "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
+        });
+        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+
+        crate::run_eval_convert(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "json",
+        )
+        .expect("conversion should succeed");
+
+        let raw = std::fs::read_to_string(output).expect("read output");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(parsed["session_id"], "chatml-session");
+        assert_eq!(parsed["steps"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn run_eval_convert_sharegpt_to_json() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("input.jsonl");
+        let output = dir.path().join("out.json");
+        let line = serde_json::json!({
+            "session_id": "sharegpt-session",
+            "model": "gpt-4.1-mini",
+            "tags": ["dataset"],
+            "outcome": { "type": "success" },
+            "sharegpt": [
+                { "from": "human", "value": "hello" },
+                { "from": "gpt", "value": "hi" }
+            ]
+        });
+        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+
+        crate::run_eval_convert(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "json",
+        )
+        .expect("conversion should succeed");
+
+        let raw = std::fs::read_to_string(output).expect("read output");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(parsed["session_id"], "sharegpt-session");
+        assert_eq!(parsed["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["steps"][0]["action_type"], "user_message");
+        assert_eq!(parsed["steps"][1]["action_type"], "assistant_message");
     }
 
     #[test]
