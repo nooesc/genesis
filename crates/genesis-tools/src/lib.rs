@@ -183,6 +183,26 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "docker_exec".to_owned(),
+                description:
+                    "Executes a command inside a running Docker container via `docker exec`."
+                        .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "container": { "type": "string", "description": "Name or ID of the running Docker container." },
+                        "command": { "type": "string", "description": "The command to execute inside the container." },
+                        "working_dir": { "type": "string", "description": "Optional working directory inside the container." },
+                        "user": { "type": "string", "description": "Optional user to run the command as (e.g. 'root', '1000')." }
+                    },
+                    "required": ["container", "command"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::docker::DockerExecTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "read_file".to_owned(),
                 description: "Reads the contents of a file at the given path.".to_owned(),
                 parameters: Some(json!({
@@ -562,7 +582,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 22);
+        assert_eq!(definitions.len(), 23);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
