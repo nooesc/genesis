@@ -594,6 +594,22 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::subagent::ListSubagentsTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "clarify".to_owned(),
+                description: "Ask the user a clarifying question when you need more information before proceeding. Use this instead of guessing when requirements are ambiguous.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "The question to ask the user." },
+                        "choices": { "type": "string", "description": "Optional comma-separated list of choices to present." }
+                    },
+                    "required": ["question"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::clarify::ClarifyTool,
         );
     registry
 }
@@ -673,7 +689,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 26);
+        assert_eq!(definitions.len(), 27);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

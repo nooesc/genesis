@@ -1395,6 +1395,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /tokens   - Show session token usage\n\
              /session  - Show current session ID\n\
              /new      - Start a new session\n\
+             /compress - Trim old messages, keeping recent context\n\
              /tools    - List available tools\n\
              /skills   - List saved skills\n\
              /model    - Show active model\n\
@@ -1424,6 +1425,36 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
             ))
         }
         "session" => Some(format!("Current session: {session_id}")),
+        "compress" => {
+            let messages = store.load_messages(session_id).ok()?;
+            let total = messages.len();
+            if total <= 10 {
+                return Some(format!(
+                    "Session has only {total} message(s). Nothing to compress."
+                ));
+            }
+            // Keep the 10 most recent messages
+            let keep = 10;
+            match store.truncate_messages(session_id, keep) {
+                Ok(deleted) => {
+                    // Inject a summary note as the first message
+                    let _ = store.append_message(
+                        session_id,
+                        "system",
+                        Some(&format!(
+                            "[Context compressed] {deleted} older messages were removed. \
+                             {keep} recent messages retained."
+                        )),
+                        None,
+                        None,
+                    );
+                    Some(format!(
+                        "Compressed: removed {deleted} old messages, kept {keep} recent."
+                    ))
+                }
+                Err(e) => Some(format!("Compression failed: {e}")),
+            }
+        }
         "clear" => {
             // ANSI clear screen
             print!("\x1b[2J\x1b[H");

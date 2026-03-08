@@ -874,6 +874,48 @@ impl SessionStore {
         Ok(messages)
     }
 
+    /// Delete messages older than the N most recent for a session.
+    /// Returns the number of messages deleted.
+    pub fn truncate_messages(
+        &self,
+        session_id: &str,
+        keep_recent: usize,
+    ) -> Result<usize, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Find the ID threshold: keep messages with the highest IDs.
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let to_delete = count as usize - keep_recent.min(count as usize);
+        if to_delete == 0 {
+            return Ok(0);
+        }
+
+        connection
+            .execute(
+                "DELETE FROM messages WHERE session_id = ?1 AND id IN (
+                    SELECT id FROM messages WHERE session_id = ?1
+                    ORDER BY id ASC LIMIT ?2
+                )",
+                params![session_id, to_delete],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(to_delete)
+    }
+
     /// Full-text search across session content. Returns matching session IDs
     /// with their summaries, ordered by relevance.
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>, StorageError> {

@@ -1,3 +1,4 @@
+pub mod clarify;
 pub mod docker;
 pub mod fs;
 pub mod memory;
