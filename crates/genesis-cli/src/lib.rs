@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::io::{self, Write};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +9,7 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 use clap::{Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::{AgentError, StreamEvent};
+use genesis_core::replay::{load_and_report, ReplayEventCounts, ReplayReport};
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
 };
@@ -261,6 +263,43 @@ pub enum Command {
         #[arg(long, help = "Also benchmark the tool provider if configured")]
         tool_provider: bool,
     },
+    #[command(subcommand, about = "Inspect offline trajectory replay reports")]
+    Eval(EvalCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EvalCommand {
+    #[command(about = "Build a replay report for one trajectory JSON file")]
+    Report {
+        #[arg(help = "Path to a trajectory JSON file")]
+        file: String,
+    },
+    #[command(about = "Aggregate replay reports across a directory of trajectory JSON files")]
+    Summarize {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        recursive: bool,
+        #[arg(long, help = "Only include trajectories for this model")]
+        model: Option<String>,
+        #[arg(long, help = "Only include trajectories tagged with this value")]
+        tag: Option<String>,
+        #[arg(long, help = "Only include trajectories that used this tool")]
+        tool: Option<String>,
+        #[arg(long, help = "Only include trajectories whose outcome is failure")]
+        failures_only: bool,
+        #[arg(long, help = "Only include trajectories that contain replay warnings")]
+        warnings_only: bool,
+        #[arg(long, help = "Only include trajectories with at least this many replay warnings")]
+        min_warnings: Option<usize>,
+    },
+    #[command(about = "Compare two trajectory replay reports")]
+    Compare {
+        #[arg(help = "Left-hand trajectory JSON file")]
+        left: String,
+        #[arg(help = "Right-hand trajectory JSON file")]
+        right: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -491,6 +530,8 @@ pub enum CliError {
     SkillNotFound(String),
     #[error("subagent `{0}` was not found")]
     SubagentNotFound(String),
+    #[error("failed to load replay report: {0}")]
+    Replay(String),
     #[error("failed to encode json output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
@@ -581,6 +622,54 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(format_bootstrap_report(&report))
             }
         }
+        Command::Eval(eval_command) => match eval_command {
+            EvalCommand::Report { file } => {
+                let report = load_and_report(&file)
+                    .map_err(|e| CliError::Replay(e.to_string()))?;
+                if cli.json {
+                    Ok(serde_json::to_string_pretty(&report)?)
+                } else {
+                    Ok(format_replay_report(&report))
+                }
+            }
+            EvalCommand::Summarize {
+                dir,
+                recursive,
+                model,
+                tag,
+                tool,
+                failures_only,
+                warnings_only,
+                min_warnings,
+            } => {
+                let summary = summarize_replay_reports(
+                    &dir,
+                    recursive,
+                    model.as_deref(),
+                    tag.as_deref(),
+                    tool.as_deref(),
+                    failures_only,
+                    warnings_only,
+                    min_warnings,
+                )
+                .map_err(|e| CliError::Replay(e.to_string()))?;
+                if cli.json {
+                    Ok(serde_json::to_string_pretty(&eval_summary_to_json(&summary))?)
+                } else {
+                    Ok(format_eval_summary(&summary))
+                }
+            }
+            EvalCommand::Compare { left, right } => {
+                let comparison = compare_replay_reports(&left, &right)?;
+                if cli.json {
+                    Ok(serde_json::to_string_pretty(&eval_comparison_to_json(
+                        &comparison,
+                    ))?)
+                } else {
+                    Ok(format_eval_comparison(&comparison))
+                }
+            }
+        },
         Command::Sessions(sessions_command) => {
             let loaded = load(cli.config.as_deref())?;
             let store = SessionStore::new(&loaded.config.storage.database_path);
@@ -899,6 +988,564 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AggregatedToolUsage {
+    name: String,
+    call_count: usize,
+    result_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvalSummary {
+    directory: String,
+    recursive: bool,
+    model_filter: Option<String>,
+    tag_filter: Option<String>,
+    tool_filter: Option<String>,
+    failures_only: bool,
+    warnings_only: bool,
+    min_warnings: Option<usize>,
+    files_processed: usize,
+    total_events: usize,
+    event_counts: ReplayEventCounts,
+    warnings: usize,
+    success_count: usize,
+    failure_count: usize,
+    abandoned_count: usize,
+    missing_outcome_count: usize,
+    models: Vec<(String, usize)>,
+    tags: Vec<(String, usize)>,
+    tools: Vec<AggregatedToolUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayEventDelta {
+    user: i64,
+    assistant: i64,
+    tool_call: i64,
+    tool_result: i64,
+    system: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolUsageDelta {
+    name: String,
+    left_call_count: usize,
+    right_call_count: usize,
+    left_result_count: usize,
+    right_result_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvalComparison {
+    left_path: String,
+    right_path: String,
+    left_session_id: String,
+    right_session_id: String,
+    left_model: String,
+    right_model: String,
+    left_total_events: usize,
+    right_total_events: usize,
+    left_warning_count: usize,
+    right_warning_count: usize,
+    event_delta: ReplayEventDelta,
+    tools: Vec<ToolUsageDelta>,
+    left_only_tags: Vec<String>,
+    right_only_tags: Vec<String>,
+}
+
+fn summarize_replay_reports(
+    dir: &str,
+    recursive: bool,
+    model_filter: Option<&str>,
+    tag_filter: Option<&str>,
+    tool_filter: Option<&str>,
+    failures_only: bool,
+    warnings_only: bool,
+    min_warnings: Option<usize>,
+) -> Result<EvalSummary, CliError> {
+    let mut reports = Vec::new();
+
+    for path in collect_eval_files(PathBuf::from(dir), recursive)? {
+        let report = load_and_report(&path).map_err(|e| CliError::Replay(e.to_string()))?;
+        if let Some(model_filter) = model_filter {
+            if report.model != model_filter {
+                continue;
+            }
+        }
+        if let Some(tag_filter) = tag_filter {
+            if !report.tags.iter().any(|tag| tag == tag_filter) {
+                continue;
+            }
+        }
+        if let Some(tool_filter) = tool_filter {
+            if !report.tool_usage.iter().any(|tool| tool.name == tool_filter) {
+                continue;
+            }
+        }
+        if failures_only
+            && !matches!(
+                report.outcome,
+                Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. })
+            )
+        {
+            continue;
+        }
+        if warnings_only && report.warnings.is_empty() {
+            continue;
+        }
+        if let Some(min_warnings) = min_warnings {
+            if report.warnings.len() < min_warnings {
+                continue;
+            }
+        }
+        reports.push(report);
+    }
+
+    let mut model_counts = BTreeMap::<String, usize>::new();
+    let mut tag_counts = BTreeMap::<String, usize>::new();
+    let mut tool_counts = BTreeMap::<String, AggregatedToolUsage>::new();
+    let mut event_counts = ReplayEventCounts::default();
+    let mut total_events = 0usize;
+    let mut warnings = 0usize;
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
+    let mut abandoned_count = 0usize;
+    let mut missing_outcome_count = 0usize;
+
+    for report in &reports {
+        total_events += report.total_events;
+        warnings += report.warnings.len();
+        event_counts.user += report.event_counts.user;
+        event_counts.assistant += report.event_counts.assistant;
+        event_counts.tool_call += report.event_counts.tool_call;
+        event_counts.tool_result += report.event_counts.tool_result;
+        event_counts.system += report.event_counts.system;
+
+        *model_counts.entry(report.model.clone()).or_default() += 1;
+        for tag in &report.tags {
+            *tag_counts.entry(tag.clone()).or_default() += 1;
+        }
+        for tool in &report.tool_usage {
+            let entry = tool_counts
+                .entry(tool.name.clone())
+                .or_insert_with(|| AggregatedToolUsage {
+                    name: tool.name.clone(),
+                    call_count: 0,
+                    result_count: 0,
+                });
+            entry.call_count += tool.call_count;
+            entry.result_count += tool.result_count;
+        }
+
+        match &report.outcome {
+            Some(genesis_core::trajectory::TrajectoryOutcome::Success) => success_count += 1,
+            Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. }) => {
+                failure_count += 1
+            }
+            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => {
+                abandoned_count += 1
+            }
+            None => missing_outcome_count += 1,
+        }
+    }
+
+    let mut tools = tool_counts.into_values().collect::<Vec<_>>();
+    tools.sort_by(|left, right| {
+        right
+            .call_count
+            .cmp(&left.call_count)
+            .then(right.result_count.cmp(&left.result_count))
+            .then(left.name.cmp(&right.name))
+    });
+
+    Ok(EvalSummary {
+        directory: dir.to_owned(),
+        recursive,
+        model_filter: model_filter.map(str::to_owned),
+        tag_filter: tag_filter.map(str::to_owned),
+        tool_filter: tool_filter.map(str::to_owned),
+        failures_only,
+        warnings_only,
+        min_warnings,
+        files_processed: reports.len(),
+        total_events,
+        event_counts,
+        warnings,
+        success_count,
+        failure_count,
+        abandoned_count,
+        missing_outcome_count,
+        models: model_counts.into_iter().collect(),
+        tags: tag_counts.into_iter().collect(),
+        tools,
+    })
+}
+
+fn collect_eval_files(dir: PathBuf, recursive: bool) -> Result<Vec<PathBuf>, CliError> {
+    let mut files = Vec::new();
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            if recursive {
+                files.extend(collect_eval_files(path, true)?);
+            }
+            continue;
+        }
+
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+fn compare_replay_reports(left: &str, right: &str) -> Result<EvalComparison, CliError> {
+    let left_report = load_and_report(left).map_err(|e| CliError::Replay(e.to_string()))?;
+    let right_report = load_and_report(right).map_err(|e| CliError::Replay(e.to_string()))?;
+
+    let mut tool_deltas = BTreeMap::<String, ToolUsageDelta>::new();
+    for tool in &left_report.tool_usage {
+        tool_deltas.insert(
+            tool.name.clone(),
+            ToolUsageDelta {
+                name: tool.name.clone(),
+                left_call_count: tool.call_count,
+                right_call_count: 0,
+                left_result_count: tool.result_count,
+                right_result_count: 0,
+            },
+        );
+    }
+    for tool in &right_report.tool_usage {
+        let entry = tool_deltas
+            .entry(tool.name.clone())
+            .or_insert_with(|| ToolUsageDelta {
+                name: tool.name.clone(),
+                left_call_count: 0,
+                right_call_count: 0,
+                left_result_count: 0,
+                right_result_count: 0,
+            });
+        entry.right_call_count = tool.call_count;
+        entry.right_result_count = tool.result_count;
+    }
+
+    let left_tags = left_report.tags.iter().cloned().collect::<HashSet<_>>();
+    let right_tags = right_report.tags.iter().cloned().collect::<HashSet<_>>();
+
+    let mut tools = tool_deltas.into_values().collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut left_only_tags = left_tags
+        .difference(&right_tags)
+        .cloned()
+        .collect::<Vec<_>>();
+    left_only_tags.sort();
+
+    let mut right_only_tags = right_tags
+        .difference(&left_tags)
+        .cloned()
+        .collect::<Vec<_>>();
+    right_only_tags.sort();
+
+    Ok(EvalComparison {
+        left_path: left.to_owned(),
+        right_path: right.to_owned(),
+        left_session_id: left_report.session_id,
+        right_session_id: right_report.session_id,
+        left_model: left_report.model,
+        right_model: right_report.model,
+        left_total_events: left_report.total_events,
+        right_total_events: right_report.total_events,
+        left_warning_count: left_report.warnings.len(),
+        right_warning_count: right_report.warnings.len(),
+        event_delta: ReplayEventDelta {
+            user: right_report.event_counts.user as i64 - left_report.event_counts.user as i64,
+            assistant: right_report.event_counts.assistant as i64
+                - left_report.event_counts.assistant as i64,
+            tool_call: right_report.event_counts.tool_call as i64
+                - left_report.event_counts.tool_call as i64,
+            tool_result: right_report.event_counts.tool_result as i64
+                - left_report.event_counts.tool_result as i64,
+            system: right_report.event_counts.system as i64
+                - left_report.event_counts.system as i64,
+        },
+        tools,
+        left_only_tags,
+        right_only_tags,
+    })
+}
+
+fn format_replay_report(report: &ReplayReport) -> String {
+    let mut output = String::new();
+    output.push_str("genesis eval report\n");
+    output.push_str(&format!("session:      {}\n", report.session_id));
+    output.push_str(&format!("model:        {}\n", report.model));
+    output.push_str(&format!("started:      {}\n", report.started_at));
+    output.push_str(&format!(
+        "completed:    {}\n",
+        report.completed_at.as_deref().unwrap_or("<missing>")
+    ));
+    output.push_str(&format!(
+        "outcome:      {}\n",
+        match &report.outcome {
+            Some(genesis_core::trajectory::TrajectoryOutcome::Success) => "success",
+            Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. }) => "failure",
+            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => "abandoned",
+            None => "<missing>",
+        }
+    ));
+    output.push_str(&format!("tags:         {}\n", report.tags.join(", ")));
+    output.push_str(&format!("events:       {}\n", report.total_events));
+    output.push_str(&format!(
+        "event counts: user={} assistant={} tool_call={} tool_result={} system={}\n",
+        report.event_counts.user,
+        report.event_counts.assistant,
+        report.event_counts.tool_call,
+        report.event_counts.tool_result,
+        report.event_counts.system
+    ));
+    output.push_str(&format!("warnings:     {}\n", report.warnings.len()));
+
+    if !report.tool_usage.is_empty() {
+        output.push_str("tools:\n");
+        for tool in &report.tool_usage {
+            output.push_str(&format!(
+                "  - {}\tcall={} result={}\n",
+                tool.name, tool.call_count, tool.result_count
+            ));
+        }
+    }
+
+    if !report.warnings.is_empty() {
+        output.push_str("replay warnings:\n");
+        for warning in &report.warnings {
+            output.push_str(&format!("  - {}\n", warning.message));
+        }
+    }
+
+    output
+}
+
+fn format_eval_summary(summary: &EvalSummary) -> String {
+    let mut output = String::new();
+    output.push_str("genesis eval summarize\n");
+    output.push_str(&format!("directory:       {}\n", summary.directory));
+    output.push_str(&format!("recursive:       {}\n", summary.recursive));
+    output.push_str(&format!(
+        "model filter:    {}\n",
+        summary.model_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!(
+        "tag filter:      {}\n",
+        summary.tag_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!(
+        "tool filter:     {}\n",
+        summary.tool_filter.as_deref().unwrap_or("<none>")
+    ));
+    output.push_str(&format!("failures only:   {}\n", summary.failures_only));
+    output.push_str(&format!("warnings only:   {}\n", summary.warnings_only));
+    output.push_str(&format!(
+        "min warnings:    {}\n",
+        summary
+            .min_warnings
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "<none>".to_owned())
+    ));
+    output.push_str(&format!("files:           {}\n", summary.files_processed));
+    output.push_str(&format!("total events:    {}\n", summary.total_events));
+    output.push_str(&format!(
+        "event counts:    user={} assistant={} tool_call={} tool_result={} system={}\n",
+        summary.event_counts.user,
+        summary.event_counts.assistant,
+        summary.event_counts.tool_call,
+        summary.event_counts.tool_result,
+        summary.event_counts.system
+    ));
+    output.push_str(&format!("warnings:        {}\n", summary.warnings));
+    output.push_str(&format!(
+        "outcomes:        success={} failure={} abandoned={} missing={}\n",
+        summary.success_count,
+        summary.failure_count,
+        summary.abandoned_count,
+        summary.missing_outcome_count
+    ));
+
+    if !summary.models.is_empty() {
+        output.push_str("models:\n");
+        for (model, count) in &summary.models {
+            output.push_str(&format!("  - {model}: {count}\n"));
+        }
+    }
+
+    if !summary.tags.is_empty() {
+        output.push_str("tags:\n");
+        for (tag, count) in &summary.tags {
+            output.push_str(&format!("  - {tag}: {count}\n"));
+        }
+    }
+
+    if !summary.tools.is_empty() {
+        output.push_str("tools:\n");
+        for tool in &summary.tools {
+            output.push_str(&format!(
+                "  - {}\tcall={} result={}\n",
+                tool.name, tool.call_count, tool.result_count
+            ));
+        }
+    }
+
+    output
+}
+
+fn format_eval_comparison(comparison: &EvalComparison) -> String {
+    let mut output = String::new();
+    output.push_str("genesis eval compare\n");
+    output.push_str(&format!("left:            {}\n", comparison.left_path));
+    output.push_str(&format!("right:           {}\n", comparison.right_path));
+    output.push_str(&format!(
+        "sessions:        {} vs {}\n",
+        comparison.left_session_id, comparison.right_session_id
+    ));
+    output.push_str(&format!(
+        "models:          {} vs {}\n",
+        comparison.left_model, comparison.right_model
+    ));
+    output.push_str(&format!(
+        "total events:    {} -> {}\n",
+        comparison.left_total_events, comparison.right_total_events
+    ));
+    output.push_str(&format!(
+        "warnings:        {} -> {}\n",
+        comparison.left_warning_count, comparison.right_warning_count
+    ));
+    output.push_str(&format!(
+        "event delta:     user={:+} assistant={:+} tool_call={:+} tool_result={:+} system={:+}\n",
+        comparison.event_delta.user,
+        comparison.event_delta.assistant,
+        comparison.event_delta.tool_call,
+        comparison.event_delta.tool_result,
+        comparison.event_delta.system
+    ));
+
+    if !comparison.left_only_tags.is_empty() || !comparison.right_only_tags.is_empty() {
+        output.push_str("tag differences:\n");
+        if !comparison.left_only_tags.is_empty() {
+            output.push_str(&format!(
+                "  - left only: {}\n",
+                comparison.left_only_tags.join(", ")
+            ));
+        }
+        if !comparison.right_only_tags.is_empty() {
+            output.push_str(&format!(
+                "  - right only: {}\n",
+                comparison.right_only_tags.join(", ")
+            ));
+        }
+    }
+
+    if !comparison.tools.is_empty() {
+        output.push_str("tool deltas:\n");
+        for tool in &comparison.tools {
+            output.push_str(&format!(
+                "  - {}\tcall {} -> {}\tresult {} -> {}\n",
+                tool.name,
+                tool.left_call_count,
+                tool.right_call_count,
+                tool.left_result_count,
+                tool.right_result_count
+            ));
+        }
+    }
+
+    output
+}
+
+fn eval_summary_to_json(summary: &EvalSummary) -> serde_json::Value {
+    serde_json::json!({
+        "directory": summary.directory,
+        "recursive": summary.recursive,
+        "model_filter": summary.model_filter,
+        "tag_filter": summary.tag_filter,
+        "tool_filter": summary.tool_filter,
+        "failures_only": summary.failures_only,
+        "warnings_only": summary.warnings_only,
+        "min_warnings": summary.min_warnings,
+        "files_processed": summary.files_processed,
+        "total_events": summary.total_events,
+        "event_counts": {
+            "user": summary.event_counts.user,
+            "assistant": summary.event_counts.assistant,
+            "tool_call": summary.event_counts.tool_call,
+            "tool_result": summary.event_counts.tool_result,
+            "system": summary.event_counts.system,
+        },
+        "warnings": summary.warnings,
+        "success_count": summary.success_count,
+        "failure_count": summary.failure_count,
+        "abandoned_count": summary.abandoned_count,
+        "missing_outcome_count": summary.missing_outcome_count,
+        "models": summary.models.iter().map(|(model, count)| {
+            serde_json::json!({
+                "model": model,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+        "tags": summary.tags.iter().map(|(tag, count)| {
+            serde_json::json!({
+                "tag": tag,
+                "count": count,
+            })
+        }).collect::<Vec<_>>(),
+        "tools": summary.tools.iter().map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "call_count": tool.call_count,
+                "result_count": tool.result_count,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn eval_comparison_to_json(comparison: &EvalComparison) -> serde_json::Value {
+    serde_json::json!({
+        "left_path": comparison.left_path,
+        "right_path": comparison.right_path,
+        "left_session_id": comparison.left_session_id,
+        "right_session_id": comparison.right_session_id,
+        "left_model": comparison.left_model,
+        "right_model": comparison.right_model,
+        "left_total_events": comparison.left_total_events,
+        "right_total_events": comparison.right_total_events,
+        "left_warning_count": comparison.left_warning_count,
+        "right_warning_count": comparison.right_warning_count,
+        "event_delta": {
+            "user": comparison.event_delta.user,
+            "assistant": comparison.event_delta.assistant,
+            "tool_call": comparison.event_delta.tool_call,
+            "tool_result": comparison.event_delta.tool_result,
+            "system": comparison.event_delta.system,
+        },
+        "tools": comparison.tools.iter().map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "left_call_count": tool.left_call_count,
+                "right_call_count": tool.right_call_count,
+                "left_result_count": tool.left_result_count,
+                "right_result_count": tool.right_result_count,
+            })
+        }).collect::<Vec<_>>(),
+        "left_only_tags": comparison.left_only_tags,
+        "right_only_tags": comparison.right_only_tags,
+    })
+}
+
 async fn run_chat(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
@@ -1180,7 +1827,10 @@ async fn run_serve(
     };
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
-    let state = std::sync::Arc::new(AppState { loaded, api_key, mcp });
+    let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    let state = std::sync::Arc::new(AppState::new(loaded, api_key, mcp, rate_limit_rpm));
     let router = build_router(state);
 
     let addr = format!("{host}:{port}");
@@ -4891,6 +5541,549 @@ storage:
     fn format_memory_list_empty() {
         let output = format_memory_list(&[]);
         assert_eq!(output, "no stored memories");
+    }
+
+    #[test]
+    fn parses_eval_report_command() {
+        let cli = Cli::try_parse_from(["genesis", "eval", "report", "trajectory.json"])
+            .expect("eval report should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Report { file }) => {
+                assert_eq!(file, "trajectory.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_summarize_command() {
+        let cli = Cli::try_parse_from(["genesis", "eval", "summarize", "trajectories"])
+            .expect("eval summarize should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Summarize {
+                dir,
+                recursive,
+                model,
+                tag,
+                failures_only,
+                warnings_only,
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(!recursive);
+                assert!(model.is_none());
+                assert!(tag.is_none());
+                assert!(!failures_only);
+                assert!(!warnings_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_summarize_recursive_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "summarize",
+            "trajectories",
+            "--recursive",
+        ])
+        .expect("eval summarize recursive should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Summarize {
+                dir,
+                recursive,
+                model,
+                tag,
+                failures_only,
+                warnings_only,
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+                assert!(model.is_none());
+                assert!(tag.is_none());
+                assert!(!failures_only);
+                assert!(!warnings_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_summarize_with_filters() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "summarize",
+            "trajectories",
+            "--model",
+            "gpt-4.1-mini",
+            "--tag",
+            "offline_eval",
+        ])
+        .expect("eval summarize with filters should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Summarize {
+                dir,
+                recursive,
+                model,
+                tag,
+                failures_only,
+                warnings_only,
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(!recursive);
+                assert_eq!(model.as_deref(), Some("gpt-4.1-mini"));
+                assert_eq!(tag.as_deref(), Some("offline_eval"));
+                assert!(!failures_only);
+                assert!(!warnings_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_summarize_with_failure_and_warning_filters() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "summarize",
+            "trajectories",
+            "--failures-only",
+            "--warnings-only",
+        ])
+        .expect("eval summarize with failure and warning filters should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Summarize {
+                dir,
+                recursive,
+                model,
+                tag,
+                failures_only,
+                warnings_only,
+            }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(!recursive);
+                assert!(model.is_none());
+                assert!(tag.is_none());
+                assert!(failures_only);
+                assert!(warnings_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_compare_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "compare",
+            "left.json",
+            "right.json",
+        ])
+        .expect("eval compare should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::Compare { left, right }) => {
+                assert_eq!(left, "left.json");
+                assert_eq!(right, "right.json");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn summarize_replay_reports_aggregates_directory() {
+        let dir = tempdir().expect("tempdir");
+        let file_one = dir.path().join("one.json");
+        let file_two = dir.path().join("two.json");
+
+        let first = serde_json::json!({
+            "session_id": "s-1",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-1",
+            "started_at": "2026-03-08T10:00:00Z",
+            "completed_at": "2026-03-08T10:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T10:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T10:00:01Z",
+                    "action_type": "assistant_message",
+                    "content": "hi"
+                },
+                {
+                    "step_index": 2,
+                    "timestamp": "2026-03-08T10:00:02Z",
+                    "action_type": "tool_call",
+                    "content": "tool_call: shell",
+                    "tool_name": "shell",
+                    "tool_arguments": "{\"cmd\":\"pwd\"}"
+                },
+                {
+                    "step_index": 3,
+                    "timestamp": "2026-03-08T10:00:03Z",
+                    "action_type": "tool_result",
+                    "content": "tool_result: shell",
+                    "tool_name": "shell",
+                    "tool_result": "/tmp"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["smoke", "offline_eval"]
+        });
+
+        let second = serde_json::json!({
+            "session_id": "s-2",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-2",
+            "started_at": "2026-03-08T11:00:00Z",
+            "completed_at": "2026-03-08T11:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T11:00:00Z",
+                    "action_type": "system_message",
+                    "content": "boot"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T11:00:01Z",
+                    "action_type": "user_message",
+                    "content": "do work"
+                }
+            ],
+            "outcome": { "type": "abandoned" },
+            "tags": ["offline_eval"]
+        });
+
+        std::fs::write(&file_one, serde_json::to_string_pretty(&first).unwrap())
+            .expect("write first trajectory");
+        std::fs::write(&file_two, serde_json::to_string_pretty(&second).unwrap())
+            .expect("write second trajectory");
+
+        let summary = crate::summarize_replay_reports(
+            dir.path().to_str().unwrap(),
+            false,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("summary should build");
+
+        assert_eq!(summary.files_processed, 2);
+        assert!(!summary.recursive);
+        assert!(summary.model_filter.is_none());
+        assert!(summary.tag_filter.is_none());
+        assert!(!summary.failures_only);
+        assert!(!summary.warnings_only);
+        assert_eq!(summary.total_events, 6);
+        assert_eq!(summary.event_counts.user, 2);
+        assert_eq!(summary.event_counts.assistant, 1);
+        assert_eq!(summary.event_counts.tool_call, 1);
+        assert_eq!(summary.event_counts.tool_result, 1);
+        assert_eq!(summary.event_counts.system, 1);
+        assert_eq!(summary.success_count, 1);
+        assert_eq!(summary.abandoned_count, 1);
+        assert_eq!(summary.failure_count, 0);
+        assert_eq!(summary.missing_outcome_count, 0);
+        assert_eq!(summary.models, vec![("gpt-4.1-mini".to_owned(), 2)]);
+        assert!(summary
+            .tags
+            .contains(&("offline_eval".to_owned(), 2)));
+        assert!(summary
+            .tools
+            .iter()
+            .any(|tool| tool.name == "shell" && tool.call_count == 1 && tool.result_count == 1));
+    }
+
+    #[test]
+    fn compare_replay_reports_reports_deltas() {
+        let dir = tempdir().expect("tempdir");
+        let left = dir.path().join("left.json");
+        let right = dir.path().join("right.json");
+
+        let left_trajectory = serde_json::json!({
+            "session_id": "left-session",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-left",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T12:00:01Z",
+                    "action_type": "assistant_message",
+                    "content": "hi"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["baseline"]
+        });
+
+        let right_trajectory = serde_json::json!({
+            "session_id": "right-session",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-right",
+            "started_at": "2026-03-08T12:05:00Z",
+            "completed_at": "2026-03-08T12:06:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:05:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T12:05:01Z",
+                    "action_type": "assistant_message",
+                    "content": "hi"
+                },
+                {
+                    "step_index": 2,
+                    "timestamp": "2026-03-08T12:05:02Z",
+                    "action_type": "tool_call",
+                    "content": "tool_call: shell",
+                    "tool_name": "shell",
+                    "tool_arguments": "{\"cmd\":\"pwd\"}"
+                },
+                {
+                    "step_index": 3,
+                    "timestamp": "2026-03-08T12:05:03Z",
+                    "action_type": "tool_result",
+                    "content": "tool_result: shell",
+                    "tool_name": "shell",
+                    "tool_result": "/tmp"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["baseline", "with_tools"]
+        });
+
+        std::fs::write(&left, serde_json::to_string_pretty(&left_trajectory).unwrap())
+            .expect("write left");
+        std::fs::write(&right, serde_json::to_string_pretty(&right_trajectory).unwrap())
+            .expect("write right");
+
+        let comparison = crate::compare_replay_reports(
+            left.to_str().unwrap(),
+            right.to_str().unwrap(),
+        )
+        .expect("comparison should build");
+
+        assert_eq!(comparison.left_session_id, "left-session");
+        assert_eq!(comparison.right_session_id, "right-session");
+        assert_eq!(comparison.left_total_events, 2);
+        assert_eq!(comparison.right_total_events, 4);
+        assert_eq!(comparison.event_delta.user, 0);
+        assert_eq!(comparison.event_delta.assistant, 0);
+        assert_eq!(comparison.event_delta.tool_call, 1);
+        assert_eq!(comparison.event_delta.tool_result, 1);
+        assert!(comparison.left_only_tags.is_empty());
+        assert_eq!(comparison.right_only_tags, vec!["with_tools".to_owned()]);
+        assert!(comparison.tools.iter().any(|tool| {
+            tool.name == "shell"
+                && tool.left_call_count == 0
+                && tool.right_call_count == 1
+                && tool.left_result_count == 0
+                && tool.right_result_count == 1
+        }));
+    }
+
+    #[test]
+    fn summarize_replay_reports_recursive_walks_nested_directories() {
+        let dir = tempdir().expect("tempdir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let root_file = dir.path().join("root.json");
+        let nested_file = nested.join("child.json");
+
+        let trajectory = |session_id: &str| serde_json::json!({
+            "session_id": session_id,
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": format!("hash-{session_id}"),
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [{
+                "step_index": 0,
+                "timestamp": "2026-03-08T12:00:00Z",
+                "action_type": "user_message",
+                "content": "hello"
+            }],
+            "outcome": { "type": "success" },
+            "tags": []
+        });
+
+        std::fs::write(&root_file, serde_json::to_string_pretty(&trajectory("root")).unwrap())
+            .expect("write root");
+        std::fs::write(
+            &nested_file,
+            serde_json::to_string_pretty(&trajectory("nested")).unwrap(),
+        )
+        .expect("write nested");
+
+        let non_recursive = crate::summarize_replay_reports(
+            dir.path().to_str().unwrap(),
+            false,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("non-recursive summary");
+        let recursive = crate::summarize_replay_reports(
+            dir.path().to_str().unwrap(),
+            true,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("recursive summary");
+
+        assert_eq!(non_recursive.files_processed, 1);
+        assert_eq!(recursive.files_processed, 2);
+        assert!(recursive.recursive);
+    }
+
+    #[test]
+    fn summarize_replay_reports_filters_by_model_and_tag() {
+        let dir = tempdir().expect("tempdir");
+        let first = dir.path().join("first.json");
+        let second = dir.path().join("second.json");
+        let third = dir.path().join("third.json");
+
+        let write = |path: &std::path::Path, session_id: &str, model: &str, tags: &[&str]| {
+            let trajectory = serde_json::json!({
+                "session_id": session_id,
+                "model": model,
+                "system_prompt_hash": format!("hash-{session_id}"),
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [{
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                }],
+                "outcome": { "type": "success" },
+                "tags": tags
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&trajectory).unwrap())
+                .expect("write trajectory");
+        };
+
+        write(&first, "s-1", "gpt-4.1-mini", &["offline_eval", "smoke"]);
+        write(&second, "s-2", "gpt-4.1-mini", &["other"]);
+        write(&third, "s-3", "claude-sonnet-4-6", &["offline_eval"]);
+
+        let summary = crate::summarize_replay_reports(
+            dir.path().to_str().unwrap(),
+            false,
+            Some("gpt-4.1-mini"),
+            Some("offline_eval"),
+            false,
+            false,
+        )
+        .expect("filtered summary should build");
+
+        assert_eq!(summary.files_processed, 1);
+        assert_eq!(summary.total_events, 1);
+        assert_eq!(summary.model_filter.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(summary.tag_filter.as_deref(), Some("offline_eval"));
+        assert_eq!(summary.models, vec![("gpt-4.1-mini".to_owned(), 1)]);
+        assert_eq!(summary.tags, vec![
+            ("offline_eval".to_owned(), 1),
+            ("smoke".to_owned(), 1),
+        ]);
+    }
+
+    #[test]
+    fn summarize_replay_reports_filters_failures_and_warnings() {
+        let dir = tempdir().expect("tempdir");
+        let success_clean = dir.path().join("success_clean.json");
+        let failure_warn = dir.path().join("failure_warn.json");
+        let failure_clean = dir.path().join("failure_clean.json");
+
+        let write = |path: &std::path::Path,
+                     session_id: &str,
+                     outcome: serde_json::Value,
+                     with_warning: bool| {
+            let tool_step = if with_warning {
+                vec![serde_json::json!({
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "tool_call",
+                    "content": "tool_call... (truncated)",
+                    "tool_name": "shell",
+                    "tool_arguments": "{}"
+                })]
+            } else {
+                vec![serde_json::json!({
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                })]
+            };
+
+            let trajectory = serde_json::json!({
+                "session_id": session_id,
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": format!("hash-{session_id}"),
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": tool_step,
+                "outcome": outcome,
+                "tags": []
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&trajectory).unwrap())
+                .expect("write trajectory");
+        };
+
+        write(&success_clean, "s-1", serde_json::json!({ "type": "success" }), false);
+        write(
+            &failure_warn,
+            "s-2",
+            serde_json::json!({ "type": "failure", "reason": "tool broke" }),
+            true,
+        );
+        write(
+            &failure_clean,
+            "s-3",
+            serde_json::json!({ "type": "failure", "reason": "tool broke" }),
+            false,
+        );
+
+        let summary = crate::summarize_replay_reports(
+            dir.path().to_str().unwrap(),
+            false,
+            None,
+            None,
+            true,
+            true,
+        )
+        .expect("filtered summary should build");
+
+        assert_eq!(summary.files_processed, 1);
+        assert!(summary.failures_only);
+        assert!(summary.warnings_only);
+        assert_eq!(summary.failure_count, 1);
+        assert_eq!(summary.warnings, 1);
     }
 
     #[test]
