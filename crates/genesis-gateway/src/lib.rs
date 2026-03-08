@@ -120,7 +120,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/telegram/webhook", post(platforms::telegram::webhook_handler))
         .route("/discord/interactions", post(platforms::discord::interactions_handler))
         .route("/slack/events", post(platforms::slack::events_handler))
-        .route("/whatsapp/webhook", get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler));
+        .route("/whatsapp/webhook", get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler))
+        .route("/homeassistant/webhook", post(platforms::homeassistant::webhook_handler));
 
     // Public routes
     Router::new()

@@ -10,7 +10,7 @@ use genesis_core::agent_loop::AgentError;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
 };
-use genesis_core::prompt::agent_name;
+use genesis_core::prompt::{agent_name, load_context_file};
 use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
@@ -55,6 +55,8 @@ pub enum Command {
     Sessions(SessionsCommand),
     #[command(subcommand, about = "Inspect and manage saved skills")]
     Skills(SkillsCommand),
+    #[command(subcommand, about = "Inspect and manage project context files")]
+    Context(ContextCommand),
     #[command(about = "List all available tools")]
     Tools,
     #[command(about = "Show system overview (profile, model, tools, sessions, skills)")]
@@ -155,6 +157,14 @@ pub enum SkillsCommand {
         #[arg(help = "Skill name to delete")]
         name: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContextCommand {
+    #[command(about = "Show the current project's context file")]
+    Show,
+    #[command(about = "Initialize a .genesis/context.md template in the current directory")]
+    Init,
 }
 
 #[derive(Debug, Subcommand)]
@@ -323,6 +333,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
+        Command::Context(context_command) => run_context(context_command),
         Command::Subagents(subagents_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -746,6 +757,33 @@ fn run_tools(config_path: Option<PathBuf>, json: bool) -> Result<String, CliErro
     }
 }
 
+fn run_context(command: ContextCommand) -> Result<String, CliError> {
+    let current_dir = std::env::current_dir()?;
+
+    match command {
+        ContextCommand::Show => Ok(match load_context_file(&current_dir) {
+            Some(contents) => contents,
+            None => "no context file found in current directory".to_owned(),
+        }),
+        ContextCommand::Init => {
+            let context_dir = current_dir.join(".genesis");
+            let context_path = context_dir.join("context.md");
+
+            if context_path.exists() {
+                return Ok(format!(
+                    "context file already exists: {}",
+                    context_path.display()
+                ));
+            }
+
+            std::fs::create_dir_all(&context_dir)?;
+            std::fs::write(&context_path, context_template())?;
+
+            Ok(format!("created context file: {}", context_path.display()))
+        }
+    }
+}
+
 fn run_model(
     config_path: Option<PathBuf>,
     command: ModelCommand,
@@ -852,6 +890,23 @@ fn cron_time_from_datetime<Tz: chrono::TimeZone>(now: DateTime<Tz>) -> CronTime 
         month: now.month(),
         day_of_week: now.weekday().num_days_from_sunday(),
     }
+}
+
+fn context_template() -> &'static str {
+    "# Project Context
+
+## Purpose
+- Describe what this project does.
+
+## Constraints
+- Note any technical, product, or operational constraints.
+
+## Working Agreements
+- Capture coding standards, review expectations, and collaboration rules.
+
+## Priorities
+- Explain what matters most right now.
+"
 }
 
 fn format_session_list(sessions: &[SessionSummary]) -> String {
@@ -1045,11 +1100,13 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        context_template,
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, format_schedule_list, format_session_list,
         format_session_messages, format_skill, format_skill_list, format_subagent,
-        format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command, ModelCommand,
-        ScheduleCommand, SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand,
+        format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command,
+        ContextCommand, ModelCommand, ScheduleCommand, SessionsCommand, SkillsCommand,
+        StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -1157,6 +1214,38 @@ mod tests {
             Command::Skills(SkillsCommand::List) => {}
             other => panic!("unexpected command parsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_context_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "context", "show"])
+            .expect("context show command should parse");
+
+        match cli.command {
+            Command::Context(ContextCommand::Show) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_context_init_command() {
+        let cli = Cli::try_parse_from(["genesis", "context", "init"])
+            .expect("context init command should parse");
+
+        match cli.command {
+            Command::Context(ContextCommand::Init) => {}
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_template_includes_expected_sections() {
+        let template = context_template();
+        assert!(template.contains("# Project Context"));
+        assert!(template.contains("## Purpose"));
+        assert!(template.contains("## Constraints"));
+        assert!(template.contains("## Working Agreements"));
+        assert!(template.contains("## Priorities"));
     }
 
     #[test]
