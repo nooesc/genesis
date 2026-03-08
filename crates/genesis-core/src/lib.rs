@@ -14,9 +14,13 @@ use genesis_config::{load, GenesisConfig, LoadedConfig};
 use genesis_provider::resolve;
 use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
 use genesis_mcp::McpManager;
-use genesis_tools::{default_registry, ToolCall, ToolContext, ToolError, ToolOutput, ToolRegistry};
-use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent};
+use genesis_tools::{
+    default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
+    ToolOutput, ToolRegistry,
+};
+use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent, ToolDefinition};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,8 +128,46 @@ pub fn build_execution_context_from_loaded(
 }
 
 pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolRuntime {
+    let mut registry = default_registry();
+
+    // Register MoA tool — handled async in ToolRuntime::execute_async
+    registry.register(
+        ToolDefinition {
+            name: "moa_consult".to_owned(),
+            description: "Consult multiple AI models for diverse perspectives on a question. \
+                Runs proposer models in parallel, then synthesizes their responses into a \
+                single high-quality answer. Use for complex decisions, nuanced analysis, or \
+                when you want diverse viewpoints before answering."
+                .to_owned(),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or task to consult multiple models about"
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "Optional system instructions for all models"
+                    },
+                    "models": {
+                        "type": "string",
+                        "description": "Comma-separated list of model identifiers (e.g., 'gpt-4.1,claude-sonnet-4-20250514,gemini-2.5-pro'). Uses default config if omitted."
+                    },
+                    "layers": {
+                        "type": "integer",
+                        "description": "Number of refinement layers (default: 1). More layers = higher quality but slower."
+                    }
+                },
+                "required": ["prompt"]
+            })),
+        },
+        ApprovalPolicy::Never,
+        MoaToolPlaceholder,
+    );
+
     ToolRuntime {
-        registry: default_registry(),
+        registry,
         context: ToolContext {
             session_id: execution_context.plan.session_id.clone(),
             profile: execution_context.plan.profile.clone(),
@@ -134,6 +176,18 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             terminal_backend: None,
         },
         mcp: None,
+    }
+}
+
+/// Placeholder handler for the MoA tool — actual execution is async via ToolRuntime.
+struct MoaToolPlaceholder;
+
+impl ToolHandler for MoaToolPlaceholder {
+    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: "moa_consult requires async execution".to_owned(),
+        })
     }
 }
 
@@ -386,6 +440,21 @@ fn provider_kind(raw: &str) -> ModelProviderKind {
     }
 }
 
+/// Infer the backend and API key env var from a model name.
+fn infer_backend(model: &str) -> (&'static str, &'static str) {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("claude") || m.starts_with("anthropic") {
+        ("anthropic", "ANTHROPIC_API_KEY")
+    } else if m.starts_with("gemini") {
+        ("gemini", "GEMINI_API_KEY")
+    } else if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+        ("openai", "OPENAI_API_KEY")
+    } else {
+        // Default to OpenRouter for unknown models
+        ("openrouter", "OPENROUTER_API_KEY")
+    }
+}
+
 impl ToolRuntime {
     /// Returns built-in tool definitions only (sync).
     /// Use `definitions_async()` to include MCP tools.
@@ -406,11 +475,11 @@ impl ToolRuntime {
         self.registry.execute(call, &self.context)
     }
 
-    /// Execute a tool call, routing MCP-prefixed tools to the MCP manager.
+    /// Execute a tool call, routing MCP-prefixed tools to the MCP manager
+    /// and `moa_consult` to the Mixture of Agents engine.
     pub async fn execute_async(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         if call.name.starts_with("mcp_") {
             if let Some(mcp) = &self.mcp {
-                // Convert BTreeMap<String,String> arguments to JSON Value
                 let args = if call.arguments.is_empty() {
                     None
                 } else {
@@ -435,7 +504,131 @@ impl ToolRuntime {
             return Err(ToolError::ToolNotFound(call.name.clone()));
         }
 
+        if call.name == "moa_consult" {
+            return self.execute_moa(call).await;
+        }
+
         self.registry.execute(call, &self.context)
+    }
+
+    /// Execute the MoA consultation tool.
+    async fn execute_moa(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
+        use crate::moa::{MoaConfig, MoaModelConfig};
+
+        let prompt = call.arguments.get("prompt").ok_or_else(|| {
+            ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "prompt",
+            }
+        })?;
+
+        if prompt.trim().is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: "prompt cannot be empty".to_owned(),
+            });
+        }
+
+        let system_prompt = call.arguments.get("system_prompt").map(|s| s.as_str());
+        let layers: usize = call
+            .arguments
+            .get("layers")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+            .max(1)
+            .min(3);
+
+        // Parse model list or use defaults
+        let models: Vec<&str> = call
+            .arguments
+            .get("models")
+            .map(|m| m.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+
+        let proposers = if models.is_empty() {
+            // Default: use a few well-known models
+            vec![
+                MoaModelConfig {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    base_url: None,
+                    api_key_env: Some("OPENAI_API_KEY".to_owned()),
+                },
+                MoaModelConfig {
+                    backend: "anthropic".to_owned(),
+                    model: "claude-sonnet-4-20250514".to_owned(),
+                    base_url: None,
+                    api_key_env: Some("ANTHROPIC_API_KEY".to_owned()),
+                },
+                MoaModelConfig {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1-mini".to_owned(),
+                    base_url: None,
+                    api_key_env: Some("OPENAI_API_KEY".to_owned()),
+                },
+            ]
+        } else {
+            models
+                .iter()
+                .map(|m| {
+                    let (backend, api_key_env) = infer_backend(m);
+                    MoaModelConfig {
+                        backend: backend.to_owned(),
+                        model: m.to_string(),
+                        base_url: None,
+                        api_key_env: Some(api_key_env.to_owned()),
+                    }
+                })
+                .collect()
+        };
+
+        // Use the first proposer as aggregator (common MoA pattern)
+        let aggregator = proposers[0].clone();
+
+        let config = MoaConfig {
+            proposers,
+            aggregator,
+            layers,
+            temperature: Some(0.7),
+            max_tokens: Some(2048),
+        };
+
+        let result = moa::run_moa(prompt, system_prompt, &config)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: e.to_string(),
+            })?;
+
+        let mut content = result.response;
+
+        // Append proposer attributions
+        if !result.proposer_responses.is_empty() {
+            content.push_str("\n\n---\n*Consulted models: ");
+            let model_names: Vec<&str> = result
+                .proposer_responses
+                .iter()
+                .map(|r| r.model.as_str())
+                .collect();
+            content.push_str(&model_names.join(", "));
+            content.push_str(&format!(" ({} layers)*", result.layers_completed));
+        }
+
+        Ok(ToolOutput {
+            content,
+            metadata: std::collections::BTreeMap::from([
+                ("tool".to_owned(), call.name.clone()),
+                (
+                    "models_consulted".to_owned(),
+                    result
+                        .proposer_responses
+                        .iter()
+                        .map(|r| r.model.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+            ]),
+        })
     }
 
     /// Attach an MCP manager for external tool support.
@@ -577,5 +770,46 @@ mod tests {
         assert!(output.content.contains("session=session-42"));
         assert!(output.content.contains("profile=operator"));
         assert!(output.content.contains("data_dir=/tmp/genesis"));
+    }
+
+    #[test]
+    fn moa_consult_tool_is_registered() {
+        let context = build_execution_context_from_loaded(
+            &sample_loaded_config(),
+            "s-1".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let runtime = build_default_tool_runtime(&context);
+        let defs = runtime.definitions();
+        assert!(
+            defs.iter().any(|d| d.name == "moa_consult"),
+            "moa_consult should be registered"
+        );
+    }
+
+    #[test]
+    fn moa_placeholder_returns_error_on_sync_call() {
+        let context = build_execution_context_from_loaded(
+            &sample_loaded_config(),
+            "s-1".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let runtime = build_default_tool_runtime(&context);
+        let result = runtime.execute(&ToolCall {
+            name: "moa_consult".to_owned(),
+            arguments: BTreeMap::from([("prompt".to_owned(), "test".to_owned())]),
+        });
+        assert!(result.is_err(), "sync moa_consult should fail");
+    }
+
+    #[test]
+    fn infer_backend_identifies_providers() {
+        use super::infer_backend;
+
+        assert_eq!(infer_backend("gpt-4.1").0, "openai");
+        assert_eq!(infer_backend("claude-sonnet-4-20250514").0, "anthropic");
+        assert_eq!(infer_backend("gemini-2.5-pro").0, "gemini");
+        assert_eq!(infer_backend("o4-mini").0, "openai");
+        assert_eq!(infer_backend("llama-3.1-70b").0, "openrouter");
     }
 }
