@@ -203,6 +203,16 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS user_model (
+                trait_key TEXT PRIMARY KEY,
+                category TEXT NOT NULL,
+                value TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                evidence_count INTEGER NOT NULL DEFAULT 1,
+                source_session TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS session_search USING fts5(
                 session_id UNINDEXED,
                 content
@@ -840,6 +850,197 @@ impl ScheduleStore {
     }
 }
 
+/// A stored user trait — an observation about the user's preferences, personality, or goals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StoredUserTrait {
+    pub trait_key: String,
+    pub category: String,
+    pub value: String,
+    pub confidence: f64,
+    pub evidence_count: i64,
+    pub source_session: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// User model persistence layer.
+///
+/// Stores observations about the user that the agent learns over time.
+/// Categories include: preference, personality, communication_style, goal, expertise, context.
+pub struct UserModelStore {
+    database_path: PathBuf,
+}
+
+impl UserModelStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Record or update a user trait. If the trait already exists, its confidence
+    /// is increased and evidence count bumped.
+    pub fn observe(
+        &self,
+        trait_key: &str,
+        category: &str,
+        value: &str,
+        source_session: Option<&str>,
+    ) -> Result<StoredUserTrait, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        // Clamp confidence at 1.0, increase by 0.1 per observation
+        connection
+            .execute(
+                "INSERT INTO user_model (trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 0.5, 1, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 ON CONFLICT(trait_key) DO UPDATE SET
+                     value = excluded.value,
+                     confidence = MIN(1.0, user_model.confidence + 0.1),
+                     evidence_count = user_model.evidence_count + 1,
+                     source_session = excluded.source_session,
+                     updated_at = CURRENT_TIMESTAMP",
+                params![trait_key, category, value, source_session],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        self.get(trait_key)?
+            .ok_or_else(|| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source: rusqlite::Error::QueryReturnedNoRows,
+            })
+    }
+
+    /// Get a specific user trait by key.
+    pub fn get(&self, trait_key: &str) -> Result<Option<StoredUserTrait>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model WHERE trait_key = ?1",
+                params![trait_key],
+                Self::row_to_trait,
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// List all user traits, ordered by confidence (highest first).
+    pub fn list_all(&self) -> Result<Vec<StoredUserTrait>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model ORDER BY confidence DESC, evidence_count DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let traits = stmt
+            .query_map([], Self::row_to_trait)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(traits)
+    }
+
+    /// List traits in a specific category.
+    pub fn list_by_category(&self, category: &str) -> Result<Vec<StoredUserTrait>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model WHERE category = ?1 ORDER BY confidence DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let traits = stmt
+            .query_map(params![category], Self::row_to_trait)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(traits)
+    }
+
+    /// Get high-confidence traits (>= threshold) for prompt injection.
+    pub fn confident_traits(&self, threshold: f64) -> Result<Vec<StoredUserTrait>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model WHERE confidence >= ?1 ORDER BY confidence DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let traits = stmt
+            .query_map(params![threshold], Self::row_to_trait)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(traits)
+    }
+
+    /// Delete a user trait.
+    pub fn delete(&self, trait_key: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute("DELETE FROM user_model WHERE trait_key = ?1", params![trait_key])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    fn row_to_trait(row: &rusqlite::Row) -> Result<StoredUserTrait, rusqlite::Error> {
+        Ok(StoredUserTrait {
+            trait_key: row.get(0)?,
+            category: row.get(1)?,
+            value: row.get(2)?,
+            confidence: row.get(3)?,
+            evidence_count: row.get(4)?,
+            source_session: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+}
+
 /// A stored agent skill — a reusable procedure the agent can invoke.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredSkill {
@@ -1373,6 +1574,103 @@ mod tests {
         let dev_skills = store.find_by_tag("dev").unwrap();
         assert_eq!(dev_skills.len(), 1);
         assert_eq!(dev_skills[0].name, "test_runner");
+    }
+
+    #[test]
+    fn user_model_observes_and_retrieves_traits() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        let t = store
+            .observe("prefers_rust", "preference", "User prefers Rust over Python", Some("s1"))
+            .expect("observe");
+
+        assert_eq!(t.trait_key, "prefers_rust");
+        assert_eq!(t.category, "preference");
+        assert_eq!(t.confidence, 0.5);
+        assert_eq!(t.evidence_count, 1);
+    }
+
+    #[test]
+    fn user_model_increases_confidence_on_repeat_observations() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
+        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
+        let t = store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
+
+        assert_eq!(t.evidence_count, 3);
+        assert!((t.confidence - 0.7).abs() < 0.01); // 0.5 + 0.1 + 0.1 = 0.7
+    }
+
+    #[test]
+    fn user_model_confidence_caps_at_one() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        // Observe 10 times: 0.5 + 9*0.1 = 1.4 -> capped at 1.0
+        for _ in 0..10 {
+            store.observe("expert_rust", "expertise", "Expert-level Rust developer", None).unwrap();
+        }
+        let t = store.get("expert_rust").unwrap().expect("should exist");
+        assert!(t.confidence <= 1.0);
+        assert_eq!(t.evidence_count, 10);
+    }
+
+    #[test]
+    fn user_model_lists_by_category() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        store.observe("pref_dark_mode", "preference", "Likes dark mode", None).unwrap();
+        store.observe("pref_vim", "preference", "Uses vim bindings", None).unwrap();
+        store.observe("style_formal", "communication_style", "Formal tone", None).unwrap();
+
+        let prefs = store.list_by_category("preference").unwrap();
+        assert_eq!(prefs.len(), 2);
+
+        let styles = store.list_by_category("communication_style").unwrap();
+        assert_eq!(styles.len(), 1);
+    }
+
+    #[test]
+    fn user_model_filters_by_confidence_threshold() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        store.observe("low_conf", "preference", "Maybe likes X", None).unwrap();
+        // Observe "high_conf" 4 times: confidence = 0.5 + 3*0.1 = 0.8
+        for _ in 0..4 {
+            store.observe("high_conf", "preference", "Definitely likes Y", None).unwrap();
+        }
+
+        let confident = store.confident_traits(0.7).unwrap();
+        assert_eq!(confident.len(), 1);
+        assert_eq!(confident[0].trait_key, "high_conf");
+    }
+
+    #[test]
+    fn user_model_deletes_trait() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let store = super::UserModelStore::new(&db_path);
+        store.observe("temp", "preference", "Temporary", None).unwrap();
+        assert!(store.delete("temp").unwrap());
+        assert!(!store.delete("temp").unwrap());
+        assert!(store.get("temp").unwrap().is_none());
     }
 
     #[test]

@@ -358,6 +358,39 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::skill::SkillDeleteTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "user_observe".to_owned(),
+                description: "Records an observation about the user's preferences, personality, communication style, goals, or expertise. Repeated observations increase confidence.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "trait_key": { "type": "string", "description": "Unique identifier for the trait (e.g. 'prefers_rust', 'likes_concise_answers')." },
+                        "category": { "type": "string", "description": "Category: preference, personality, communication_style, goal, expertise, or context." },
+                        "value": { "type": "string", "description": "Description of the observation about the user." }
+                    },
+                    "required": ["trait_key", "category", "value"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::user_model::UserObserveTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "user_model".to_owned(),
+                description: "Retrieves what is known about the user from accumulated observations. Can filter by category or minimum confidence.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string", "description": "Optional: filter by category (preference, personality, communication_style, goal, expertise, context)." },
+                        "min_confidence": { "type": "number", "description": "Optional: minimum confidence threshold (0.0 to 1.0)." }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::user_model::UserModelTool,
         );
     registry
 }
@@ -437,7 +470,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 14);
+        assert_eq!(definitions.len(), 16);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -452,6 +485,8 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
+        assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
+        assert!(definitions.iter().any(|tool| tool.name == "user_model"));
     }
 
     #[test]
