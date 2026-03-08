@@ -25,6 +25,7 @@ impl ToolHandler for WebRequestTool {
             .unwrap_or_else(|| "GET".to_owned());
 
         let body = call.arguments.get("body");
+        let headers_json = call.arguments.get("headers");
 
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(TIMEOUT_SECS))
@@ -50,8 +51,30 @@ impl ToolHandler for WebRequestTool {
             }
         };
 
+        // Apply custom headers from JSON object: {"Authorization": "Bearer ...", ...}
+        if let Some(headers_str) = headers_json {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(headers_str) {
+                if let Some(obj) = parsed.as_object() {
+                    for (key, value) in obj {
+                        if let Some(val_str) = value.as_str() {
+                            request = request.header(key.as_str(), val_str);
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(body_content) = body {
-            request = request.header("Content-Type", "application/json").body(body_content.clone());
+            // Only set Content-Type if not already set via custom headers
+            if headers_json.is_none()
+                || !headers_json
+                    .unwrap()
+                    .to_lowercase()
+                    .contains("content-type")
+            {
+                request = request.header("Content-Type", "application/json");
+            }
+            request = request.body(body_content.clone());
         }
 
         let response = request.send().map_err(|e| ToolError::ExecutionFailed {

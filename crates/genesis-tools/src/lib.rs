@@ -330,6 +330,7 @@ pub fn default_registry() -> ToolRegistry {
                     "properties": {
                         "url": { "type": "string", "description": "The URL to request." },
                         "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD). Defaults to GET." },
+                        "headers": { "type": "string", "description": "Optional JSON object of custom headers, e.g. {\"Authorization\": \"Bearer token\"}." },
                         "body": { "type": "string", "description": "Optional request body (sent as JSON content-type)." }
                     },
                     "required": ["url"]
