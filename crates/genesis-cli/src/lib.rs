@@ -943,14 +943,19 @@ fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError
         .map(|s| s.len())
         .unwrap_or(0);
 
+    let mcp_server_count = loaded.config.mcp_servers.len();
+    let version = env!("CARGO_PKG_VERSION");
+
     if json {
         let info = serde_json::json!({
+            "version": version,
             "profile": loaded.config.profile,
             "provider": {
                 "backend": loaded.config.provider.backend,
                 "model": loaded.config.provider.model,
             },
             "tools": tool_count,
+            "mcp_servers": mcp_server_count,
             "sessions": session_count,
             "skills": skill_count,
             "user_traits": trait_count,
@@ -961,16 +966,17 @@ fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError
         Ok(serde_json::to_string_pretty(&info)?)
     } else {
         Ok(format!(
-            "genesis info\n\
-             profile:    {}\n\
-             provider:   {} / {}\n\
-             tools:      {tool_count}\n\
-             sessions:   {session_count}\n\
-             skills:     {skill_count}\n\
+            "genesis v{version}\n\
+             profile:     {}\n\
+             provider:    {} / {}\n\
+             tools:       {tool_count}\n\
+             mcp servers: {mcp_server_count}\n\
+             sessions:    {session_count}\n\
+             skills:      {skill_count}\n\
              user traits: {trait_count}\n\
-             schedules:  {schedule_count}\n\
-             config:     {}\n\
-             database:   {}",
+             schedules:   {schedule_count}\n\
+             config:      {}\n\
+             database:    {}",
             loaded.config.profile,
             loaded.config.provider.backend,
             loaded.config.provider.model,
@@ -2245,10 +2251,11 @@ storage:
         .await
         .expect("info command should succeed");
 
-        assert!(output.contains("genesis info"));
+        assert!(output.contains("genesis v"));
         assert!(output.contains("profile:"));
         assert!(output.contains("provider:"));
         assert!(output.contains("tools:"));
+        assert!(output.contains("mcp servers:"));
     }
 
     #[tokio::test]
