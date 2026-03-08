@@ -316,6 +316,20 @@ pub enum EvalCommand {
         #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
         recursive: bool,
     },
+    #[command(about = "Export a directory of trajectories as ShareGPT JSONL")]
+    ExportSharegpt {
+        #[arg(help = "Directory containing trajectory JSON files")]
+        dir: String,
+        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        recursive: bool,
+    },
+    #[command(about = "Import ChatML JSONL and create trajectory JSON files")]
+    ImportChatml {
+        #[arg(help = "Path to a ChatML JSONL file")]
+        file: String,
+        #[arg(long, help = "Directory to write trajectory JSON files into")]
+        output: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -738,6 +752,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
             EvalCommand::ExportChatml { dir, recursive } => {
                 run_eval_export_chatml(&dir, recursive)
+            }
+            EvalCommand::ExportSharegpt { dir, recursive } => {
+                run_eval_export_sharegpt(&dir, recursive)
+            }
+            EvalCommand::ImportChatml { file, output } => {
+                run_eval_import_chatml(&file, &output)
             }
         },
         Command::Sessions(sessions_command) => {
@@ -2348,17 +2368,7 @@ fn run_eval_export_chatml(dir: &str, recursive: bool) -> Result<String, CliError
     let mut lines = Vec::new();
 
     for path in collect_eval_files(PathBuf::from(dir), recursive)? {
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
-            .map_err(|e| {
-                CliError::Other(format!(
-                    "invalid trajectory JSON in {}: {e}",
-                    path.display()
-                ))
-            })?;
-        let compressed = genesis_core::compress::TrajectoryCompressor::default()
-            .compress_for_training(&trajectory);
+        let compressed = load_training_compressed_trajectory(&path)?;
         let line = serde_json::json!({
             "session_id": compressed.session_id,
             "model": compressed.model,
@@ -2370,6 +2380,175 @@ fn run_eval_export_chatml(dir: &str, recursive: bool) -> Result<String, CliError
     }
 
     Ok(lines.join("\n"))
+}
+
+fn run_eval_export_sharegpt(dir: &str, recursive: bool) -> Result<String, CliError> {
+    let mut lines = Vec::new();
+
+    for path in collect_eval_files(PathBuf::from(dir), recursive)? {
+        let compressed = load_training_compressed_trajectory(&path)?;
+        let line = serde_json::json!({
+            "session_id": compressed.session_id,
+            "model": compressed.model,
+            "tags": compressed.tags,
+            "outcome": compressed.outcome,
+            "sharegpt": genesis_core::compress::to_sharegpt(&compressed),
+        });
+        lines.push(serde_json::to_string(&line)?);
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn run_eval_import_chatml(file: &str, output_dir: &str) -> Result<String, CliError> {
+    let contents = std::fs::read_to_string(file)
+        .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| CliError::Other(format!("failed to create {output_dir}: {e}")))?;
+
+    let mut imported = 0usize;
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| CliError::Other(format!("invalid JSONL line {}: {e}", index + 1)))?;
+        let trajectory = trajectory_from_chatml_entry(&entry, index)?;
+        let session_id = sanitize_session_id_for_filename(&trajectory.session_id);
+        let output_path = std::path::Path::new(output_dir).join(format!("{session_id}.json"));
+        let json = serde_json::to_string_pretty(&trajectory)?;
+        std::fs::write(&output_path, json).map_err(|e| {
+            CliError::Other(format!("failed to write {}: {e}", output_path.display()))
+        })?;
+        imported += 1;
+    }
+
+    Ok(format!("imported {imported} trajectories into {output_dir}"))
+}
+
+fn load_training_compressed_trajectory(
+    path: &std::path::Path,
+) -> Result<genesis_core::compress::CompressedTrajectory, CliError> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
+    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
+        CliError::Other(format!(
+            "invalid trajectory JSON in {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(
+        genesis_core::compress::TrajectoryCompressor::default()
+            .compress_for_training(&trajectory),
+    )
+}
+
+fn trajectory_from_chatml_entry(
+    entry: &serde_json::Value,
+    index: usize,
+) -> Result<genesis_core::trajectory::Trajectory, CliError> {
+    let chatml = entry
+        .get("chatml")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| CliError::Other(format!("JSONL line {} missing 'chatml' field", index + 1)))?;
+
+    let session_id = entry
+        .get("session_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("chatml-import-{}", index + 1));
+    let model = entry
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or("imported-chatml")
+        .to_owned();
+    let tags = entry
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| tag.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let outcome = entry
+        .get("outcome")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| CliError::Other(format!("invalid outcome on line {}: {e}", index + 1)))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let messages = parse_chatml_blocks(chatml)?;
+    let steps = messages
+        .into_iter()
+        .enumerate()
+        .map(|(step_index, (role, content))| genesis_core::trajectory::TrajectoryStep {
+            step_index,
+            timestamp: now.clone(),
+            action_type: match role.as_str() {
+                "system" => genesis_core::trajectory::ActionType::SystemMessage,
+                "user" => genesis_core::trajectory::ActionType::UserMessage,
+                "assistant" | "tool" => genesis_core::trajectory::ActionType::AssistantMessage,
+                _ => genesis_core::trajectory::ActionType::AssistantMessage,
+            },
+            content,
+            tool_name: None,
+            tool_arguments: None,
+            tool_result: None,
+            tokens: None,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(genesis_core::trajectory::Trajectory {
+        session_id,
+        model,
+        system_prompt_hash: sha256_hex(chatml),
+        started_at: now.clone(),
+        completed_at: Some(now),
+        steps,
+        outcome,
+        tags,
+    })
+}
+
+fn parse_chatml_blocks(chatml: &str) -> Result<Vec<(String, String)>, CliError> {
+    let mut messages = Vec::new();
+    let mut rest = chatml;
+
+    while let Some(start_idx) = rest.find("<|im_start|>") {
+        rest = &rest[start_idx + "<|im_start|>".len()..];
+        let end_idx = rest.find("<|im_end|>").ok_or_else(|| {
+            CliError::Other("invalid ChatML: missing <|im_end|> marker".to_owned())
+        })?;
+        let block = &rest[..end_idx];
+        rest = &rest[end_idx + "<|im_end|>".len()..];
+
+        let Some((role, content)) = block.split_once('\n') else {
+            return Err(CliError::Other(
+                "invalid ChatML: block missing role/content separator".to_owned(),
+            ));
+        };
+
+        messages.push((role.trim().to_owned(), content.to_owned()));
+    }
+
+    if messages.is_empty() {
+        return Err(CliError::Other("invalid ChatML: no messages found".to_owned()));
+    }
+
+    Ok(messages)
+}
+
+fn sanitize_session_id_for_filename(session_id: &str) -> String {
+    session_id
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6340,6 +6519,45 @@ storage:
     }
 
     #[test]
+    fn parses_eval_export_sharegpt_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "export-sharegpt",
+            "trajectories",
+            "--recursive",
+        ])
+        .expect("eval export-sharegpt should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::ExportSharegpt { dir, recursive }) => {
+                assert_eq!(dir, "trajectories");
+                assert!(recursive);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_eval_import_chatml_command() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "import-chatml",
+            "dataset.jsonl",
+            "--output",
+            "out",
+        ])
+        .expect("eval import-chatml should parse");
+        match cli.command {
+            Command::Eval(crate::EvalCommand::ImportChatml { file, output }) => {
+                assert_eq!(file, "dataset.jsonl");
+                assert_eq!(output, "out");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn summarize_replay_reports_aggregates_directory() {
         let dir = tempdir().expect("tempdir");
         let file_one = dir.path().join("one.json");
@@ -6678,6 +6896,83 @@ storage:
             .as_str()
             .unwrap()
             .contains("<|im_start|>user"));
+    }
+
+    #[test]
+    fn run_eval_export_sharegpt_emits_jsonl() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("trajectory.json");
+        let trajectory = serde_json::json!({
+            "session_id": "s-sharegpt",
+            "model": "gpt-4.1-mini",
+            "system_prompt_hash": "hash-sharegpt",
+            "started_at": "2026-03-08T12:00:00Z",
+            "completed_at": "2026-03-08T12:01:00Z",
+            "steps": [
+                {
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                },
+                {
+                    "step_index": 1,
+                    "timestamp": "2026-03-08T12:00:01Z",
+                    "action_type": "assistant_message",
+                    "content": "hi"
+                }
+            ],
+            "outcome": { "type": "success" },
+            "tags": ["dataset"]
+        });
+        std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap())
+            .expect("write trajectory");
+
+        let output = crate::run_eval_export_sharegpt(dir.path().to_str().unwrap(), false)
+            .expect("sharegpt export should succeed");
+        let line = output.lines().next().expect("one jsonl line");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("valid jsonl object");
+
+        assert_eq!(parsed["session_id"], "s-sharegpt");
+        assert_eq!(parsed["model"], "gpt-4.1-mini");
+        assert_eq!(parsed["tags"][0], "dataset");
+        assert_eq!(parsed["sharegpt"][0]["from"], "human");
+    }
+
+    #[test]
+    fn run_eval_import_chatml_creates_trajectory_files() {
+        let dir = tempdir().expect("tempdir");
+        let input = dir.path().join("dataset.jsonl");
+        let output_dir = dir.path().join("out");
+        let line = serde_json::json!({
+            "session_id": "chatml-session",
+            "model": "gpt-4.1-mini",
+            "tags": ["dataset"],
+            "outcome": { "type": "success" },
+            "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
+        });
+        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
+            .expect("write jsonl");
+
+        let result = crate::run_eval_import_chatml(
+            input.to_str().unwrap(),
+            output_dir.to_str().unwrap(),
+        )
+        .expect("chatml import should succeed");
+
+        assert!(result.contains("imported 1 trajectories"));
+        let imported_path = output_dir.join("chatml-session.json");
+        assert!(imported_path.exists());
+
+        let raw = std::fs::read_to_string(imported_path).expect("read imported trajectory");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid trajectory");
+        assert_eq!(parsed["session_id"], "chatml-session");
+        assert_eq!(parsed["model"], "gpt-4.1-mini");
+        assert_eq!(parsed["tags"][0], "dataset");
+        assert_eq!(parsed["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(parsed["steps"][0]["action_type"], "system_message");
+        assert_eq!(parsed["steps"][1]["action_type"], "user_message");
+        assert_eq!(parsed["steps"][2]["action_type"], "assistant_message");
     }
 
     #[test]
