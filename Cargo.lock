@@ -425,7 +425,9 @@ dependencies = [
 name = "genesis-tools"
 version = "0.1.0"
 dependencies = [
+ "genesis-storage",
  "genesis-types",
+ "rusqlite",
  "serde",
  "tempfile",
  "thiserror",

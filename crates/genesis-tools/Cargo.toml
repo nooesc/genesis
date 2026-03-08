@@ -5,7 +5,9 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }
+rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

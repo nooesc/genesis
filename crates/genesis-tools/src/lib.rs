@@ -186,6 +186,24 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::fs::ListDirTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "memory_store".to_owned(),
+                description: "Stores a durable memory as a key and value pair in sqlite."
+                    .to_owned(),
+            },
+            ApprovalPolicy::Never,
+            builtins::memory::MemoryStoreTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "memory_recall".to_owned(),
+                description: "Searches stored memories using sqlite full-text search."
+                    .to_owned(),
+            },
+            ApprovalPolicy::Never,
+            builtins::memory::MemoryRecallTool,
         );
     registry
 }
@@ -265,13 +283,15 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 6);
+        assert_eq!(definitions.len(), 8);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
         assert!(definitions.iter().any(|tool| tool.name == "read_file"));
         assert!(definitions.iter().any(|tool| tool.name == "write_file"));
         assert!(definitions.iter().any(|tool| tool.name == "list_dir"));
+        assert!(definitions.iter().any(|tool| tool.name == "memory_store"));
+        assert!(definitions.iter().any(|tool| tool.name == "memory_recall"));
     }
 
     #[test]
