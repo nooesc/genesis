@@ -550,6 +550,7 @@ dependencies = [
  "futures-util",
  "genesis-config",
  "genesis-core",
+ "genesis-mcp",
  "genesis-provider",
  "genesis-storage",
  "genesis-types",

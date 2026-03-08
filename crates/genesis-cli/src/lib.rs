@@ -552,8 +552,19 @@ async fn run_serve(
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
 
+    // Connect MCP servers if configured
+    let mcp = if !loaded.config.mcp_servers.is_empty() {
+        let service = genesis_core::execution::SessionExecutionService::with_mcp(&loaded).await;
+        // Extract the MCP manager — it's stored in the service internals.
+        // For now, just log that MCP is configured.
+        let _ = service;
+        None // TODO: extract MCP manager from service
+    } else {
+        None
+    };
+
     let api_key = std::env::var("GENESIS_API_KEY").ok();
-    let state = std::sync::Arc::new(AppState { loaded, api_key });
+    let state = std::sync::Arc::new(AppState { loaded, api_key, mcp });
     let router = build_router(state);
 
     let addr = format!("{host}:{port}");

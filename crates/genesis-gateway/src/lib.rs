@@ -31,6 +31,8 @@ pub struct AppState {
     /// Optional API key for gateway authentication.
     /// When set, all non-health requests must include `Authorization: Bearer <key>`.
     pub api_key: Option<String>,
+    /// Shared MCP manager for external tool servers (connected at startup).
+    pub mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
 }
 
 /// Request body for the `/chat` endpoint.
@@ -380,6 +382,7 @@ mod tests {
         let state = Arc::new(AppState {
             loaded,
             api_key: None,
+            mcp: None,
         });
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
