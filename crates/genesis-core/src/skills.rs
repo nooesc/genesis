@@ -4,12 +4,20 @@
 //! improve over time. They're stored in SQLite and injected into the
 //! system prompt so the agent knows what skills are available.
 
-use genesis_storage::{SkillStore, StoredSkill};
+use genesis_storage::{SkillStore, SkillUsageStore, StoredSkill};
 
 /// Format a list of skills as a prompt section for the agent.
 ///
 /// Returns `None` if there are no skills to include.
 pub fn format_skills_for_prompt(skills: &[StoredSkill]) -> Option<String> {
+    format_skills_for_prompt_with_stats(skills, None)
+}
+
+/// Format skills with optional usage stats for self-improvement context.
+pub fn format_skills_for_prompt_with_stats(
+    skills: &[StoredSkill],
+    usage_store: Option<&SkillUsageStore>,
+) -> Option<String> {
     if skills.is_empty() {
         return None;
     }
@@ -17,9 +25,12 @@ pub fn format_skills_for_prompt(skills: &[StoredSkill]) -> Option<String> {
     let mut section = String::from("## Available Skills\n\n");
     section.push_str("You have the following learned skills available. ");
     section.push_str("When a user's request matches a skill's trigger, follow the skill's instructions.\n\n");
+    section.push_str("**Self-improvement:** After using a skill, call `skill_record_usage` with the outcome ");
+    section.push_str("(success/partial/failure) and feedback. If a skill's instructions can be improved ");
+    section.push_str("based on what you learned, update it with `skill_create`.\n\n");
 
     for skill in skills {
-        section.push_str(&format!("### {}\n", skill.name));
+        section.push_str(&format!("### {} (v{})\n", skill.name, skill.version));
         section.push_str(&format!("**Description:** {}\n", skill.description));
         if let Some(trigger) = &skill.trigger_hint {
             section.push_str(&format!("**Trigger:** {trigger}\n"));
@@ -27,6 +38,19 @@ pub fn format_skills_for_prompt(skills: &[StoredSkill]) -> Option<String> {
         if !skill.tags.is_empty() {
             section.push_str(&format!("**Tags:** {}\n", skill.tags.join(", ")));
         }
+
+        // Include usage stats if available
+        if let Some(store) = usage_store {
+            if let Ok(stats) = store.stats(&skill.name) {
+                if stats.total_uses > 0 {
+                    section.push_str(&format!(
+                        "**Usage:** {} uses ({} success, {} failure, refined {} times)\n",
+                        stats.total_uses, stats.successes, stats.failures, stats.times_refined
+                    ));
+                }
+            }
+        }
+
         section.push_str(&format!("**Instructions:**\n{}\n\n", skill.instructions));
     }
 
@@ -40,7 +64,8 @@ pub fn format_skills_for_prompt(skills: &[StoredSkill]) -> Option<String> {
 pub fn load_skills_prompt(database_path: &std::path::Path) -> Option<String> {
     let store = SkillStore::new(database_path);
     let skills = store.list_all().ok()?;
-    format_skills_for_prompt(&skills)
+    let usage_store = SkillUsageStore::new(database_path);
+    format_skills_for_prompt_with_stats(&skills, Some(&usage_store))
 }
 
 /// Match a user message against skill trigger hints.
@@ -95,10 +120,11 @@ mod tests {
     fn format_skills_includes_skill_details() {
         let skills = vec![sample_skill("code_review", Some("review code"))];
         let prompt = format_skills_for_prompt(&skills).expect("should have content");
-        assert!(prompt.contains("### code_review"));
+        assert!(prompt.contains("### code_review (v1)"));
         assert!(prompt.contains("code_review description"));
         assert!(prompt.contains("Step 1: do code_review"));
         assert!(prompt.contains("review code"));
+        assert!(prompt.contains("skill_record_usage"));
     }
 
     #[test]
@@ -108,8 +134,8 @@ mod tests {
             sample_skill("test", Some("run tests")),
         ];
         let prompt = format_skills_for_prompt(&skills).expect("should have content");
-        assert!(prompt.contains("### deploy"));
-        assert!(prompt.contains("### test"));
+        assert!(prompt.contains("### deploy (v1)"));
+        assert!(prompt.contains("### test (v1)"));
     }
 
     #[test]
@@ -165,5 +191,38 @@ mod tests {
         let prompt = load_skills_prompt(&db_path).expect("should have prompt");
         assert!(prompt.contains("### greet"));
         assert!(prompt.contains("Say hello warmly"));
+    }
+
+    #[test]
+    fn format_skills_with_stats_includes_usage_data() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = SkillStore::new(&db_path);
+        skill_store
+            .upsert("deploy", "Deploy app", "Run deploy", None, &[])
+            .expect("upsert");
+
+        let usage_store = SkillUsageStore::new(&db_path);
+        usage_store.record_usage("deploy", None, "success", None).unwrap();
+        usage_store.record_usage("deploy", None, "failure", Some("Timed out")).unwrap();
+
+        let skills = skill_store.list_all().unwrap();
+        let prompt = format_skills_for_prompt_with_stats(&skills, Some(&usage_store))
+            .expect("should have prompt");
+
+        assert!(prompt.contains("2 uses"));
+        assert!(prompt.contains("1 success"));
+        assert!(prompt.contains("1 failure"));
+    }
+
+    #[test]
+    fn format_skills_with_stats_omits_zero_usage() {
+        let skills = vec![sample_skill("new_skill", None)];
+        // Pass None for usage store — no stats available
+        let prompt = format_skills_for_prompt_with_stats(&skills, None)
+            .expect("should have prompt");
+        assert!(!prompt.contains("Usage:"));
     }
 }

@@ -361,6 +361,23 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "skill_record_usage".to_owned(),
+                description: "Records that you used a skill and how effective it was. Call this after applying a skill to track its performance and enable self-improvement. If the outcome is not 'success', consider updating the skill's instructions with skill_create.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "skill_name": { "type": "string", "description": "Name of the skill that was used." },
+                        "outcome": { "type": "string", "description": "How well the skill worked: 'success', 'partial', 'failure', or 'unknown'." },
+                        "feedback": { "type": "string", "description": "What worked well, what didn't, and what could be improved in the skill's instructions." }
+                    },
+                    "required": ["skill_name", "outcome"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::skill::SkillRecordUsageTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "user_observe".to_owned(),
                 description: "Records an observation about the user's preferences, personality, communication style, goals, or expertise. Repeated observations increase confidence.".to_owned(),
                 parameters: Some(json!({
@@ -514,7 +531,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 19);
+        assert_eq!(definitions.len(), 20);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));

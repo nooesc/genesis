@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use genesis_storage::{bootstrap, SkillStore};
+use genesis_storage::{bootstrap, SkillStore, SkillUsageStore};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -194,6 +194,106 @@ impl ToolHandler for SkillDeleteTool {
     }
 }
 
+/// Tool that records a skill usage and optional feedback for self-improvement.
+///
+/// After using a skill, the agent calls this to record how effective it was.
+/// If the outcome reveals ways to improve, the agent can then call `skill_create`
+/// to update the skill's instructions (the version auto-increments on upsert).
+pub struct SkillRecordUsageTool;
+
+impl ToolHandler for SkillRecordUsageTool {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let skill_name = call
+            .arguments
+            .get("skill_name")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "skill_name",
+            })?;
+
+        let outcome = call
+            .arguments
+            .get("outcome")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "outcome",
+            })?;
+
+        // Validate outcome
+        if !["success", "partial", "failure", "unknown"].contains(&outcome.as_str()) {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!(
+                    "outcome must be one of: success, partial, failure, unknown — got `{outcome}`"
+                ),
+            });
+        }
+
+        let feedback = call.arguments.get("feedback").map(|s| s.as_str());
+
+        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let _ = bootstrap(&db_path);
+
+        // Verify the skill exists
+        let skill_store = SkillStore::new(&db_path);
+        let skill = skill_store
+            .get(skill_name)
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to look up skill: {e}"),
+            })?
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("skill `{skill_name}` not found"),
+            })?;
+
+        let usage_store = SkillUsageStore::new(&db_path);
+        let usage = usage_store
+            .record_usage(skill_name, Some(&context.session_id), outcome, feedback)
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to record usage: {e}"),
+            })?;
+
+        // Get current stats for the response
+        let stats = usage_store
+            .stats(skill_name)
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to get stats: {e}"),
+            })?;
+
+        let mut content = format!(
+            "Recorded usage of `{}` (v{}) — outcome: {}\n",
+            skill_name, skill.version, outcome
+        );
+        if let Some(ref fb) = usage.feedback {
+            content.push_str(&format!("Feedback: {fb}\n"));
+        }
+        content.push_str(&format!(
+            "Lifetime stats: {} uses ({} success, {} failure, {} refined)",
+            stats.total_uses, stats.successes, stats.failures, stats.times_refined
+        ));
+
+        // If outcome is not success, suggest refinement
+        if outcome != "success" {
+            content.push_str(
+                "\n\nConsider refining this skill with `skill_create` to update its instructions based on what you learned.",
+            );
+        }
+
+        Ok(ToolOutput {
+            content,
+            metadata: BTreeMap::from([
+                ("tool".to_owned(), call.name.clone()),
+                ("skill_name".to_owned(), skill_name.clone()),
+                ("usage_id".to_owned(), usage.id.to_string()),
+                ("outcome".to_owned(), outcome.clone()),
+            ]),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +440,113 @@ mod tests {
         };
         let output = SkillListTool.run(&call, &ctx).expect("list");
         assert!(output.content.contains("No skills saved"));
+    }
+
+    #[test]
+    fn skill_record_usage_tracks_outcome() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        // Create a skill first
+        let create_call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "deploy".to_owned()),
+                ("description".to_owned(), "Deploy app".to_owned()),
+                ("instructions".to_owned(), "Run deploy".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&create_call, &ctx).expect("create");
+
+        // Record usage
+        let usage_call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([
+                ("skill_name".to_owned(), "deploy".to_owned()),
+                ("outcome".to_owned(), "success".to_owned()),
+                ("feedback".to_owned(), "Deployed correctly".to_owned()),
+            ]),
+        };
+        let output = SkillRecordUsageTool.run(&usage_call, &ctx).expect("record");
+        assert!(output.content.contains("deploy"));
+        assert!(output.content.contains("success"));
+        assert!(output.content.contains("1 uses"));
+    }
+
+    #[test]
+    fn skill_record_usage_suggests_refinement_on_failure() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let create_call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "buggy_skill".to_owned()),
+                ("description".to_owned(), "Buggy".to_owned()),
+                ("instructions".to_owned(), "Wrong steps".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&create_call, &ctx).expect("create");
+
+        let usage_call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([
+                ("skill_name".to_owned(), "buggy_skill".to_owned()),
+                ("outcome".to_owned(), "failure".to_owned()),
+                ("feedback".to_owned(), "Steps were wrong".to_owned()),
+            ]),
+        };
+        let output = SkillRecordUsageTool.run(&usage_call, &ctx).expect("record");
+        assert!(output.content.contains("refining"));
+    }
+
+    #[test]
+    fn skill_record_usage_validates_outcome() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let create_call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "test".to_owned()),
+                ("description".to_owned(), "Test".to_owned()),
+                ("instructions".to_owned(), "Test".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&create_call, &ctx).expect("create");
+
+        let usage_call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([
+                ("skill_name".to_owned(), "test".to_owned()),
+                ("outcome".to_owned(), "invalid_value".to_owned()),
+            ]),
+        };
+        let err = SkillRecordUsageTool.run(&usage_call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn skill_record_usage_errors_on_missing_skill() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let usage_call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([
+                ("skill_name".to_owned(), "nonexistent".to_owned()),
+                ("outcome".to_owned(), "success".to_owned()),
+            ]),
+        };
+        let err = SkillRecordUsageTool.run(&usage_call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 }

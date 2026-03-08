@@ -16,7 +16,7 @@ use genesis_core::run_doctor;
 use genesis_provider::ProviderError;
 use genesis_storage::{
     bootstrap, ScheduleStore, SessionStore, SessionSummary, SkillStore, StorageError,
-    StoredSchedule, UserModelStore,
+    StoredSchedule, SubagentStore, UserModelStore,
 };
 use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
@@ -70,6 +70,8 @@ pub enum Command {
     },
     #[command(subcommand, about = "Manage the active LLM provider and model")]
     Model(ModelCommand),
+    #[command(subcommand, about = "Inspect spawned subagents")]
+    Subagents(SubagentsCommand),
     #[command(about = "Run a self-reflection nudge to consolidate learning")]
     Nudge,
     #[command(subcommand, about = "Print starter assets for first-time setup")]
@@ -145,6 +147,20 @@ pub enum SkillsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SubagentsCommand {
+    #[command(about = "List subagents for a parent session")]
+    List {
+        #[arg(help = "Parent session ID")]
+        session_id: String,
+    },
+    #[command(about = "Show subagent details")]
+    Show {
+        #[arg(help = "Subagent ID")]
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ScheduleCommand {
     #[command(about = "Create a schedule")]
     Create {
@@ -188,6 +204,8 @@ pub enum CliError {
     ScheduleNotFound(String),
     #[error("skill `{0}` was not found")]
     SkillNotFound(String),
+    #[error("subagent `{0}` was not found")]
+    SubagentNotFound(String),
     #[error("failed to encode json output: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
@@ -291,6 +309,32 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     }
 
                     Ok(format!("deleted skill {}", name))
+                }
+            }
+        }
+        Command::Subagents(subagents_command) => {
+            let loaded = load(cli.config.as_deref())?;
+            bootstrap(&loaded.config.storage.database_path)?;
+            let store = SubagentStore::new(&loaded.config.storage.database_path);
+
+            match subagents_command {
+                SubagentsCommand::List { session_id } => {
+                    let subs = store.list_by_parent(&session_id)?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&subs)?)
+                    } else {
+                        Ok(format_subagent_list(&subs))
+                    }
+                }
+                SubagentsCommand::Show { id } => {
+                    let sub = store
+                        .get(&id)?
+                        .ok_or_else(|| CliError::SubagentNotFound(id.clone()))?;
+                    if cli.json {
+                        Ok(serde_json::to_string_pretty(&sub)?)
+                    } else {
+                        Ok(format_subagent(&sub))
+                    }
                 }
             }
         }
@@ -769,6 +813,43 @@ fn format_skill(skill: &genesis_storage::StoredSkill) -> String {
     lines.join("\n")
 }
 
+fn format_subagent_list(subs: &[genesis_storage::StoredSubagent]) -> String {
+    if subs.is_empty() {
+        return "no subagents found".to_owned();
+    }
+
+    let mut lines = vec!["genesis subagents".to_owned()];
+    for sub in subs {
+        lines.push(format!(
+            "{}\t{}\t{}\t{}",
+            sub.id, sub.name, sub.status, sub.created_at
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_subagent(sub: &genesis_storage::StoredSubagent) -> String {
+    let mut lines = vec![
+        format!("subagent: {}", sub.id),
+        format!("name: {}", sub.name),
+        format!("status: {}", sub.status),
+        format!("parent_session: {}", sub.parent_session_id),
+        format!("child_session: {}", sub.child_session_id),
+        format!("task: {}", sub.task),
+        format!("created_at: {}", sub.created_at),
+    ];
+    if let Some(ref result) = sub.result {
+        lines.push(format!("result: {result}"));
+    }
+    if let Some(ref error) = sub.error {
+        lines.push(format!("error: {error}"));
+    }
+    if let Some(ref completed_at) = sub.completed_at {
+        lines.push(format!("completed_at: {completed_at}"));
+    }
+    lines.join("\n")
+}
+
 fn format_created_schedule(schedule: &StoredSchedule) -> String {
     format!(
         "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ncreated_at: {}",
@@ -855,9 +936,9 @@ mod tests {
     use super::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
         default_session_id, delivery_platform_from_str, format_schedule_list, format_session_list,
-        format_session_messages, format_skill, format_skill_list, is_exit_command, run,
-        BootstrapCommand, Cli, Command, ModelCommand, ScheduleCommand, SessionsCommand,
-        SkillsCommand, StorageCommand,
+        format_session_messages, format_skill, format_skill_list, format_subagent,
+        format_subagent_list, is_exit_command, run, BootstrapCommand, Cli, Command, ModelCommand,
+        ScheduleCommand, SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -1454,5 +1535,68 @@ storage:
             serde_json::from_str(&output).expect("output should be valid json");
         assert!(parsed["tools"].as_u64().unwrap() > 0);
         assert!(parsed["profile"].is_string());
+    }
+
+    #[test]
+    fn parses_subagents_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "subagents", "list", "session-42"])
+            .expect("subagents list should parse");
+        match cli.command {
+            Command::Subagents(SubagentsCommand::List { session_id }) => {
+                assert_eq!(session_id, "session-42");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_subagents_show_command() {
+        let cli = Cli::try_parse_from(["genesis", "subagents", "show", "sub-1"])
+            .expect("subagents show should parse");
+        match cli.command {
+            Command::Subagents(SubagentsCommand::Show { id }) => {
+                assert_eq!(id, "sub-1");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_subagent_list_for_humans() {
+        use genesis_storage::StoredSubagent;
+        let output = format_subagent_list(&[StoredSubagent {
+            id: "sub-1".to_owned(),
+            parent_session_id: "p-1".to_owned(),
+            child_session_id: "c-1".to_owned(),
+            name: "researcher".to_owned(),
+            task: "find docs".to_owned(),
+            status: "completed".to_owned(),
+            result: Some("found them".to_owned()),
+            error: None,
+            created_at: "2026-03-08".to_owned(),
+            completed_at: Some("2026-03-08".to_owned()),
+        }]);
+        assert!(output.contains("genesis subagents"));
+        assert!(output.contains("sub-1\tresearcher\tcompleted"));
+    }
+
+    #[test]
+    fn formats_subagent_show_for_humans() {
+        use genesis_storage::StoredSubagent;
+        let output = format_subagent(&StoredSubagent {
+            id: "sub-1".to_owned(),
+            parent_session_id: "p-1".to_owned(),
+            child_session_id: "c-1".to_owned(),
+            name: "researcher".to_owned(),
+            task: "find docs".to_owned(),
+            status: "failed".to_owned(),
+            result: None,
+            error: Some("timeout".to_owned()),
+            created_at: "2026-03-08".to_owned(),
+            completed_at: Some("2026-03-08".to_owned()),
+        });
+        assert!(output.contains("subagent: sub-1"));
+        assert!(output.contains("name: researcher"));
+        assert!(output.contains("error: timeout"));
     }
 }

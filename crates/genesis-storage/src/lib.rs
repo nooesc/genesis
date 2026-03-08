@@ -213,6 +213,16 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS skill_usages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_name TEXT NOT NULL,
+                session_id TEXT,
+                outcome TEXT NOT NULL DEFAULT 'unknown',
+                feedback TEXT,
+                refined INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(skill_name) REFERENCES skills(name) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS subagents (
                 id TEXT PRIMARY KEY,
                 parent_session_id TEXT NOT NULL,
@@ -1460,6 +1470,170 @@ impl SubagentStore {
     }
 }
 
+/// A recorded skill usage — tracks when and how a skill was applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSkillUsage {
+    pub id: i64,
+    pub skill_name: String,
+    pub session_id: Option<String>,
+    /// "success", "partial", "failure", or "unknown"
+    pub outcome: String,
+    /// Agent's free-text feedback on what worked or didn't
+    pub feedback: Option<String>,
+    /// Whether the agent refined the skill after this usage
+    pub refined: bool,
+    pub created_at: String,
+}
+
+/// Aggregate stats for a skill's usage history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillUsageStats {
+    pub skill_name: String,
+    pub total_uses: i64,
+    pub successes: i64,
+    pub failures: i64,
+    pub last_used: Option<String>,
+    pub times_refined: i64,
+}
+
+/// Skill usage tracking layer.
+pub struct SkillUsageStore {
+    database_path: PathBuf,
+}
+
+impl SkillUsageStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Record that a skill was used in a session.
+    pub fn record_usage(
+        &self,
+        skill_name: &str,
+        session_id: Option<&str>,
+        outcome: &str,
+        feedback: Option<&str>,
+    ) -> Result<StoredSkillUsage, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO skill_usages (skill_name, session_id, outcome, feedback)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![skill_name, session_id, outcome, feedback],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let id = connection.last_insert_rowid();
+        connection
+            .query_row(
+                "SELECT id, skill_name, session_id, outcome, feedback, refined, created_at
+                 FROM skill_usages WHERE id = ?1",
+                params![id],
+                Self::row_to_usage,
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Mark a usage record as having led to a skill refinement.
+    pub fn mark_refined(&self, usage_id: i64) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "UPDATE skill_usages SET refined = 1 WHERE id = ?1",
+                params![usage_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Get aggregate usage stats for a skill.
+    pub fn stats(&self, skill_name: &str) -> Result<SkillUsageStats, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT
+                    ?1 as skill_name,
+                    COUNT(*) as total_uses,
+                    SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as successes,
+                    SUM(CASE WHEN outcome = 'failure' THEN 1 ELSE 0 END) as failures,
+                    MAX(created_at) as last_used,
+                    SUM(refined) as times_refined
+                 FROM skill_usages WHERE skill_name = ?1",
+                params![skill_name],
+                |row| {
+                    Ok(SkillUsageStats {
+                        skill_name: row.get(0)?,
+                        total_uses: row.get(1)?,
+                        successes: row.get(2)?,
+                        failures: row.get(3)?,
+                        last_used: row.get(4)?,
+                        times_refined: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Get recent usage records for a skill.
+    pub fn recent_usages(
+        &self,
+        skill_name: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredSkillUsage>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, skill_name, session_id, outcome, feedback, refined, created_at
+                 FROM skill_usages WHERE skill_name = ?1
+                 ORDER BY created_at DESC LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let usages = stmt
+            .query_map(params![skill_name, limit as i64], Self::row_to_usage)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(usages)
+    }
+
+    fn row_to_usage(row: &rusqlite::Row) -> Result<StoredSkillUsage, rusqlite::Error> {
+        Ok(StoredSkillUsage {
+            id: row.get(0)?,
+            skill_name: row.get(1)?,
+            session_id: row.get(2)?,
+            outcome: row.get(3)?,
+            feedback: row.get(4)?,
+            refined: row.get::<_, i64>(5)? != 0,
+            created_at: row.get(6)?,
+        })
+    }
+}
+
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
     Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
@@ -1991,6 +2165,94 @@ mod tests {
         assert_eq!(r.status, "failed");
         assert_eq!(r.error.as_deref(), Some("out of tokens"));
         assert!(r.completed_at.is_some());
+    }
+
+    #[test]
+    fn skill_usage_store_records_and_retrieves() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("deploy", "Deploy app", "Run deploy", None, &[])
+            .unwrap();
+
+        let store = super::SkillUsageStore::new(&db_path);
+        let usage = store
+            .record_usage("deploy", Some("s-1"), "success", Some("Worked well"))
+            .unwrap();
+
+        assert_eq!(usage.skill_name, "deploy");
+        assert_eq!(usage.outcome, "success");
+        assert_eq!(usage.feedback.as_deref(), Some("Worked well"));
+        assert!(!usage.refined);
+    }
+
+    #[test]
+    fn skill_usage_store_stats_aggregates() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("test", "Test skill", "Run tests", None, &[])
+            .unwrap();
+
+        let store = super::SkillUsageStore::new(&db_path);
+        store.record_usage("test", None, "success", None).unwrap();
+        store.record_usage("test", None, "success", None).unwrap();
+        store.record_usage("test", None, "failure", Some("Flaky")).unwrap();
+
+        let stats = store.stats("test").unwrap();
+        assert_eq!(stats.total_uses, 3);
+        assert_eq!(stats.successes, 2);
+        assert_eq!(stats.failures, 1);
+        assert!(stats.last_used.is_some());
+    }
+
+    #[test]
+    fn skill_usage_store_mark_refined() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("refine_me", "Refine test", "v1 instructions", None, &[])
+            .unwrap();
+
+        let store = super::SkillUsageStore::new(&db_path);
+        let usage = store
+            .record_usage("refine_me", None, "partial", Some("Needs improvement"))
+            .unwrap();
+
+        store.mark_refined(usage.id).unwrap();
+
+        let recent = store.recent_usages("refine_me", 5).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].refined);
+    }
+
+    #[test]
+    fn skill_usage_store_recent_respects_limit() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let skill_store = super::SkillStore::new(&db_path);
+        skill_store
+            .upsert("many", "Many uses", "Instructions", None, &[])
+            .unwrap();
+
+        let store = super::SkillUsageStore::new(&db_path);
+        for _ in 0..5 {
+            store.record_usage("many", None, "success", None).unwrap();
+        }
+
+        let recent = store.recent_usages("many", 3).unwrap();
+        assert_eq!(recent.len(), 3);
     }
 
     #[test]
