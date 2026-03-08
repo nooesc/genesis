@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod execution;
+pub mod nudge;
 pub mod prompt;
 pub mod scheduler;
 pub mod skills;

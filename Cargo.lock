@@ -531,6 +531,7 @@ dependencies = [
  "genesis-storage",
  "genesis-tools",
  "genesis-types",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

@@ -70,6 +70,8 @@ pub enum Command {
     },
     #[command(subcommand, about = "Manage the active LLM provider and model")]
     Model(ModelCommand),
+    #[command(about = "Run a self-reflection nudge to consolidate learning")]
+    Nudge,
     #[command(subcommand, about = "Print starter assets for first-time setup")]
     Bootstrap(BootstrapCommand),
 }
@@ -338,6 +340,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Model(model_command) => run_model(cli.config, model_command, cli.json),
         Command::Serve { host, port } => run_serve(cli.config, &host, port).await,
+        Command::Nudge => run_nudge(cli.config).await,
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
@@ -487,6 +490,22 @@ async fn run_serve(
     })?;
 
     Ok("server stopped".to_owned())
+}
+
+async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    bootstrap(&loaded.config.storage.database_path)?;
+
+    let session_id = format!(
+        "nudge-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    let response = genesis_core::nudge::run_nudge(&loaded, &session_id).await?;
+    Ok(format!("Nudge complete (session: {session_id}):\n\n{response}"))
 }
 
 fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError> {
@@ -1396,6 +1415,13 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "info"])
             .expect("info command should parse");
         assert!(matches!(cli.command, Command::Info));
+    }
+
+    #[test]
+    fn parses_nudge_command() {
+        let cli = Cli::try_parse_from(["genesis", "nudge"])
+            .expect("nudge command should parse");
+        assert!(matches!(cli.command, Command::Nudge));
     }
 
     #[tokio::test]
