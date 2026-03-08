@@ -88,6 +88,9 @@ pub struct AgentLoopConfig {
     /// Optional response format constraint (e.g. json_object, json_schema).
     /// When set, every chat completion request includes this format directive.
     pub response_format: Option<genesis_provider::ResponseFormat>,
+    /// Timeout for individual tool calls in seconds. When a tool exceeds this
+    /// duration, it is cancelled and the LLM receives a timeout error. Default: 120s.
+    pub tool_timeout_secs: u64,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -128,6 +131,7 @@ impl Default for AgentLoopConfig {
             session_id: None,
             thinking: None,
             response_format: None,
+            tool_timeout_secs: 120,
         }
     }
 }
@@ -340,6 +344,7 @@ impl AgentLoop {
                         &self.subagent_spawner,
                         tool_calls,
                         self.config.max_concurrency,
+                        self.config.tool_timeout_secs,
                     )
                     .await?;
 
@@ -535,6 +540,7 @@ impl AgentLoop {
                             &self.subagent_spawner,
                             &streamed_tool_calls,
                             self.config.max_concurrency,
+                            self.config.tool_timeout_secs,
                         )
                         .await?;
 
@@ -628,6 +634,7 @@ impl AgentLoop {
                                 &self.subagent_spawner,
                                 tool_calls,
                                 self.config.max_concurrency,
+                                self.config.tool_timeout_secs,
                             )
                             .await?;
 
@@ -981,10 +988,34 @@ async fn execute_tool_calls_parallel(
     subagent_spawner: &Option<Arc<dyn SubagentSpawner>>,
     tool_calls: &[ToolCallEntry],
     max_concurrency: usize,
+    timeout_secs: u64,
 ) -> Result<Vec<(String, bool)>, AgentError> {
+    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+
     if tool_calls.len() == 1 {
         // Fast path: avoid semaphore overhead for single tool calls.
-        let result = execute_single_tool(tools, subagent_spawner, &tool_calls[0]).await?;
+        let result = match tokio::time::timeout(
+            timeout_duration,
+            execute_single_tool(tools, subagent_spawner, &tool_calls[0]),
+        )
+        .await
+        {
+            Ok(r) => r?,
+            Err(_) => {
+                warn!(
+                    tool_name = tool_calls[0].function.name.as_str(),
+                    timeout_secs,
+                    "tool call timed out"
+                );
+                (
+                    format!(
+                        "Error: tool `{}` timed out after {timeout_secs}s",
+                        tool_calls[0].function.name
+                    ),
+                    false,
+                )
+            }
+        };
         return Ok(vec![result]);
     }
 
@@ -993,9 +1024,28 @@ async fn execute_tool_calls_parallel(
         .iter()
         .map(|tc| {
             let sem = Arc::clone(&semaphore);
+            let tool_name = tc.function.name.clone();
             async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
-                execute_single_tool(tools, subagent_spawner, tc).await
+                match tokio::time::timeout(
+                    timeout_duration,
+                    execute_single_tool(tools, subagent_spawner, tc),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => {
+                        warn!(
+                            tool_name = tool_name.as_str(),
+                            timeout_secs,
+                            "tool call timed out"
+                        );
+                        Ok((
+                            format!("Error: tool `{tool_name}` timed out after {timeout_secs}s"),
+                            false,
+                        ))
+                    }
+                }
             }
         })
         .collect();
@@ -1420,6 +1470,7 @@ mod tests {
             &agent.subagent_spawner,
             &tool_calls,
             4,
+            120,
         )
         .await
         .expect("parallel execution should succeed");
@@ -1446,6 +1497,7 @@ mod tests {
             &agent.subagent_spawner,
             &tool_calls,
             4,
+            120,
         )
         .await
         .expect("single-item parallel should succeed");
@@ -1481,6 +1533,7 @@ mod tests {
             &agent.subagent_spawner,
             &tool_calls,
             4,
+            120,
         )
         .await;
 
