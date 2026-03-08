@@ -22,6 +22,32 @@ use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
 
+/// Interactive approval handler for CLI mode. Prompts the user via stdin
+/// when a tool requires explicit confirmation (e.g., send_message).
+struct CliApprovalHandler;
+
+impl genesis_tools::ApprovalHandler for CliApprovalHandler {
+    fn request_approval(&self, tool_name: &str, arguments: &std::collections::BTreeMap<String, String>) -> bool {
+        eprintln!("\n[Tool approval required] {tool_name}");
+        for (key, value) in arguments {
+            let display = if value.len() > 100 {
+                format!("{}...", &value[..100])
+            } else {
+                value.clone()
+            };
+            eprintln!("  {key}: {display}");
+        }
+        eprint!("Allow this tool call? [y/N] ");
+        let _ = io::stderr().flush();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            return false;
+        }
+        matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "genesis", version, about = "Rust-native Genesis bootstrap CLI")]
 pub struct Cli {
@@ -707,6 +733,7 @@ async fn run_chat(
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
     let mut service = SessionExecutionService::new(&loaded);
+    service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
     if let Some(ref sys) = system_override {
         service.set_system_prompt_override(sys.clone());
     }
@@ -819,6 +846,7 @@ async fn run_oneshot(
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
     let mut service = SessionExecutionService::new(&loaded);
+    service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
     if let Some(sys) = system_override {
         service.set_system_prompt_override(sys);
     }

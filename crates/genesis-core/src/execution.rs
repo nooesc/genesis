@@ -23,6 +23,7 @@ pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
     mcp: Option<Arc<McpManager>>,
     system_prompt_override: Option<String>,
+    approval_handler: Option<Arc<dyn genesis_tools::ApprovalHandler>>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +64,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None }
+        Self { loaded, mcp: None, system_prompt_override: None, approval_handler: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -90,7 +91,7 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None }
+        Self { loaded, mcp, system_prompt_override: None, approval_handler: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
@@ -101,6 +102,11 @@ impl<'a> SessionExecutionService<'a> {
     /// Override the system prompt / agent identity for this service instance.
     pub fn set_system_prompt_override(&mut self, prompt: String) {
         self.system_prompt_override = Some(prompt);
+    }
+
+    /// Set an interactive approval handler for tools requiring user confirmation.
+    pub fn set_approval_handler(&mut self, handler: Arc<dyn genesis_tools::ApprovalHandler>) {
+        self.approval_handler = Some(handler);
     }
 
     /// Return the MCP manager if connected, for sharing with other subsystems.
@@ -238,6 +244,11 @@ impl<'a> SessionExecutionService<'a> {
         // Attach MCP manager if we connected any servers at service creation
         if let Some(mcp) = &self.mcp {
             tool_runtime.set_mcp(Arc::clone(mcp));
+        }
+
+        // Attach interactive approval handler if configured
+        if let Some(handler) = &self.approval_handler {
+            tool_runtime.set_approval_handler(Arc::clone(handler));
         }
 
         // Set terminal backend if configured
