@@ -5,12 +5,14 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+async-stream.workspace = true
 axum.workspace = true
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-types = { path = "../genesis-types" }
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

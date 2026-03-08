@@ -531,7 +531,9 @@ dependencies = [
 name = "genesis-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum",
+ "futures-util",
  "genesis-config",
  "genesis-core",
  "genesis-provider",
