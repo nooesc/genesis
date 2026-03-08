@@ -1,3 +1,4 @@
+pub mod browse;
 pub mod clarify;
 pub mod code_execution;
 pub mod docker;

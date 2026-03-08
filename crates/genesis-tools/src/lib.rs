@@ -676,6 +676,22 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "browse".to_owned(),
+                description: "Fetches a web page and extracts readable text content, stripping HTML tags, scripts, styles, and navigation. More useful than web_request for reading articles and documentation.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL of the web page to read." },
+                        "selector": { "type": "string", "description": "Optional HTML tag to focus on (e.g. 'article', 'main', 'p'). Extracts only content within matching tags." }
+                    },
+                    "required": ["url"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browse::BrowseTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "schedule_create".to_owned(),
                 description: "Creates a recurring scheduled prompt that runs on a cron schedule. The prompt will be executed automatically at the specified interval.".to_owned(),
                 parameters: Some(json!({
@@ -832,7 +848,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 34);
+        assert_eq!(definitions.len(), 35);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
