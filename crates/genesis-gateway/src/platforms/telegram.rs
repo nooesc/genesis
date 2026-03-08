@@ -40,6 +40,34 @@ pub struct TelegramMessage {
     pub chat: TelegramChat,
     pub from: Option<TelegramUser>,
     pub text: Option<String>,
+    /// Voice message (audio recorded inline in Telegram).
+    pub voice: Option<TelegramVoice>,
+    /// Audio file (uploaded as a document).
+    pub audio: Option<TelegramAudio>,
+    /// Photo attachments (array of sizes, largest last).
+    pub photo: Option<Vec<TelegramPhoto>>,
+    /// Caption for photo/audio/voice messages.
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramVoice {
+    pub file_id: String,
+    pub duration: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramAudio {
+    pub file_id: String,
+    pub duration: Option<i64>,
+    pub file_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramPhoto {
+    pub file_id: String,
+    pub width: i64,
+    pub height: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,10 +114,49 @@ pub async fn webhook_handler(
         None => return StatusCode::OK, // Ignore non-message updates (edits, callbacks, etc.)
     };
 
-    let text = match message.text {
-        Some(t) if !t.is_empty() => t,
-        _ => return StatusCode::OK, // Ignore empty or non-text messages
+    // Extract text from message. Handle text, photos, voice, and audio.
+    let (text, is_voice) = if let Some(t) = message.text.filter(|t| !t.is_empty()) {
+        (t, false)
+    } else if let Some(photos) = &message.photo {
+        // Photo message — use the largest photo (last in the array).
+        let best = photos.last();
+        let caption = message.caption.as_deref().unwrap_or("");
+        let file_info = best
+            .map(|p| format!("{}x{}, file_id={}", p.width, p.height, p.file_id))
+            .unwrap_or_else(|| "unknown".to_owned());
+        (
+            format!(
+                "[Photo received: {file_info}. Caption: \"{caption}\". \
+                 Use the vision tool to analyze the image if needed.]"
+            ),
+            false,
+        )
+    } else if let Some(voice) = &message.voice {
+        // Voice message — tell the agent about it so it can use transcription tools.
+        (
+            format!(
+                "[Voice message received: {}s audio, file_id={}. \
+                 Use the transcribe tool if audio transcription is needed, \
+                 or acknowledge that you received a voice message.]",
+                voice.duration, voice.file_id
+            ),
+            true,
+        )
+    } else if let Some(audio) = &message.audio {
+        let name = audio.file_name.as_deref().unwrap_or("audio");
+        let dur = audio.duration.unwrap_or(0);
+        (
+            format!(
+                "[Audio file received: \"{name}\", {dur}s, file_id={}. \
+                 Use the transcribe tool if transcription is needed.]",
+                audio.file_id
+            ),
+            true,
+        )
+    } else {
+        return StatusCode::OK; // Ignore unsupported message types
     };
+    let _ = is_voice; // May be used for richer handling later.
 
     let chat_id = message.chat.id;
     let message_id = message.message_id;
@@ -301,6 +368,65 @@ mod tests {
         assert!(json.contains("\"chat_id\":42"));
         assert!(json.contains("\"text\":\"Hello!\""));
         assert!(json.contains("\"reply_to_message_id\":1"));
+    }
+
+    #[test]
+    fn telegram_photo_message_deserializes() {
+        let json = r#"{
+            "update_id": 102,
+            "message": {
+                "message_id": 7,
+                "chat": {"id": 42, "type": "private"},
+                "photo": [
+                    {"file_id": "small", "width": 90, "height": 90},
+                    {"file_id": "medium", "width": 320, "height": 320},
+                    {"file_id": "large", "width": 800, "height": 800}
+                ],
+                "caption": "Check this out"
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        let photos = msg.photo.expect("should have photos");
+        assert_eq!(photos.len(), 3);
+        assert_eq!(photos.last().unwrap().file_id, "large");
+        assert_eq!(msg.caption.as_deref(), Some("Check this out"));
+    }
+
+    #[test]
+    fn telegram_voice_message_deserializes() {
+        let json = r#"{
+            "update_id": 100,
+            "message": {
+                "message_id": 5,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 100, "first_name": "Cole"},
+                "voice": {"file_id": "AwACAgIAAxkBAAIB", "duration": 12}
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        assert!(msg.text.is_none());
+        let voice = msg.voice.expect("should have voice");
+        assert_eq!(voice.file_id, "AwACAgIAAxkBAAIB");
+        assert_eq!(voice.duration, 12);
+    }
+
+    #[test]
+    fn telegram_audio_message_deserializes() {
+        let json = r#"{
+            "update_id": 101,
+            "message": {
+                "message_id": 6,
+                "chat": {"id": 42, "type": "private"},
+                "audio": {"file_id": "CQACAgI", "duration": 180, "file_name": "podcast.mp3"}
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        let audio = msg.audio.expect("should have audio");
+        assert_eq!(audio.file_id, "CQACAgI");
+        assert_eq!(audio.file_name.as_deref(), Some("podcast.mp3"));
     }
 
     #[test]
