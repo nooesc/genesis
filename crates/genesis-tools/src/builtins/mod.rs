@@ -5,6 +5,7 @@ pub mod fs;
 pub mod memory;
 pub mod patch;
 pub mod search;
+pub mod send_message;
 pub mod session;
 pub mod shell;
 pub mod skill;

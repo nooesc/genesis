@@ -658,6 +658,24 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
+                name: "send_message".to_owned(),
+                description: "Sends a message to a messaging platform (Slack, Telegram, Discord). Requires the corresponding API token environment variable to be set.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "platform": { "type": "string", "description": "Target platform: 'slack', 'telegram', or 'discord'." },
+                        "channel": { "type": "string", "description": "Channel or chat ID to send the message to. Slack: channel ID (e.g. C04XXXXXXX). Telegram: chat ID (numeric). Discord: channel ID (numeric)." },
+                        "message": { "type": "string", "description": "The message text to send." },
+                        "thread_id": { "type": "string", "description": "Optional thread/reply ID. Slack: thread_ts. Telegram: reply_to_message_id." }
+                    },
+                    "required": ["platform", "channel", "message"]
+                })),
+            },
+            ApprovalPolicy::Always,
+            builtins::send_message::SendMessageTool,
+        )
+        .register(
+            ToolDefinition {
                 name: "session_export".to_owned(),
                 description: "Exports a conversation session to Markdown or JSON format. Can write to a file or return the content directly.".to_owned(),
                 parameters: Some(json!({
@@ -752,7 +770,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 29);
+        assert_eq!(definitions.len(), 30);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
