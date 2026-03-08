@@ -547,12 +547,12 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "patch".to_owned(),
-                description: "Applies a targeted find-and-replace within a file. More efficient than write_file for small edits — only send the text to find and its replacement. The old_text must match exactly once unless replace_all is set.".to_owned(),
+                description: "Applies a targeted find-and-replace within a file. Tries exact match first; if that fails, falls back to fuzzy line-based matching (≥70% similarity) so small whitespace or indentation differences don't cause failures. More efficient than write_file for small edits.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Path to the file to patch." },
-                        "old_text": { "type": "string", "description": "The exact text to find in the file. Must match exactly once (including whitespace and indentation)." },
+                        "old_text": { "type": "string", "description": "The text to find in the file. Exact match is tried first; if not found, a fuzzy match is attempted." },
                         "new_text": { "type": "string", "description": "The text to replace old_text with." },
                         "replace_all": { "type": "string", "description": "Set to 'true' to replace all occurrences. Default: replace only unique match." }
                     },
