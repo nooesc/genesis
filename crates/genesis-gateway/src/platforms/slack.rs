@@ -165,6 +165,13 @@ pub async fn events_handler(
         crate::commands::CommandResult::PassThrough => {}
     }
 
+    // Auto-reset expired sessions before processing.
+    crate::commands::check_session_expiry(
+        &session_id,
+        &store,
+        state.loaded.config.gateway.as_ref(),
+    );
+
     // Process in background
     tokio::spawn(
         async move {

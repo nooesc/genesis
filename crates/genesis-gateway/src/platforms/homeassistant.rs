@@ -84,6 +84,13 @@ pub async fn webhook_handler(
         }));
     }
 
+    // Auto-reset expired sessions before processing.
+    crate::commands::check_session_expiry(
+        &session_id,
+        &store,
+        state.loaded.config.gateway.as_ref(),
+    );
+
     let service = SessionExecutionService::new(&state.loaded);
 
     let outcome = service

@@ -223,6 +223,13 @@ pub async fn webhook_handler(
                     crate::commands::CommandResult::PassThrough => {}
                 }
 
+                // Auto-reset expired sessions before processing.
+                crate::commands::check_session_expiry(
+                    &session_id,
+                    &store,
+                    state.loaded.config.gateway.as_ref(),
+                );
+
                 let state = Arc::clone(&state);
                 let token = token.clone();
                 let phone_id = phone_id.clone();

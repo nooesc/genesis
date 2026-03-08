@@ -27,6 +27,9 @@ pub struct GenesisConfig {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
+    /// Gateway-specific settings (session policies, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayConfig>,
 }
 
 /// Configuration for a single MCP server.
@@ -115,6 +118,21 @@ pub enum TerminalConfig {
     },
 }
 
+/// Gateway-specific settings for session lifecycle policies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GatewayConfig {
+    /// Auto-reset sessions that have been idle for this many minutes.
+    /// When a new message arrives and the session's `updated_at` is older
+    /// than this threshold, the session is cleared before processing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_minutes: Option<u64>,
+    /// Auto-reset sessions daily at this hour (0-23, local time).
+    /// If the session's `updated_at` is before today's reset hour, it
+    /// is cleared on the next incoming message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_reset_hour: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -144,6 +162,8 @@ struct FileConfig {
     storage: Option<FileStorageConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<FileRuntimeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway: Option<GatewayConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -253,6 +273,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             budget_limit: None,
             terminal: None,
         },
+        gateway: None,
     })
 }
 
@@ -408,6 +429,7 @@ pub fn load_from_map(
                 database_path: database_path.clone(),
             },
             runtime,
+            gateway: file_config.gateway,
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -901,5 +923,36 @@ mcp_servers:
 
         let result = super::set_value_in_file(&config_path, "runtime.max_turns", "not_a_number");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn gateway_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openai
+  model: gpt-4.1-mini
+gateway:
+  idle_timeout_minutes: 120
+  daily_reset_hour: 6
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let gw = loaded.config.gateway.expect("gateway should be set");
+        assert_eq!(gw.idle_timeout_minutes, Some(120));
+        assert_eq!(gw.daily_reset_hour, Some(6));
+    }
+
+    #[test]
+    fn gateway_config_absent_when_not_configured() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.gateway.is_none());
     }
 }

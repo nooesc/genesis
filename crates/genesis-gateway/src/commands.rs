@@ -4,8 +4,10 @@
 //! platforms before they reach the agent. Returns a response if the command
 //! was handled, or `None` to pass through to the agent.
 
+use chrono::{Local, NaiveDateTime};
+use genesis_config::GatewayConfig;
 use genesis_storage::SessionStore;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Result of processing a gateway command.
 pub enum CommandResult {
@@ -68,6 +70,86 @@ pub fn handle_command(text: &str, session_id: &str, store: &SessionStore) -> Com
             CommandResult::PassThrough
         }
     }
+}
+
+/// Check if a session should be auto-reset based on gateway config policies.
+///
+/// Returns `true` if the session was expired and deleted (caller should
+/// treat this as a fresh session). Returns `false` if the session is
+/// still valid or doesn't exist.
+pub fn check_session_expiry(
+    session_id: &str,
+    store: &SessionStore,
+    gateway: Option<&GatewayConfig>,
+) -> bool {
+    let config = match gateway {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // No policies configured
+    if config.idle_timeout_minutes.is_none() && config.daily_reset_hour.is_none() {
+        return false;
+    }
+
+    let session = match store.get_session(session_id) {
+        Ok(Some(s)) => s,
+        _ => return false, // No session to expire
+    };
+
+    // Parse the updated_at timestamp (SQLite CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS")
+    let updated_at = match NaiveDateTime::parse_from_str(&session.updated_at, "%Y-%m-%d %H:%M:%S") {
+        Ok(dt) => dt,
+        Err(_) => {
+            warn!(
+                session_id,
+                updated_at = session.updated_at.as_str(),
+                "could not parse session updated_at timestamp"
+            );
+            return false;
+        }
+    };
+
+    let now = Local::now().naive_local();
+
+    // Check idle timeout
+    if let Some(idle_minutes) = config.idle_timeout_minutes {
+        let elapsed = now.signed_duration_since(updated_at);
+        if elapsed.num_minutes() >= idle_minutes as i64 {
+            info!(
+                session_id,
+                idle_minutes = elapsed.num_minutes(),
+                threshold = idle_minutes,
+                "session expired due to idle timeout"
+            );
+            let _ = store.delete_session(session_id);
+            return true;
+        }
+    }
+
+    // Check daily reset hour
+    if let Some(reset_hour) = config.daily_reset_hour {
+        if reset_hour < 24 {
+            let today_reset = now
+                .date()
+                .and_hms_opt(reset_hour as u32, 0, 0)
+                .unwrap_or(now);
+
+            // If the reset time has passed today and the session was last
+            // updated before the reset time, it should be cleared.
+            if now >= today_reset && updated_at < today_reset {
+                info!(
+                    session_id,
+                    reset_hour,
+                    "session expired due to daily reset"
+                );
+                let _ = store.delete_session(session_id);
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -168,5 +250,100 @@ mod tests {
             }
             CommandResult::PassThrough => panic!("expected Reply"),
         }
+    }
+
+    // --- Session expiry tests ---
+
+    /// Set a session's updated_at to a specific timestamp for testing.
+    fn set_updated_at(store: &SessionStore, session_id: &str, timestamp: &str) {
+        let conn = rusqlite::Connection::open(store.database_path()).unwrap();
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![timestamp, session_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn expiry_returns_false_when_no_config() {
+        let store = test_store();
+        store.create_session("s1", "test", None).unwrap();
+        assert!(!check_session_expiry("s1", &store, None));
+    }
+
+    #[test]
+    fn expiry_returns_false_when_no_policies() {
+        let store = test_store();
+        store.create_session("s1", "test", None).unwrap();
+        let config = GatewayConfig {
+            idle_timeout_minutes: None,
+            daily_reset_hour: None,
+        };
+        assert!(!check_session_expiry("s1", &store, Some(&config)));
+    }
+
+    #[test]
+    fn expiry_returns_false_for_nonexistent_session() {
+        let store = test_store();
+        let config = GatewayConfig {
+            idle_timeout_minutes: Some(30),
+            daily_reset_hour: None,
+        };
+        assert!(!check_session_expiry("nonexistent", &store, Some(&config)));
+    }
+
+    #[test]
+    fn expiry_idle_timeout_triggers_for_old_session() {
+        let store = test_store();
+        store.create_session("s1", "test", None).unwrap();
+        // Set updated_at to 2 hours ago
+        let two_hours_ago = (Local::now() - chrono::Duration::hours(2))
+            .naive_local()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        set_updated_at(&store, "s1", &two_hours_ago);
+
+        let config = GatewayConfig {
+            idle_timeout_minutes: Some(60),
+            daily_reset_hour: None,
+        };
+        assert!(check_session_expiry("s1", &store, Some(&config)));
+        // Session should be deleted
+        assert!(store.get_session("s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn expiry_idle_timeout_does_not_trigger_for_recent_session() {
+        let store = test_store();
+        store.create_session("s1", "test", None).unwrap();
+        // Just created — updated_at is CURRENT_TIMESTAMP (now)
+
+        let config = GatewayConfig {
+            idle_timeout_minutes: Some(60),
+            daily_reset_hour: None,
+        };
+        assert!(!check_session_expiry("s1", &store, Some(&config)));
+        // Session should still exist
+        assert!(store.get_session("s1").unwrap().is_some());
+    }
+
+    #[test]
+    fn expiry_daily_reset_triggers_for_yesterday_session() {
+        let store = test_store();
+        store.create_session("s1", "test", None).unwrap();
+        // Set updated_at to yesterday
+        let yesterday = (Local::now() - chrono::Duration::days(1))
+            .naive_local()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        set_updated_at(&store, "s1", &yesterday);
+
+        // Reset at hour 0 — any session from yesterday is expired
+        let config = GatewayConfig {
+            idle_timeout_minutes: None,
+            daily_reset_hour: Some(0),
+        };
+        assert!(check_session_expiry("s1", &store, Some(&config)));
+        assert!(store.get_session("s1").unwrap().is_none());
     }
 }

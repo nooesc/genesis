@@ -312,6 +312,16 @@ pub async fn webhook_handler(
         }
     }
 
+    // Auto-reset expired sessions before processing.
+    {
+        let store = SessionStore::new(&state.loaded.config.storage.database_path);
+        crate::commands::check_session_expiry(
+            &session_id,
+            &store,
+            state.loaded.config.gateway.as_ref(),
+        );
+    }
+
     // Spawn background task so we return 200 immediately
     let state = Arc::clone(&state);
     tokio::spawn(
