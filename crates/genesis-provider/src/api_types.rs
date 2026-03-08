@@ -287,4 +287,26 @@ mod tests {
         assert_eq!(chat_tool.tool_type, "function");
         assert_eq!(chat_tool.function.name, "search");
     }
+
+    #[test]
+    fn tool_definition_with_parameters_serializes_to_wire_format() {
+        let def = genesis_types::ToolDefinition {
+            name: "shell_exec".to_owned(),
+            description: "Runs a command".to_owned(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The command to run." }
+                },
+                "required": ["command"]
+            })),
+        };
+        let chat_tool = ChatTool::from(&def);
+        let json = serde_json::to_value(&chat_tool).expect("should serialize");
+
+        let params = &json["function"]["parameters"];
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["properties"]["command"]["type"], "string");
+        assert_eq!(params["required"][0], "command");
+    }
 }
