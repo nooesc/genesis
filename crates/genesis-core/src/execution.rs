@@ -108,6 +108,11 @@ impl<'a> SessionExecutionService<'a> {
         Self { loaded, mcp }
     }
 
+    /// Attach an already-connected MCP manager (e.g. from gateway startup).
+    pub fn set_mcp(&mut self, mcp: Arc<McpManager>) {
+        self.mcp = Some(mcp);
+    }
+
     /// Return the MCP manager if connected, for sharing with other subsystems.
     pub fn mcp_manager(&self) -> Option<Arc<McpManager>> {
         self.mcp.clone()

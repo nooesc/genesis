@@ -176,7 +176,10 @@ async fn chat_handler(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, String)> {
     let loaded = &state.loaded;
-    let service = SessionExecutionService::new(loaded);
+    let mut service = SessionExecutionService::new(loaded);
+    if let Some(mcp) = &state.mcp {
+        service.set_mcp(std::sync::Arc::clone(mcp));
+    }
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     let span = info_span!(
@@ -250,7 +253,10 @@ async fn chat_stream_handler(
         platform = platform.as_str()
     );
     tokio::spawn(async move {
-        let service = SessionExecutionService::new(&state_for_task.loaded);
+        let mut service = SessionExecutionService::new(&state_for_task.loaded);
+        if let Some(mcp) = &state_for_task.mcp {
+            service.set_mcp(std::sync::Arc::clone(mcp));
+        }
         let initial_payload = serde_json::to_string(&serde_json::json!({
             "session_id": session_id_for_task,
         }));
