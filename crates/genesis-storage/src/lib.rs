@@ -131,6 +131,34 @@ mod session_store_tests {
         assert_eq!(stats.total_input_tokens, 3000);
         assert_eq!(stats.total_output_tokens, 1300);
     }
+
+    #[test]
+    fn set_title_overwrites_existing_title() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("s1", "cli", Some("Original")).expect("create");
+
+        let session = store.get_session("s1").unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), Some("Original"));
+
+        assert!(store.set_title("s1", "Renamed").unwrap());
+
+        let session = store.get_session("s1").unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), Some("Renamed"));
+    }
+
+    #[test]
+    fn set_title_returns_false_for_missing_session() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        assert!(!store.set_title("nonexistent", "Title").unwrap());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -682,6 +710,21 @@ impl SessionStore {
                 source,
             })?;
         Ok(())
+    }
+
+    /// Set the session title unconditionally (overwrites any existing title).
+    pub fn set_title(&self, session_id: &str, title: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "UPDATE sessions SET title = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![session_id, title],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
     }
 
     /// Delete a session and all its messages and search index entries.

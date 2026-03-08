@@ -45,6 +45,8 @@ pub enum Command {
         prompt: Option<String>,
         #[arg(long, help = "Override the system prompt / agent identity")]
         system: Option<String>,
+        #[arg(long, help = "Resume the most recent session")]
+        last: bool,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -187,6 +189,13 @@ pub enum SessionsCommand {
     },
     #[command(about = "Show aggregate usage statistics across all sessions")]
     Stats,
+    #[command(about = "Rename a session (set its title)")]
+    Rename {
+        #[arg(help = "Session ID to rename")]
+        id: String,
+        #[arg(help = "New title for the session")]
+        title: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -283,8 +292,8 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system } => {
-            run_chat(cli.config, session_id, resume, prompt, system).await
+        Command::Chat { session_id, resume, prompt, system, last } => {
+            run_chat(cli.config, session_id, resume, prompt, system, last).await
         }
         Command::Doctor { bootstrap_storage } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
@@ -400,6 +409,13 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(serde_json::to_string_pretty(&stats)?)
                     } else {
                         Ok(format_usage_stats(&stats))
+                    }
+                }
+                SessionsCommand::Rename { id, title } => {
+                    if store.set_title(&id, &title)? {
+                        Ok(format!("Renamed session {id} to \"{title}\""))
+                    } else {
+                        Err(CliError::SessionNotFound(id))
                     }
                 }
             }
@@ -539,6 +555,7 @@ async fn run_chat(
     resume: Option<String>,
     initial_prompt: Option<String>,
     system_override: Option<String>,
+    last: bool,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -548,14 +565,22 @@ async fn run_chat(
     }
     let store = SessionStore::new(&loaded.config.storage.database_path);
 
-    let (session_id, is_resumed) = match resume {
-        Some(resume_id) => {
-            let session = store
-                .get_session(&resume_id)?
-                .ok_or_else(|| CliError::SessionNotFound(resume_id.clone()))?;
-            (session.id, true)
+    let (session_id, is_resumed) = if last {
+        let sessions = store.list_recent_sessions(1)?;
+        match sessions.first() {
+            Some(s) => (s.id.clone(), true),
+            None => return Err(CliError::Other("no previous sessions found".to_owned())),
         }
-        None => (session_id.unwrap_or_else(default_session_id), false),
+    } else {
+        match resume {
+            Some(resume_id) => {
+                let session = store
+                    .get_session(&resume_id)?
+                    .ok_or_else(|| CliError::SessionNotFound(resume_id.clone()))?;
+                (session.id, true)
+            }
+            None => (session_id.unwrap_or_else(default_session_id), false),
+        }
     };
 
     if !is_resumed {
@@ -1621,11 +1646,12 @@ mod tests {
             .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id, resume, prompt, system } => {
+            Command::Chat { session_id, resume, prompt, system, last } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
                 assert_eq!(resume.as_deref(), Some("session-1"));
                 assert!(prompt.is_none());
                 assert!(system.is_none());
+                assert!(!last);
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }
@@ -2593,5 +2619,30 @@ storage:
         assert!(output.contains("input tokens:  100000"));
         assert!(output.contains("output tokens: 50000"));
         assert!(output.contains("total tokens:  150000"));
+    }
+
+    #[test]
+    fn parses_sessions_rename_command() {
+        let cli = Cli::try_parse_from([
+            "genesis", "sessions", "rename", "session-42", "My Project",
+        ])
+        .expect("sessions rename should parse");
+        match cli.command {
+            Command::Sessions(SessionsCommand::Rename { id, title }) => {
+                assert_eq!(id, "session-42");
+                assert_eq!(title, "My Project");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_last_flag() {
+        let cli = Cli::try_parse_from(["genesis", "chat", "--last"])
+            .expect("chat --last should parse");
+        match cli.command {
+            Command::Chat { last, .. } => assert!(last),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }
