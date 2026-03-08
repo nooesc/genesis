@@ -9,6 +9,16 @@ pub fn build_system_prompt(
     tools: &[ToolDefinition],
     custom_identity: Option<&str>,
 ) -> String {
+    build_system_prompt_with_skills(profile, tools, custom_identity, None)
+}
+
+/// Build a system prompt with optional skills context.
+pub fn build_system_prompt_with_skills(
+    profile: &str,
+    tools: &[ToolDefinition],
+    custom_identity: Option<&str>,
+    skills_section: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
 
     // Identity section
@@ -29,6 +39,16 @@ pub fn build_system_prompt(
         }
         parts.push(tool_section);
     }
+
+    // Skills section
+    if let Some(skills) = skills_section {
+        parts.push(skills.to_owned());
+    }
+
+    // Skill instruction
+    parts.push(
+        "You can learn new skills using the skill_create tool. After completing a complex multi-step task successfully, consider saving the procedure as a skill for future reuse.".to_owned(),
+    );
 
     parts.join("\n\n")
 }
@@ -91,5 +111,20 @@ mod tests {
     #[test]
     fn agent_name_returns_eve() {
         assert_eq!(agent_name(), "Eve");
+    }
+
+    #[test]
+    fn prompt_with_skills_includes_skill_section() {
+        let skills = "## Available Skills\n\n### deploy\n**Description:** Deploy app\n";
+        let prompt = build_system_prompt_with_skills("operator", &[], None, Some(skills));
+        assert!(prompt.contains("## Available Skills"));
+        assert!(prompt.contains("### deploy"));
+    }
+
+    #[test]
+    fn prompt_with_skills_includes_learning_instruction() {
+        let prompt = build_system_prompt_with_skills("default", &[], None, None);
+        assert!(prompt.contains("skill_create"));
+        assert!(prompt.contains("learn new skills"));
     }
 }
