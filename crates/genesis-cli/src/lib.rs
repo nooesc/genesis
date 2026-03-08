@@ -243,6 +243,8 @@ pub enum Command {
         toolset: Option<String>,
         #[arg(long, help = "Discard generated trajectories whose quality score is below this threshold (0.0-1.0)")]
         quality_filter: Option<f64>,
+        #[arg(long, help = "Automatically tag generated trajectories based on content analysis")]
+        auto_tag: bool,
     },
     #[command(about = "Compress a trajectory JSON file for training/export")]
     Compress {
@@ -1115,6 +1117,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             concurrency,
             toolset,
             quality_filter,
+            auto_tag,
         } => {
             run_batch(
                 cli.config,
@@ -1125,6 +1128,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 concurrency,
                 toolset,
                 quality_filter,
+                auto_tag,
             )
             .await
         }
@@ -2446,6 +2450,7 @@ async fn run_batch(
     concurrency: Option<usize>,
     toolset: Option<String>,
     quality_filter: Option<f64>,
+    auto_tag: bool,
 ) -> Result<String, CliError> {
     if let Some(score) = quality_filter {
         if !(0.0..=1.0).contains(&score) {
@@ -2547,6 +2552,7 @@ async fn run_batch(
                 max_turns,
                 distribution.as_ref().map(|d| d.as_ref()),
                 quality_filter,
+                auto_tag,
             )
             .await;
 
@@ -2582,6 +2588,7 @@ async fn run_batch_item(
     max_turns: Option<usize>,
     distribution: Option<&genesis_core::toolset::ToolsetDistribution>,
     quality_filter: Option<f64>,
+    auto_tag: bool,
 ) -> Result<(), CliError> {
     let session_store = SessionStore::new(&loaded.config.storage.database_path);
     let _ = session_store.create_session(session_id, "batch", None);
@@ -2655,6 +2662,9 @@ async fn run_batch_item(
     }
 
     let _ = agent.run_turn(&item.prompt).await?;
+    if auto_tag {
+        apply_auto_tags(output_dir, session_id)?;
+    }
     if let Some(min_quality) = quality_filter {
         discard_low_quality_trajectory(output_dir, session_id, min_quality)?;
     }
@@ -2688,6 +2698,42 @@ fn discard_low_quality_trajectory(
             ))
         })?;
     }
+
+    Ok(())
+}
+
+fn apply_auto_tags(output_dir: &str, session_id: &str) -> Result<(), CliError> {
+    let output_path = batch_output_path(output_dir, session_id);
+    if !output_path.exists() {
+        return Ok(());
+    }
+
+    let raw = std::fs::read_to_string(&output_path)
+        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", output_path.display())))?;
+    let mut trajectory: genesis_core::trajectory::Trajectory =
+        serde_json::from_str(&raw).map_err(|e| {
+            CliError::Other(format!(
+                "invalid trajectory JSON in {}: {e}",
+                output_path.display()
+            ))
+        })?;
+
+    let auto_tags = genesis_core::tagger::auto_tag(&trajectory);
+    let existing: HashSet<String> = trajectory.tags.iter().cloned().collect();
+    for tag in auto_tags {
+        if !existing.contains(&tag) {
+            trajectory.tags.push(tag);
+        }
+    }
+    trajectory.tags.sort();
+
+    let updated = serde_json::to_string_pretty(&trajectory)?;
+    std::fs::write(&output_path, updated).map_err(|e| {
+        CliError::Other(format!(
+            "failed to write auto-tagged trajectory {}: {e}",
+            output_path.display()
+        ))
+    })?;
 
     Ok(())
 }
@@ -6707,6 +6753,7 @@ storage:
                 concurrency,
                 toolset,
                 quality_filter,
+                auto_tag,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
@@ -6715,6 +6762,7 @@ storage:
                 assert!(concurrency.is_none());
                 assert!(toolset.is_none());
                 assert!(quality_filter.is_none());
+                assert!(!auto_tag);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6747,6 +6795,7 @@ storage:
                 concurrency,
                 toolset,
                 quality_filter,
+                auto_tag,
             } => {
                 assert_eq!(input, "prompts.jsonl");
                 assert_eq!(output, "trajectories");
@@ -6755,6 +6804,7 @@ storage:
                 assert_eq!(concurrency, Some(8));
                 assert!(toolset.is_none());
                 assert!(quality_filter.is_none());
+                assert!(!auto_tag);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -6799,6 +6849,27 @@ storage:
         match cli.command {
             Command::Batch { quality_filter, .. } => {
                 assert_eq!(quality_filter, Some(0.75));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_command_with_auto_tag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "batch",
+            "--input",
+            "prompts.jsonl",
+            "--output",
+            "trajectories",
+            "--auto-tag",
+        ])
+        .expect("batch with auto-tag should parse");
+
+        match cli.command {
+            Command::Batch { auto_tag, .. } => {
+                assert!(auto_tag);
             }
             other => panic!("unexpected command: {other:?}"),
         }
