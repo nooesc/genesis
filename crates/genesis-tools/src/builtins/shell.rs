@@ -149,6 +149,47 @@ fn build_command(
             cmd.arg(image).arg("sh").arg("-c").arg(command);
             cmd
         }
+        Some(crate::TerminalBackend::Modal {
+            app,
+            gpu,
+            image,
+            timeout,
+        }) => {
+            // Modal cloud sandbox: `modal shell [--gpu ...] [--image ...] [--timeout ...] --cmd 'command'`
+            let mut cmd = Command::new("modal");
+            cmd.arg("shell");
+            if let Some(a) = app {
+                cmd.arg("--app").arg(a);
+            }
+            if let Some(g) = gpu {
+                cmd.arg("--gpu").arg(g);
+            }
+            if let Some(img) = image {
+                cmd.arg("--image").arg(img);
+            }
+            if let Some(t) = timeout {
+                cmd.arg("--timeout").arg(t.to_string());
+            }
+            cmd.arg("--cmd").arg(command);
+            cmd
+        }
+        Some(crate::TerminalBackend::Daytona {
+            workspace,
+            project,
+        }) => {
+            // Daytona workspace: `daytona exec [--project ...] workspace -- sh -c 'command'`
+            let mut cmd = Command::new("daytona");
+            cmd.arg("exec");
+            if let Some(p) = project {
+                cmd.arg("--project").arg(p);
+            }
+            cmd.arg(workspace)
+                .arg("--")
+                .arg("sh")
+                .arg("-c")
+                .arg(command);
+            cmd
+        }
         None => {
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(command);
@@ -518,6 +559,76 @@ mod tests {
         assert!(!args.contains(&std::ffi::OsStr::new("--bind")));
         assert!(!args.contains(&std::ffi::OsStr::new("--pwd")));
         assert!(args.contains(&std::ffi::OsStr::new("pytorch.sif")));
+    }
+
+    #[test]
+    fn build_command_modal_backend() {
+        let backend = Some(crate::TerminalBackend::Modal {
+            app: Some("my-sandbox".to_owned()),
+            gpu: Some("T4".to_owned()),
+            image: Some("python:3.11".to_owned()),
+            timeout: Some(600),
+        });
+        let cmd = build_command("python train.py", None, &backend);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "modal");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("shell")));
+        assert!(args.contains(&std::ffi::OsStr::new("--app")));
+        assert!(args.contains(&std::ffi::OsStr::new("my-sandbox")));
+        assert!(args.contains(&std::ffi::OsStr::new("--gpu")));
+        assert!(args.contains(&std::ffi::OsStr::new("T4")));
+        assert!(args.contains(&std::ffi::OsStr::new("--image")));
+        assert!(args.contains(&std::ffi::OsStr::new("python:3.11")));
+        assert!(args.contains(&std::ffi::OsStr::new("--timeout")));
+        assert!(args.contains(&std::ffi::OsStr::new("600")));
+        assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
+        assert!(args.contains(&std::ffi::OsStr::new("python train.py")));
+    }
+
+    #[test]
+    fn build_command_modal_minimal() {
+        let backend = Some(crate::TerminalBackend::Modal {
+            app: None,
+            gpu: None,
+            image: None,
+            timeout: None,
+        });
+        let cmd = build_command("echo hi", None, &backend);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd.get_program(), "modal");
+        assert!(!args.contains(&std::ffi::OsStr::new("--app")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--gpu")));
+        assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
+    }
+
+    #[test]
+    fn build_command_daytona_backend() {
+        let backend = Some(crate::TerminalBackend::Daytona {
+            workspace: "ws-abc123".to_owned(),
+            project: Some("my-project".to_owned()),
+        });
+        let cmd = build_command("npm test", None, &backend);
+        let prog = cmd.get_program();
+        assert_eq!(prog, "daytona");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("exec")));
+        assert!(args.contains(&std::ffi::OsStr::new("--project")));
+        assert!(args.contains(&std::ffi::OsStr::new("my-project")));
+        assert!(args.contains(&std::ffi::OsStr::new("ws-abc123")));
+        assert!(args.contains(&std::ffi::OsStr::new("npm test")));
+    }
+
+    #[test]
+    fn build_command_daytona_minimal() {
+        let backend = Some(crate::TerminalBackend::Daytona {
+            workspace: "dev-ws".to_owned(),
+            project: None,
+        });
+        let cmd = build_command("ls", None, &backend);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(!args.contains(&std::ffi::OsStr::new("--project")));
+        assert!(args.contains(&std::ffi::OsStr::new("dev-ws")));
     }
 
     #[test]

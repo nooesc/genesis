@@ -85,6 +85,31 @@ pub enum TerminalBackend {
         #[serde(skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
     },
+    /// Execute via Modal cloud sandbox (`modal shell --cmd ...`).
+    #[serde(rename = "modal")]
+    Modal {
+        /// Modal app or sandbox name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        /// GPU type to request (e.g. "T4", "A10G").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gpu: Option<String>,
+        /// Docker image to use for the sandbox.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
+        /// Timeout in seconds for the sandbox.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
+    },
+    /// Execute in a Daytona workspace (`daytona exec ...`).
+    #[serde(rename = "daytona")]
+    Daytona {
+        /// Workspace ID or name.
+        workspace: String,
+        /// Project within the workspace.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1307,6 +1332,32 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "danger acknowledged");
+    }
+
+    #[test]
+    fn terminal_backend_modal_round_trips() {
+        let backend = super::TerminalBackend::Modal {
+            app: Some("my-app".to_owned()),
+            gpu: Some("A10G".to_owned()),
+            image: None,
+            timeout: Some(300),
+        };
+        let json = serde_json::to_string(&backend).expect("serialize");
+        assert!(json.contains("\"type\":\"modal\""));
+        let decoded: super::TerminalBackend = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, backend);
+    }
+
+    #[test]
+    fn terminal_backend_daytona_round_trips() {
+        let backend = super::TerminalBackend::Daytona {
+            workspace: "ws-123".to_owned(),
+            project: Some("main".to_owned()),
+        };
+        let json = serde_json::to_string(&backend).expect("serialize");
+        assert!(json.contains("\"type\":\"daytona\""));
+        let decoded: super::TerminalBackend = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, backend);
     }
 
     #[test]

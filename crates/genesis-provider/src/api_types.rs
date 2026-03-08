@@ -18,7 +18,78 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
+}
+
+/// Controls which (if any) tool the model should call.
+///
+/// Maps to the OpenAI `tool_choice` parameter:
+/// - `"none"` → model will not call any tool
+/// - `"auto"` → model decides (default when tools are present)
+/// - `"required"` → model must call at least one tool
+/// - `{"type":"function","function":{"name":"..."}}` → call a specific tool
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolChoice {
+    None,
+    Auto,
+    Required,
+    /// Force the model to call a specific named tool.
+    Function(String),
+}
+
+impl Serialize for ToolChoice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            ToolChoice::None => serializer.serialize_str("none"),
+            ToolChoice::Auto => serializer.serialize_str("auto"),
+            ToolChoice::Required => serializer.serialize_str("required"),
+            ToolChoice::Function(name) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "function")?;
+                map.serialize_entry("function", &serde_json::json!({ "name": name }))?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => match s.as_str() {
+                "none" => Ok(ToolChoice::None),
+                "auto" => Ok(ToolChoice::Auto),
+                "required" => Ok(ToolChoice::Required),
+                other => Err(serde::de::Error::unknown_variant(
+                    other,
+                    &["none", "auto", "required"],
+                )),
+            },
+            serde_json::Value::Object(obj) => {
+                let name = obj
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .ok_or_else(|| {
+                        serde::de::Error::custom("tool_choice object must have function.name")
+                    })?;
+                Ok(ToolChoice::Function(name.to_owned()))
+            }
+            _ => Err(serde::de::Error::custom(
+                "tool_choice must be a string or object",
+            )),
+        }
+    }
 }
 
 /// Specifies the format that the model must output.
@@ -345,8 +416,15 @@ impl ChatCompletionRequest {
             stream: None,
             stream_options: None,
             response_format: None,
+            tool_choice: None,
             extra_body: None,
         }
+    }
+
+    /// Force the model to call a specific tool by name.
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = Some(choice);
+        self
     }
 
     /// Set the response format to JSON object mode.
@@ -697,5 +775,60 @@ mod tests {
             }
             _ => panic!("expected JsonSchema variant"),
         }
+    }
+
+    #[test]
+    fn tool_choice_none_serializes_as_string() {
+        let json = serde_json::to_value(&ToolChoice::None).expect("serialize");
+        assert_eq!(json, "none");
+    }
+
+    #[test]
+    fn tool_choice_auto_serializes_as_string() {
+        let json = serde_json::to_value(&ToolChoice::Auto).expect("serialize");
+        assert_eq!(json, "auto");
+    }
+
+    #[test]
+    fn tool_choice_required_serializes_as_string() {
+        let json = serde_json::to_value(&ToolChoice::Required).expect("serialize");
+        assert_eq!(json, "required");
+    }
+
+    #[test]
+    fn tool_choice_function_serializes_as_object() {
+        let json =
+            serde_json::to_value(&ToolChoice::Function("search".to_owned())).expect("serialize");
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "search");
+    }
+
+    #[test]
+    fn tool_choice_round_trips() {
+        for choice in [
+            ToolChoice::None,
+            ToolChoice::Auto,
+            ToolChoice::Required,
+            ToolChoice::Function("shell_exec".to_owned()),
+        ] {
+            let json = serde_json::to_string(&choice).expect("serialize");
+            let decoded: ToolChoice = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, choice);
+        }
+    }
+
+    #[test]
+    fn tool_choice_omitted_when_none_in_request() {
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hi")]);
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert!(!json.as_object().unwrap().contains_key("tool_choice"));
+    }
+
+    #[test]
+    fn tool_choice_included_in_request_when_set() {
+        let request = ChatCompletionRequest::new("gpt-4", vec![ChatMessage::user("hi")])
+            .with_tool_choice(ToolChoice::Required);
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(json["tool_choice"], "required");
     }
 }

@@ -8,7 +8,7 @@ pub use api_types::{
     ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatChoice, ChatMessage, ChatTool, ChatToolFunction, ChatUsage,
     ContentPart, FunctionCall, ImageUrl, JsonSchemaSpec, MessageContent, ResponseFormat,
-    ToolCallEntry,
+    ToolCallEntry, ToolChoice,
 };
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
