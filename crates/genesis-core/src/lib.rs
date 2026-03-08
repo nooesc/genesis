@@ -292,6 +292,7 @@ mod tests {
                     base_url: Some("https://openrouter.ai/api/v1".to_owned()),
                     api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
                 },
+                tool_provider: None,
                 storage: StorageConfig {
                     data_dir: PathBuf::from("/tmp/genesis"),
                     database_path: PathBuf::from("/tmp/genesis/genesis.db"),

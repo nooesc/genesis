@@ -218,6 +218,22 @@ impl<'a> SessionExecutionService<'a> {
             history,
         );
 
+        // Set up tool provider routing if configured
+        if let Some(tp) = &self.loaded.config.tool_provider {
+            let tool_client = client_from_config(
+                &tp.backend,
+                &tp.model,
+                tp.base_url.as_deref(),
+                tp.api_key_env.as_deref(),
+            )?;
+            agent.set_tool_client(tool_client);
+            debug!(
+                tool_provider_backend = %tp.backend,
+                tool_model = %tp.model,
+                "multi-provider routing enabled"
+            );
+        }
+
         // Attach subagent spawner so agent can spawn parallel workstreams
         agent.set_subagent_spawner(Arc::new(ExecutionSubagentSpawner {
             loaded: Arc::new(self.loaded.clone()),
@@ -677,6 +693,7 @@ mod tests {
                     base_url: Some("http://localhost:8000/v1".to_owned()),
                     api_key_env: None,
                 },
+                tool_provider: None,
                 storage: StorageConfig {
                     data_dir: data_dir.clone(),
                     database_path: database_path.clone(),

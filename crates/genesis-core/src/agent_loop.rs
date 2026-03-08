@@ -76,6 +76,10 @@ pub trait SubagentSpawner: Send + Sync {
 /// Flow: user message → LLM → [tool_calls → execute → LLM]* → final text
 pub struct AgentLoop {
     client: ChatClient,
+    /// Optional cheaper client for tool-calling turns. When set, turns that
+    /// follow tool results use this client while turns following user messages
+    /// use the primary `client`.
+    tool_client: Option<ChatClient>,
     tools: ToolRuntime,
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
@@ -103,6 +107,7 @@ impl AgentLoop {
 
         Self {
             client,
+            tool_client: None,
             tools,
             config,
             messages,
@@ -110,9 +115,28 @@ impl AgentLoop {
         }
     }
 
+    /// Set an optional cheaper client for tool-calling turns.
+    pub fn set_tool_client(&mut self, client: ChatClient) {
+        self.tool_client = Some(client);
+    }
+
     /// Attach a subagent spawner so the agent can spawn parallel workstreams.
     pub fn set_subagent_spawner(&mut self, spawner: Arc<dyn SubagentSpawner>) {
         self.subagent_spawner = Some(spawner);
+    }
+
+    /// Pick the right client for the current turn. Uses the tool client when
+    /// the most recent message is a tool result (the agent is processing tool
+    /// output and will likely make more tool calls). Falls back to the primary
+    /// client otherwise.
+    fn active_client(&self) -> &ChatClient {
+        if let Some(ref tool_client) = self.tool_client {
+            let last_role = self.messages.last().map(|m| m.role.as_str());
+            if last_role == Some("tool") {
+                return tool_client;
+            }
+        }
+        &self.client
     }
 
     /// Run a single user turn through the agent loop.
@@ -138,12 +162,13 @@ impl AgentLoop {
             debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
 
             self.prune_context().await;
+            let client = self.active_client().clone();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
 
-            let response = self.client.complete(request).await?;
+            let response = client.complete(request).await?;
 
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
@@ -219,12 +244,13 @@ impl AgentLoop {
             debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
 
             self.prune_context().await;
+            let client = self.active_client().clone();
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
             request.tools = tool_defs.clone();
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
 
-            match self.client.complete_stream(request.clone()).await {
+            match client.complete_stream(request.clone()).await {
                 Ok(mut stream) => {
                     let mut response_text = String::new();
                     let mut streamed_tool_calls = Vec::new();
@@ -278,7 +304,7 @@ impl AgentLoop {
                 }
                 Err(_) => {
                     warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
-                    let response = self.client.complete(request).await?;
+                    let response = client.complete(request).await?;
 
                     if let Some(usage) = &response.usage {
                         total_input_tokens =
@@ -865,5 +891,49 @@ mod tests {
         // Provider at localhost:8000 won't be running, so this should return None
         let result = agent.summarize_messages(&messages).await;
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn active_client_uses_primary_after_user_message() {
+        let mut agent = test_agent();
+
+        // Set up a tool client on a different endpoint so we can distinguish
+        let tool_provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:9999/v1".to_owned(),
+            api_key: String::new(),
+            model: "cheap-model".to_owned(),
+        };
+        let tool_client = ChatClient::new(&tool_provider).expect("tool client should build");
+        agent.set_tool_client(tool_client);
+
+        // After user message, should use primary
+        agent.messages.push(ChatMessage::user("hello"));
+        assert_eq!(agent.active_client().endpoint(), "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn active_client_uses_tool_client_after_tool_result() {
+        let mut agent = test_agent();
+
+        let tool_provider = genesis_provider::ResolvedProvider {
+            base_url: "http://localhost:9999/v1".to_owned(),
+            api_key: String::new(),
+            model: "cheap-model".to_owned(),
+        };
+        let tool_client = ChatClient::new(&tool_provider).expect("tool client should build");
+        agent.set_tool_client(tool_client);
+
+        // After tool result, should use tool client
+        agent.messages.push(ChatMessage::tool_result("call-1", "result"));
+        assert_eq!(agent.active_client().endpoint(), "http://localhost:9999/v1/chat/completions");
+    }
+
+    #[test]
+    fn active_client_falls_back_when_no_tool_client() {
+        let mut agent = test_agent();
+
+        // No tool client set — should always use primary
+        agent.messages.push(ChatMessage::tool_result("call-1", "result"));
+        assert_eq!(agent.active_client().endpoint(), "http://localhost:8000/v1/chat/completions");
     }
 }

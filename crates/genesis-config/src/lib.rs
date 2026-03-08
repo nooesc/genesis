@@ -16,6 +16,11 @@ pub struct GenesisConfig {
     pub schema_version: u32,
     pub profile: String,
     pub provider: ProviderConfig,
+    /// Optional secondary provider for tool-calling turns. When set, the agent
+    /// uses this cheaper/faster model for turns that follow tool results and
+    /// reserves the primary provider for reasoning turns (after user messages).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_provider: Option<ProviderConfig>,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
 }
@@ -61,6 +66,8 @@ struct FileConfig {
     profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<FileProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_provider: Option<FileProviderConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<FileStorageConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,6 +159,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             base_url: None,
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
         },
+        tool_provider: None,
         storage: StorageConfig {
             data_dir: paths.data_dir.clone(),
             database_path: paths.database_path,
@@ -233,6 +241,32 @@ pub fn load_from_map(
         }),
     };
 
+    // Optional tool provider — inherits primary provider defaults when partially specified.
+    let tool_provider = file_config.tool_provider.as_ref().map(|tp| {
+        ProviderConfig {
+            backend: env
+                .get("GENESIS_TOOL_PROVIDER_BACKEND")
+                .cloned()
+                .or_else(|| tp.backend.clone())
+                .unwrap_or_else(|| provider.backend.clone()),
+            model: env
+                .get("GENESIS_TOOL_MODEL")
+                .cloned()
+                .or_else(|| tp.model.clone())
+                .unwrap_or_else(|| provider.model.clone()),
+            base_url: env
+                .get("GENESIS_TOOL_PROVIDER_BASE_URL")
+                .cloned()
+                .or_else(|| tp.base_url.clone())
+                .or_else(|| provider.base_url.clone()),
+            api_key_env: env
+                .get("GENESIS_TOOL_PROVIDER_API_KEY_ENV")
+                .cloned()
+                .or_else(|| tp.api_key_env.clone())
+                .or_else(|| provider.api_key_env.clone()),
+        }
+    });
+
     let runtime = RuntimeConfig {
         max_concurrency: parse_env(
             env,
@@ -259,6 +293,7 @@ pub fn load_from_map(
             schema_version: file_config.schema_version.unwrap_or(1),
             profile,
             provider,
+            tool_provider,
             storage: StorageConfig {
                 data_dir: data_dir.clone(),
                 database_path: database_path.clone(),
@@ -525,5 +560,39 @@ runtime:
             loaded.config.provider.base_url.as_deref(),
             Some("https://openrouter.ai/api/v1")
         );
+    }
+
+    #[test]
+    fn tool_provider_parsed_from_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openrouter
+  model: anthropic/claude-sonnet-4-6
+  api_key_env: OPENROUTER_API_KEY
+tool_provider:
+  model: openai/gpt-4.1-mini
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let tp = loaded.config.tool_provider.expect("tool_provider should be set");
+        assert_eq!(tp.model, "openai/gpt-4.1-mini");
+        // Should inherit backend from primary provider
+        assert_eq!(tp.backend, "openrouter");
+        // Should inherit api_key_env from primary provider
+        assert_eq!(tp.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+    }
+
+    #[test]
+    fn tool_provider_absent_when_not_configured() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.tool_provider.is_none());
     }
 }

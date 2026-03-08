@@ -552,6 +552,7 @@ dependencies = [
  "genesis-provider",
  "genesis-storage",
  "genesis-types",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
