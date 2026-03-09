@@ -43,7 +43,7 @@ impl SlashCompleter {
                 "/help", "/history", "/export", "/tokens", "/session",
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/cache", "/clear",
+                "/personality", "/cache", "/stats", "/clear",
             ],
         }
     }
@@ -5865,6 +5865,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /skills       - List saved skills\n\
              /model [spec] - Show or switch model (e.g. /model anthropic/claude-sonnet-4-20250514)\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
+             /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
@@ -5960,6 +5961,36 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                 }
                 Err(_) => Some("No stored memories.".to_owned()),
             }
+        }
+        "stats" => {
+            let messages = store.load_messages(session_id).ok()?;
+            let session = store.get_session(session_id).ok()??;
+            let user_msgs = messages.iter().filter(|m| m.role == "user").count();
+            let assistant_msgs = messages.iter().filter(|m| m.role == "assistant").count();
+            let tool_msgs = messages.iter().filter(|m| m.role == "tool").count();
+            let system_msgs = messages.iter().filter(|m| m.role == "system").count();
+            let total_chars: usize = messages
+                .iter()
+                .filter_map(|m| m.content.as_ref())
+                .map(|c| c.len())
+                .sum();
+            let total_tokens = session.total_input_tokens + session.total_output_tokens;
+            let title = session.title.as_deref().unwrap_or("(untitled)");
+            let mut lines = vec![
+                format!("Session: {} — {}", session_id, title),
+                format!("Platform: {}", session.platform),
+                format!("Messages: {} total ({} user, {} assistant, {} tool, {} system)",
+                    messages.len(), user_msgs, assistant_msgs, tool_msgs, system_msgs),
+                format!("Characters: {}", total_chars),
+                format!("Tokens: {} ({} in, {} out)",
+                    total_tokens, session.total_input_tokens, session.total_output_tokens),
+            ];
+            if let Some(ref parent) = session.parent_session_id {
+                lines.push(format!("Forked from: {parent}"));
+            }
+            lines.push(format!("Created: {}", session.created_at));
+            lines.push(format!("Updated: {}", session.updated_at));
+            Some(lines.join("\n"))
         }
         "cache" => {
             let cache_store = genesis_storage::ResponseCacheStore::new(store.database_path());
