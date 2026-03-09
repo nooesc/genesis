@@ -578,6 +578,8 @@ pub enum ConfigCommand {
         /// Value to set
         value: String,
     },
+    #[command(about = "Validate the config file and check for common issues")]
+    Validate,
 }
 
 #[derive(Debug, Subcommand)]
@@ -909,6 +911,90 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let loaded = load(cli.config.as_deref())?;
             genesis_config::set_value_in_file(&loaded.paths.config_path, &key, &value)?;
             Ok(format!("set {key} = {value}"))
+        }
+        Command::Config(ConfigCommand::Validate) => {
+            let loaded = load(cli.config.as_deref())?;
+            let mut issues: Vec<String> = Vec::new();
+            let mut warnings: Vec<String> = Vec::new();
+
+            // Check provider
+            let valid_backends = ["openai", "anthropic", "google", "openrouter", "custom"];
+            if !valid_backends.contains(&loaded.config.provider.backend.as_str()) {
+                warnings.push(format!(
+                    "Unknown provider backend '{}' (known: {})",
+                    loaded.config.provider.backend,
+                    valid_backends.join(", ")
+                ));
+            }
+            if loaded.config.provider.model.is_empty() {
+                issues.push("Provider model is empty.".to_owned());
+            }
+
+            // Check API key resolution
+            let api_key_env = loaded.config.provider.api_key_env.as_deref()
+                .unwrap_or_else(|| match loaded.config.provider.backend.as_str() {
+                    "anthropic" => "ANTHROPIC_API_KEY",
+                    "google" => "GOOGLE_API_KEY",
+                    _ => "OPENAI_API_KEY",
+                });
+            if std::env::var(api_key_env).is_err() {
+                warnings.push(format!(
+                    "API key env var '{}' is not set.", api_key_env
+                ));
+            }
+
+            // Check storage paths
+            if let Some(parent) = loaded.config.storage.database_path.parent() {
+                if !parent.exists() {
+                    warnings.push(format!(
+                        "Database directory does not exist: {}",
+                        parent.display()
+                    ));
+                }
+            }
+
+            // Check runtime config
+            if loaded.config.runtime.max_turns == 0 {
+                issues.push("runtime.max_turns is 0 — agent cannot run.".to_owned());
+            }
+            if loaded.config.runtime.max_concurrency == 0 {
+                issues.push("runtime.max_concurrency is 0 — tools cannot run.".to_owned());
+            }
+
+            // Check fallback providers
+            for (i, fp) in loaded.config.fallback_providers.iter().enumerate() {
+                if fp.model.is_empty() {
+                    issues.push(format!("Fallback provider {} has an empty model.", i + 1));
+                }
+            }
+
+            // Check MCP servers
+            for (name, mcp) in &loaded.config.mcp_servers {
+                if mcp.command.is_none() && mcp.url.is_none() {
+                    issues.push(format!(
+                        "MCP server '{}' has no command or URL configured.", name
+                    ));
+                }
+            }
+
+            let config_path = loaded.paths.config_path.display();
+            let mut output = format!("Config: {config_path}\n");
+            if issues.is_empty() && warnings.is_empty() {
+                output.push_str("All checks passed.");
+            } else {
+                for issue in &issues {
+                    output.push_str(&format!("  ERROR: {issue}\n"));
+                }
+                for warning in &warnings {
+                    output.push_str(&format!("  WARN:  {warning}\n"));
+                }
+                if issues.is_empty() {
+                    output.push_str("No errors found.");
+                } else {
+                    output.push_str(&format!("{} error(s) found.", issues.len()));
+                }
+            }
+            Ok(output)
         }
         Command::Storage(StorageCommand::Path) => {
             let loaded = load(cli.config.as_deref())?;
