@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/template", "/clear",
+                "/title", "/tree", "/audit", "/analytics", "/template", "/clear",
             ],
         }
     }
@@ -6047,6 +6047,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
              /audit        - View audit log (stats, purge <days>)\n\
+             /analytics    - Tool and LLM usage analytics\n\
              /template     - Apply an agent template (archetype)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
@@ -6297,6 +6298,55 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                          Commands: /cache clear, /cache prune"
                     )),
                     Err(e) => Some(format!("Cache stats unavailable: {e}")),
+                }
+            }
+        }
+        "analytics" => {
+            let audit_store = genesis_storage::AuditLogStore::new(store.database_path());
+            let sub = _args.trim();
+            let days: u32 = if sub == "llm" || sub == "tools" { 30 } else { sub.parse().unwrap_or(30) };
+            let is_llm = sub == "llm";
+
+            if is_llm {
+                match audit_store.llm_analytics(days) {
+                    Ok(analytics) => {
+                        if analytics.is_empty() {
+                            Some("No LLM analytics data yet. Analytics are populated from audit logs.".into())
+                        } else {
+                            let mut lines = vec![format!("LLM usage (last {days} days):")];
+                            for a in &analytics {
+                                let total = a.total_input_tokens + a.total_output_tokens;
+                                lines.push(format!(
+                                    "  {} - {} calls, {} tokens ({} in / {} out)",
+                                    a.model, a.call_count, total, a.total_input_tokens, a.total_output_tokens
+                                ));
+                            }
+                            Some(lines.join("\n"))
+                        }
+                    }
+                    Err(e) => Some(format!("LLM analytics unavailable: {e}")),
+                }
+            } else {
+                match audit_store.tool_analytics(days) {
+                    Ok(analytics) => {
+                        if analytics.is_empty() {
+                            Some("No tool analytics data yet. Analytics are populated from audit logs.".into())
+                        } else {
+                            let mut lines = vec![format!("Tool usage (last {days} days):")];
+                            for a in &analytics {
+                                let success_rate = if a.call_count > 0 {
+                                    (a.success_count as f64 / a.call_count as f64) * 100.0
+                                } else { 0.0 };
+                                lines.push(format!(
+                                    "  {:20} {:4} calls  {:.0}% success  {:.0}ms avg",
+                                    a.tool_name, a.call_count, success_rate, a.avg_duration_ms
+                                ));
+                            }
+                            lines.push("\nCommands: /analytics, /analytics llm".into());
+                            Some(lines.join("\n"))
+                        }
+                    }
+                    Err(e) => Some(format!("Tool analytics unavailable: {e}")),
                 }
             }
         }

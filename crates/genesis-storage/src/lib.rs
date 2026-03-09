@@ -3490,6 +3490,24 @@ pub struct AuditEntry {
     pub created_at: String,
 }
 
+/// Tool usage analytics derived from audit log data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAnalytics {
+    pub tool_name: String,
+    pub call_count: i64,
+    pub success_count: i64,
+    pub avg_duration_ms: f64,
+}
+
+/// LLM usage analytics derived from audit log data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmAnalytics {
+    pub model: String,
+    pub call_count: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
+}
+
 /// SQLite-backed audit log for tracking agent actions.
 ///
 /// Records tool calls, LLM requests, config changes, and other security-relevant
@@ -3682,6 +3700,103 @@ impl AuditLogStore {
             })?);
         }
         Ok(stats)
+    }
+
+    /// Aggregate tool usage analytics from tool_call_end audit events.
+    ///
+    /// Returns a list of (tool_name, call_count, success_count, avg_duration_ms)
+    /// sorted by call count descending.
+    pub fn tool_analytics(&self, days: u32) -> Result<Vec<ToolAnalytics>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT
+                    json_extract(details, '$.tool') as tool_name,
+                    COUNT(*) as calls,
+                    SUM(CASE WHEN json_extract(details, '$.success') = 1 THEN 1 ELSE 0 END) as successes,
+                    AVG(CAST(json_extract(details, '$.duration_ms') AS REAL)) as avg_dur
+                 FROM audit_log
+                 WHERE event_type = 'tool_call_end'
+                   AND created_at >= datetime('now', '-' || ?1 || ' days')
+                   AND json_extract(details, '$.tool') IS NOT NULL
+                 GROUP BY tool_name
+                 ORDER BY calls DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![days], |row| {
+                Ok(ToolAnalytics {
+                    tool_name: row.get(0)?,
+                    call_count: row.get(1)?,
+                    success_count: row.get(2)?,
+                    avg_duration_ms: row.get(3)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut analytics = Vec::new();
+        for row in rows {
+            analytics.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(analytics)
+    }
+
+    /// Aggregate LLM usage analytics from llm_response audit events.
+    ///
+    /// Returns per-model token usage totals.
+    pub fn llm_analytics(&self, days: u32) -> Result<Vec<LlmAnalytics>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT
+                    json_extract(details, '$.model') as model,
+                    COUNT(*) as calls,
+                    SUM(CAST(json_extract(details, '$.input_tokens') AS INTEGER)) as total_input,
+                    SUM(CAST(json_extract(details, '$.output_tokens') AS INTEGER)) as total_output
+                 FROM audit_log
+                 WHERE event_type = 'llm_response'
+                   AND created_at >= datetime('now', '-' || ?1 || ' days')
+                   AND json_extract(details, '$.model') IS NOT NULL
+                 GROUP BY model
+                 ORDER BY calls DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![days], |row| {
+                Ok(LlmAnalytics {
+                    model: row.get(0)?,
+                    call_count: row.get(1)?,
+                    total_input_tokens: row.get(2)?,
+                    total_output_tokens: row.get(3)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut analytics = Vec::new();
+        for row in rows {
+            analytics.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(analytics)
     }
 
     /// Delete audit entries older than the given number of days.
@@ -5112,5 +5227,48 @@ mod tests {
 
         let entries = store.by_session("s1", 3).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn tool_analytics_aggregates_by_tool() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 100})).unwrap();
+        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 200})).unwrap();
+        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "file_read", "success": false, "duration_ms": 50})).unwrap();
+
+        let analytics = store.tool_analytics(30).unwrap();
+        assert_eq!(analytics.len(), 2);
+        // shell_execute has more calls, should be first
+        assert_eq!(analytics[0].tool_name, "shell_execute");
+        assert_eq!(analytics[0].call_count, 2);
+        assert_eq!(analytics[0].success_count, 2);
+        assert!((analytics[0].avg_duration_ms - 150.0).abs() < 1.0);
+
+        assert_eq!(analytics[1].tool_name, "file_read");
+        assert_eq!(analytics[1].call_count, 1);
+        assert_eq!(analytics[1].success_count, 0);
+    }
+
+    #[test]
+    fn llm_analytics_aggregates_by_model() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 100, "output_tokens": 50})).unwrap();
+        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 200, "output_tokens": 80})).unwrap();
+        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "claude-3", "input_tokens": 300, "output_tokens": 100})).unwrap();
+
+        let analytics = store.llm_analytics(30).unwrap();
+        assert_eq!(analytics.len(), 2);
+        assert_eq!(analytics[0].model, "gpt-4");
+        assert_eq!(analytics[0].call_count, 2);
+        assert_eq!(analytics[0].total_input_tokens, 300);
+        assert_eq!(analytics[0].total_output_tokens, 130);
     }
 }

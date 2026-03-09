@@ -392,6 +392,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/audit/stats", get(audit_stats_handler))
         .route("/audit/session/{id}", get(audit_session_handler))
         .route("/audit/purge", post(audit_purge_handler))
+        .route("/analytics/tools", get(tool_analytics_handler))
+        .route("/analytics/llm", get(llm_analytics_handler))
         .route("/webhooks/status", get(webhooks_status_handler))
         .route("/webhooks/dead-letters", get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler))
         .route("/templates", get(list_templates_handler))
@@ -1850,6 +1852,45 @@ async fn audit_purge_handler(
             "error": e.to_string(),
         })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Analytics endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AnalyticsQuery {
+    days: Option<u32>,
+}
+
+async fn tool_analytics_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AnalyticsQuery>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let days = params.days.unwrap_or(30);
+    let analytics = store.tool_analytics(days).unwrap_or_default();
+    Json(serde_json::json!({
+        "period_days": days,
+        "tools": analytics,
+    }))
+}
+
+async fn llm_analytics_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AnalyticsQuery>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let days = params.days.unwrap_or(30);
+    let analytics = store.llm_analytics(days).unwrap_or_default();
+    Json(serde_json::json!({
+        "period_days": days,
+        "models": analytics,
+    }))
 }
 
 // ---------------------------------------------------------------------------
