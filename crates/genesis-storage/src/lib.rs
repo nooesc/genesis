@@ -1170,6 +1170,19 @@ impl SessionStore {
         Ok(results)
     }
 
+    /// Count total sessions.
+    pub fn session_count(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
     /// Get a session summary by ID.
     pub fn get_session(&self, id: &str) -> Result<Option<SessionSummary>, StorageError> {
         let connection = open(&self.database_path)?;

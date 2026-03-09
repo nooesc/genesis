@@ -221,6 +221,8 @@ pub struct HealthResponse {
     pub model: String,
     pub mcp_servers: usize,
     pub active_schedules: usize,
+    pub total_sessions: usize,
+    pub total_tools: usize,
 }
 
 /// Detailed MCP server status response.
@@ -410,10 +412,19 @@ async fn health_handler(
         Some(mcp) => mcp.server_count().await,
         None => 0,
     };
-    let active_schedules = ScheduleStore::new(&state.loaded.config.storage.database_path)
+    let db_path = &state.loaded.config.storage.database_path;
+    let active_schedules = ScheduleStore::new(db_path)
         .list_enabled()
         .map(|s| s.len())
         .unwrap_or(0);
+    let total_sessions = SessionStore::new(db_path)
+        .session_count()
+        .unwrap_or(0) as usize;
+    let mcp_tools = match &state.mcp {
+        Some(mcp) => mcp.tool_count().await,
+        None => 0,
+    };
+    let builtin_tools = genesis_core::default_tool_count();
     Json(HealthResponse {
         status: "ok".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -425,6 +436,8 @@ async fn health_handler(
         ),
         mcp_servers: mcp_count,
         active_schedules,
+        total_sessions,
+        total_tools: builtin_tools + mcp_tools,
     })
 }
 
@@ -1971,11 +1984,15 @@ mod tests {
             model: "openai/gpt-4.1-mini".to_owned(),
             mcp_servers: 0,
             active_schedules: 0,
+            total_sessions: 5,
+            total_tools: 61,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"status\":\"ok\""));
         assert!(json.contains("\"uptime_seconds\":42"));
         assert!(json.contains("\"model\":\"openai/gpt-4.1-mini\""));
+        assert!(json.contains("\"total_sessions\":5"));
+        assert!(json.contains("\"total_tools\":61"));
     }
 
     #[test]
