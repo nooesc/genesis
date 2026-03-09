@@ -139,6 +139,10 @@ pub struct ChatRequest {
     /// Optional response format constraint (json_object, json_schema, or text).
     #[serde(default)]
     pub response_format: Option<genesis_provider::ResponseFormat>,
+    /// Optional model override (e.g. "openai/gpt-4.1" or "anthropic/claude-sonnet-4").
+    /// Format: "backend/model" or just "model" (uses default backend).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// An image input for multimodal chat requests.
@@ -162,6 +166,15 @@ fn default_api_session_id() -> String {
         .as_millis();
     let seq = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     format!("api-{ts}-{seq}")
+}
+
+/// Parse a model spec like "openai/gpt-4.1" or "gpt-4.1" into (backend, model).
+/// If no backend prefix is given, uses the default backend.
+fn parse_model_spec(spec: &str, default_backend: &str) -> (String, String) {
+    match spec.split_once('/') {
+        Some((backend, model)) => (backend.to_owned(), model.to_owned()),
+        None => (default_backend.to_owned(), spec.to_owned()),
+    }
 }
 
 fn default_request_id() -> String {
@@ -1433,6 +1446,10 @@ async fn chat_handler(
     if let Some(response_format) = request.response_format {
         service.set_response_format(response_format);
     }
+    if let Some(ref model_spec) = request.model {
+        let (backend, model) = parse_model_spec(model_spec, &loaded.config.provider.backend);
+        service.set_model_override(backend, model);
+    }
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     let span = info_span!(
@@ -2167,6 +2184,20 @@ mod tests {
     #[test]
     fn default_request_id_uses_req_prefix() {
         assert!(default_request_id().starts_with("req-"));
+    }
+
+    #[test]
+    fn parse_model_spec_with_backend() {
+        let (b, m) = parse_model_spec("anthropic/claude-sonnet-4", "openai");
+        assert_eq!(b, "anthropic");
+        assert_eq!(m, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn parse_model_spec_without_backend() {
+        let (b, m) = parse_model_spec("gpt-4.1-mini", "openai");
+        assert_eq!(b, "openai");
+        assert_eq!(m, "gpt-4.1-mini");
     }
 
     #[test]

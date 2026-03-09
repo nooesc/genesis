@@ -27,6 +27,8 @@ pub struct SessionExecutionService<'a> {
     approval_handler: Option<Arc<dyn genesis_tools::ApprovalHandler>>,
     /// Default working directory for shell commands (worktree isolation).
     default_working_dir: Option<String>,
+    /// Override the model for this service instance (backend, model).
+    model_override: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +69,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None }
+        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -95,7 +97,7 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None }
+        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
@@ -112,6 +114,13 @@ impl<'a> SessionExecutionService<'a> {
     /// service instance (e.g. json_object or json_schema).
     pub fn set_response_format(&mut self, format: genesis_provider::ResponseFormat) {
         self.response_format = Some(format);
+    }
+
+    /// Override the model backend and name for this service instance.
+    ///
+    /// When set, this model is used instead of the one from config.
+    pub fn set_model_override(&mut self, backend: String, model: String) {
+        self.model_override = Some((backend, model));
     }
 
     /// Set an interactive approval handler for tools requiring user confirmation.
@@ -349,15 +358,22 @@ impl<'a> SessionExecutionService<'a> {
             prompt_builder = prompt_builder.memories(m);
         }
         let system_prompt = prompt_builder.build();
+        let (backend, model) = match &self.model_override {
+            Some((b, m)) => (b.as_str(), m.as_str()),
+            None => (
+                self.loaded.config.provider.backend.as_str(),
+                self.loaded.config.provider.model.as_str(),
+            ),
+        };
         let client = client_from_config(
-            &self.loaded.config.provider.backend,
-            &self.loaded.config.provider.model,
+            backend,
+            model,
             self.loaded.config.provider.base_url.as_deref(),
             self.loaded.config.provider.api_key_env.as_deref(),
         )?;
         debug!(
-            provider_backend = %self.loaded.config.provider.backend,
-            model = %self.loaded.config.provider.model,
+            provider_backend = %backend,
+            model = %model,
             "built agent loop dependencies"
         );
 
