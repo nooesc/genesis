@@ -408,6 +408,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/bus/publish", post(bus_publish_handler))
         .route("/bus/history/{channel}", get(bus_history_handler))
         .route("/bus/stats", get(bus_stats_handler))
+        .route("/eval/validate", post(eval_validate_handler))
+        .route("/eval/run", post(eval_run_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -2103,6 +2105,61 @@ async fn bus_stats_handler(
             serde_json::json!({"channel": ch, "message_count": count})
         }).collect::<Vec<_>>(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation endpoints
+// ---------------------------------------------------------------------------
+
+async fn eval_validate_handler(
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned())
+    })?;
+
+    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("Failed to parse suite: {e}"))
+    })?;
+
+    let issues = genesis_core::eval::validate_suite(&suite);
+    Ok(Json(serde_json::json!({
+        "valid": issues.is_empty(),
+        "suite_name": suite.name,
+        "cases": suite.cases.len(),
+        "issues": issues,
+    })))
+}
+
+async fn eval_run_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned())
+    })?;
+
+    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("Failed to parse suite: {e}"))
+    })?;
+
+    let issues = genesis_core::eval::validate_suite(&suite);
+    if !issues.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Suite validation failed: {}", issues.join("; ")),
+        ));
+    }
+
+    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let report = service.run_eval(&suite).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Eval run failed: {e}"),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!(report)))
 }
 
 // ---------------------------------------------------------------------------

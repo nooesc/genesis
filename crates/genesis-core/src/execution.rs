@@ -692,6 +692,134 @@ impl<'a> SessionExecutionService<'a> {
 
         Ok(result)
     }
+
+    /// Run an evaluation suite against the agent, collecting per-case results.
+    ///
+    /// Each test case is executed as an independent agent turn. The response
+    /// is evaluated against the case's criteria, and results are aggregated
+    /// into an `EvalReport`.
+    pub async fn run_eval(
+        &self,
+        suite: &crate::eval::EvalSuite,
+    ) -> Result<crate::eval::EvalReport, SessionExecutionError> {
+        use crate::eval::{evaluate_response, build_report, EvalResult};
+
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let start_instant = std::time::Instant::now();
+        let model = match &self.model_override {
+            Some((b, m)) => format!("{b}/{m}"),
+            None => format!(
+                "{}/{}",
+                self.loaded.config.provider.backend,
+                self.loaded.config.provider.model
+            ),
+        };
+
+        info!(
+            suite = %suite.name,
+            cases = suite.cases.len(),
+            model = %model,
+            "starting evaluation run"
+        );
+
+        let mut results = Vec::new();
+
+        for (i, case) in suite.cases.iter().enumerate() {
+            let case_start = std::time::Instant::now();
+            let eval_session_id = format!("eval__{}__{}", suite.name, case.id);
+
+            info!(
+                case = i + 1,
+                case_id = %case.id,
+                "running eval case"
+            );
+
+            let turn_input = SessionTurnInput {
+                session_id: &eval_session_id,
+                session_platform: "eval",
+                delivery_platform: DeliveryPlatform::Cli,
+                prompt: &case.prompt,
+                title: Some(&format!("Eval: {} / {}", suite.name, case.id)),
+                images: vec![],
+            };
+
+            let result = match self.run_turn(turn_input).await {
+                Ok(outcome) => {
+                    let response = outcome.result.response.clone();
+                    let (passed, score, checks) = evaluate_response(
+                        &response,
+                        &case.criteria,
+                        outcome.result.turns_used,
+                        outcome.result.tool_calls_made,
+                    );
+
+                    EvalResult {
+                        case_id: case.id.clone(),
+                        passed,
+                        score,
+                        response,
+                        duration_ms: case_start.elapsed().as_millis() as u64,
+                        input_tokens: outcome.result.total_input_tokens,
+                        output_tokens: outcome.result.total_output_tokens,
+                        turns_used: outcome.result.turns_used,
+                        tool_calls: outcome.result.tool_calls_made,
+                        checks,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    warn!(case_id = %case.id, error = %e, "eval case failed");
+                    EvalResult {
+                        case_id: case.id.clone(),
+                        passed: false,
+                        score: 0.0,
+                        response: String::new(),
+                        duration_ms: case_start.elapsed().as_millis() as u64,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        turns_used: 0,
+                        tool_calls: 0,
+                        checks: vec![],
+                        error: Some(e.to_string()),
+                    }
+                }
+            };
+
+            info!(
+                case_id = %case.id,
+                passed = result.passed,
+                score = result.score,
+                duration_ms = result.duration_ms,
+                "eval case complete"
+            );
+
+            results.push(result);
+        }
+
+        let completed_at = chrono::Utc::now().to_rfc3339();
+        let total_duration_ms = start_instant.elapsed().as_millis() as u64;
+
+        let report = build_report(
+            suite,
+            &model,
+            &started_at,
+            &completed_at,
+            total_duration_ms,
+            results,
+        );
+
+        info!(
+            suite = %suite.name,
+            passed = report.passed,
+            failed = report.failed,
+            pass_rate = report.pass_rate,
+            avg_score = report.avg_score,
+            total_duration_ms = report.total_duration_ms,
+            "evaluation run complete"
+        );
+
+        Ok(report)
+    }
 }
 
 /// Spawns child agent loops as background tokio tasks.

@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/clear",
+                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/eval", "/clear",
             ],
         }
     }
@@ -2744,6 +2744,145 @@ async fn run_chat(
                 }
             } else {
                 println!("Unknown workflow subcommand '{sub}'. Use /workflow help.");
+            }
+            continue;
+        }
+
+        // Handle /eval — run evaluation suites
+        if trimmed.starts_with("/eval") {
+            let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+            let sub = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if sub.is_empty() || sub == "help" {
+                println!(
+                    "Usage:\n\
+                     /eval run <file.yaml>      - Run an evaluation suite\n\
+                     /eval validate <file.yaml>  - Validate a suite definition\n\
+                     /eval show <file.yaml>      - Show suite test cases\n\
+                     \n\
+                     Example eval suite YAML:\n\
+                     name: basic_math\n\
+                     cases:\n\
+                       - id: addition\n\
+                         prompt: \"What is 2 + 2?\"\n\
+                         criteria:\n\
+                           must_contain: [\"4\"]"
+                );
+            } else if sub == "validate" {
+                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                if file.is_empty() {
+                    println!("Usage: /eval validate <file.yaml>");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::eval::parse_suite(&yaml) {
+                            Ok(suite) => {
+                                let issues = genesis_core::eval::validate_suite(&suite);
+                                if issues.is_empty() {
+                                    println!("Suite '{}' is valid ({} cases).", suite.name, suite.cases.len());
+                                } else {
+                                    println!("Suite '{}' has {} issue(s):", suite.name, issues.len());
+                                    for issue in &issues {
+                                        println!("  - {issue}");
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Failed to parse suite: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else if sub == "show" {
+                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                if file.is_empty() {
+                    println!("Usage: /eval show <file.yaml>");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::eval::parse_suite(&yaml) {
+                            Ok(suite) => {
+                                println!("Suite: {} v{} — {}", suite.name, suite.version, suite.description);
+                                println!("Cases: {}", suite.cases.len());
+                                for case in &suite.cases {
+                                    let criteria_count = case.criteria.must_contain.len()
+                                        + case.criteria.must_not_contain.len()
+                                        + if case.criteria.exact_match.is_some() { 1 } else { 0 }
+                                        + if case.criteria.regex_match.is_some() { 1 } else { 0 };
+                                    println!(
+                                        "  {} (difficulty: {}, {} criteria, tags: [{}])",
+                                        case.id,
+                                        case.difficulty,
+                                        criteria_count,
+                                        case.tags.join(", ")
+                                    );
+                                    let prompt_preview = if case.prompt.len() > 60 {
+                                        format!("{}...", &case.prompt[..60])
+                                    } else {
+                                        case.prompt.clone()
+                                    };
+                                    println!("    Prompt: {prompt_preview}");
+                                }
+                            }
+                            Err(e) => println!("Failed to parse suite: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else if sub == "run" {
+                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                if file.is_empty() {
+                    println!("Usage: /eval run <file.yaml>");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::eval::parse_suite(&yaml) {
+                            Ok(suite) => {
+                                let issues = genesis_core::eval::validate_suite(&suite);
+                                if !issues.is_empty() {
+                                    println!("Suite has validation issues:");
+                                    for issue in &issues {
+                                        println!("  - {issue}");
+                                    }
+                                    println!("Fix these before running.");
+                                } else {
+                                    println!("Running eval suite '{}' ({} cases)...", suite.name, suite.cases.len());
+                                    match service.run_eval(&suite).await {
+                                        Ok(report) => {
+                                            println!("\n=== Eval Report: {} v{} ===", report.suite_name, report.suite_version);
+                                            println!("Model: {}", report.model);
+                                            println!("Duration: {}ms", report.total_duration_ms);
+                                            println!("Results: {} passed, {} failed, {} errored ({:.0}% pass rate)",
+                                                report.passed, report.failed, report.errored, report.pass_rate * 100.0);
+                                            println!("Avg score: {:.2}", report.avg_score);
+                                            println!("Tokens: {} in / {} out\n", report.total_input_tokens, report.total_output_tokens);
+
+                                            for r in &report.results {
+                                                let status = if r.passed { "PASS" } else if r.error.is_some() { "ERROR" } else { "FAIL" };
+                                                println!("[{status}] {} — score: {:.2}, {}ms, {} turns",
+                                                    r.case_id, r.score, r.duration_ms, r.turns_used);
+                                                for check in &r.checks {
+                                                    let mark = if check.passed { "✓" } else { "✗" };
+                                                    println!("  {mark} {}: {}", check.criterion, check.detail);
+                                                }
+                                                if let Some(ref err) = r.error {
+                                                    println!("  Error: {err}");
+                                                }
+                                            }
+
+                                            if !report.tag_results.is_empty() {
+                                                println!("\nBy tag:");
+                                                for (tag, tr) in &report.tag_results {
+                                                    println!("  {tag}: {}/{} passed ({:.0}%)", tr.passed, tr.total, tr.pass_rate * 100.0);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => println!("Eval run failed: {e}"),
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Failed to parse suite: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else {
+                println!("Unknown eval subcommand '{sub}'. Use /eval help.");
             }
             continue;
         }
@@ -6174,6 +6313,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /template     - Apply an agent template (archetype)\n\
              /workflow     - Run a YAML-defined multi-step workflow\n\
              /bus          - Agent message bus (stats, history)\n\
+             /eval         - Run evaluation suites against the agent\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
