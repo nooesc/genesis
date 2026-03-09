@@ -259,7 +259,16 @@ pub struct WebhookConfig {
     /// Event types to send. If empty, all events are sent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
+    /// Maximum number of retry attempts on failure (default: 3).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Initial backoff delay in milliseconds (default: 1000). Doubles each retry.
+    #[serde(default = "default_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
 }
+
+fn default_max_retries() -> u32 { 3 }
+fn default_retry_backoff_ms() -> u64 { 1000 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {

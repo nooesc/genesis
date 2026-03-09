@@ -1,12 +1,17 @@
 //! Webhook event dispatcher for Genesis gateway.
 //!
-//! Sends event notifications to configured webhook URLs. Events are dispatched
-//! asynchronously (fire-and-forget) to avoid blocking the agent loop.
+//! Sends event notifications to configured webhook URLs with automatic retry
+//! and exponential backoff. Failed deliveries after all retries are logged as
+//! dead-letter entries for later inspection.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use genesis_config::WebhookConfig;
 use reqwest::Client;
 use serde::Serialize;
-use tracing::{debug, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 /// Event types that can be sent to webhooks.
 #[derive(Debug, Clone, Serialize)]
@@ -43,11 +48,32 @@ pub struct WebhookPayload {
     pub data: serde_json::Value,
 }
 
-/// Dispatcher that sends events to configured webhooks.
+/// A dead-letter entry for a webhook that failed all retry attempts.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeadLetterEntry {
+    pub url: String,
+    pub event_type: String,
+    pub payload: String,
+    pub last_error: String,
+    pub attempts: u32,
+    pub failed_at: String,
+}
+
+/// Metrics for webhook delivery.
+#[derive(Debug, Default)]
+pub struct WebhookMetrics {
+    pub delivered: AtomicU64,
+    pub retried: AtomicU64,
+    pub failed: AtomicU64,
+}
+
+/// Dispatcher that sends events to configured webhooks with retry and dead-letter.
 #[derive(Clone)]
 pub struct WebhookDispatcher {
     client: Client,
     configs: Vec<WebhookConfig>,
+    dead_letters: Arc<Mutex<Vec<DeadLetterEntry>>>,
+    metrics: Arc<WebhookMetrics>,
 }
 
 impl WebhookDispatcher {
@@ -57,7 +83,12 @@ impl WebhookDispatcher {
             .user_agent("genesis-webhook")
             .build()
             .unwrap_or_default();
-        Self { client, configs }
+        Self {
+            client,
+            configs,
+            dead_letters: Arc::new(Mutex::new(Vec::new())),
+            metrics: Arc::new(WebhookMetrics::default()),
+        }
     }
 
     /// Check if any webhooks are configured.
@@ -65,9 +96,31 @@ impl WebhookDispatcher {
         self.configs.is_empty()
     }
 
+    /// Return delivery metrics (delivered, retried, failed).
+    pub fn metrics(&self) -> (u64, u64, u64) {
+        (
+            self.metrics.delivered.load(Ordering::Relaxed),
+            self.metrics.retried.load(Ordering::Relaxed),
+            self.metrics.failed.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Return a snapshot of the dead-letter queue.
+    pub async fn dead_letters(&self) -> Vec<DeadLetterEntry> {
+        self.dead_letters.lock().await.clone()
+    }
+
+    /// Clear the dead-letter queue, returning how many entries were removed.
+    pub async fn clear_dead_letters(&self) -> usize {
+        let mut dl = self.dead_letters.lock().await;
+        let count = dl.len();
+        dl.clear();
+        count
+    }
+
     /// Dispatch an event to all matching webhooks.
     ///
-    /// This spawns background tasks — it does not block on delivery.
+    /// Spawns background tasks with retry and exponential backoff.
     pub fn dispatch(&self, payload: WebhookPayload) {
         if self.configs.is_empty() {
             return;
@@ -86,38 +139,102 @@ impl WebhookDispatcher {
             let client = self.client.clone();
             let url = config.url.clone();
             let secret = config.secret.clone();
+            let max_retries = config.max_retries;
+            let backoff_ms = config.retry_backoff_ms;
             let body = serde_json::to_string(&payload).unwrap_or_default();
+            let dead_letters = Arc::clone(&self.dead_letters);
+            let metrics = Arc::clone(&self.metrics);
+            let event_type = event_str.to_owned();
 
             tokio::spawn(async move {
-                let mut request = client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .header("X-Genesis-Event", event_str);
+                #[allow(unused_assignments)]
+                let mut last_error = String::new();
+                let mut attempt = 0u32;
 
-                // Add HMAC signature if secret is configured
-                if let Some(ref secret) = secret {
-                    let signature = compute_hmac(secret, &body);
-                    request = request.header("X-Genesis-Signature", signature);
+                loop {
+                    let mut request = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("X-Genesis-Event", event_type.as_str())
+                        .header("X-Genesis-Attempt", (attempt + 1).to_string());
+
+                    // Add HMAC signature if secret is configured
+                    if let Some(ref secret) = secret {
+                        let signature = compute_hmac(secret, &body);
+                        request = request.header("X-Genesis-Signature", signature);
+                    }
+
+                    match request.body(body.clone()).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            if attempt > 0 {
+                                info!(
+                                    url = url.as_str(),
+                                    event = event_type.as_str(),
+                                    attempt = attempt + 1,
+                                    "webhook delivered after retry"
+                                );
+                            } else {
+                                debug!(
+                                    url = url.as_str(),
+                                    event = event_type.as_str(),
+                                    status = resp.status().as_u16(),
+                                    "webhook delivered"
+                                );
+                            }
+                            metrics.delivered.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        Ok(resp) => {
+                            last_error = format!("HTTP {}", resp.status());
+                        }
+                        Err(e) => {
+                            last_error = e.to_string();
+                        }
+                    }
+
+                    attempt += 1;
+                    if attempt > max_retries {
+                        break;
+                    }
+
+                    // Exponential backoff: backoff_ms * 2^(attempt-1)
+                    let delay = backoff_ms * (1u64 << (attempt - 1));
+                    warn!(
+                        url = url.as_str(),
+                        event = event_type.as_str(),
+                        attempt,
+                        delay_ms = delay,
+                        error = last_error.as_str(),
+                        "webhook delivery failed, retrying"
+                    );
+                    metrics.retried.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
 
-                match request.body(body).send().await {
-                    Ok(resp) => {
-                        debug!(
-                            url = url.as_str(),
-                            event = event_str,
-                            status = resp.status().as_u16(),
-                            "webhook delivered"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            url = url.as_str(),
-                            event = event_str,
-                            error = %e,
-                            "webhook delivery failed"
-                        );
-                    }
+                // All retries exhausted — dead-letter it
+                warn!(
+                    url = url.as_str(),
+                    event = event_type.as_str(),
+                    attempts = attempt,
+                    error = last_error.as_str(),
+                    "webhook delivery failed permanently, adding to dead-letter queue"
+                );
+                metrics.failed.fetch_add(1, Ordering::Relaxed);
+
+                let entry = DeadLetterEntry {
+                    url,
+                    event_type,
+                    payload: body,
+                    last_error,
+                    attempts: attempt,
+                    failed_at: chrono::Utc::now().to_rfc3339(),
+                };
+                let mut dl = dead_letters.lock().await;
+                // Cap the dead-letter queue at 1000 entries
+                if dl.len() >= 1000 {
+                    dl.remove(0);
                 }
+                dl.push(entry);
             });
         }
     }
@@ -196,6 +313,8 @@ mod tests {
             url: "https://example.com/webhook".to_owned(),
             secret: None,
             events: vec![],
+            max_retries: 3,
+            retry_backoff_ms: 1000,
         };
         let dispatcher = WebhookDispatcher::new(vec![config]);
         assert!(!dispatcher.is_empty());
@@ -221,5 +340,55 @@ mod tests {
         let sig1 = compute_hmac("secret", "body1");
         let sig2 = compute_hmac("secret", "body2");
         assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn metrics_start_at_zero() {
+        let dispatcher = WebhookDispatcher::new(vec![]);
+        let (delivered, retried, failed) = dispatcher.metrics();
+        assert_eq!(delivered, 0);
+        assert_eq!(retried, 0);
+        assert_eq!(failed, 0);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_queue_starts_empty() {
+        let dispatcher = WebhookDispatcher::new(vec![]);
+        assert!(dispatcher.dead_letters().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_dead_letters_returns_count() {
+        let dispatcher = WebhookDispatcher::new(vec![]);
+        // Add a dead letter manually for testing
+        {
+            let mut dl = dispatcher.dead_letters.lock().await;
+            dl.push(DeadLetterEntry {
+                url: "http://example.com".into(),
+                event_type: "test".into(),
+                payload: "{}".into(),
+                last_error: "timeout".into(),
+                attempts: 3,
+                failed_at: "2026-03-08T00:00:00Z".into(),
+            });
+        }
+        let count = dispatcher.clear_dead_letters().await;
+        assert_eq!(count, 1);
+        assert!(dispatcher.dead_letters().await.is_empty());
+    }
+
+    #[test]
+    fn dead_letter_entry_serializes() {
+        let entry = DeadLetterEntry {
+            url: "http://example.com".into(),
+            event_type: "error".into(),
+            payload: r#"{"event":"error"}"#.into(),
+            last_error: "connection refused".into(),
+            attempts: 4,
+            failed_at: "2026-03-08T12:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["attempts"], 4);
+        assert_eq!(json["last_error"], "connection refused");
     }
 }

@@ -334,6 +334,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/audit/stats", get(audit_stats_handler))
         .route("/audit/session/{id}", get(audit_session_handler))
         .route("/audit/purge", post(audit_purge_handler))
+        .route("/webhooks/status", get(webhooks_status_handler))
+        .route("/webhooks/dead-letters", get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -1754,6 +1756,43 @@ async fn audit_purge_handler(
             "error": e.to_string(),
         })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Webhook status endpoints
+// ---------------------------------------------------------------------------
+
+async fn webhooks_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let (delivered, retried, failed) = state.webhooks.metrics();
+    let dead_letter_count = state.webhooks.dead_letters().await.len();
+    Json(serde_json::json!({
+        "configured": !state.webhooks.is_empty(),
+        "delivered": delivered,
+        "retried": retried,
+        "failed": failed,
+        "dead_letter_count": dead_letter_count,
+    }))
+}
+
+async fn webhooks_dead_letters_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let entries = state.webhooks.dead_letters().await;
+    Json(serde_json::json!({
+        "entries": entries,
+        "count": entries.len(),
+    }))
+}
+
+async fn webhooks_clear_dead_letters_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let cleared = state.webhooks.clear_dead_letters().await;
+    Json(serde_json::json!({
+        "cleared": cleared,
+    }))
 }
 
 async fn chat_handler(
