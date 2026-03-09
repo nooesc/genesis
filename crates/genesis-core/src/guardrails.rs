@@ -177,34 +177,7 @@ pub fn check_input(config: &GuardrailConfig, input: &str) -> GuardrailResult {
 
     // Check PII in input
     if config.detect_pii {
-        let pii_violations = detect_pii(input);
-        for (kind, matched) in &pii_violations {
-            match config.pii_action {
-                ViolationAction::Block => {
-                    blocked = true;
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII detected in input: {kind}"),
-                        action: ViolationAction::Block,
-                    });
-                }
-                ViolationAction::Redact => {
-                    content = content.replace(matched, &format!("[{kind}_REDACTED]"));
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII redacted in input: {kind}"),
-                        action: ViolationAction::Redact,
-                    });
-                }
-                ViolationAction::Warn => {
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII detected in input: {kind}"),
-                        action: ViolationAction::Warn,
-                    });
-                }
-            }
-        }
+        apply_pii_checks(config, input, "input", &mut content, &mut violations, &mut blocked);
     }
 
     // Check custom rules for input
@@ -274,34 +247,7 @@ pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
 
     // Check PII in output
     if config.detect_pii {
-        let pii_violations = detect_pii(output);
-        for (kind, matched) in &pii_violations {
-            match config.pii_action {
-                ViolationAction::Block => {
-                    blocked = true;
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII detected in output: {kind}"),
-                        action: ViolationAction::Block,
-                    });
-                }
-                ViolationAction::Redact => {
-                    content = content.replace(matched, &format!("[{kind}_REDACTED]"));
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII redacted in output: {kind}"),
-                        action: ViolationAction::Redact,
-                    });
-                }
-                ViolationAction::Warn => {
-                    violations.push(Violation {
-                        rule: format!("pii_{kind}"),
-                        message: format!("PII detected in output: {kind}"),
-                        action: ViolationAction::Warn,
-                    });
-                }
-            }
-        }
+        apply_pii_checks(config, output, "output", &mut content, &mut violations, &mut blocked);
     }
 
     // Check JSON output requirement
@@ -343,6 +289,45 @@ pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
         passed: !blocked,
         content,
         violations,
+    }
+}
+
+/// Apply PII checks to text, mutating violations/content/blocked as needed.
+fn apply_pii_checks(
+    config: &GuardrailConfig,
+    text: &str,
+    direction: &str,
+    content: &mut String,
+    violations: &mut Vec<Violation>,
+    blocked: &mut bool,
+) {
+    let pii_found = detect_pii(text);
+    for (kind, matched) in &pii_found {
+        match config.pii_action {
+            ViolationAction::Block => {
+                *blocked = true;
+                violations.push(Violation {
+                    rule: format!("pii_{kind}"),
+                    message: format!("PII detected in {direction}: {kind}"),
+                    action: ViolationAction::Block,
+                });
+            }
+            ViolationAction::Redact => {
+                *content = content.replace(matched, &format!("[{kind}_REDACTED]"));
+                violations.push(Violation {
+                    rule: format!("pii_{kind}"),
+                    message: format!("PII redacted in {direction}: {kind}"),
+                    action: ViolationAction::Redact,
+                });
+            }
+            ViolationAction::Warn => {
+                violations.push(Violation {
+                    rule: format!("pii_{kind}"),
+                    message: format!("PII detected in {direction}: {kind}"),
+                    action: ViolationAction::Warn,
+                });
+            }
+        }
     }
 }
 

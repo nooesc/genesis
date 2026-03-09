@@ -142,6 +142,16 @@ impl AgentBus {
         }
     }
 
+    /// Get message counts per channel (from persistence).
+    pub fn stats(&self) -> Vec<(String, i64)> {
+        if let Some(ref db_path) = self.database_path {
+            let store = AgentBusStore::new(db_path);
+            store.channel_stats().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Send a task delegation request to a channel and return immediately.
     pub async fn delegate_task(
         &self,
@@ -223,13 +233,17 @@ pub struct AgentBusStore {
 
 impl AgentBusStore {
     pub fn new(database_path: &std::path::Path) -> Self {
-        Self {
+        let store = Self {
             database_path: database_path.to_path_buf(),
+        };
+        if let Err(e) = store.ensure_table() {
+            tracing::warn!(error = %e, "failed to initialize agent_bus_messages table");
         }
+        store
     }
 
     /// Ensure the agent_bus_messages table exists.
-    pub fn ensure_table(&self) -> Result<(), String> {
+    fn ensure_table(&self) -> Result<(), String> {
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         conn.execute_batch(
@@ -255,7 +269,6 @@ impl AgentBusStore {
 
     /// Store a message.
     pub fn store_message(&self, message: &AgentMessage) -> Result<(), String> {
-        self.ensure_table()?;
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let metadata_json =
@@ -287,7 +300,6 @@ impl AgentBusStore {
         channel: &str,
         limit: usize,
     ) -> Result<Vec<AgentMessage>, String> {
-        self.ensure_table()?;
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let mut stmt = conn
@@ -308,7 +320,7 @@ impl AgentBusStore {
                     id: row.get(0)?,
                     channel: row.get(1)?,
                     sender: row.get(2)?,
-                    kind: parse_message_kind(&kind_str),
+                    kind: serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(MessageKind::Text),
                     payload: row.get(4)?,
                     metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
                     timestamp: row.get(6)?,
@@ -327,7 +339,6 @@ impl AgentBusStore {
         sender: &str,
         limit: usize,
     ) -> Result<Vec<AgentMessage>, String> {
-        self.ensure_table()?;
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let mut stmt = conn
@@ -348,7 +359,7 @@ impl AgentBusStore {
                     id: row.get(0)?,
                     channel: row.get(1)?,
                     sender: row.get(2)?,
-                    kind: parse_message_kind(&kind_str),
+                    kind: serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(MessageKind::Text),
                     payload: row.get(4)?,
                     metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
                     timestamp: row.get(6)?,
@@ -363,7 +374,6 @@ impl AgentBusStore {
 
     /// Count messages per channel.
     pub fn channel_stats(&self) -> Result<Vec<(String, i64)>, String> {
-        self.ensure_table()?;
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let mut stmt = conn
@@ -386,7 +396,6 @@ impl AgentBusStore {
 
     /// Purge messages older than N days.
     pub fn purge_older_than(&self, days: u32) -> Result<usize, String> {
-        self.ensure_table()?;
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let rows = conn
@@ -397,18 +406,6 @@ impl AgentBusStore {
             )
             .map_err(|e| format!("Failed to purge messages: {e}"))?;
         Ok(rows)
-    }
-}
-
-fn parse_message_kind(s: &str) -> MessageKind {
-    match s {
-        "text" => MessageKind::Text,
-        "json" => MessageKind::Json,
-        "task_request" => MessageKind::TaskRequest,
-        "task_result" => MessageKind::TaskResult,
-        "error" => MessageKind::Error,
-        "lifecycle" => MessageKind::Lifecycle,
-        _ => MessageKind::Text,
     }
 }
 
@@ -544,7 +541,6 @@ mod tests {
         let db_path = dir.path().join("bus.db");
 
         let store = AgentBusStore::new(&db_path);
-        store.ensure_table().unwrap();
 
         let msg = AgentMessage {
             id: "persist-1".into(),
@@ -569,7 +565,6 @@ mod tests {
         let db_path = dir.path().join("bus.db");
 
         let store = AgentBusStore::new(&db_path);
-        store.ensure_table().unwrap();
 
         for i in 0..5 {
             store
@@ -610,7 +605,6 @@ mod tests {
         let db_path = dir.path().join("bus.db");
 
         let store = AgentBusStore::new(&db_path);
-        store.ensure_table().unwrap();
 
         store
             .store_message(&AgentMessage {
@@ -669,13 +663,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_message_kind_handles_all_variants() {
-        assert_eq!(parse_message_kind("text"), MessageKind::Text);
-        assert_eq!(parse_message_kind("json"), MessageKind::Json);
-        assert_eq!(parse_message_kind("task_request"), MessageKind::TaskRequest);
-        assert_eq!(parse_message_kind("task_result"), MessageKind::TaskResult);
-        assert_eq!(parse_message_kind("error"), MessageKind::Error);
-        assert_eq!(parse_message_kind("lifecycle"), MessageKind::Lifecycle);
-        assert_eq!(parse_message_kind("unknown"), MessageKind::Text);
+    fn message_kind_serde_from_string() {
+        let parse = |s: &str| -> MessageKind {
+            serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap_or(MessageKind::Text)
+        };
+        assert_eq!(parse("text"), MessageKind::Text);
+        assert_eq!(parse("json"), MessageKind::Json);
+        assert_eq!(parse("task_request"), MessageKind::TaskRequest);
+        assert_eq!(parse("task_result"), MessageKind::TaskResult);
+        assert_eq!(parse("error"), MessageKind::Error);
+        assert_eq!(parse("lifecycle"), MessageKind::Lifecycle);
+        assert_eq!(parse("unknown"), MessageKind::Text);
     }
 }

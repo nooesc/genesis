@@ -476,11 +476,7 @@ pub fn validate_suite(suite: &EvalSuite) -> Vec<String> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max])
-    } else {
-        s.to_owned()
-    }
+    crate::compress::truncate(s, max)
 }
 
 #[cfg(test)]

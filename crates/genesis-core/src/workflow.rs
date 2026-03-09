@@ -49,11 +49,17 @@ pub struct StepResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowResult {
     pub workflow_name: String,
-    pub steps_completed: usize,
     pub step_results: Vec<StepResult>,
     pub final_output: String,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+}
+
+impl WorkflowResult {
+    /// Number of steps that completed successfully.
+    pub fn steps_completed(&self) -> usize {
+        self.step_results.len()
+    }
 }
 
 /// Render a prompt template by substituting variables.
@@ -256,7 +262,6 @@ steps:
     fn workflow_result_serializes() {
         let result = WorkflowResult {
             workflow_name: "test".into(),
-            steps_completed: 2,
             step_results: vec![
                 StepResult {
                     step_name: "a".into(),
@@ -269,8 +274,8 @@ steps:
             total_input_tokens: 100,
             total_output_tokens: 50,
         };
+        assert_eq!(result.steps_completed(), 1);
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["workflow_name"], "test");
-        assert_eq!(json["steps_completed"], 2);
     }
 }

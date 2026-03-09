@@ -2718,7 +2718,7 @@ async fn run_chat(
                                     match service.run_workflow(&wf, input_text, &wf_session_id).await {
                                         Ok(result) => {
                                             println!("\nWorkflow '{}' complete!", result.workflow_name);
-                                            println!("Steps completed: {}/{}", result.steps_completed, wf.steps.len());
+                                            println!("Steps completed: {}/{}", result.steps_completed(), wf.steps.len());
                                             println!("Total tokens: {} in / {} out", result.total_input_tokens, result.total_output_tokens);
                                             for sr in &result.step_results {
                                                 println!("\n--- Step: {} ---", sr.step_name);
@@ -6715,7 +6715,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                         let total: i64 = stats.iter().map(|(_, c)| c).sum();
                         let mut lines = vec![format!("Agent bus: {total} total messages, {} channels", stats.len())];
                         for (channel, count) in &stats {
-                            lines.push(format!("  {channel}: {count}"));
+                            lines.push(format!("  {channel}: {count} messages"));
                         }
                         lines.push("\nCommands: /bus stats, /bus history <channel>".into());
                         Some(lines.join("\n"))

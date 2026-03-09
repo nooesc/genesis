@@ -419,7 +419,7 @@ fn compress_heavy(steps: &[TrajectoryStep]) -> Vec<CompressedTurn> {
 // ---------------------------------------------------------------------------
 
 /// Truncate a string to `max_len` characters, appending "..." if truncated.
-fn truncate(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_owned()
     } else {

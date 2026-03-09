@@ -676,7 +676,6 @@ impl<'a> SessionExecutionService<'a> {
 
         let result = WorkflowResult {
             workflow_name: workflow.name.clone(),
-            steps_completed: step_results.len(),
             step_results,
             final_output,
             total_input_tokens,
@@ -684,7 +683,7 @@ impl<'a> SessionExecutionService<'a> {
         };
 
         info!(
-            steps_completed = result.steps_completed,
+            steps_completed = result.steps_completed(),
             total_input_tokens = result.total_input_tokens,
             total_output_tokens = result.total_output_tokens,
             "workflow execution complete"

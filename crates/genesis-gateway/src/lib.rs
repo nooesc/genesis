@@ -2096,9 +2096,7 @@ async fn bus_history_handler(
 async fn bus_stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let db_path = &state.loaded.config.storage.database_path;
-    let store = genesis_core::agent_bus::AgentBusStore::new(db_path);
-    let stats = store.channel_stats().unwrap_or_default();
+    let stats = state.agent_bus.stats();
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
     Json(serde_json::json!({
         "total_messages": total,
