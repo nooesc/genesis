@@ -394,6 +394,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/audit/purge", post(audit_purge_handler))
         .route("/webhooks/status", get(webhooks_status_handler))
         .route("/webhooks/dead-letters", get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler))
+        .route("/templates", get(list_templates_handler))
+        .route("/templates/{name}", get(get_template_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -1847,6 +1849,33 @@ async fn audit_purge_handler(
         Err(e) => Json(serde_json::json!({
             "error": e.to_string(),
         })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent template endpoints
+// ---------------------------------------------------------------------------
+
+async fn list_templates_handler() -> Json<serde_json::Value> {
+    let templates = genesis_core::templates::list_templates();
+    Json(serde_json::json!({
+        "templates": templates,
+        "count": templates.len(),
+    }))
+}
+
+async fn get_template_handler(
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match genesis_core::templates::get_template(&name) {
+        Some(t) => {
+            let prompt = genesis_core::templates::format_template_prompt(t);
+            Ok(Json(serde_json::json!({
+                "template": t,
+                "formatted_prompt": prompt,
+            })))
+        }
+        None => Err((StatusCode::NOT_FOUND, format!("Template '{name}' not found"))),
     }
 }
 

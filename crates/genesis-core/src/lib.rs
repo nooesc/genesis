@@ -19,6 +19,7 @@ pub mod redact;
 pub mod skill_manifest;
 pub mod personality;
 pub mod tagger;
+pub mod templates;
 pub mod toolset;
 pub mod trajectory;
 

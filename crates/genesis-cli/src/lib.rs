@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/clear",
+                "/title", "/tree", "/audit", "/template", "/clear",
             ],
         }
     }
@@ -2588,6 +2588,43 @@ async fn run_chat(
         }
 
         // Handle /personality — list or set personality
+        // Handle /template — apply an agent template (personality + system prompt + guidelines)
+        if trimmed.starts_with("/template") {
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if arg.is_empty() {
+                let templates = genesis_core::templates::list_templates();
+                println!("Available agent templates:");
+                for t in templates {
+                    println!("  {:12} - {} [personality: {}]", t.name, t.description, t.personality);
+                }
+                println!("\nApply with: /template <name>");
+            } else {
+                match genesis_core::templates::get_template(arg) {
+                    Some(t) => {
+                        let prompt = genesis_core::templates::format_template_prompt(t);
+                        service.set_personality_override(t.personality.to_owned());
+                        service.set_system_prompt_override(prompt);
+                        println!("Applied template '{}' (personality: {}).", t.name, t.personality);
+                        println!("Guidelines:");
+                        for g in t.guidelines {
+                            println!("  - {g}");
+                        }
+                        println!("Takes effect on next turn.");
+                    }
+                    None => {
+                        let names: Vec<&str> =
+                            genesis_core::templates::list_templates()
+                                .iter()
+                                .map(|t| t.name)
+                                .collect();
+                        println!("Unknown template '{arg}'. Available: {}", names.join(", "));
+                    }
+                }
+            }
+            continue;
+        }
+
         if trimmed.starts_with("/personality") {
             let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
             let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
@@ -6010,6 +6047,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
              /audit        - View audit log (stats, purge <days>)\n\
+             /template     - Apply an agent template (archetype)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
