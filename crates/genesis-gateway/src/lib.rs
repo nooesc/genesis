@@ -256,6 +256,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/purge", delete(purge_sessions_handler))
         .route("/sessions/import", post(import_session_handler))
+        .route("/sessions/export", get(bulk_export_handler))
         .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
         .route("/sessions/{id}/messages", get(session_messages_handler))
         .route("/sessions/{id}/fork", post(fork_session_handler))
@@ -754,6 +755,83 @@ async fn import_session_handler(
         "session_id": session_id,
         "messages_imported": message_count,
     })))
+}
+
+#[derive(Deserialize)]
+struct BulkExportQuery {
+    #[serde(default = "default_bulk_format")]
+    format: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn default_bulk_format() -> String {
+    "jsonl".to_owned()
+}
+
+/// Export multiple sessions as JSONL for fine-tuning or archival.
+///
+/// Each line is a separate training example with the messages array.
+async fn bulk_export_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<BulkExportQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+
+    let limit = params.limit.unwrap_or(1000);
+    let sessions = store
+        .list_recent_sessions(limit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    use genesis_tools::builtins::export::{export_json, export_jsonl};
+
+    let mut output = String::new();
+
+    for session in &sessions {
+        let stored = match store.load_messages(&session.id) {
+            Ok(msgs) if !msgs.is_empty() => msgs,
+            _ => continue,
+        };
+
+        let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
+            .into_iter()
+            .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+            .collect();
+
+        match params.format.as_str() {
+            "jsonl" | "finetune" => {
+                let line = export_jsonl(&messages);
+                if !line.is_empty() {
+                    output.push_str(&line);
+                }
+            }
+            "json" => {
+                let json = export_json(&session.id, session.title.as_deref(), &messages);
+                output.push_str(&json);
+                output.push('\n');
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "unsupported bulk format '{}'; use 'jsonl' or 'json'",
+                        params.format
+                    ),
+                ))
+            }
+        }
+    }
+
+    let content_type = match params.format.as_str() {
+        "json" => "application/json; charset=utf-8",
+        _ => "application/jsonl; charset=utf-8",
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", content_type)
+        .body(axum::body::Body::from(output))
+        .unwrap())
 }
 
 #[derive(Deserialize)]
