@@ -43,7 +43,8 @@ impl SlashCompleter {
                 "/help", "/history", "/export", "/tokens", "/session",
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/cache", "/stats", "/clear",
+                "/personality", "/cache", "/stats", "/tag", "/title",
+                "/clear",
             ],
         }
     }
@@ -5865,6 +5866,8 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /skills       - List saved skills\n\
              /model [spec] - Show or switch model (e.g. /model anthropic/claude-sonnet-4-20250514)\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
+             /title [text] - View or set session title\n\
+             /tag [name]   - View, add, or remove (-name) session tags\n\
              /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
              /clear        - Clear the screen\n\
@@ -5960,6 +5963,44 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                     Some(lines.join("\n"))
                 }
                 Err(_) => Some("No stored memories.".to_owned()),
+            }
+        }
+        "title" => {
+            let arg = _args.trim();
+            if arg.is_empty() {
+                match store.get_session(session_id) {
+                    Ok(Some(s)) => Some(format!(
+                        "Title: {}",
+                        s.title.as_deref().unwrap_or("(untitled)")
+                    )),
+                    _ => Some("Could not load session.".to_owned()),
+                }
+            } else {
+                match store.update_title(session_id, arg) {
+                    Ok(_) => Some(format!("Title set to: {arg}")),
+                    Err(e) => Some(format!("Failed to set title: {e}")),
+                }
+            }
+        }
+        "tag" => {
+            let arg = _args.trim();
+            if arg.is_empty() {
+                match store.get_tags(session_id) {
+                    Ok(tags) if tags.is_empty() => Some("No tags on this session. Add with: /tag <name>".to_owned()),
+                    Ok(tags) => Some(format!("Tags: {}\nRemove with: /tag -<name>", tags.join(", "))),
+                    Err(e) => Some(format!("Failed to read tags: {e}")),
+                }
+            } else if let Some(to_remove) = arg.strip_prefix('-') {
+                match store.remove_tag(session_id, to_remove.trim()) {
+                    Ok(true) => Some(format!("Removed tag '{}'.", to_remove.trim())),
+                    Ok(false) => Some(format!("Tag '{}' not found.", to_remove.trim())),
+                    Err(e) => Some(format!("Failed to remove tag: {e}")),
+                }
+            } else {
+                match store.add_tag(session_id, arg) {
+                    Ok(_) => Some(format!("Added tag '{arg}'.")),
+                    Err(e) => Some(format!("Failed to add tag: {e}")),
+                }
             }
         }
         "stats" => {
