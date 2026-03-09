@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -260,6 +260,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 total_input_tokens INTEGER NOT NULL DEFAULT 0,
                 total_output_tokens INTEGER NOT NULL DEFAULT 0,
                 parent_session_id TEXT,
+                tags TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -386,6 +387,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     // Run migrations for existing databases.
     migrate_to_v2(&connection, database_path)?;
     migrate_to_v3(&connection, database_path)?;
+    migrate_to_v4(&connection, database_path)?;
 
     connection
         .execute(
@@ -443,6 +445,28 @@ fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Result<(), St
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v3 → v4: add tags column to sessions for categorization.
+fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    let has_column: bool = connection
+        .prepare("SELECT tags FROM sessions LIMIT 0")
+        .is_ok();
+
+    if has_column {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(
+            "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -836,6 +860,102 @@ impl SessionStore {
                 source,
             })?;
         Ok(rows > 0)
+    }
+
+    /// Get tags for a session (comma-separated string parsed into Vec).
+    pub fn get_tags(&self, session_id: &str) -> Result<Vec<String>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let tags: String = connection
+            .query_row(
+                "SELECT tags FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(if tags.is_empty() {
+            Vec::new()
+        } else {
+            tags.split(',').map(|t| t.trim().to_owned()).collect()
+        })
+    }
+
+    /// Set tags for a session (replaces existing tags).
+    pub fn set_tags(&self, session_id: &str, tags: &[&str]) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let tags_str = tags.join(",");
+        let rows = connection
+            .execute(
+                "UPDATE sessions SET tags = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![session_id, tags_str],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Add a tag to a session (no-op if already present).
+    pub fn add_tag(&self, session_id: &str, tag: &str) -> Result<bool, StorageError> {
+        let mut tags = self.get_tags(session_id)?;
+        if tags.iter().any(|t| t == tag) {
+            return Ok(false); // Already has this tag
+        }
+        tags.push(tag.to_owned());
+        let tags_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+        self.set_tags(session_id, &tags_refs)
+    }
+
+    /// Remove a tag from a session.
+    pub fn remove_tag(&self, session_id: &str, tag: &str) -> Result<bool, StorageError> {
+        let tags = self.get_tags(session_id)?;
+        let filtered: Vec<&str> = tags.iter().filter(|t| t.as_str() != tag).map(|t| t.as_str()).collect();
+        if filtered.len() == tags.len() {
+            return Ok(false); // Tag wasn't present
+        }
+        self.set_tags(session_id, &filtered)
+    }
+
+    /// List sessions that have a specific tag.
+    pub fn sessions_by_tag(&self, tag: &str) -> Result<Vec<SessionSummary>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let pattern = format!("%{tag}%");
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
+                 FROM sessions WHERE tags LIKE ?1
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let summaries = stmt
+            .query_map(params![pattern], |row| {
+                Ok(SessionSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    platform: row.get(2)?,
+                    total_input_tokens: row.get(3)?,
+                    total_output_tokens: row.get(4)?,
+                    parent_session_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(summaries)
     }
 
     /// Delete a session and all its messages and search index entries.

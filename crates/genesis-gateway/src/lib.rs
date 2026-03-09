@@ -275,6 +275,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/fork", post(fork_session_handler))
         .route("/sessions/{id}/title", patch(update_session_title_handler))
         .route("/sessions/{id}/export", get(export_session_handler))
+        .route("/sessions/{id}/tags", get(get_session_tags_handler).put(set_session_tags_handler))
+        .route("/sessions/{id}/tags/{tag}", post(add_session_tag_handler).delete(remove_session_tag_handler))
+        .route("/sessions/by-tag/{tag}", get(sessions_by_tag_handler))
         .route("/messages/search", get(search_messages_handler))
         .route("/usage", get(usage_handler))
         .route("/insights", get(insights_handler))
@@ -724,6 +727,74 @@ async fn purge_sessions_handler(
         "purged": purged,
         "older_than_days": params.older_than_days,
     })))
+}
+
+async fn get_session_tags_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let tags = store
+        .get_tags(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
+}
+
+#[derive(Deserialize)]
+struct SetTagsRequest {
+    tags: Vec<String>,
+}
+
+async fn set_session_tags_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SetTagsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
+    store
+        .set_tags(&id, &tag_refs)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    Ok(Json(serde_json::json!({ "session_id": id, "tags": request.tags })))
+}
+
+async fn add_session_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path((id, tag)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let added = store
+        .add_tag(&id, &tag)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    let tags = store
+        .get_tags(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags })))
+}
+
+async fn remove_session_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path((id, tag)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let removed = store
+        .remove_tag(&id, &tag)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    let tags = store
+        .get_tags(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags })))
+}
+
+async fn sessions_by_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tag): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let sessions = store
+        .sessions_by_tag(&tag)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    Ok(Json(serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() })))
 }
 
 #[derive(Deserialize)]
