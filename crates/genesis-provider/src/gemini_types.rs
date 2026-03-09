@@ -150,6 +150,26 @@ pub(crate) struct GeminiUsageMetadata {
     pub total_token_count: u32,
 }
 
+impl GeminiUsageMetadata {
+    pub fn to_chat_usage(&self) -> ChatUsage {
+        ChatUsage {
+            prompt_tokens: self.prompt_token_count,
+            completion_tokens: self.candidates_token_count,
+            total_tokens: self.total_token_count,
+        }
+    }
+}
+
+/// Map Gemini finish reason to OpenAI equivalent.
+fn map_finish_reason(reason: &str) -> String {
+    match reason {
+        "STOP" => "stop".to_owned(),
+        "MAX_TOKENS" => "length".to_owned(),
+        "SAFETY" => "content_filter".to_owned(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Translation: OpenAI → Gemini
 // ---------------------------------------------------------------------------
@@ -326,19 +346,14 @@ fn content_to_gemini_parts(content: &Option<MessageContent>) -> Vec<GeminiPart> 
                     text: text.clone(),
                 }),
                 crate::api_types::ContentPart::ImageUrl { image_url } => {
-                    // Convert data URIs to inline_data
-                    if let Some(rest) = image_url.url.strip_prefix("data:") {
-                        if let Some((media_type, data)) = rest.split_once(",") {
-                            let media_type = media_type.trim_end_matches(";base64");
-                            return Some(GeminiPart::InlineData {
-                                inline_data: GeminiInlineData {
-                                    mime_type: media_type.to_owned(),
-                                    data: data.to_owned(),
-                                },
-                            });
-                        }
-                    }
-                    None
+                    crate::api_types::parse_data_uri(&image_url.url).map(
+                        |(media_type, data)| GeminiPart::InlineData {
+                            inline_data: GeminiInlineData {
+                                mime_type: media_type.to_owned(),
+                                data: data.to_owned(),
+                            },
+                        },
+                    )
                 }
             })
             .collect(),
@@ -361,12 +376,7 @@ pub(crate) fn from_gemini_response(
 
     let (message, finish_reason) = match candidate {
         Some(c) => {
-            let finish_reason = c.finish_reason.as_deref().map(|r| match r {
-                "STOP" => "stop".to_owned(),
-                "MAX_TOKENS" => "length".to_owned(),
-                "SAFETY" => "content_filter".to_owned(),
-                other => other.to_ascii_lowercase(),
-            });
+            let finish_reason = c.finish_reason.as_deref().map(map_finish_reason);
 
             let message = if let Some(content) = c.content {
                 parts_to_chat_message(&content.parts)
@@ -389,11 +399,7 @@ pub(crate) fn from_gemini_response(
         None => (ChatMessage::assistant(""), None),
     };
 
-    let usage = resp.usage_metadata.map(|u| ChatUsage {
-        prompt_tokens: u.prompt_token_count,
-        completion_tokens: u.candidates_token_count,
-        total_tokens: u.total_token_count,
-    });
+    let usage = resp.usage_metadata.map(|u| u.to_chat_usage());
 
     ChatCompletionResponse {
         id: response_id.to_owned(),
@@ -483,24 +489,17 @@ pub(crate) fn from_gemini_stream_chunk(
         }
     }
 
-    let finish_reason = candidate.finish_reason.as_deref().map(|r| match r {
-        "STOP" => {
-            if tool_calls.is_some() {
-                "tool_calls".to_owned()
-            } else {
-                "stop".to_owned()
-            }
+    let finish_reason = candidate.finish_reason.as_deref().map(|r| {
+        let mapped = map_finish_reason(r);
+        // Override "stop" to "tool_calls" when function calls are present
+        if mapped == "stop" && tool_calls.is_some() {
+            "tool_calls".to_owned()
+        } else {
+            mapped
         }
-        "MAX_TOKENS" => "length".to_owned(),
-        "SAFETY" => "content_filter".to_owned(),
-        other => other.to_ascii_lowercase(),
     });
 
-    let usage = resp.usage_metadata.map(|u| ChatUsage {
-        prompt_tokens: u.prompt_token_count,
-        completion_tokens: u.candidates_token_count,
-        total_tokens: u.total_token_count,
-    });
+    let usage = resp.usage_metadata.map(|u| u.to_chat_usage());
 
     Some(ChatCompletionChunk {
         id: chunk_id.to_owned(),

@@ -314,6 +314,16 @@ impl ChatClient {
 
         let completion = anthropic_types::from_anthropic_response(anthropic_resp);
 
+        if completion.choices.is_empty() {
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "anthropic completion returned no content"
+            );
+            return Err(ProviderError::EmptyChoices);
+        }
+
         let (prompt_tokens, completion_tokens, total_tokens) = completion
             .usage
             .as_ref()
@@ -612,16 +622,12 @@ impl ChatClient {
 
                 // Gemini streaming uses standard SSE with data: prefix
                 while let Some(event) = take_next_sse_event(&mut buffer) {
-                    let data = event
-                        .lines()
-                        .filter_map(|line| line.strip_prefix("data:"))
-                        .map(str::trim)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if data.is_empty() || data == "[DONE]" {
-                        continue;
-                    }
+                    let data = match event.lines()
+                        .find_map(|line| line.strip_prefix("data:").map(str::trim))
+                    {
+                        Some(d) if !d.is_empty() && d != "[DONE]" => d,
+                        _ => continue,
+                    };
 
                     let gemini_resp: gemini_types::GeminiResponse = serde_json::from_str(&data)?;
                     if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
@@ -633,18 +639,15 @@ impl ChatClient {
 
             // Handle any remaining buffered data
             if !buffer.trim().is_empty() {
-                let data = buffer
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                if !data.is_empty() && data != "[DONE]" {
-                    if let Ok(gemini_resp) = serde_json::from_str::<gemini_types::GeminiResponse>(&data) {
-                        if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
-                            chunk_count += 1;
-                            yield parsed;
+                if let Some(data) = buffer.lines()
+                    .find_map(|line| line.strip_prefix("data:").map(str::trim))
+                {
+                    if !data.is_empty() && data != "[DONE]" {
+                        if let Ok(gemini_resp) = serde_json::from_str::<gemini_types::GeminiResponse>(data) {
+                            if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
+                                chunk_count += 1;
+                                yield parsed;
+                            }
                         }
                     }
                 }
@@ -729,17 +732,17 @@ fn inject_cache_control(body: &mut serde_json::Value) {
 /// Anthropic SSE uses `event: <type>\ndata: <json>` format.
 fn parse_anthropic_sse(event: &str) -> (String, String) {
     let mut event_type = String::new();
-    let mut data_parts: Vec<&str> = Vec::new();
+    let mut data = String::new();
 
     for line in event.lines() {
         if let Some(rest) = line.strip_prefix("event:") {
             event_type = rest.trim().to_owned();
         } else if let Some(rest) = line.strip_prefix("data:") {
-            data_parts.push(rest.trim());
+            data = rest.trim().to_owned();
         }
     }
 
-    (event_type, data_parts.join("\n"))
+    (event_type, data)
 }
 
 /// Whether an HTTP status code is transient and worth retrying.

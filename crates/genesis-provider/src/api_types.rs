@@ -241,6 +241,16 @@ pub struct ImageUrl {
     pub detail: Option<String>,
 }
 
+/// Parse a data URI into (media_type, base64_data).
+///
+/// Handles URIs like `data:image/png;base64,iVBOR...` returning `("image/png", "iVBOR...")`.
+pub(crate) fn parse_data_uri(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (media_type, data) = rest.split_once(',')?;
+    let media_type = media_type.trim_end_matches(";base64");
+    Some((media_type, data))
+}
+
 /// A single message in the chat conversation (OpenAI wire format).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatMessage {

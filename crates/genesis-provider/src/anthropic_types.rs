@@ -151,6 +151,16 @@ pub(crate) struct AnthropicUsage {
     pub output_tokens: u32,
 }
 
+impl AnthropicUsage {
+    pub fn to_chat_usage(&self) -> ChatUsage {
+        ChatUsage {
+            prompt_tokens: self.input_tokens,
+            completion_tokens: self.output_tokens,
+            total_tokens: self.input_tokens + self.output_tokens,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Anthropic streaming types
 // ---------------------------------------------------------------------------
@@ -200,7 +210,6 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
     for msg in &req.messages {
         match msg.role.as_str() {
             "system" => {
-                let text = msg.content_text().unwrap_or_default().to_owned();
                 // Check if content is already in content-block form (from cache injection)
                 if let Some(MessageContent::Parts(parts)) = &msg.content {
                     let blocks: Vec<AnthropicContentBlock> = parts
@@ -222,6 +231,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                         continue;
                     }
                 }
+                let text = msg.content_text().unwrap_or_default().to_owned();
                 system = Some(AnthropicSystemContent::Text(text));
             }
             "assistant" => {
@@ -318,24 +328,15 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                                     })
                                 }
                                 crate::api_types::ContentPart::ImageUrl { image_url } => {
-                                    // Convert data URIs to Anthropic's image format
-                                    if let Some(rest) =
-                                        image_url.url.strip_prefix("data:")
-                                    {
-                                        if let Some((media_type, data)) = rest.split_once(",") {
-                                            let media_type =
-                                                media_type.trim_end_matches(";base64");
-                                            return Some(AnthropicContentBlock::Image {
-                                                source: ImageSource {
-                                                    source_type: "base64".to_owned(),
-                                                    media_type: media_type.to_owned(),
-                                                    data: data.to_owned(),
-                                                },
-                                            });
-                                        }
-                                    }
-                                    // URL-based images — Anthropic supports these via url source type
-                                    None
+                                    crate::api_types::parse_data_uri(&image_url.url).map(
+                                        |(media_type, data)| AnthropicContentBlock::Image {
+                                            source: ImageSource {
+                                                source_type: "base64".to_owned(),
+                                                media_type: media_type.to_owned(),
+                                                data: data.to_owned(),
+                                            },
+                                        },
+                                    )
                                 }
                             })
                             .collect();
@@ -436,28 +437,28 @@ pub(crate) fn from_anthropic_response(resp: AnthropicResponse) -> ChatCompletion
     let mut tool_calls: Vec<ToolCallEntry> = Vec::new();
     let mut thinking: Option<String> = None;
 
-    for block in &resp.content {
+    for block in resp.content {
         match block {
             AnthropicContentBlock::Text {
                 text,
                 cache_control: _,
             } => {
-                text_parts.push(text.clone());
+                text_parts.push(text);
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCallEntry {
-                    id: id.clone(),
+                    id,
                     call_type: "function".to_owned(),
                     function: FunctionCall {
-                        name: name.clone(),
-                        arguments: serde_json::to_string(input).unwrap_or_default(),
+                        name,
+                        arguments: serde_json::to_string(&input).unwrap_or_default(),
                     },
                 });
             }
             AnthropicContentBlock::Thinking {
                 thinking: think_text,
             } => {
-                thinking = Some(think_text.clone());
+                thinking = Some(think_text);
             }
             _ => {}
         }
@@ -496,11 +497,7 @@ pub(crate) fn from_anthropic_response(resp: AnthropicResponse) -> ChatCompletion
             message,
             finish_reason,
         }],
-        usage: Some(ChatUsage {
-            prompt_tokens: resp.usage.input_tokens,
-            completion_tokens: resp.usage.output_tokens,
-            total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
-        }),
+        usage: Some(resp.usage.to_chat_usage()),
     }
 }
 
@@ -531,13 +528,10 @@ pub(crate) fn anthropic_event_to_chunk(
                     },
                     finish_reason: None,
                 }],
-                usage: event.message.as_ref().and_then(|m| {
-                    m.usage.as_ref().map(|u| ChatUsage {
-                        prompt_tokens: u.input_tokens,
-                        completion_tokens: u.output_tokens,
-                        total_tokens: u.input_tokens + u.output_tokens,
-                    })
-                }),
+                usage: event
+                    .message
+                    .as_ref()
+                    .and_then(|m| m.usage.as_ref().map(|u| u.to_chat_usage())),
             }))
         }
         "content_block_start" => {
@@ -627,11 +621,7 @@ pub(crate) fn anthropic_event_to_chunk(
                     other => other.to_owned(),
                 })
             });
-            let usage = event.usage.as_ref().map(|u| ChatUsage {
-                prompt_tokens: u.input_tokens,
-                completion_tokens: u.output_tokens,
-                total_tokens: u.input_tokens + u.output_tokens,
-            });
+            let usage = event.usage.as_ref().map(|u| u.to_chat_usage());
             Ok(Some(ChatCompletionChunk {
                 id: msg_id.clone(),
                 choices: vec![ChatChunkChoice {
