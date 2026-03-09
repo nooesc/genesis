@@ -67,6 +67,8 @@ pub enum SessionExecutionError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("required MCP servers failed to initialize: {servers:?}")]
+    McpStartupFailed { servers: Vec<String> },
 }
 
 impl<'a> SessionExecutionService<'a> {
@@ -75,7 +77,13 @@ impl<'a> SessionExecutionService<'a> {
     }
 
     /// Create a service with MCP servers connected.
-    pub async fn with_mcp(loaded: &'a LoadedConfig) -> Self {
+    ///
+    /// If `strict_startup` is true, startup fails when any configured MCP server
+    /// cannot be initialized.
+    pub async fn with_mcp(
+        loaded: &'a LoadedConfig,
+        strict_startup: bool,
+    ) -> Result<Self, SessionExecutionError> {
         let mcp = if !loaded.config.mcp_servers.is_empty() {
             let configs = genesis_mcp::build_server_configs(&loaded.config.mcp_servers);
 
@@ -83,6 +91,17 @@ impl<'a> SessionExecutionService<'a> {
                 None
             } else {
                 let manager = McpManager::connect_all(configs).await;
+                if strict_startup {
+                    let failed: Vec<String> = manager
+                        .server_status()
+                        .await
+                        .into_iter()
+                        .filter_map(|(name, connected)| (!connected).then_some(name))
+                        .collect();
+                    if !failed.is_empty() {
+                        return Err(SessionExecutionError::McpStartupFailed { servers: failed });
+                    }
+                }
                 let tool_count = manager.tool_count().await;
                 if tool_count > 0 {
                     info!(
@@ -99,7 +118,16 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None }
+        Ok(Self {
+            loaded,
+            mcp,
+            system_prompt_override: None,
+            response_format: None,
+            approval_handler: None,
+            default_working_dir: None,
+            model_override: None,
+            personality_override: None,
+        })
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).

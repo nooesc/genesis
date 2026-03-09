@@ -2487,6 +2487,48 @@ fn percentile(values: &[usize], pct: f64) -> usize {
     values[rank.min(values.len() - 1)]
 }
 
+fn is_production_profile(profile: &str) -> bool {
+    matches!(
+        profile.to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+fn parse_bool_env(name: &str) -> Option<Result<bool, CliError>> {
+    std::env::var(name).ok().map(|value| {
+        value.parse::<bool>().map_err(|_| {
+            CliError::Other(format!("invalid value for {name}: {value} (expected true or false)"))
+        })
+    })
+}
+
+fn is_production_environment() -> bool {
+    std::env::var("GENESIS_ENV")
+        .ok()
+        .map(|value| is_production_profile(&value))
+        .unwrap_or(false)
+}
+
+fn mcp_startup_strict(loaded: &LoadedConfig) -> Result<bool, CliError> {
+    if let Some(result) = parse_bool_env("GENESIS_MCP_STRICT_STARTUP") {
+        return result;
+    }
+
+    Ok(is_production_environment() || is_production_profile(&loaded.config.profile))
+}
+
+async fn build_session_service<'a>(
+    loaded: &'a LoadedConfig,
+    strict_startup: bool,
+    approval_handler: bool,
+) -> Result<SessionExecutionService<'a>, CliError> {
+    let mut service = SessionExecutionService::with_mcp(loaded, strict_startup).await?;
+    if approval_handler {
+        service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
+    }
+    Ok(service)
+}
+
 async fn run_chat(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
@@ -2498,8 +2540,8 @@ async fn run_chat(
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
-    let mut service = SessionExecutionService::new(&loaded);
-    service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
+    let strict_startup = mcp_startup_strict(&loaded)?;
+    let mut service = build_session_service(&loaded, strict_startup, true).await?;
     if let Some(ref sys) = system_override {
         service.set_system_prompt_override(sys.clone());
     }
@@ -3063,8 +3105,8 @@ async fn run_oneshot(
 
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
-    let mut service = SessionExecutionService::new(&loaded);
-    service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
+    let strict_startup = mcp_startup_strict(&loaded)?;
+    let mut service = build_session_service(&loaded, strict_startup, true).await?;
     if let Some(sys) = system_override {
         service.set_system_prompt_override(sys);
     }
@@ -3177,13 +3219,9 @@ async fn run_serve(
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
 
-    // Connect MCP servers if configured
-    let mcp = if !loaded.config.mcp_servers.is_empty() {
-        let service = genesis_core::execution::SessionExecutionService::with_mcp(&loaded).await;
-        service.mcp_manager()
-    } else {
-        None
-    };
+    let strict_startup = mcp_startup_strict(&loaded)?;
+    let service = build_session_service(&loaded, strict_startup, false).await?;
+    let mcp = service.mcp_manager();
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
     // Env var overrides config file setting
