@@ -2512,6 +2512,25 @@ async fn run_chat(
             continue;
         }
 
+        // Handle /model — show or switch model at runtime
+        if trimmed.starts_with("/model") {
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if arg.is_empty() {
+                println!("Active model: {}", model);
+                println!("Set with: /model <backend>/<model>  (e.g. /model anthropic/claude-sonnet-4-20250514)");
+            } else if let Some((backend, new_model)) = arg.split_once('/') {
+                service.set_model_override(backend.to_owned(), new_model.to_owned());
+                println!("Model switched to {backend}/{new_model}. Takes effect on next turn.");
+            } else {
+                // Assume same backend, just changing model name
+                let backend = &loaded.config.provider.backend;
+                service.set_model_override(backend.clone(), arg.to_owned());
+                println!("Model switched to {backend}/{arg}. Takes effect on next turn.");
+            }
+            continue;
+        }
+
         // Handle /fork — branch the conversation into a new session
         if trimmed == "/fork" {
             let new_id = default_session_id();
@@ -5844,7 +5863,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /compress     - Trim old messages, keeping recent context\n\
              /tools        - List available tools\n\
              /skills       - List saved skills\n\
-             /model        - Show active model\n\
+             /model [spec] - Show or switch model (e.g. /model anthropic/claude-sonnet-4-20250514)\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
              /cache        - Show cache stats (clear, prune)\n\
              /clear        - Clear the screen\n\
@@ -5984,9 +6003,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
         "skills" => {
             Some("Use `genesis skills list` to see saved skills.".to_owned())
         }
-        "model" => {
-            Some("Use `genesis model show` to see the active model.".to_owned())
-        }
+        "model" => None, // handled in chat loop for mutable service access
         "undo" => {
             // Remove the last user-assistant exchange (user message + all
             // subsequent assistant/tool messages until the next user or start).
