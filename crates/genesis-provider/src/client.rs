@@ -31,17 +31,21 @@ pub struct ChatClient {
     model: String,
     /// The backend identifier for provider-specific optimizations.
     backend: String,
+    /// API key stored separately for backends using query-param auth (Gemini).
+    api_key: Option<String>,
 }
 
 impl ChatClient {
     /// Create a new client from a resolved provider.
     pub fn new(provider: &ResolvedProvider) -> Result<Self, ProviderError> {
         let is_anthropic = provider.backend == "anthropic";
+        let is_gemini = matches!(provider.backend.as_str(), "gemini" | "google");
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
+        // Gemini uses API key in URL query params — no auth header needed.
+        // Anthropic uses x-api-key header. Everything else uses Bearer token.
         if is_anthropic {
-            // Anthropic uses x-api-key header and requires anthropic-version
             if !provider.api_key.is_empty() {
                 headers.insert(
                     "x-api-key",
@@ -56,7 +60,7 @@ impl ChatClient {
                 "anthropic-version",
                 HeaderValue::from_static("2023-06-01"),
             );
-        } else if !provider.api_key.is_empty() {
+        } else if !is_gemini && !provider.api_key.is_empty() {
             let auth_value = format!("Bearer {}", provider.api_key);
             headers.insert(
                 AUTHORIZATION,
@@ -75,8 +79,19 @@ impl ChatClient {
         let base = provider.base_url.trim_end_matches('/');
         let endpoint = if is_anthropic {
             format!("{}/messages", base)
+        } else if is_gemini {
+            // For Gemini, store base URL — full endpoint constructed per-request
+            // because it includes the model name and API key.
+            base.to_owned()
         } else {
             format!("{}/chat/completions", base)
+        };
+
+        // Store API key for backends that need it in the URL (Gemini)
+        let api_key = if is_gemini {
+            Some(provider.api_key.clone())
+        } else {
+            None
         };
 
         Ok(Self {
@@ -84,6 +99,7 @@ impl ChatClient {
             endpoint,
             model: provider.model.clone(),
             backend: provider.backend.clone(),
+            api_key,
         })
     }
 
@@ -115,13 +131,14 @@ impl ChatClient {
     /// errors (429 rate-limit, 5xx server errors, network failures).
     async fn send_with_retry(
         &self,
+        url: &str,
         body: &serde_json::Value,
         model: &str,
     ) -> Result<reqwest::Response, ProviderError> {
         let started_at = Instant::now();
 
         for attempt in 0..=MAX_RETRIES {
-            let result = self.http.post(&self.endpoint).json(body).send().await;
+            let result = self.http.post(url).json(body).send().await;
 
             match result {
                 Ok(response) => {
@@ -213,8 +230,12 @@ impl ChatClient {
             return self.complete_anthropic(request, started_at).await;
         }
 
+        if matches!(self.backend.as_str(), "gemini" | "google") {
+            return self.complete_gemini(request, started_at).await;
+        }
+
         let body = Self::prepare_body(&mut request, &self.backend)?;
-        let response = self.send_with_retry(&body, &request.model).await?;
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
         let completion: ChatCompletionResponse = match response.json().await {
             Ok(completion) => completion,
@@ -275,7 +296,7 @@ impl ChatClient {
 
         let anthropic_req = anthropic_types::to_anthropic_request(&request);
         let body = serde_json::to_value(&anthropic_req)?;
-        let response = self.send_with_retry(&body, &request.model).await?;
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
         let anthropic_resp: AnthropicResponse = match response.json().await {
             Ok(resp) => resp,
@@ -313,6 +334,67 @@ impl ChatClient {
         Ok(completion)
     }
 
+    /// Gemini-native completion path: translates request/response formats.
+    async fn complete_gemini(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        use crate::gemini_types;
+
+        let api_key = self.api_key.as_deref().unwrap_or_default();
+        let url = gemini_types::generate_content_url(&self.endpoint, &request.model, api_key);
+
+        let gemini_req = gemini_types::to_gemini_request(&request);
+        let body = serde_json::to_value(&gemini_req)?;
+        let response = self.send_with_retry(&url, &body, &request.model).await?;
+
+        let gemini_resp: gemini_types::GeminiResponse = match response.json().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                error!(
+                    endpoint = self.endpoint.as_str(),
+                    model = request.model.as_str(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "gemini response decode failed"
+                );
+                return Err(error.into());
+            }
+        };
+
+        let completion = gemini_types::from_gemini_response(gemini_resp, &request.model);
+
+        if completion.choices.is_empty() {
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "gemini completion returned no candidates"
+            );
+            return Err(ProviderError::EmptyChoices);
+        }
+
+        let (prompt_tokens, completion_tokens, total_tokens) = completion
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+            .unwrap_or((0, 0, 0));
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            token_counts_available = completion.usage.is_some(),
+            "gemini completion request succeeded"
+        );
+
+        Ok(completion)
+    }
+
     pub async fn complete_stream(
         &self,
         mut request: ChatCompletionRequest,
@@ -327,10 +409,14 @@ impl ChatClient {
             return self.complete_stream_anthropic(request, started_at).await;
         }
 
+        if matches!(self.backend.as_str(), "gemini" | "google") {
+            return self.complete_stream_gemini(request, started_at).await;
+        }
+
         request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
-        let response = self.send_with_retry(&body, &request.model).await?;
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
         info!(
             endpoint = self.endpoint.as_str(),
@@ -416,7 +502,7 @@ impl ChatClient {
 
         let anthropic_req = anthropic_types::to_anthropic_request(&request);
         let body = serde_json::to_value(&anthropic_req)?;
-        let response = self.send_with_retry(&body, &request.model).await?;
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
         info!(
             endpoint = self.endpoint.as_str(),
@@ -479,6 +565,97 @@ impl ChatClient {
                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
                 chunk_count,
                 "anthropic streaming stream closed"
+            );
+        };
+
+        Ok(Box::pin(stream))
+    }
+
+    /// Gemini-native streaming path: translates SSE events to OpenAI chunks.
+    async fn complete_stream_gemini(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionChunkStream, ProviderError> {
+        use crate::gemini_types;
+
+        let api_key = self.api_key.as_deref().unwrap_or_default();
+        let url =
+            gemini_types::stream_generate_content_url(&self.endpoint, &request.model, api_key);
+
+        let gemini_req = gemini_types::to_gemini_request(&request);
+        let body = serde_json::to_value(&gemini_req)?;
+        let response = self.send_with_retry(&url, &body, &request.model).await?;
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "gemini streaming request accepted"
+        );
+
+        let endpoint = self.endpoint.clone();
+        let model = request.model.clone();
+        let byte_stream = response.bytes_stream();
+        let stream = async_stream::try_stream! {
+            futures_util::pin_mut!(byte_stream);
+            let mut buffer = String::new();
+            let stream_started_at = Instant::now();
+            let mut chunk_count = 0usize;
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = chunk?;
+                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
+                    error.to_string()
+                ))?;
+                buffer.push_str(text);
+
+                // Gemini streaming uses standard SSE with data: prefix
+                while let Some(event) = take_next_sse_event(&mut buffer) {
+                    let data = event
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data:"))
+                        .map(str::trim)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+
+                    let gemini_resp: gemini_types::GeminiResponse = serde_json::from_str(&data)?;
+                    if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
+                        chunk_count += 1;
+                        yield parsed;
+                    }
+                }
+            }
+
+            // Handle any remaining buffered data
+            if !buffer.trim().is_empty() {
+                let data = buffer
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if !data.is_empty() && data != "[DONE]" {
+                    if let Ok(gemini_resp) = serde_json::from_str::<gemini_types::GeminiResponse>(&data) {
+                        if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
+                            chunk_count += 1;
+                            yield parsed;
+                        }
+                    }
+                }
+            }
+
+            info!(
+                endpoint = endpoint.as_str(),
+                model = model.as_str(),
+                elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                chunk_count,
+                "gemini streaming finished"
             );
         };
 
@@ -820,6 +997,38 @@ mod tests {
         let (event_type, data) = parse_anthropic_sse(event);
         assert_eq!(event_type, "");
         assert!(data.contains("ping"));
+    }
+
+    #[test]
+    fn gemini_client_stores_base_url() {
+        let provider = ResolvedProvider {
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+            api_key: "AIza-test".to_owned(),
+            model: "gemini-2.5-pro".to_owned(),
+            backend: "gemini".to_owned(),
+        };
+
+        let client = ChatClient::new(&provider).expect("should build gemini client");
+        assert_eq!(
+            client.endpoint(),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(client.backend(), "gemini");
+        assert_eq!(client.api_key.as_deref(), Some("AIza-test"));
+    }
+
+    #[test]
+    fn google_alias_builds_gemini_client() {
+        let provider = ResolvedProvider {
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+            api_key: "AIza-google".to_owned(),
+            model: "gemini-2.5-flash".to_owned(),
+            backend: "google".to_owned(),
+        };
+
+        let client = ChatClient::new(&provider).expect("should build google client");
+        assert_eq!(client.backend(), "google");
+        assert_eq!(client.api_key.as_deref(), Some("AIza-google"));
     }
 
     #[test]

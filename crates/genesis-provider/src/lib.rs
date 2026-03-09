@@ -2,6 +2,7 @@ mod anthropic_types;
 mod api_types;
 mod client;
 mod error;
+mod gemini_types;
 pub mod model_metadata;
 pub mod parsers;
 pub mod pricing;

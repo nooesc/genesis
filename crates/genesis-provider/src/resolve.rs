@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
+const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Resolved provider endpoint ready to use for API calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ fn default_base_url(backend: &str) -> &str {
         "openrouter" => OPENROUTER_BASE_URL,
         "openai" => OPENAI_BASE_URL,
         "anthropic" => ANTHROPIC_BASE_URL,
+        "gemini" | "google" => GEMINI_BASE_URL,
         _ => OPENAI_BASE_URL,
     }
 }
@@ -141,6 +143,28 @@ mod tests {
         let resolved = resolve("vllm", "llama-3", None, None, &env);
 
         assert_eq!(resolved.base_url, OPENAI_BASE_URL);
+    }
+
+    #[test]
+    fn resolves_gemini_with_correct_url_and_key() {
+        let env = BTreeMap::from([("GEMINI_API_KEY".to_owned(), "AIza-test".to_owned())]);
+
+        let resolved = resolve("gemini", "gemini-2.5-pro", None, None, &env);
+
+        assert_eq!(resolved.base_url, GEMINI_BASE_URL);
+        assert_eq!(resolved.api_key, "AIza-test");
+        assert_eq!(resolved.model, "gemini-2.5-pro");
+        assert_eq!(resolved.backend, "gemini");
+    }
+
+    #[test]
+    fn resolves_google_alias_to_gemini_url() {
+        let env = BTreeMap::from([("GOOGLE_API_KEY".to_owned(), "AIza-google".to_owned())]);
+
+        let resolved = resolve("google", "gemini-2.5-flash", None, None, &env);
+
+        assert_eq!(resolved.base_url, GEMINI_BASE_URL);
+        assert_eq!(resolved.api_key, "AIza-google");
     }
 
     #[test]
