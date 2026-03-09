@@ -196,8 +196,8 @@ pub async fn interactions_handler(
             &discord_user_id,
             &user_name,
         ) {
-            super::PairingCheck::Approved => {}
-            super::PairingCheck::NeedsPairing(code) => {
+            Ok(super::PairingCheck::Approved) => {}
+            Ok(super::PairingCheck::NeedsPairing(code)) => {
                 let reply = super::pairing_reply(&code);
                 return Ok(Json(
                     serde_json::to_value(InteractionResponse {
@@ -207,7 +207,7 @@ pub async fn interactions_handler(
                     .unwrap(),
                 ));
             }
-            super::PairingCheck::AtCapacity => {
+            Ok(super::PairingCheck::AtCapacity) => {
                 return Ok(Json(
                     serde_json::to_value(InteractionResponse {
                         response_type: RESPONSE_CHANNEL_MESSAGE,
@@ -218,6 +218,7 @@ pub async fn interactions_handler(
                     .unwrap(),
                 ));
             }
+            Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
         }
 
         // Handle gateway slash commands.

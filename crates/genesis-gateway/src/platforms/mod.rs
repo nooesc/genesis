@@ -17,6 +17,13 @@ pub enum PairingCheck {
     AtCapacity,
 }
 
+/// Pairing check errors.
+#[derive(Debug)]
+pub enum PairingCheckError {
+    /// The pairing store is unavailable or returned an unexpected error.
+    StoreUnavailable,
+}
+
 /// Check whether a user is approved to interact via a messaging platform.
 ///
 /// If the user is not yet approved, a pairing code is generated and returned
@@ -26,26 +33,26 @@ pub fn check_pairing(
     platform: &str,
     user_id: &str,
     user_name: &str,
-) -> PairingCheck {
+) -> Result<PairingCheck, PairingCheckError> {
     let store = PairingStore::new(database_path);
 
     // If already approved, fast-path
     match store.is_approved(platform, user_id) {
-        Ok(true) => return PairingCheck::Approved,
+        Ok(true) => return Ok(PairingCheck::Approved),
         Err(e) => {
-            tracing::error!(error = %e, "pairing check failed, allowing through");
-            return PairingCheck::Approved; // fail-open to avoid locking out users on DB errors
+            tracing::error!(error = %e, "pairing lookup failed");
+            return Err(PairingCheckError::StoreUnavailable);
         }
         Ok(false) => {}
     }
 
     // Not approved — generate a code
     match store.generate_code(platform, user_id, user_name) {
-        Ok(Some(code)) => PairingCheck::NeedsPairing(code),
-        Ok(None) => PairingCheck::AtCapacity,
+        Ok(Some(code)) => Ok(PairingCheck::NeedsPairing(code)),
+        Ok(None) => Ok(PairingCheck::AtCapacity),
         Err(e) => {
-            tracing::error!(error = %e, "pairing code generation failed, allowing through");
-            PairingCheck::Approved // fail-open
+            tracing::error!(error = %e, "pairing code generation failed");
+            Err(PairingCheckError::StoreUnavailable)
         }
     }
 }

@@ -160,8 +160,8 @@ pub async fn events_handler(
         &user,
         &user, // Slack user IDs are opaque; username isn't available without API call
     ) {
-        super::PairingCheck::Approved => {}
-        super::PairingCheck::NeedsPairing(code) => {
+        Ok(super::PairingCheck::Approved) => {}
+        Ok(super::PairingCheck::NeedsPairing(code)) => {
             let reply = super::pairing_reply(&code);
             let client2 = state.http_client.clone();
             let token2 = token.clone();
@@ -174,7 +174,7 @@ pub async fn events_handler(
             });
             return Ok(Json(serde_json::json!({ "ok": true })));
         }
-        super::PairingCheck::AtCapacity => {
+        Ok(super::PairingCheck::AtCapacity) => {
             let reply = super::pairing_capacity_reply().to_owned();
             let client2 = state.http_client.clone();
             let token2 = token.clone();
@@ -186,6 +186,9 @@ pub async fn events_handler(
                 }
             });
             return Ok(Json(serde_json::json!({ "ok": true })));
+        }
+        Err(_) => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
 

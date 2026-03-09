@@ -336,8 +336,8 @@ pub async fn webhook_handler(
         &user_id_str,
         &user_name,
     ) {
-        super::PairingCheck::Approved => {} // proceed
-        super::PairingCheck::NeedsPairing(code) => {
+        Ok(super::PairingCheck::Approved) => {} // proceed
+        Ok(super::PairingCheck::NeedsPairing(code)) => {
             let reply = super::pairing_reply(&code);
             let client2 = state.http_client.clone();
             let token2 = token.clone();
@@ -348,7 +348,7 @@ pub async fn webhook_handler(
             });
             return StatusCode::OK;
         }
-        super::PairingCheck::AtCapacity => {
+        Ok(super::PairingCheck::AtCapacity) => {
             let reply = super::pairing_capacity_reply().to_owned();
             let client2 = state.http_client.clone();
             let token2 = token.clone();
@@ -358,6 +358,9 @@ pub async fn webhook_handler(
                 }
             });
             return StatusCode::OK;
+        }
+        Err(_) => {
+            return StatusCode::SERVICE_UNAVAILABLE;
         }
     }
 
