@@ -255,6 +255,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/chat/batch", post(chat_batch_handler))
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/purge", delete(purge_sessions_handler))
+        .route("/sessions/import", post(import_session_handler))
         .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
         .route("/sessions/{id}/messages", get(session_messages_handler))
         .route("/sessions/{id}/fork", post(fork_session_handler))
@@ -702,6 +703,50 @@ async fn purge_sessions_handler(
     Ok(Json(serde_json::json!({
         "purged": purged,
         "older_than_days": params.older_than_days,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ImportSessionRequest {
+    session_id: Option<String>,
+    title: Option<String>,
+    messages: Vec<ImportMessage>,
+}
+
+#[derive(Deserialize)]
+struct ImportMessage {
+    role: String,
+    content: String,
+}
+
+async fn import_session_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ImportSessionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+
+    let session_id = request.session_id.unwrap_or_else(|| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        format!("import-{ts}")
+    });
+
+    let message_count = request.messages.len();
+    let messages: Vec<(String, String)> = request
+        .messages
+        .into_iter()
+        .map(|m| (m.role, m.content))
+        .collect();
+
+    store
+        .import_session(&session_id, request.title.as_deref(), messages)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("import error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "messages_imported": message_count,
     })))
 }
 
