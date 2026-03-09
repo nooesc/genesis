@@ -202,7 +202,9 @@ impl<'a> SessionExecutionService<'a> {
         let images = input.images.clone();
 
         let outcome = self.run_turn_with_runner(input, |history| async move {
-            let mut agent = self.build_agent_loop(session_id, platform, history, Some(&prompt))?;
+            let mut agent = self
+                .build_agent_loop(session_id, platform, history, Some(&prompt))
+                .await?;
             let start_index = agent.messages().len();
             let result = agent.run_turn_with_images(&prompt, images).await?;
             Ok(ExecutedTurn {
@@ -239,7 +241,9 @@ impl<'a> SessionExecutionService<'a> {
         let images = input.images.clone();
 
         let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
-            let mut agent = self.build_agent_loop(session_id, platform, history, Some(&prompt))?;
+            let mut agent = self
+                .build_agent_loop(session_id, platform, history, Some(&prompt))
+                .await?;
             let start_index = agent.messages().len();
             let result = agent.run_turn_streaming_with_images(&prompt, images, on_chunk).await?;
             Ok(ExecutedTurn {
@@ -292,7 +296,7 @@ impl<'a> SessionExecutionService<'a> {
         SessionStore::new(&self.loaded.config.storage.database_path)
     }
 
-    fn build_agent_loop(
+    async fn build_agent_loop(
         &self,
         session_id: String,
         platform: DeliveryPlatform,
@@ -325,7 +329,16 @@ impl<'a> SessionExecutionService<'a> {
 
         // Apply tool filter (allowlist/denylist)
         if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
-            let all_tools: Vec<String> = tool_runtime.definitions().iter().map(|d| d.name.clone()).collect();
+            let all_tools: Vec<String> = if filter.allow.is_empty() {
+                tool_runtime
+                    .definitions_async()
+                    .await
+                    .into_iter()
+                    .map(|d| d.name)
+                    .collect()
+            } else {
+                filter.allow.iter().cloned().collect()
+            };
             let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
                 all_tools.into_iter().collect()
             } else {
@@ -408,6 +421,10 @@ impl<'a> SessionExecutionService<'a> {
             "built agent loop dependencies"
         );
 
+        let hook_runner = crate::hooks::HookRunner::default();
+        let hooks = crate::audit::AuditHooks::shared(db_path);
+
+        let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
             client,
             tool_runtime,
@@ -432,7 +449,7 @@ impl<'a> SessionExecutionService<'a> {
                 response_format: self.response_format.clone(),
                 ..AgentLoopConfig::default()
             },
-            crate::hooks::HookRunner::default(),
+            hook_runner.clone(),
             history,
         );
 
@@ -474,6 +491,10 @@ impl<'a> SessionExecutionService<'a> {
         // Attach subagent spawner so agent can spawn parallel workstreams
         agent.set_subagent_spawner(Arc::new(ExecutionSubagentSpawner {
             loaded: Arc::new(self.loaded.clone()),
+            tool_runtime: subagent_tool_runtime,
+            hook_runner,
+            hooks: Arc::clone(&hooks),
+            model_override: self.model_override.clone(),
         }));
 
         // Set up response cache if configured
@@ -483,7 +504,7 @@ impl<'a> SessionExecutionService<'a> {
         }
 
         // Attach audit logging hooks
-        agent.set_hooks(crate::audit::AuditHooks::shared(db_path));
+        agent.set_hooks(hooks);
 
         Ok(agent)
     }
@@ -830,11 +851,19 @@ impl<'a> SessionExecutionService<'a> {
 /// a new `AgentLoop` and runs it in the background.
 struct ExecutionSubagentSpawner {
     loaded: Arc<LoadedConfig>,
+    tool_runtime: Arc<ToolRuntime>,
+    hook_runner: crate::hooks::HookRunner,
+    hooks: Arc<dyn crate::agent_loop::AgentHooks>,
+    model_override: Option<(String, String)>,
 }
 
 impl SubagentSpawner for ExecutionSubagentSpawner {
     fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str) {
         let loaded = Arc::clone(&self.loaded);
+        let tool_runtime = self.tool_runtime.with_session_id(child_session_id);
+        let hook_runner = self.hook_runner.clone();
+        let hooks = Arc::clone(&self.hooks);
+        let model_override = self.model_override.clone();
         let child_session_id = child_session_id.to_owned();
         let subagent_id = subagent_id.to_owned();
         let task = task.to_owned();
@@ -859,22 +888,22 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                 info!("subagent starting");
 
                 // Build the child agent loop
-                let execution_context = build_execution_context_from_loaded(
-                    &loaded,
-                    child_session_id.clone(),
-                    DeliveryPlatform::Cli,
-                );
-                let tool_runtime = build_default_tool_runtime(&execution_context);
-
                 let system_prompt = format!(
                     "You are a subagent — a focused worker spawned by a parent agent to handle a specific task. \
                      Complete the task below thoroughly and concisely. You have access to the same tools as the parent agent.\n\n\
                      ## Your Task\n{task}"
                 );
 
+                let (backend, model) = match &model_override {
+                    Some((b, m)) => (b.as_str(), m.as_str()),
+                    None => (
+                        loaded.config.provider.backend.as_str(),
+                        loaded.config.provider.model.as_str(),
+                    ),
+                };
                 let client = match client_from_config(
-                    &loaded.config.provider.backend,
-                    &loaded.config.provider.model,
+                    backend,
+                    model,
                     loaded.config.provider.base_url.as_deref(),
                     loaded.config.provider.api_key_env.as_deref(),
                 ) {
@@ -894,8 +923,9 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                         max_turns: 10, // Subagents get fewer turns to stay focused
                         ..AgentLoopConfig::default()
                     },
-                    crate::hooks::HookRunner::default(),
+                    hook_runner,
                 );
+                agent.set_hooks(hooks);
 
                 // Run the subagent turn
                 match agent.run_turn(&task).await {
