@@ -36,10 +36,27 @@ pub struct ChatClient {
 impl ChatClient {
     /// Create a new client from a resolved provider.
     pub fn new(provider: &ResolvedProvider) -> Result<Self, ProviderError> {
+        let is_anthropic = provider.backend == "anthropic";
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        if !provider.api_key.is_empty() {
+        if is_anthropic {
+            // Anthropic uses x-api-key header and requires anthropic-version
+            if !provider.api_key.is_empty() {
+                headers.insert(
+                    "x-api-key",
+                    HeaderValue::from_str(&provider.api_key).map_err(|_| {
+                        ProviderError::MissingApiKey {
+                            env_var: "API key contains invalid header characters".to_owned(),
+                        }
+                    })?,
+                );
+            }
+            headers.insert(
+                "anthropic-version",
+                HeaderValue::from_static("2023-06-01"),
+            );
+        } else if !provider.api_key.is_empty() {
             let auth_value = format!("Bearer {}", provider.api_key);
             headers.insert(
                 AUTHORIZATION,
@@ -56,7 +73,11 @@ impl ChatClient {
             .build()?;
 
         let base = provider.base_url.trim_end_matches('/');
-        let endpoint = format!("{}/chat/completions", base);
+        let endpoint = if is_anthropic {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/chat/completions", base)
+        };
 
         Ok(Self {
             http,
@@ -188,6 +209,10 @@ impl ChatClient {
             request.model = self.model.clone();
         }
 
+        if self.backend == "anthropic" {
+            return self.complete_anthropic(request, started_at).await;
+        }
+
         let body = Self::prepare_body(&mut request, &self.backend)?;
         let response = self.send_with_retry(&body, &request.model).await?;
 
@@ -240,6 +265,54 @@ impl ChatClient {
         Ok(completion)
     }
 
+    /// Anthropic-native completion path: translates request/response formats.
+    async fn complete_anthropic(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        use crate::anthropic_types::{self, AnthropicResponse};
+
+        let anthropic_req = anthropic_types::to_anthropic_request(&request);
+        let body = serde_json::to_value(&anthropic_req)?;
+        let response = self.send_with_retry(&body, &request.model).await?;
+
+        let anthropic_resp: AnthropicResponse = match response.json().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                error!(
+                    endpoint = self.endpoint.as_str(),
+                    model = request.model.as_str(),
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %error,
+                    "anthropic response decode failed"
+                );
+                return Err(error.into());
+            }
+        };
+
+        let completion = anthropic_types::from_anthropic_response(anthropic_resp);
+
+        let (prompt_tokens, completion_tokens, total_tokens) = completion
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+            .unwrap_or((0, 0, 0));
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            token_counts_available = true,
+            "anthropic completion request succeeded"
+        );
+
+        Ok(completion)
+    }
+
     pub async fn complete_stream(
         &self,
         mut request: ChatCompletionRequest,
@@ -249,6 +322,11 @@ impl ChatClient {
             request.model = self.model.clone();
         }
         request.stream = Some(true);
+
+        if self.backend == "anthropic" {
+            return self.complete_stream_anthropic(request, started_at).await;
+        }
+
         request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
@@ -328,6 +406,85 @@ impl ChatClient {
         Ok(Box::pin(stream))
     }
 
+    /// Anthropic-native streaming path: translates SSE events to OpenAI chunks.
+    async fn complete_stream_anthropic(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionChunkStream, ProviderError> {
+        use crate::anthropic_types;
+
+        let anthropic_req = anthropic_types::to_anthropic_request(&request);
+        let body = serde_json::to_value(&anthropic_req)?;
+        let response = self.send_with_retry(&body, &request.model).await?;
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens = 0u32,
+            completion_tokens = 0u32,
+            total_tokens = 0u32,
+            token_counts_available = false,
+            "anthropic streaming request accepted"
+        );
+
+        let endpoint = self.endpoint.clone();
+        let model = request.model.clone();
+        let byte_stream = response.bytes_stream();
+        let stream = async_stream::try_stream! {
+            futures_util::pin_mut!(byte_stream);
+            let mut buffer = String::new();
+            let stream_started_at = Instant::now();
+            let mut chunk_count = 0usize;
+            let mut msg_id = String::new();
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = chunk?;
+                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
+                    error.to_string()
+                ))?;
+                buffer.push_str(text);
+
+                while let Some(event_text) = take_next_sse_event(&mut buffer) {
+                    let (event_type, data) = parse_anthropic_sse(&event_text);
+                    if data.is_empty() {
+                        continue;
+                    }
+
+                    match anthropic_types::anthropic_event_to_chunk(&event_type, &data, &mut msg_id)? {
+                        Some(parsed) => {
+                            chunk_count += 1;
+                            yield parsed;
+                        }
+                        None => {}
+                    }
+
+                    if event_type == "message_stop" {
+                        info!(
+                            endpoint = endpoint.as_str(),
+                            model = model.as_str(),
+                            elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                            chunk_count,
+                            "anthropic streaming finished"
+                        );
+                        return;
+                    }
+                }
+            }
+
+            info!(
+                endpoint = endpoint.as_str(),
+                model = model.as_str(),
+                elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                chunk_count,
+                "anthropic streaming stream closed"
+            );
+        };
+
+        Ok(Box::pin(stream))
+    }
+
     /// Returns the endpoint URL this client is configured to hit.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
@@ -388,6 +545,24 @@ fn inject_cache_control(body: &mut serde_json::Value) {
             last_tool["cache_control"] = cache_marker;
         }
     }
+}
+
+/// Parse an Anthropic SSE event, returning (event_type, data).
+///
+/// Anthropic SSE uses `event: <type>\ndata: <json>` format.
+fn parse_anthropic_sse(event: &str) -> (String, String) {
+    let mut event_type = String::new();
+    let mut data_parts: Vec<&str> = Vec::new();
+
+    for line in event.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = rest.trim().to_owned();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_parts.push(rest.trim());
+        }
+    }
+
+    (event_type, data_parts.join("\n"))
 }
 
 /// Whether an HTTP status code is transient and worth retrying.
@@ -612,6 +787,39 @@ mod tests {
         let mut body = serde_json::json!({"model": "test"});
         inject_cache_control(&mut body); // should not panic
         assert_eq!(body, serde_json::json!({"model": "test"}));
+    }
+
+    #[test]
+    fn anthropic_client_uses_messages_endpoint() {
+        let provider = ResolvedProvider {
+            base_url: "https://api.anthropic.com/v1".to_owned(),
+            api_key: "sk-ant-test".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            backend: "anthropic".to_owned(),
+        };
+
+        let client = ChatClient::new(&provider).expect("should build anthropic client");
+        assert_eq!(
+            client.endpoint(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(client.backend(), "anthropic");
+    }
+
+    #[test]
+    fn parse_anthropic_sse_extracts_event_and_data() {
+        let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}";
+        let (event_type, data) = parse_anthropic_sse(event);
+        assert_eq!(event_type, "content_block_delta");
+        assert!(data.contains("text_delta"));
+    }
+
+    #[test]
+    fn parse_anthropic_sse_handles_missing_event_type() {
+        let event = "data: {\"type\":\"ping\"}";
+        let (event_type, data) = parse_anthropic_sse(event);
+        assert_eq!(event_type, "");
+        assert!(data.contains("ping"));
     }
 
     #[test]

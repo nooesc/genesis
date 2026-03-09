@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 /// Resolved provider endpoint ready to use for API calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,7 @@ fn default_base_url(backend: &str) -> &str {
     match backend.trim().to_ascii_lowercase().as_str() {
         "openrouter" => OPENROUTER_BASE_URL,
         "openai" => OPENAI_BASE_URL,
+        "anthropic" => ANTHROPIC_BASE_URL,
         _ => OPENAI_BASE_URL,
     }
 }
@@ -139,5 +141,17 @@ mod tests {
         let resolved = resolve("vllm", "llama-3", None, None, &env);
 
         assert_eq!(resolved.base_url, OPENAI_BASE_URL);
+    }
+
+    #[test]
+    fn resolves_anthropic_with_correct_url_and_key() {
+        let env = BTreeMap::from([("ANTHROPIC_API_KEY".to_owned(), "sk-ant-123".to_owned())]);
+
+        let resolved = resolve("anthropic", "claude-sonnet-4-20250514", None, None, &env);
+
+        assert_eq!(resolved.base_url, ANTHROPIC_BASE_URL);
+        assert_eq!(resolved.api_key, "sk-ant-123");
+        assert_eq!(resolved.model, "claude-sonnet-4-20250514");
+        assert_eq!(resolved.backend, "anthropic");
     }
 }

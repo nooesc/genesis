@@ -1,3 +1,4 @@
+mod anthropic_types;
 mod api_types;
 mod client;
 mod error;
