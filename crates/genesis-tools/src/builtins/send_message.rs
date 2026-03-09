@@ -53,10 +53,14 @@ impl ToolHandler for SendMessageTool {
             "slack" => send_slack(channel, message, thread_id, &call.name),
             "telegram" => send_telegram(channel, message, thread_id, &call.name),
             "discord" => send_discord(channel, message, &call.name),
+            "whatsapp" => send_whatsapp(channel, message, &call.name),
+            "homeassistant" | "home_assistant" => {
+                send_homeassistant(channel, message, &call.name)
+            }
             _ => Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!(
-                    "unsupported platform: {platform}. Supported: slack, telegram, discord"
+                    "unsupported platform: {platform}. Supported: slack, telegram, discord, whatsapp, homeassistant"
                 ),
             }),
         }
@@ -263,6 +267,149 @@ fn send_discord(
     })
 }
 
+fn send_whatsapp(
+    recipient: &str,
+    text: &str,
+    tool_name: &str,
+) -> Result<ToolOutput, ToolError> {
+    let token = std::env::var("WHATSAPP_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+    })?;
+
+    let phone_number_id =
+        std::env::var("WHATSAPP_PHONE_NUMBER_ID").map_err(|_| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
+        })?;
+
+    // WhatsApp has a 4096 character limit
+    let truncated = if text.len() > 4096 {
+        format!("{}...", &text[..4093])
+    } else {
+        text.to_owned()
+    };
+
+    let url = format!(
+        "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
+    );
+
+    let body = serde_json::json!({
+        "messaging_product": "whatsapp",
+        "to": recipient,
+        "type": "text",
+        "text": { "body": truncated }
+    });
+
+    let resp = platform_client()
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("WhatsApp API request failed: {e}"),
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let resp_body = resp.text().unwrap_or_default();
+        return Err(ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("WhatsApp API error {status}: {resp_body}"),
+        });
+    }
+
+    let resp_body: serde_json::Value =
+        resp.json().map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("failed to parse WhatsApp response: {e}"),
+        })?;
+
+    let msg_id = resp_body["messages"][0]["id"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
+
+    Ok(ToolOutput {
+        content: format!("Message sent to WhatsApp recipient {recipient} (id: {msg_id})"),
+        metadata: BTreeMap::from([
+            ("tool".to_owned(), tool_name.to_owned()),
+            ("platform".to_owned(), "whatsapp".to_owned()),
+            ("recipient".to_owned(), recipient.to_owned()),
+            ("message_id".to_owned(), msg_id),
+        ]),
+    })
+}
+
+fn send_homeassistant(
+    service_target: &str,
+    message: &str,
+    tool_name: &str,
+) -> Result<ToolOutput, ToolError> {
+    let ha_url =
+        std::env::var("HOMEASSISTANT_URL").map_err(|_| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
+        })?;
+
+    let ha_token = std::env::var("HOMEASSISTANT_LONG_LIVED_TOKEN").map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "HOMEASSISTANT_LONG_LIVED_TOKEN environment variable not set".to_owned(),
+        }
+    })?;
+
+    // service_target can be:
+    //   "notify.persistent_notification" — creates a HA notification
+    //   "notify.mobile_app_<device>" — sends push to mobile app
+    //   "tts.speak" — text-to-speech on a media player
+    // Default to persistent_notification if just a plain name is given
+    let (domain, service) = if let Some((d, s)) = service_target.split_once('.') {
+        (d, s)
+    } else {
+        ("notify", service_target)
+    };
+
+    let base = ha_url.trim_end_matches('/');
+    let url = format!("{base}/api/services/{domain}/{service}");
+
+    let body = serde_json::json!({
+        "message": message,
+        "title": "Genesis Agent"
+    });
+
+    let resp = platform_client()
+        .post(&url)
+        .bearer_auth(&ha_token)
+        .json(&body)
+        .send()
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("Home Assistant API request failed: {e}"),
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let resp_body = resp.text().unwrap_or_default();
+        return Err(ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("Home Assistant API error {status}: {resp_body}"),
+        });
+    }
+
+    Ok(ToolOutput {
+        content: format!(
+            "Message sent via Home Assistant service {domain}.{service}"
+        ),
+        metadata: BTreeMap::from([
+            ("tool".to_owned(), tool_name.to_owned()),
+            ("platform".to_owned(), "homeassistant".to_owned()),
+            ("service".to_owned(), format!("{domain}.{service}")),
+        ]),
+    })
+}
+
 /// Split a message into chunks respecting a max length.
 /// Tries to split on newlines, then word boundaries.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
@@ -459,6 +606,70 @@ mod tests {
         let chunks = split_message(text, 12);
         assert_eq!(chunks[0], "hello world");
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn whatsapp_requires_token() {
+        std::env::remove_var("WHATSAPP_TOKEN");
+        let tool = SendMessageTool;
+        let call = ToolCall {
+            name: "send_message".to_owned(),
+            arguments: BTreeMap::from([
+                ("platform".to_owned(), "whatsapp".to_owned()),
+                ("channel".to_owned(), "+1234567890".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("WHATSAPP_TOKEN"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn homeassistant_requires_url() {
+        std::env::remove_var("HOMEASSISTANT_URL");
+        let tool = SendMessageTool;
+        let call = ToolCall {
+            name: "send_message".to_owned(),
+            arguments: BTreeMap::from([
+                ("platform".to_owned(), "homeassistant".to_owned()),
+                ("channel".to_owned(), "persistent_notification".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("HOMEASSISTANT_URL"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn homeassistant_accepts_alternate_name() {
+        std::env::remove_var("HOMEASSISTANT_URL");
+        let tool = SendMessageTool;
+        let call = ToolCall {
+            name: "send_message".to_owned(),
+            arguments: BTreeMap::from([
+                ("platform".to_owned(), "home_assistant".to_owned()),
+                ("channel".to_owned(), "persistent_notification".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        // Should route to homeassistant handler, not unsupported platform
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("HOMEASSISTANT_URL"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

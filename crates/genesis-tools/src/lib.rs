@@ -827,11 +827,11 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "send_message".to_owned(),
-                description: "Sends a message to a messaging platform (Slack, Telegram, Discord). Requires the corresponding API token environment variable to be set. Use list_channels first to discover available channel IDs.".to_owned(),
+                description: "Sends a message to a messaging platform (Slack, Telegram, Discord, WhatsApp, Home Assistant). Requires the corresponding API token environment variable to be set. Use list_channels first to discover available channel IDs.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
-                        "platform": { "type": "string", "description": "Target platform: 'slack', 'telegram', or 'discord'." },
+                        "platform": { "type": "string", "description": "Target platform: 'slack', 'telegram', 'discord', 'whatsapp', or 'homeassistant'." },
                         "channel": { "type": "string", "description": "Channel or chat ID to send the message to. Slack: channel ID (e.g. C04XXXXXXX). Telegram: chat ID (numeric). Discord: channel ID (numeric)." },
                         "message": { "type": "string", "description": "The message text to send." },
                         "thread_id": { "type": "string", "description": "Optional thread/reply ID. Slack: thread_ts. Telegram: reply_to_message_id." }
@@ -845,7 +845,7 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "list_channels".to_owned(),
-                description: "Lists available channels on configured messaging platforms (Slack, Discord). Fetches from platform APIs and caches results. Use this to discover channel IDs before using send_message.".to_owned(),
+                description: "Lists available channels on configured messaging platforms (Slack, Discord, WhatsApp, Home Assistant). Fetches from platform APIs and caches results. Use this to discover channel IDs before using send_message.".to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {

@@ -111,6 +111,12 @@ fn configured_platforms() -> Vec<String> {
     if std::env::var("DISCORD_BOT_TOKEN").is_ok() {
         platforms.push("discord".to_owned());
     }
+    if std::env::var("WHATSAPP_TOKEN").is_ok() {
+        platforms.push("whatsapp".to_owned());
+    }
+    if std::env::var("HOMEASSISTANT_URL").is_ok() {
+        platforms.push("homeassistant".to_owned());
+    }
     platforms
 }
 
@@ -119,10 +125,12 @@ fn fetch_channels(platform: &str, tool_name: &str) -> Result<Vec<CachedChannel>,
         "slack" => fetch_slack_channels(tool_name),
         "telegram" => Ok(Vec::new()), // Telegram doesn't have a list-channels API for bots
         "discord" => fetch_discord_channels(tool_name),
+        "whatsapp" => fetch_whatsapp_info(tool_name),
+        "homeassistant" => fetch_homeassistant_services(tool_name),
         _ => Err(ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: format!(
-                "unsupported platform: {platform}. Supported: slack, telegram, discord"
+                "unsupported platform: {platform}. Supported: slack, telegram, discord, whatsapp, homeassistant"
             ),
         }),
     }
@@ -300,6 +308,98 @@ fn fetch_discord_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolErr
     }
 
     Ok(all_channels)
+}
+
+/// WhatsApp Cloud API doesn't support listing contacts, but we can show the
+/// configured phone number ID so the agent knows the platform is available.
+fn fetch_whatsapp_info(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
+    let _token = std::env::var("WHATSAPP_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+    })?;
+
+    let phone_id =
+        std::env::var("WHATSAPP_PHONE_NUMBER_ID").map_err(|_| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
+        })?;
+
+    // Return a single entry representing the configured WhatsApp business number.
+    // Actual recipients must be specified by phone number.
+    Ok(vec![CachedChannel {
+        platform: "whatsapp".to_owned(),
+        channel_id: phone_id.clone(),
+        channel_name: format!("Business Phone (ID: {phone_id})"),
+        channel_type: "phone".to_owned(),
+        is_member: true,
+        cached_at: String::new(),
+    }])
+}
+
+/// Fetch available notification services from Home Assistant REST API.
+fn fetch_homeassistant_services(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
+    let ha_url = std::env::var("HOMEASSISTANT_URL").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
+    })?;
+
+    let ha_token = std::env::var("HOMEASSISTANT_LONG_LIVED_TOKEN").map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "HOMEASSISTANT_LONG_LIVED_TOKEN environment variable not set".to_owned(),
+        }
+    })?;
+
+    let base = ha_url.trim_end_matches('/');
+    let url = format!("{base}/api/services");
+
+    let resp = api_client()
+        .get(&url)
+        .bearer_auth(&ha_token)
+        .send()
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("Home Assistant API request failed: {e}"),
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("Home Assistant API error {status}: {body}"),
+        });
+    }
+
+    let services: Vec<serde_json::Value> =
+        resp.json().map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("failed to parse Home Assistant services: {e}"),
+        })?;
+
+    let mut channels = Vec::new();
+
+    // Extract notify.* services which can receive messages
+    for domain in &services {
+        let domain_name = domain["domain"].as_str().unwrap_or("");
+        if domain_name != "notify" {
+            continue;
+        }
+        if let Some(service_list) = domain["services"].as_object() {
+            for (service_name, _service_def) in service_list {
+                channels.push(CachedChannel {
+                    platform: "homeassistant".to_owned(),
+                    channel_id: format!("notify.{service_name}"),
+                    channel_name: format!("notify.{service_name}"),
+                    channel_type: "service".to_owned(),
+                    is_member: true,
+                    cached_at: String::new(),
+                });
+            }
+        }
+    }
+
+    Ok(channels)
 }
 
 fn format_channels(channels: &[CachedChannel]) -> String {
