@@ -283,10 +283,30 @@ pub enum Command {
     Toolset(ToolsetCommand),
     #[command(subcommand, about = "List and preview agent personalities")]
     Personality(PersonalityCommand),
+    #[command(subcommand, about = "Run and manage multi-step workflows")]
+    Workflow(WorkflowCommand),
     #[command(about = "Generate shell completions for bash, zsh, fish, elvish, or powershell")]
     Completions {
         #[arg(help = "Shell to generate completions for (bash, zsh, fish, elvish, powershell)")]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    #[command(about = "Execute a workflow from a YAML definition file")]
+    Run {
+        #[arg(help = "Path to the workflow YAML file")]
+        file: String,
+        #[arg(help = "Initial input for the workflow")]
+        input: String,
+        #[arg(long, help = "Session ID to use (default: auto-generated)")]
+        session_id: Option<String>,
+    },
+    #[command(about = "Validate a workflow YAML file without executing it")]
+    Validate {
+        #[arg(help = "Path to the workflow YAML file")]
+        file: String,
     },
 }
 
@@ -1537,6 +1557,48 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Toolset(toolset_command) => run_toolset(toolset_command, cli.json),
         Command::Personality(personality_command) => run_personality(personality_command, cli.json),
+        Command::Workflow(WorkflowCommand::Validate { file }) => {
+            let yaml = fs::read_to_string(&file)
+                .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
+            let workflow = genesis_core::workflow::parse_workflow(&yaml)
+                .map_err(|e| CliError::Other(format!("invalid workflow YAML: {e}")))?;
+            let issues = genesis_core::workflow::validate_workflow(&workflow);
+            if issues.is_empty() {
+                Ok(format!("Workflow '{}' is valid ({} steps)", workflow.name, workflow.steps.len()))
+            } else {
+                Err(CliError::Other(format!("Validation errors:\n{}", issues.join("\n"))))
+            }
+        }
+        Command::Workflow(WorkflowCommand::Run { file, input, session_id }) => {
+            let yaml = fs::read_to_string(&file)
+                .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
+            let workflow = genesis_core::workflow::parse_workflow(&yaml)
+                .map_err(|e| CliError::Other(format!("invalid workflow YAML: {e}")))?;
+
+            let loaded = load(cli.config.as_deref())?;
+            let session_id = session_id.unwrap_or_else(|| {
+                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+                format!("workflow-{}-{ts}", workflow.name)
+            });
+
+            let svc = genesis_core::execution::SessionExecutionService::new(&loaded);
+            let result = svc.run_workflow(&workflow, &input, &session_id).await
+                .map_err(|e| CliError::Other(format!("workflow failed: {e}")))?;
+
+            if cli.json {
+                Ok(serde_json::to_string_pretty(&result)?)
+            } else {
+                let mut output = format!("Workflow '{}' completed ({} steps)\n", result.workflow_name, result.steps_completed());
+                for step in &result.step_results {
+                    output.push_str(&format!("\n--- {} ---\n{}\n", step.step_name, step.output));
+                }
+                output.push_str(&format!(
+                    "\nTokens: {} in / {} out",
+                    result.total_input_tokens, result.total_output_tokens
+                ));
+                Ok(output)
+            }
+        }
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());

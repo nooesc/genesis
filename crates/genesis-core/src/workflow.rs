@@ -121,6 +121,91 @@ pub fn validate_workflow(workflow: &WorkflowDefinition) -> Vec<String> {
     issues
 }
 
+/// Error from workflow execution.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowError {
+    #[error("workflow validation failed: {0}")]
+    Validation(String),
+    #[error("step '{step}' failed: {source}")]
+    StepFailed {
+        step: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+/// Execute a workflow by running each step through the provided async runner.
+///
+/// The `runner` closure receives `(rendered_prompt, optional_max_turns)` and
+/// must return the step output text plus token counts. This keeps the executor
+/// decoupled from any specific agent implementation.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = execute_workflow(&workflow, "user question", |prompt, max_turns| async {
+///     let agent_result = agent.run_turn(&prompt).await?;
+///     Ok((agent_result.response, agent_result.total_input_tokens, agent_result.total_output_tokens))
+/// }).await?;
+/// ```
+pub async fn execute_workflow<F, Fut>(
+    workflow: &WorkflowDefinition,
+    input: &str,
+    mut runner: F,
+) -> Result<WorkflowResult, WorkflowError>
+where
+    F: FnMut(String, Option<usize>) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, u32, u32), Box<dyn std::error::Error + Send + Sync>>>,
+{
+    let issues = validate_workflow(workflow);
+    if !issues.is_empty() {
+        return Err(WorkflowError::Validation(issues.join("; ")));
+    }
+
+    let mut step_outputs: HashMap<String, String> = HashMap::new();
+    let mut step_results: Vec<StepResult> = Vec::new();
+    let mut total_input_tokens = 0u32;
+    let mut total_output_tokens = 0u32;
+
+    for step in &workflow.steps {
+        let rendered = render_prompt(&step.prompt, input, &step_outputs);
+
+        let (output, in_tok, out_tok) = runner(rendered, step.max_turns)
+            .await
+            .map_err(|e| WorkflowError::StepFailed {
+                step: step.name.clone(),
+                source: e,
+            })?;
+
+        total_input_tokens = total_input_tokens.saturating_add(in_tok);
+        total_output_tokens = total_output_tokens.saturating_add(out_tok);
+
+        step_outputs.insert(step.name.clone(), output.clone());
+        step_results.push(StepResult {
+            step_name: step.name.clone(),
+            output: output.clone(),
+            input_tokens: in_tok,
+            output_tokens: out_tok,
+        });
+
+        if step.terminal {
+            break;
+        }
+    }
+
+    let final_output = step_results.last()
+        .map(|r| r.output.clone())
+        .unwrap_or_default();
+
+    Ok(WorkflowResult {
+        workflow_name: workflow.name.clone(),
+        step_results,
+        final_output,
+        total_input_tokens,
+        total_output_tokens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +362,112 @@ steps:
         assert_eq!(result.steps_completed(), 1);
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["workflow_name"], "test");
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_runs_steps_sequentially() {
+        let workflow = WorkflowDefinition {
+            name: "pipeline".into(),
+            description: "test pipeline".into(),
+            steps: vec![
+                WorkflowStep {
+                    name: "step1".into(),
+                    prompt: "Process: {{input}}".into(),
+                    model: None,
+                    max_turns: None,
+                    terminal: false,
+                },
+                WorkflowStep {
+                    name: "step2".into(),
+                    prompt: "Refine: {{step1}}".into(),
+                    model: None,
+                    max_turns: None,
+                    terminal: false,
+                },
+            ],
+        };
+
+        let result = execute_workflow(&workflow, "hello", |prompt, _max_turns| async move {
+            // Simulate an agent that echoes the prompt
+            Ok((format!("output_of({prompt})"), 10, 5))
+        }).await.unwrap();
+
+        assert_eq!(result.workflow_name, "pipeline");
+        assert_eq!(result.step_results.len(), 2);
+        assert_eq!(result.step_results[0].output, "output_of(Process: hello)");
+        assert_eq!(result.step_results[1].output, "output_of(Refine: output_of(Process: hello))");
+        assert_eq!(result.total_input_tokens, 20);
+        assert_eq!(result.total_output_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_stops_at_terminal_step() {
+        let workflow = WorkflowDefinition {
+            name: "early_exit".into(),
+            description: "".into(),
+            steps: vec![
+                WorkflowStep {
+                    name: "a".into(),
+                    prompt: "Step A: {{input}}".into(),
+                    model: None,
+                    max_turns: None,
+                    terminal: true,
+                },
+                WorkflowStep {
+                    name: "b".into(),
+                    prompt: "Step B: {{a}}".into(),
+                    model: None,
+                    max_turns: None,
+                    terminal: false,
+                },
+            ],
+        };
+
+        let result = execute_workflow(&workflow, "test", |_prompt, _| async move {
+            Ok(("done".into(), 5, 3))
+        }).await.unwrap();
+
+        assert_eq!(result.step_results.len(), 1);
+        assert_eq!(result.final_output, "done");
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_propagates_step_error() {
+        let workflow = WorkflowDefinition {
+            name: "failing".into(),
+            description: "".into(),
+            steps: vec![
+                WorkflowStep {
+                    name: "fail".into(),
+                    prompt: "boom".into(),
+                    model: None,
+                    max_turns: None,
+                    terminal: false,
+                },
+            ],
+        };
+
+        let result = execute_workflow(&workflow, "x", |_prompt, _| async move {
+            Err("agent error".into())
+        }).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("fail"));
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_rejects_invalid() {
+        let workflow = WorkflowDefinition {
+            name: "empty".into(),
+            description: "".into(),
+            steps: vec![],
+        };
+
+        let result = execute_workflow(&workflow, "x", |_prompt, _| async move {
+            Ok(("nope".into(), 0, 0))
+        }).await;
+
+        assert!(matches!(result, Err(WorkflowError::Validation(_))));
     }
 }
