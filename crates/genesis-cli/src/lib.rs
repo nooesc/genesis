@@ -43,7 +43,7 @@ impl SlashCompleter {
                 "/help", "/history", "/export", "/tokens", "/session",
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
-                "/clear",
+                "/personality", "/clear",
             ],
         }
     }
@@ -2477,6 +2477,36 @@ async fn run_chat(
                     }
                     Ok(None) => println!("Session '{target_id}' not found."),
                     Err(e) => println!("Error looking up session: {e}"),
+                }
+            }
+            continue;
+        }
+
+        // Handle /personality — list or set personality
+        if trimmed.starts_with("/personality") {
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if arg.is_empty() {
+                let all = genesis_core::personality::list_personalities();
+                println!("Available personalities:");
+                for p in &all {
+                    println!("  {:12} - {}", p.name, p.description);
+                }
+                println!("\nSet with: /personality <name>");
+            } else {
+                match genesis_core::personality::get_personality(arg) {
+                    Some(p) => {
+                        service.set_personality_override(p.name.to_owned());
+                        println!("Personality set to '{}'. Takes effect on next turn.", p.name);
+                    }
+                    None => {
+                        let names: Vec<&str> =
+                            genesis_core::personality::list_personalities()
+                                .iter()
+                                .map(|p| p.name)
+                                .collect();
+                        println!("Unknown personality '{arg}'. Available: {}", names.join(", "));
+                    }
                 }
             }
             continue;
@@ -5815,6 +5845,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /tools        - List available tools\n\
              /skills       - List saved skills\n\
              /model        - Show active model\n\
+             /personality  - List or set personality (e.g. /personality pirate)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
@@ -9096,6 +9127,13 @@ storage:
         let result2 = handle_chat_command("/usage", "s1", &store);
         // Both should return something (even if session doesn't exist = None)
         assert_eq!(result1.is_some(), result2.is_some());
+    }
+
+    #[test]
+    fn chat_help_includes_personality() {
+        let result = handle_chat_command("/help", "s1", &stub_session_store());
+        let help = result.expect("help should return something");
+        assert!(help.contains("/personality"));
     }
 
     #[test]

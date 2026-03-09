@@ -29,6 +29,8 @@ pub struct SessionExecutionService<'a> {
     default_working_dir: Option<String>,
     /// Override the model for this service instance (backend, model).
     model_override: Option<(String, String)>,
+    /// Override the personality for this service instance.
+    personality_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +71,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None }
+        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None }
     }
 
     /// Create a service with MCP servers connected.
@@ -97,7 +99,7 @@ impl<'a> SessionExecutionService<'a> {
             None
         };
 
-        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None }
+        Self { loaded, mcp, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None }
     }
 
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
@@ -121,6 +123,11 @@ impl<'a> SessionExecutionService<'a> {
     /// When set, this model is used instead of the one from config.
     pub fn set_model_override(&mut self, backend: String, model: String) {
         self.model_override = Some((backend, model));
+    }
+
+    /// Override the personality for this service instance.
+    pub fn set_personality_override(&mut self, name: String) {
+        self.personality_override = Some(name);
     }
 
     /// Set an interactive approval handler for tools requiring user confirmation.
@@ -345,7 +352,9 @@ impl<'a> SessionExecutionService<'a> {
         if let Some(id) = self.system_prompt_override.as_deref() {
             prompt_builder = prompt_builder.identity(id);
         }
-        if let Some(ref p) = self.loaded.config.personality {
+        let effective_personality = self.personality_override.as_deref()
+            .or(self.loaded.config.personality.as_deref());
+        if let Some(p) = effective_personality {
             prompt_builder = prompt_builder.personality(p);
         }
         if let Some(s) = skills_section.as_deref() {
@@ -1189,5 +1198,59 @@ mod tests {
 
         let messages = store.load_messages("s1").unwrap();
         assert!(messages.is_empty(), "no nudge for unfinished turns");
+    }
+
+    #[test]
+    fn personality_override_takes_precedence() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = LoadedConfig {
+            config: GenesisConfig {
+                schema_version: 1,
+                profile: "operator".to_owned(),
+                provider: ProviderConfig {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1-mini".to_owned(),
+                    base_url: Some("http://localhost:8000/v1".to_owned()),
+                    api_key_env: None,
+                    extra_body: None,
+                    tool_call_parser: None,
+                },
+                tool_provider: None,
+                fallback_providers: Vec::new(),
+                mcp_servers: std::collections::HashMap::new(),
+                storage: StorageConfig {
+                    data_dir: data_dir.clone(),
+                    database_path: db_path.clone(),
+                },
+                runtime: RuntimeConfig {
+                    max_concurrency: 4,
+                    allow_destructive_tools: false,
+                    max_turns: 20,
+                    max_context_messages: None,
+                    budget_limit: None,
+                    terminal: None,
+                    thinking_budget: None,
+                    max_context_tokens: None,
+                    max_iterations: None,
+                    context_security: genesis_config::ContextSecurityPolicy::default(),
+                    reasoning_effort: None,
+                },
+                gateway: None,
+                toolsets: std::collections::HashMap::new(),
+                personality: Some("default".to_owned()),
+            },
+            paths: AppPaths {
+                config_path: PathBuf::from("/tmp/genesis/config.yaml"),
+                data_dir,
+                database_path: db_path,
+            },
+        };
+
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("pirate".to_owned());
+        // The personality_override field should be set
+        assert_eq!(service.personality_override.as_deref(), Some("pirate"));
     }
 }
