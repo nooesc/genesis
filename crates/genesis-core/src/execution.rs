@@ -422,6 +422,8 @@ impl<'a> SessionExecutionService<'a> {
                 tool_call_parser: self.loaded.config.provider.tool_call_parser.clone(),
                 reasoning_effort: self.loaded.config.runtime.reasoning_effort,
                 cache: self.loaded.config.runtime.cache.clone(),
+                guardrails: self.loaded.config.runtime.guardrails.as_ref()
+                    .map(crate::guardrails::GuardrailConfig::from),
                 thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
                     genesis_provider::ThinkingConfig {
                         budget_tokens: Some(budget),
@@ -1341,6 +1343,7 @@ mod tests {
                     reasoning_effort: None,
                     cache: None,
                     tool_filter: None,
+                    guardrails: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1497,6 +1500,7 @@ mod tests {
                     reasoning_effort: None,
                     cache: None,
                     tool_filter: None,
+                    guardrails: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

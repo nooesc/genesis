@@ -141,6 +141,10 @@ pub struct RuntimeConfig {
     /// When set, only tools matching the filter criteria are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_filter: Option<ToolFilterConfig>,
+    /// Guardrails configuration. When set, input and output are validated
+    /// against the specified rules before processing / returning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<GuardrailsConfig>,
 }
 
 /// Configuration for filtering which tools are available to the agent.
@@ -183,6 +187,50 @@ impl Default for CacheConfig {
         }
     }
 }
+
+/// Guardrails configuration for input/output validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GuardrailsConfig {
+    /// Enable PII detection (phone, email, SSN, credit card).
+    #[serde(default)]
+    pub detect_pii: bool,
+    /// Action when PII is detected: block, warn, or redact.
+    #[serde(default = "default_pii_action")]
+    pub pii_action: String,
+    /// Maximum response length in characters (0 = unlimited).
+    #[serde(default)]
+    pub max_response_length: usize,
+    /// Forbidden input patterns (regex). Inputs matching these are blocked.
+    #[serde(default)]
+    pub forbidden_input_patterns: Vec<String>,
+    /// Forbidden output patterns (regex). Outputs matching these are blocked.
+    #[serde(default)]
+    pub forbidden_output_patterns: Vec<String>,
+    /// Require output to be valid JSON.
+    #[serde(default)]
+    pub require_json_output: bool,
+    /// Maximum token budget per turn (0 = unlimited).
+    #[serde(default)]
+    pub max_tokens_per_turn: u32,
+    /// Custom rules with pattern and action.
+    #[serde(default)]
+    pub custom_rules: Vec<GuardrailCustomRule>,
+}
+
+/// A custom guardrail rule in config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GuardrailCustomRule {
+    pub name: String,
+    pub pattern: String,
+    #[serde(default = "default_applies_to")]
+    pub applies_to: String,
+    pub action: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+fn default_pii_action() -> String { "redact".to_owned() }
+fn default_applies_to() -> String { "both".to_owned() }
 
 /// Reasoning effort level controlling how much compute the model spends.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,6 +424,8 @@ struct FileRuntimeConfig {
     cache: Option<CacheConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_filter: Option<ToolFilterConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guardrails: Option<GuardrailsConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -458,6 +508,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             reasoning_effort: None,
             cache: None,
             tool_filter: None,
+            guardrails: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -667,6 +718,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.tool_filter.clone()),
+        guardrails: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.guardrails.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

@@ -412,6 +412,7 @@ mod tests {
                 reasoning_effort: None,
                 cache: None,
                 tool_filter: None,
+                guardrails: None,
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),

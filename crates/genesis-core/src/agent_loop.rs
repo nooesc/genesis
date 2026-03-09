@@ -109,6 +109,9 @@ pub struct AgentLoopConfig {
     /// Response cache configuration. When set, identical LLM requests are
     /// served from a SQLite cache instead of calling the provider.
     pub cache: Option<genesis_config::CacheConfig>,
+    /// Guardrails configuration. When set, user input is validated before
+    /// processing and agent output is validated before returning.
+    pub guardrails: Option<crate::guardrails::GuardrailConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -154,6 +157,7 @@ impl Default for AgentLoopConfig {
             tool_call_parser: None,
             reasoning_effort: None,
             cache: None,
+            guardrails: None,
         }
     }
 }
@@ -603,17 +607,47 @@ impl AgentLoop {
             }),
         );
 
-        self.trajectory.record_user_message(user_message);
+        // Run input guardrails if configured
+        let user_message = if let Some(ref gc) = self.config.guardrails {
+            let result = crate::guardrails::check_input(gc, user_message);
+            if !result.passed {
+                let blocked_reasons: Vec<&str> = result.violations.iter()
+                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+                    .map(|v| v.message.as_str())
+                    .collect();
+                let agent_result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by guardrails: {}",
+                        blocked_reasons.join("; ")
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &agent_result));
+                self.hooks.on_turn_end(&hook_session, &agent_result);
+                return Ok(agent_result);
+            }
+            result.content
+        } else {
+            user_message.to_owned()
+        };
+
+        self.trajectory.record_user_message(&user_message);
 
         if images.is_empty() {
-            self.messages.push(ChatMessage::user(user_message));
+            self.messages.push(ChatMessage::user(&user_message));
         } else {
             self.messages
-                .push(ChatMessage::user_with_images(user_message, images));
+                .push(ChatMessage::user_with_images(user_message.clone(), images));
         }
 
         // Fire turn-start hook
-        self.hooks.on_turn_start(&hook_session, user_message);
+        self.hooks.on_turn_start(&hook_session, &user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -935,10 +969,27 @@ impl AgentLoop {
             }
 
             // No tool calls - this is the final text response
-            let response_text = assistant_msg
+            let mut response_text = assistant_msg
                 .content_text()
                 .unwrap_or("")
                 .to_owned();
+
+            // Run output guardrails if configured
+            if let Some(ref gc) = self.config.guardrails {
+                let result = crate::guardrails::check_output(gc, &response_text);
+                if !result.passed {
+                    let blocked_reasons: Vec<&str> = result.violations.iter()
+                        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+                        .map(|v| v.message.as_str())
+                        .collect();
+                    response_text = format!(
+                        "Response blocked by guardrails: {}",
+                        blocked_reasons.join("; ")
+                    );
+                } else {
+                    response_text = result.content;
+                }
+            }
 
             self.trajectory.record_assistant_message(&response_text);
             self.messages.push(ChatMessage::assistant(&response_text));
@@ -994,17 +1045,47 @@ impl AgentLoop {
             }),
         );
 
-        self.trajectory.record_user_message(user_message);
+        // Run input guardrails if configured (streaming path)
+        let user_message = if let Some(ref gc) = self.config.guardrails {
+            let result = crate::guardrails::check_input(gc, user_message);
+            if !result.passed {
+                let blocked_reasons: Vec<&str> = result.violations.iter()
+                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+                    .map(|v| v.message.as_str())
+                    .collect();
+                let agent_result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by guardrails: {}",
+                        blocked_reasons.join("; ")
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &agent_result));
+                self.hooks.on_turn_end(&hook_session, &agent_result);
+                return Ok(agent_result);
+            }
+            result.content
+        } else {
+            user_message.to_owned()
+        };
+
+        self.trajectory.record_user_message(&user_message);
 
         if images.is_empty() {
-            self.messages.push(ChatMessage::user(user_message));
+            self.messages.push(ChatMessage::user(&user_message));
         } else {
             self.messages
-                .push(ChatMessage::user_with_images(user_message, images));
+                .push(ChatMessage::user_with_images(user_message.clone(), images));
         }
 
         // Fire turn-start hook (streaming)
-        self.hooks.on_turn_start(&hook_session, user_message);
+        self.hooks.on_turn_start(&hook_session, &user_message);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -1427,10 +1508,28 @@ impl AgentLoop {
                         }
                     }
 
-                    let response_text = assistant_msg
+                    let mut response_text = assistant_msg
                         .content_text()
                         .unwrap_or("")
                         .to_owned();
+
+                    // Run output guardrails if configured (streaming path)
+                    if let Some(ref gc) = self.config.guardrails {
+                        let gr = crate::guardrails::check_output(gc, &response_text);
+                        if !gr.passed {
+                            let blocked_reasons: Vec<&str> = gr.violations.iter()
+                                .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+                                .map(|v| v.message.as_str())
+                                .collect();
+                            response_text = format!(
+                                "Response blocked by guardrails: {}",
+                                blocked_reasons.join("; ")
+                            );
+                        } else {
+                            response_text = gr.content;
+                        }
+                    }
+
                     self.trajectory.record_assistant_message(&response_text);
                     self.messages.push(ChatMessage::assistant(&response_text));
 

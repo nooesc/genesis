@@ -347,6 +347,45 @@ pub fn parse_config(yaml: &str) -> Result<GuardrailConfig, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
 }
 
+impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
+    fn from(cfg: &genesis_config::GuardrailsConfig) -> Self {
+        let pii_action = match cfg.pii_action.as_str() {
+            "block" => ViolationAction::Block,
+            "warn" => ViolationAction::Warn,
+            _ => ViolationAction::Redact,
+        };
+        let custom_rules = cfg.custom_rules.iter().map(|r| {
+            let applies_to = match r.applies_to.as_str() {
+                "input" => AppliesTo::Input,
+                "output" => AppliesTo::Output,
+                _ => AppliesTo::Both,
+            };
+            let action = match r.action.as_str() {
+                "block" => ViolationAction::Block,
+                "warn" => ViolationAction::Warn,
+                _ => ViolationAction::Redact,
+            };
+            CustomRule {
+                name: r.name.clone(),
+                pattern: r.pattern.clone(),
+                applies_to,
+                action,
+                message: r.message.clone(),
+            }
+        }).collect();
+        Self {
+            detect_pii: cfg.detect_pii,
+            pii_action,
+            max_response_length: cfg.max_response_length,
+            forbidden_input_patterns: cfg.forbidden_input_patterns.clone(),
+            forbidden_output_patterns: cfg.forbidden_output_patterns.clone(),
+            require_json_output: cfg.require_json_output,
+            max_tokens_per_turn: cfg.max_tokens_per_turn,
+            custom_rules,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
