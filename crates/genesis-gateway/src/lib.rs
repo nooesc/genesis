@@ -220,6 +220,8 @@ pub struct HealthResponse {
 pub struct McpStatusResponse {
     pub servers: Vec<McpServerStatus>,
     pub total_tools: usize,
+    pub total_resources: usize,
+    pub total_prompts: usize,
 }
 
 /// Status of a single MCP server.
@@ -418,6 +420,8 @@ async fn mcp_status_handler(
         Some(mcp) => {
             let status = mcp.server_status().await;
             let total_tools = mcp.tool_count().await;
+            let total_resources = mcp.resource_definitions().await.len();
+            let total_prompts = mcp.prompt_definitions().await.len();
             let servers = status
                 .into_iter()
                 .map(|(name, connected)| McpServerStatus { name, connected })
@@ -425,11 +429,15 @@ async fn mcp_status_handler(
             Json(McpStatusResponse {
                 servers,
                 total_tools,
+                total_resources,
+                total_prompts,
             })
         }
         None => Json(McpStatusResponse {
             servers: vec![],
             total_tools: 0,
+            total_resources: 0,
+            total_prompts: 0,
         }),
     }
 }
@@ -1809,10 +1817,14 @@ mod tests {
         let resp = McpStatusResponse {
             servers: vec![],
             total_tools: 0,
+            total_resources: 0,
+            total_prompts: 0,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"servers\":[]"));
         assert!(json.contains("\"total_tools\":0"));
+        assert!(json.contains("\"total_resources\":0"));
+        assert!(json.contains("\"total_prompts\":0"));
     }
 
     #[test]
@@ -1823,6 +1835,8 @@ mod tests {
                 McpServerStatus { name: "github".to_owned(), connected: false },
             ],
             total_tools: 5,
+            total_resources: 3,
+            total_prompts: 2,
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"filesystem\""));
