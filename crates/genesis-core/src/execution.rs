@@ -323,6 +323,20 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_default_working_dir(dir.clone());
         }
 
+        // Apply tool filter (allowlist/denylist)
+        if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
+            let all_tools: Vec<String> = tool_runtime.definitions().iter().map(|d| d.name.clone()).collect();
+            let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
+                all_tools.into_iter().collect()
+            } else {
+                filter.allow.iter().cloned().collect()
+            };
+            for denied in &filter.deny {
+                allowed.remove(denied);
+            }
+            tool_runtime.retain(&allowed);
+        }
+
         // Load skills, user model, project context, and relevant memories
         let db_path = &self.loaded.config.storage.database_path;
         let skills_section = match user_prompt {
@@ -1098,6 +1112,7 @@ mod tests {
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                     reasoning_effort: None,
                     cache: None,
+                    tool_filter: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1253,6 +1268,7 @@ mod tests {
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                     reasoning_effort: None,
                     cache: None,
+                    tool_filter: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

@@ -137,6 +137,21 @@ pub struct RuntimeConfig {
     /// are served from a local SQLite cache instead of calling the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheConfig>,
+    /// Tool filter for controlling which tools the agent can use.
+    /// When set, only tools matching the filter criteria are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_filter: Option<ToolFilterConfig>,
+}
+
+/// Configuration for filtering which tools are available to the agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolFilterConfig {
+    /// If non-empty, only these tools are allowed (allowlist takes priority).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Tools to block even if they appear in the allowlist or default set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 /// Response cache configuration.
@@ -359,6 +374,8 @@ struct FileRuntimeConfig {
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache: Option<CacheConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_filter: Option<ToolFilterConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -440,6 +457,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             context_security: ContextSecurityPolicy::default(),
             reasoning_effort: None,
             cache: None,
+            tool_filter: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -645,6 +663,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.cache.clone()),
+        tool_filter: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.tool_filter.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

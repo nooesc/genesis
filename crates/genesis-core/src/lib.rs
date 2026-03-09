@@ -920,6 +920,7 @@ mod tests {
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                     reasoning_effort: None,
                     cache: None,
+                    tool_filter: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
