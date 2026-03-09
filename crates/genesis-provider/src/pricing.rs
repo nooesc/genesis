@@ -56,6 +56,8 @@ const PRICING: &[(&str, ModelPricing)] = &[
     // DeepSeek
     ("deepseek-chat", ModelPricing { input_per_million: 0.27, output_per_million: 1.10 }),
     ("deepseek-reasoner", ModelPricing { input_per_million: 0.55, output_per_million: 2.19 }),
+    ("deepseek-r1", ModelPricing { input_per_million: 0.55, output_per_million: 2.19 }),
+    ("deepseek-v3", ModelPricing { input_per_million: 0.27, output_per_million: 1.10 }),
     // Mistral
     ("mistral-large", ModelPricing { input_per_million: 2.0, output_per_million: 6.0 }),
     ("mistral-small", ModelPricing { input_per_million: 0.10, output_per_million: 0.30 }),
@@ -67,6 +69,8 @@ const PRICING: &[(&str, ModelPricing)] = &[
     // Qwen (via API providers)
     ("qwen-2.5-72b", ModelPricing { input_per_million: 0.35, output_per_million: 0.70 }),
     ("qwen-2.5-coder-32b", ModelPricing { input_per_million: 0.15, output_per_million: 0.30 }),
+    ("qwen-3-235b", ModelPricing { input_per_million: 0.50, output_per_million: 1.00 }),
+    ("qwen-3-30b", ModelPricing { input_per_million: 0.15, output_per_million: 0.30 }),
     // xAI Grok
     ("grok-3", ModelPricing { input_per_million: 3.0, output_per_million: 15.0 }),
     ("grok-3-mini", ModelPricing { input_per_million: 0.30, output_per_million: 0.50 }),

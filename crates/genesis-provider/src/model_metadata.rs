@@ -67,6 +67,30 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             supports_thinking: true,
         },
         ModelMetadata {
+            model: "claude-opus-4-6",
+            context_length: 200_000,
+            max_output_tokens: Some(32_000),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+        },
+        ModelMetadata {
+            model: "claude-sonnet-4-6",
+            context_length: 200_000,
+            max_output_tokens: Some(64_000),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+        },
+        ModelMetadata {
+            model: "claude-haiku-4-5",
+            context_length: 200_000,
+            max_output_tokens: Some(8_192),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+        },
+        ModelMetadata {
             model: "claude-haiku-3.5-20241022",
             context_length: 200_000,
             max_output_tokens: Some(8_192),
@@ -91,6 +115,14 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             supports_vision: true,
             supports_thinking: true,
         },
+        ModelMetadata {
+            model: "gemini-2.0-flash",
+            context_length: 1_048_576,
+            max_output_tokens: Some(8_192),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: false,
+        },
         // DeepSeek
         ModelMetadata {
             model: "deepseek-r1",
@@ -99,6 +131,14 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             supports_tools: false,
             supports_vision: false,
             supports_thinking: true,
+        },
+        ModelMetadata {
+            model: "deepseek-v3",
+            context_length: 128_000,
+            max_output_tokens: Some(8_192),
+            supports_tools: true,
+            supports_vision: false,
+            supports_thinking: false,
         },
         // Meta
         ModelMetadata {
@@ -117,6 +157,31 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             supports_vision: false,
             supports_thinking: false,
         },
+        ModelMetadata {
+            model: "llama-4-maverick",
+            context_length: 1_048_576,
+            max_output_tokens: Some(32_768),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: true,
+        },
+        ModelMetadata {
+            model: "llama-4-scout",
+            context_length: 524_288,
+            max_output_tokens: Some(32_768),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking: false,
+        },
+        // Mistral
+        ModelMetadata {
+            model: "mistral-large",
+            context_length: 128_000,
+            max_output_tokens: Some(8_192),
+            supports_tools: true,
+            supports_vision: false,
+            supports_thinking: false,
+        },
         // Qwen
         ModelMetadata {
             model: "qwen-2.5-72b",
@@ -125,6 +190,14 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             supports_tools: true,
             supports_vision: false,
             supports_thinking: false,
+        },
+        ModelMetadata {
+            model: "qwen-3-235b",
+            context_length: 131_072,
+            max_output_tokens: Some(8_192),
+            supports_tools: true,
+            supports_vision: false,
+            supports_thinking: true,
         },
         // Moonshot / Kimi
         ModelMetadata {
