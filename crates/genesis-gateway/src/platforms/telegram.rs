@@ -6,25 +6,31 @@
 //! ## Setup
 //! 1. Create a bot via @BotFather on Telegram
 //! 2. Set the `TELEGRAM_BOT_TOKEN` environment variable
-//! 3. Register the webhook URL: `POST https://api.telegram.org/bot<TOKEN>/setWebhook`
+//! 3. Set `TELEGRAM_WEBHOOK_SECRET` for webhook requests
+//! 4. Register the webhook URL: `POST https://api.telegram.org/bot<TOKEN>/setWebhook`
 //!    with `{"url": "https://your-server/telegram/webhook"}`
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::Json;
+use axum::http::{HeaderMap, StatusCode};
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_storage::SessionStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_telegram_webhook_secret;
 use crate::AppState;
 
 /// Telegram Bot API token, loaded from environment.
 pub fn bot_token() -> Option<String> {
     std::env::var("TELEGRAM_BOT_TOKEN").ok()
+}
+
+pub fn webhook_secret() -> Option<String> {
+    std::env::var("TELEGRAM_WEBHOOK_SECRET").ok()
 }
 
 // --- Telegram API types (subset we need) ---
@@ -224,9 +230,32 @@ async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_i
 /// Telegram expects a 200 OK response quickly, so we spawn the agent
 /// execution in a background task and reply via the Bot API.
 pub async fn webhook_handler(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(update): Json<TelegramUpdate>,
+    body: Bytes,
 ) -> StatusCode {
+    let expected_webhook_secret = match webhook_secret() {
+        Some(secret) => secret,
+        None => {
+            warn!("TELEGRAM_WEBHOOK_SECRET is not configured");
+            return StatusCode::FORBIDDEN;
+        }
+    };
+
+    let provided_webhook_secret = headers
+        .get("x-telegram-bot-api-secret-token")
+        .and_then(|value| value.to_str().ok());
+
+    if !verify_telegram_webhook_secret(&expected_webhook_secret, provided_webhook_secret) {
+        warn!("telegram webhook secret verification failed");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let update: TelegramUpdate = match serde_json::from_slice(body.as_ref()) {
+        Ok(update) => update,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+
     let message = match update.message {
         Some(m) => m,
         None => return StatusCode::OK, // Ignore non-message updates (edits, callbacks, etc.)

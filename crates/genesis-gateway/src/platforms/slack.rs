@@ -75,21 +75,26 @@ pub async fn events_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Verify Slack signature if signing secret is configured
-    if let Some(secret) = signing_secret() {
-        let timestamp = headers
-            .get("X-Slack-Request-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let signature = headers
-            .get("X-Slack-Signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !verify_slack_signature(&secret, timestamp, &body, signature) {
-            warn!("slack webhook signature verification failed");
-            return Err(StatusCode::UNAUTHORIZED);
+    let secret = match signing_secret() {
+        Some(secret) => secret,
+        None => {
+            warn!("SLACK_SIGNING_SECRET is not configured");
+            return Err(StatusCode::FORBIDDEN);
         }
+    };
+
+    let timestamp = headers
+        .get("X-Slack-Request-Timestamp")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let signature = headers
+        .get("X-Slack-Signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if !verify_slack_signature(&secret, timestamp, &body, signature) {
+        warn!("slack webhook signature verification failed");
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     let payload: SlackEventPayload =

@@ -3,11 +3,49 @@
 //! Each platform uses its own signing mechanism:
 //! - **Slack**: HMAC-SHA256 with a signing secret
 //! - **Discord**: Ed25519 signature verification with a public key
+//! - **Telegram**: webhook secret token header
+//! - **Home Assistant**: shared secret token header
+//! - **WhatsApp**: `sha256` HMAC over raw body
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
+
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECS: i64 = 300;
+
+/// Verify a simple token-style shared-secret header/value.
+pub fn verify_secret_token(secret: &str, provided: Option<&str>) -> bool {
+    match provided {
+        Some(candidate) => constant_time_eq(secret.as_bytes(), candidate.as_bytes()),
+        None => false,
+    }
+}
+
+/// Verify a Home Assistant webhook secret token.
+pub fn verify_homeassistant_signature(secret: &str, provided: Option<&str>) -> bool {
+    verify_secret_token(secret, provided)
+}
+
+/// Verify a Telegram webhook secret token.
+pub fn verify_telegram_webhook_secret(secret: &str, provided: Option<&str>) -> bool {
+    verify_secret_token(secret, provided)
+}
+
+/// Verify whether a timestamp is inside the replay tolerance window.
+fn timestamp_within_window(timestamp: &str, tolerance_secs: i64) -> bool {
+    let ts = match timestamp.parse::<i64>() {
+        Ok(ts) => ts,
+        Err(_) => return false,
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    (now - ts).abs() <= tolerance_secs
+}
 
 /// Verify a Slack webhook request signature.
 ///
@@ -25,15 +63,9 @@ pub fn verify_slack_signature(
     body: &[u8],
     signature: &str,
 ) -> bool {
-    // Guard against replay attacks (reject requests older than 5 minutes)
-    if let Ok(ts) = timestamp.parse::<i64>() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        if (now - ts).unsigned_abs() > 300 {
-            return false;
-        }
+    // Guard against replay attacks (reject requests outside tolerance window)
+    if !timestamp_within_window(timestamp, WEBHOOK_TIMESTAMP_TOLERANCE_SECS) {
+        return false;
     }
 
     // Build the base string: v0:{timestamp}:{body}
@@ -71,6 +103,10 @@ pub fn verify_discord_signature(
     body: &[u8],
     signature_hex: &str,
 ) -> bool {
+    if !timestamp_within_window(timestamp, WEBHOOK_TIMESTAMP_TOLERANCE_SECS) {
+        return false;
+    }
+
     use ed25519_dalek::{Signature, VerifyingKey};
 
     // Decode the public key from hex
@@ -107,6 +143,27 @@ pub fn verify_discord_signature(
 
     use ed25519_dalek::Verifier;
     verifying_key.verify(&message, &signature).is_ok()
+}
+
+/// Verify a WhatsApp Cloud API request signature.
+///
+/// WhatsApp includes an `x-hub-signature-256` header with the form:
+/// `sha256=<hex_hmac_sha256>`, where the HMAC is computed over the raw
+/// request body with the app secret as key.
+pub fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[u8]) -> bool {
+    let signature = match signature.and_then(|sig| sig.strip_prefix("sha256=")) {
+        Some(value) => value,
+        None => return false,
+    };
+
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+
+    let expected = hex::encode(mac.finalize().into_bytes());
+    constant_time_eq(expected.as_bytes(), signature.as_bytes())
 }
 
 /// Constant-time comparison to prevent timing attacks.
@@ -186,6 +243,19 @@ mod tests {
     }
 
     #[test]
+    fn webhook_secret_compare_works() {
+        assert!(verify_secret_token("webhook-secret", Some("webhook-secret")));
+        assert!(!verify_secret_token("webhook-secret", Some("other")));
+        assert!(!verify_secret_token("webhook-secret", None));
+    }
+
+    #[test]
+    fn telegram_signature_token_matches_expected() {
+        assert!(verify_telegram_webhook_secret("secret", Some("secret")));
+        assert!(!verify_telegram_webhook_secret("secret", Some("wrong")));
+    }
+
+    #[test]
     fn discord_signature_rejects_invalid_key() {
         assert!(!verify_discord_signature("not-hex", "ts", b"body", "sig"));
     }
@@ -224,6 +294,38 @@ mod tests {
     }
 
     #[test]
+    fn discord_signature_rejects_stale_timestamp() {
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let pub_key_hex = hex::encode(verifying_key.as_bytes());
+
+        let old_timestamp = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 601)
+            .to_string();
+        let body = b"{}";
+
+        let mut message = Vec::new();
+        message.extend_from_slice(old_timestamp.as_bytes());
+        message.extend_from_slice(body);
+
+        use ed25519_dalek::Signer;
+        let sig = signing_key.sign(&message);
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        assert!(!verify_discord_signature(
+            &pub_key_hex,
+            &old_timestamp,
+            body,
+            &sig_hex
+        ));
+    }
+
+    #[test]
     fn discord_signature_valid() {
         use ed25519_dalek::SigningKey;
 
@@ -256,5 +358,29 @@ mod tests {
         assert!(constant_time_eq(b"hello", b"hello"));
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
+    }
+
+    #[test]
+    fn verify_whatsapp_signature_valid() {
+        let secret = "wh-secret";
+        let body = b"{\"foo\":\"bar\"}";
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        assert!(verify_whatsapp_signature(secret, Some(&signature), body));
+    }
+
+    #[test]
+    fn verify_whatsapp_signature_rejects_invalid() {
+        assert!(!verify_whatsapp_signature(
+            "wh-secret",
+            Some("sha256=bad-signature"),
+            b"{\"foo\":\"bar\"}"
+        ));
+    }
+
+    #[test]
+    fn verify_whatsapp_signature_rejects_missing_header() {
+        assert!(!verify_whatsapp_signature("wh-secret", None, b"{\"foo\":\"bar\"}"));
     }
 }

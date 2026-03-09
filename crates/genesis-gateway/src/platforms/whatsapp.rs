@@ -6,19 +6,21 @@
 //! ## Setup
 //! 1. Create a WhatsApp Business app in Meta Developer Portal
 //! 2. Set `WHATSAPP_TOKEN` (permanent token) and `WHATSAPP_PHONE_NUMBER_ID`
-//! 3. Configure the webhook URL: `https://your-server/whatsapp/webhook`
-//! 4. Set `WHATSAPP_VERIFY_TOKEN` for webhook verification
+//! 3. Set `WHATSAPP_APP_SECRET` for signed webhook verification
+//! 4. Configure the webhook URL: `https://your-server/whatsapp/webhook`
+//! 5. Set `WHATSAPP_VERIFY_TOKEN` for webhook verification
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::Json;
+use axum::http::{HeaderMap, StatusCode};
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_whatsapp_signature;
 use crate::AppState;
 
 const MAX_WHATSAPP_MESSAGE_LEN: usize = 4096;
@@ -35,6 +37,10 @@ fn phone_number_id() -> Option<String> {
 
 fn verify_token() -> Option<String> {
     std::env::var("WHATSAPP_VERIFY_TOKEN").ok()
+}
+
+fn app_secret() -> Option<String> {
+    std::env::var("WHATSAPP_APP_SECRET").ok()
 }
 
 // --- WhatsApp Cloud API types ---
@@ -146,9 +152,36 @@ pub async fn verify_handler(Query(query): Query<VerifyQuery>) -> (StatusCode, St
 
 /// POST handler for WhatsApp webhook events.
 pub async fn webhook_handler(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<WebhookPayload>,
+    body: Bytes,
 ) -> StatusCode {
+    let app_secret = match app_secret() {
+        Some(secret) => secret,
+        None => {
+            warn!("WHATSAPP_APP_SECRET is not configured");
+            return StatusCode::FORBIDDEN;
+        }
+    };
+
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|value| value.to_str().ok());
+
+    if !verify_whatsapp_signature(
+        &app_secret,
+        signature,
+        body.as_ref(),
+    ) {
+        warn!("whatsapp webhook signature verification failed");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    let payload: WebhookPayload = match serde_json::from_slice(body.as_ref()) {
+        Ok(payload) => payload,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+
     if payload.object != "whatsapp_business_account" {
         return StatusCode::OK;
     }

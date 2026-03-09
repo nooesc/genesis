@@ -7,20 +7,22 @@
 //! ## Setup
 //! 1. In Home Assistant, create a webhook automation
 //! 2. Point it at `https://your-server/homeassistant/webhook`
-//! 3. Optionally set `HOMEASSISTANT_TOKEN` for authentication
+//! 3. Set `HOMEASSISTANT_TOKEN` for authentication
 //! 4. Optionally set `HOMEASSISTANT_URL` and `HOMEASSISTANT_LONG_LIVED_TOKEN`
 //!    to enable the agent to call back into Home Assistant services
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::{header, HeaderMap, StatusCode};
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_homeassistant_signature;
 use crate::AppState;
 
 // --- Types ---
@@ -43,6 +45,31 @@ pub struct HomeAssistantResponse {
     pub tool_calls_made: usize,
 }
 
+fn webhook_token() -> Option<String> {
+    std::env::var("HOMEASSISTANT_TOKEN").ok()
+}
+
+fn extract_provided_token(headers: &HeaderMap) -> Option<&str> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    let auth_token = auth
+        .and_then(|value| value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")))
+        .or(auth);
+
+    auth_token.or_else(|| {
+        headers
+            .get("x-homeassistant-token")
+            .and_then(|value| value.to_str().ok())
+    })
+    .or_else(|| {
+        headers
+            .get("x-home-assistant-token")
+            .and_then(|value| value.to_str().ok())
+    })
+}
+
 // --- Handler ---
 
 /// Webhook handler for Home Assistant automations.
@@ -50,9 +77,26 @@ pub struct HomeAssistantResponse {
 /// Unlike platform bots, we return the response synchronously since
 /// Home Assistant automations expect the result in the HTTP response.
 pub async fn webhook_handler(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(request): Json<HomeAssistantRequest>,
+    body: Bytes,
 ) -> Result<Json<HomeAssistantResponse>, (StatusCode, String)> {
+    let expected_token = match webhook_token() {
+        Some(token) => token,
+        None => {
+            warn!("HOMEASSISTANT_TOKEN is not configured");
+            return Err((StatusCode::FORBIDDEN, "missing HOMEASSISTANT_TOKEN".to_owned()));
+        }
+    };
+
+    if !verify_homeassistant_signature(&expected_token, extract_provided_token(&headers)) {
+        warn!("homeassistant webhook token verification failed");
+        return Err((StatusCode::UNAUTHORIZED, "invalid homeassistant token".to_owned()));
+    }
+
+    let request: HomeAssistantRequest = serde_json::from_slice(body.as_ref())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid request body".to_owned()))?;
+
     let session_id = request
         .entity_id
         .as_deref()

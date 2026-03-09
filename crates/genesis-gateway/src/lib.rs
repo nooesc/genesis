@@ -421,7 +421,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
-    // Platform webhook routes (no API key — each platform has its own auth)
+    // Platform webhook routes (no API key — each platform has strict, fail-closed webhook auth)
     let platform_webhooks = Router::new()
         .route("/telegram/webhook", post(platforms::telegram::webhook_handler))
         .route("/discord/interactions", post(platforms::discord::interactions_handler))
