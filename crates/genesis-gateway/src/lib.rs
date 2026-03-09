@@ -166,6 +166,8 @@ pub struct AppState {
     pub stream_requests_total: AtomicU64,
     /// Request duration histogram buckets (in ms): [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, +Inf]
     pub request_duration_histogram: Mutex<HistogramBuckets>,
+    /// Agent message bus for inter-agent communication.
+    pub agent_bus: genesis_core::agent_bus::AgentBus,
 }
 
 impl AppState {
@@ -179,6 +181,7 @@ impl AppState {
             .as_ref()
             .map(|g| g.webhooks.clone())
             .unwrap_or_default();
+        let bus_db_path = loaded.config.storage.database_path.clone();
         Self {
             loaded,
             api_key,
@@ -193,6 +196,7 @@ impl AppState {
             output_tokens_total: AtomicU64::new(0),
             stream_requests_total: AtomicU64::new(0),
             request_duration_histogram: Mutex::new(HistogramBuckets::new(DURATION_BUCKETS)),
+            agent_bus: genesis_core::agent_bus::AgentBus::with_persistence(&bus_db_path),
         }
     }
 }
@@ -400,6 +404,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/templates/{name}", get(get_template_handler))
         .route("/workflows/validate", post(workflow_validate_handler))
         .route("/workflows/run", post(workflow_run_handler))
+        .route("/bus/channels", get(bus_channels_handler))
+        .route("/bus/publish", post(bus_publish_handler))
+        .route("/bus/history/{channel}", get(bus_history_handler))
+        .route("/bus/stats", get(bus_stats_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -2004,6 +2012,97 @@ async fn workflow_run_handler(
         })?;
 
     Ok(Json(serde_json::json!(result)))
+}
+
+// ---------------------------------------------------------------------------
+// Agent bus endpoints
+// ---------------------------------------------------------------------------
+
+async fn bus_channels_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let channels = state.agent_bus.channels().await;
+    Json(serde_json::json!({
+        "channels": channels,
+        "count": channels.len(),
+    }))
+}
+
+async fn bus_publish_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let channel = body.get("channel").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'channel' field".to_owned())
+    })?;
+    let sender = body.get("sender").and_then(|v| v.as_str()).unwrap_or("api");
+    let payload = body.get("payload").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'payload' field".to_owned())
+    })?;
+    let kind_str = body.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
+    let kind: genesis_core::agent_bus::MessageKind =
+        serde_json::from_str(&format!("\"{kind_str}\"")).unwrap_or(genesis_core::agent_bus::MessageKind::Text);
+
+    let metadata: std::collections::HashMap<String, String> = body
+        .get("metadata")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let msg = genesis_core::agent_bus::AgentMessage {
+        id: format!("api-{:016x}", {
+            use std::hash::{BuildHasher, Hasher};
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let rng = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            ts as u64 ^ rng
+        }),
+        channel: channel.to_owned(),
+        sender: sender.to_owned(),
+        kind,
+        payload: payload.to_owned(),
+        metadata,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let subscribers = state.agent_bus.publish(msg.clone()).await;
+    Ok(Json(serde_json::json!({
+        "published": true,
+        "message_id": msg.id,
+        "subscribers_notified": subscribers,
+    })))
+}
+
+async fn bus_history_handler(
+    State(state): State<Arc<AppState>>,
+    Path(channel): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let messages = state.agent_bus.history(&channel, limit);
+    Json(serde_json::json!({
+        "channel": channel,
+        "messages": messages,
+        "count": messages.len(),
+    }))
+}
+
+async fn bus_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let db_path = &state.loaded.config.storage.database_path;
+    let store = genesis_core::agent_bus::AgentBusStore::new(db_path);
+    let stats = store.channel_stats().unwrap_or_default();
+    let total: i64 = stats.iter().map(|(_, c)| c).sum();
+    Json(serde_json::json!({
+        "total_messages": total,
+        "channels": stats.iter().map(|(ch, count)| {
+            serde_json::json!({"channel": ch, "message_count": count})
+        }).collect::<Vec<_>>(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

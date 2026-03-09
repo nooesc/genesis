@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/clear",
+                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/clear",
             ],
         }
     }
@@ -6173,6 +6173,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /analytics    - Tool and LLM usage analytics\n\
              /template     - Apply an agent template (archetype)\n\
              /workflow     - Run a YAML-defined multi-step workflow\n\
+             /bus          - Agent message bus (stats, history)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
@@ -6517,6 +6518,69 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                         }
                     }
                     Err(e) => Some(format!("Audit log unavailable: {e}")),
+                }
+            }
+        }
+        "bus" => {
+            let bus_store = genesis_core::agent_bus::AgentBusStore::new(store.database_path());
+            let sub = _args.trim();
+            if sub == "stats" {
+                match bus_store.channel_stats() {
+                    Ok(stats) => {
+                        if stats.is_empty() {
+                            Some("No agent bus messages yet.".into())
+                        } else {
+                            let total: i64 = stats.iter().map(|(_, c)| c).sum();
+                            let mut lines = vec![format!("Agent bus: {total} total messages")];
+                            for (channel, count) in &stats {
+                                lines.push(format!("  {channel}: {count} messages"));
+                            }
+                            lines.push("Commands: /bus stats, /bus history <channel>".into());
+                            Some(lines.join("\n"))
+                        }
+                    }
+                    Err(e) => Some(format!("Bus stats unavailable: {e}")),
+                }
+            } else if sub.starts_with("history") {
+                let channel = sub.strip_prefix("history").unwrap_or("").trim();
+                if channel.is_empty() {
+                    Some("Usage: /bus history <channel>".into())
+                } else {
+                    match bus_store.channel_messages(channel, 20) {
+                        Ok(messages) => {
+                            if messages.is_empty() {
+                                Some(format!("No messages on channel '{channel}'."))
+                            } else {
+                                let mut lines = vec![format!("Channel '{channel}' ({} messages):", messages.len())];
+                                for msg in &messages {
+                                    lines.push(format!(
+                                        "  [{}] {} ({:?}): {}",
+                                        msg.timestamp, msg.sender, msg.kind,
+                                        if msg.payload.len() > 100 {
+                                            format!("{}...", &msg.payload[..100])
+                                        } else {
+                                            msg.payload.clone()
+                                        }
+                                    ));
+                                }
+                                Some(lines.join("\n"))
+                            }
+                        }
+                        Err(e) => Some(format!("Bus history unavailable: {e}")),
+                    }
+                }
+            } else {
+                match bus_store.channel_stats() {
+                    Ok(stats) => {
+                        let total: i64 = stats.iter().map(|(_, c)| c).sum();
+                        let mut lines = vec![format!("Agent bus: {total} total messages, {} channels", stats.len())];
+                        for (channel, count) in &stats {
+                            lines.push(format!("  {channel}: {count}"));
+                        }
+                        lines.push("\nCommands: /bus stats, /bus history <channel>".into());
+                        Some(lines.join("\n"))
+                    }
+                    Err(e) => Some(format!("Bus info unavailable: {e}")),
                 }
             }
         }

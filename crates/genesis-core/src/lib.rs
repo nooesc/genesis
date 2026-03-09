@@ -1,3 +1,4 @@
+pub mod agent_bus;
 pub mod agent_loop;
 pub mod audit;
 pub mod compress;
