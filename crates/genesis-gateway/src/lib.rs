@@ -327,6 +327,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/pairing/clear-pending", post(clear_pending_handler))
         // Tool introspection
         .route("/tools", get(list_tools_handler))
+        // Cache management
+        .route("/cache/stats", get(cache_stats_handler))
+        .route("/cache/clear", post(cache_clear_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -534,6 +537,9 @@ async fn prometheus_metrics_handler(
         None => 0,
     };
 
+    let cache_store = genesis_storage::ResponseCacheStore::new(db_path);
+    let (cache_entries, cache_hits) = cache_store.stats().unwrap_or((0, 0));
+
     let model = format!(
         "{}/{}",
         state.loaded.config.provider.backend,
@@ -568,6 +574,12 @@ async fn prometheus_metrics_handler(
          # HELP genesis_mcp_servers Connected MCP server count.\n\
          # TYPE genesis_mcp_servers gauge\n\
          genesis_mcp_servers {mcp_servers}\n\
+         # HELP genesis_cache_entries Current response cache entries.\n\
+         # TYPE genesis_cache_entries gauge\n\
+         genesis_cache_entries {cache_entries}\n\
+         # HELP genesis_cache_hits_total Total response cache hits.\n\
+         # TYPE genesis_cache_hits_total counter\n\
+         genesis_cache_hits_total {cache_hits}\n\
          # HELP genesis_info Build and configuration info.\n\
          # TYPE genesis_info gauge\n\
          genesis_info{{version=\"{version}\",model=\"{model}\"}} 1\n",
@@ -1592,6 +1604,37 @@ async fn config_handler(
         "profile": config.profile,
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+async fn cache_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let cache = genesis_storage::ResponseCacheStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let (entries, hits) = cache.stats().unwrap_or((0, 0));
+    let enabled = state.loaded.config.runtime.cache.as_ref().is_some_and(|c| c.enabled);
+    Json(serde_json::json!({
+        "enabled": enabled,
+        "entries": entries,
+        "total_hits": hits,
+    }))
+}
+
+async fn cache_clear_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let cache = genesis_storage::ResponseCacheStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    match cache.clear() {
+        Ok(deleted) => Json(serde_json::json!({
+            "cleared": deleted,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": e.to_string(),
+        })),
+    }
 }
 
 async fn chat_handler(

@@ -43,7 +43,7 @@ impl SlashCompleter {
                 "/help", "/history", "/export", "/tokens", "/session",
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/clear",
+                "/personality", "/cache", "/clear",
             ],
         }
     }
@@ -5846,6 +5846,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /skills       - List saved skills\n\
              /model        - Show active model\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
+             /cache        - Show cache stats (clear, prune)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
@@ -5939,6 +5940,29 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                     Some(lines.join("\n"))
                 }
                 Err(_) => Some("No stored memories.".to_owned()),
+            }
+        }
+        "cache" => {
+            let cache_store = genesis_storage::ResponseCacheStore::new(store.database_path());
+            let sub = _args.trim();
+            if sub == "clear" {
+                match cache_store.clear() {
+                    Ok(n) => Some(format!("Cache cleared ({n} entries removed).")),
+                    Err(e) => Some(format!("Failed to clear cache: {e}")),
+                }
+            } else if sub == "prune" {
+                match cache_store.prune_expired() {
+                    Ok(n) => Some(format!("Pruned {n} expired cache entries.")),
+                    Err(e) => Some(format!("Failed to prune cache: {e}")),
+                }
+            } else {
+                match cache_store.stats() {
+                    Ok((entries, hits)) => Some(format!(
+                        "Response cache: {entries} entries, {hits} total hits\n\
+                         Commands: /cache clear, /cache prune"
+                    )),
+                    Err(e) => Some(format!("Cache stats unavailable: {e}")),
+                }
             }
         }
         "clear" => {
