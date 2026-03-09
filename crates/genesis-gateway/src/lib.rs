@@ -3142,6 +3142,7 @@ mod tests {
                 max_iterations: None,
                 context_security: genesis_config::ContextSecurityPolicy::default(),
                 reasoning_effort: None,
+                cache: None,
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),

@@ -133,6 +133,40 @@ pub struct RuntimeConfig {
     /// Supported on OpenRouter, Anthropic, and some custom providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Response cache configuration. When enabled, identical LLM requests
+    /// are served from a local SQLite cache instead of calling the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheConfig>,
+}
+
+/// Response cache configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// Whether caching is enabled (default: true when cache section present).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Time-to-live for cached entries in seconds (default: 3600 = 1 hour).
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_seconds: u32,
+    /// Maximum number of recent messages to include in the cache key.
+    /// Fewer messages = more cache hits but less context sensitivity.
+    /// Default: 4.
+    #[serde(default = "default_cache_context_messages")]
+    pub max_context_messages: usize,
+}
+
+fn default_true() -> bool { true }
+fn default_cache_ttl() -> u32 { 3600 }
+fn default_cache_context_messages() -> usize { 4 }
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_seconds: 3600,
+            max_context_messages: 4,
+        }
+    }
 }
 
 /// Reasoning effort level controlling how much compute the model spends.
@@ -314,6 +348,8 @@ struct FileRuntimeConfig {
     context_security: Option<ContextSecurityPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache: Option<CacheConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -394,6 +430,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             max_iterations: None,
             context_security: ContextSecurityPolicy::default(),
             reasoning_effort: None,
+            cache: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -595,6 +632,10 @@ pub fn load_from_map(
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.reasoning_effort),
+        cache: file_config
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.cache.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

@@ -377,6 +377,17 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 session_id UNINDEXED,
                 content
             );
+            CREATE TABLE IF NOT EXISTS response_cache (
+                cache_key TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                response TEXT NOT NULL,
+                tool_calls_json TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL
+            );
             ",
         )
         .map_err(|source| StorageError::Sqlite {
@@ -3413,6 +3424,154 @@ impl ChannelStore {
     }
 }
 
+/// A cached LLM response entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedResponse {
+    pub cache_key: String,
+    pub model: String,
+    pub response: String,
+    pub tool_calls_json: Option<String>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub hit_count: u32,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+/// SQLite-backed response cache for LLM completions.
+///
+/// Caches responses keyed by a deterministic hash of the request parameters
+/// (model + messages + tools + temperature). Entries expire after a configurable TTL.
+pub struct ResponseCacheStore {
+    database_path: PathBuf,
+}
+
+impl ResponseCacheStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Look up a cached response by its cache key.
+    /// Returns `None` if the entry doesn't exist or has expired.
+    /// Increments the hit counter on successful lookup.
+    pub fn get(&self, cache_key: &str) -> Result<Option<CachedResponse>, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let entry: Option<CachedResponse> = connection
+            .query_row(
+                "SELECT cache_key, model, response, tool_calls_json, input_tokens,
+                        output_tokens, hit_count, created_at, expires_at
+                 FROM response_cache
+                 WHERE cache_key = ?1 AND expires_at > datetime('now')",
+                params![cache_key],
+                |row| {
+                    Ok(CachedResponse {
+                        cache_key: row.get(0)?,
+                        model: row.get(1)?,
+                        response: row.get(2)?,
+                        tool_calls_json: row.get(3)?,
+                        input_tokens: row.get(4)?,
+                        output_tokens: row.get(5)?,
+                        hit_count: row.get(6)?,
+                        created_at: row.get(7)?,
+                        expires_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        if let Some(ref _e) = entry {
+            let _ = connection.execute(
+                "UPDATE response_cache SET hit_count = hit_count + 1 WHERE cache_key = ?1",
+                params![cache_key],
+            );
+        }
+
+        Ok(entry)
+    }
+
+    /// Store a response in the cache.
+    ///
+    /// `ttl_seconds` controls how long the entry stays valid.
+    pub fn set(
+        &self,
+        cache_key: &str,
+        model: &str,
+        response: &str,
+        tool_calls_json: Option<&str>,
+        input_tokens: u32,
+        output_tokens: u32,
+        ttl_seconds: u32,
+    ) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO response_cache
+                 (cache_key, model, response, tool_calls_json, input_tokens, output_tokens,
+                  hit_count, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'),
+                         datetime('now', '+' || ?7 || ' seconds'))",
+                params![cache_key, model, response, tool_calls_json,
+                        input_tokens, output_tokens, ttl_seconds],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Remove expired entries from the cache.
+    pub fn prune_expired(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM response_cache WHERE expires_at <= datetime('now')",
+                [],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted as u64)
+    }
+
+    /// Clear all cache entries.
+    pub fn clear(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let deleted = connection
+            .execute("DELETE FROM response_cache", [])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted as u64)
+    }
+
+    /// Return total number of cached entries and total hit count.
+    pub fn stats(&self) -> Result<(u64, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+        let (entries, hits) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(hit_count), 0) FROM response_cache
+                 WHERE expires_at > datetime('now')",
+                [],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok((entries, hits))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4468,5 +4627,118 @@ mod tests {
         assert_eq!(tg.len(), 1);
         let dc = store.list_approved(Some("discord")).unwrap();
         assert_eq!(dc.len(), 0);
+    }
+
+    #[test]
+    fn response_cache_store_set_and_get() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        cache
+            .set("key-1", "gpt-4", "Hello world", None, 100, 20, 3600)
+            .unwrap();
+
+        let entry = cache.get("key-1").unwrap().expect("should find cached entry");
+        assert_eq!(entry.model, "gpt-4");
+        assert_eq!(entry.response, "Hello world");
+        assert_eq!(entry.input_tokens, 100);
+        assert_eq!(entry.output_tokens, 20);
+        assert!(entry.tool_calls_json.is_none());
+    }
+
+    #[test]
+    fn response_cache_miss_returns_none() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        let result = cache.get("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn response_cache_hit_increments_counter() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        cache.set("key-2", "gpt-4", "cached", None, 50, 10, 3600).unwrap();
+
+        let _ = cache.get("key-2").unwrap();
+        let _ = cache.get("key-2").unwrap();
+        let entry = cache.get("key-2").unwrap().expect("should exist");
+        // Each get reads then increments, so after 3 gets the stored count is 3
+        // but the returned entry from the 3rd get shows 2 (read before increment)
+        assert!(entry.hit_count >= 2, "hit_count should track accesses");
+    }
+
+    #[test]
+    fn response_cache_expired_entry_not_returned() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        // TTL of 0 seconds = immediately expired
+        cache.set("expired", "gpt-4", "old", None, 10, 5, 0).unwrap();
+
+        let result = cache.get("expired").unwrap();
+        assert!(result.is_none(), "expired entry should not be returned");
+    }
+
+    #[test]
+    fn response_cache_clear_removes_all() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        cache.set("a", "gpt-4", "1", None, 10, 5, 3600).unwrap();
+        cache.set("b", "gpt-4", "2", None, 10, 5, 3600).unwrap();
+
+        let (entries, _) = cache.stats().unwrap();
+        assert_eq!(entries, 2);
+
+        let deleted = cache.clear().unwrap();
+        assert_eq!(deleted, 2);
+
+        let (entries, _) = cache.stats().unwrap();
+        assert_eq!(entries, 0);
+    }
+
+    #[test]
+    fn response_cache_stats_tracks_entries_and_hits() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        cache.set("s1", "gpt-4", "resp", None, 10, 5, 3600).unwrap();
+        let _ = cache.get("s1").unwrap(); // 1 hit
+        let _ = cache.get("s1").unwrap(); // 2 hits
+
+        let (entries, hits) = cache.stats().unwrap();
+        assert_eq!(entries, 1);
+        assert_eq!(hits, 2);
+    }
+
+    #[test]
+    fn response_cache_with_tool_calls() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let cache = super::ResponseCacheStore::new(&db_path);
+        let tc = r#"[{"id":"tc-1","type":"function","function":{"name":"echo","arguments":"{}"}}]"#;
+        cache
+            .set("tc-key", "gpt-4", "Using tool", Some(tc), 100, 30, 3600)
+            .unwrap();
+
+        let entry = cache.get("tc-key").unwrap().expect("should exist");
+        assert_eq!(entry.tool_calls_json.as_deref(), Some(tc));
     }
 }

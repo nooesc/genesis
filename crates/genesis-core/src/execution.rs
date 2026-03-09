@@ -402,6 +402,7 @@ impl<'a> SessionExecutionService<'a> {
                 max_iterations: self.loaded.config.runtime.max_iterations,
                 tool_call_parser: self.loaded.config.provider.tool_call_parser.clone(),
                 reasoning_effort: self.loaded.config.runtime.reasoning_effort,
+                cache: self.loaded.config.runtime.cache.clone(),
                 thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
                     genesis_provider::ThinkingConfig {
                         budget_tokens: Some(budget),
@@ -453,6 +454,12 @@ impl<'a> SessionExecutionService<'a> {
         agent.set_subagent_spawner(Arc::new(ExecutionSubagentSpawner {
             loaded: Arc::new(self.loaded.clone()),
         }));
+
+        // Set up response cache if configured
+        if self.loaded.config.runtime.cache.as_ref().is_some_and(|c| c.enabled) {
+            let cache = genesis_storage::ResponseCacheStore::new(db_path);
+            agent.set_response_cache(cache);
+        }
 
         Ok(agent)
     }
@@ -1082,6 +1089,7 @@ mod tests {
                     max_iterations: None,
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                     reasoning_effort: None,
+                    cache: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1236,6 +1244,7 @@ mod tests {
                     max_iterations: None,
                     context_security: genesis_config::ContextSecurityPolicy::default(),
                     reasoning_effort: None,
+                    cache: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

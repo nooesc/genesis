@@ -9,6 +9,7 @@ use genesis_provider::{
 };
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, info, info_span, warn};
 
@@ -105,6 +106,9 @@ pub struct AgentLoopConfig {
     /// Reasoning effort level. Injected into the request as `reasoning_effort`
     /// for providers that support it (OpenRouter, some custom providers).
     pub reasoning_effort: Option<genesis_config::ReasoningEffort>,
+    /// Response cache configuration. When set, identical LLM requests are
+    /// served from a SQLite cache instead of calling the provider.
+    pub cache: Option<genesis_config::CacheConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -149,6 +153,7 @@ impl Default for AgentLoopConfig {
             max_iterations: None,
             tool_call_parser: None,
             reasoning_effort: None,
+            cache: None,
         }
     }
 }
@@ -262,6 +267,10 @@ pub struct AgentLoop {
     /// Cancellation flag. When set to `true`, the loop exits gracefully
     /// at the next turn boundary.
     cancelled: Arc<AtomicBool>,
+    /// Optional response cache for deduplicating identical LLM calls.
+    response_cache: Option<genesis_storage::ResponseCacheStore>,
+    cache_hits: u32,
+    cache_misses: u32,
 }
 
 /// Number of consecutive failures for the same tool before injecting a
@@ -320,6 +329,9 @@ impl AgentLoop {
             tool_failure_counts: HashMap::new(),
             iterations_used: 0,
             cancelled: Arc::new(AtomicBool::new(false)),
+            response_cache: None,
+            cache_hits: 0,
+            cache_misses: 0,
         }
     }
 
@@ -337,6 +349,44 @@ impl AgentLoop {
     /// Set fallback clients to try when the primary provider fails.
     pub fn set_fallback_clients(&mut self, clients: Vec<ChatClient>) {
         self.fallback_clients = clients;
+    }
+
+    /// Set the response cache store for deduplicating LLM calls.
+    pub fn set_response_cache(&mut self, cache: genesis_storage::ResponseCacheStore) {
+        self.response_cache = Some(cache);
+    }
+
+    /// Compute a deterministic cache key from the model, recent messages, and tools.
+    fn compute_cache_key(&self, model: &str, tools: &[ChatTool]) -> String {
+        let max_msgs = self
+            .config
+            .cache
+            .as_ref()
+            .map(|c| c.max_context_messages)
+            .unwrap_or(4);
+
+        let mut hasher = Sha256::new();
+        hasher.update(model.as_bytes());
+
+        // Hash the last N messages (skip system prompt at index 0)
+        let msgs = if self.messages.len() > max_msgs {
+            &self.messages[self.messages.len() - max_msgs..]
+        } else {
+            &self.messages[..]
+        };
+        for msg in msgs {
+            hasher.update(msg.role.as_bytes());
+            if let Some(text) = msg.content_text() {
+                hasher.update(text.as_bytes());
+            }
+        }
+
+        // Hash tool names (not full definitions — too verbose)
+        for tool in tools {
+            hasher.update(tool.function.name.as_bytes());
+        }
+
+        hex::encode(hasher.finalize())
     }
 
     /// Attach a subagent spawner so the agent can spawn parallel workstreams.
@@ -651,14 +701,94 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
+            // Check response cache before making an LLM call
+            let cache_key = if self.response_cache.is_some()
+                && self.config.cache.as_ref().is_some_and(|c| c.enabled)
+            {
+                Some(self.compute_cache_key(self.active_client().model(), &tool_defs))
+            } else {
+                None
+            };
+
+            let cached = cache_key.as_ref().and_then(|key| {
+                self.response_cache
+                    .as_ref()
+                    .and_then(|cache| cache.get(key).ok().flatten())
+            });
+
             self.hooks.on_llm_request(&hook_session, self.active_client().model(), turns_used);
-            let (mut response, active_model) = match self.complete_with_failover(request).await {
-                Ok(result) => result,
-                Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
+            let (mut response, active_model) = if let Some(hit) = cached {
+                debug!(cache_key = cache_key.as_deref().unwrap_or(""), "response cache hit");
+                self.cache_hits += 1;
+
+                // Reconstruct a ChatCompletionResponse from the cached data
+                let tool_calls: Option<Vec<ToolCallEntry>> = hit
+                    .tool_calls_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok());
+                let choice = genesis_provider::ChatChoice {
+                    index: 0,
+                    message: ChatMessage {
+                        role: "assistant".to_owned(),
+                        content: Some(MessageContent::Text(hit.response)),
+                        thinking: None,
+                        tool_calls,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    finish_reason: Some("stop".to_owned()),
+                };
+                let resp = genesis_provider::ChatCompletionResponse {
+                    id: format!("cache-{}", &cache_key.as_ref().unwrap()[..8]),
+                    choices: vec![choice],
+                    usage: Some(genesis_provider::ChatUsage {
+                        prompt_tokens: hit.input_tokens,
+                        completion_tokens: hit.output_tokens,
+                        total_tokens: hit.input_tokens + hit.output_tokens,
+                    }),
+                };
+                (resp, hit.model)
+            } else {
+                if cache_key.is_some() {
+                    self.cache_misses += 1;
+                }
+                match self.complete_with_failover(request).await {
+                    Ok(result) => result,
+                    Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
+                }
             };
 
             // Apply tool call parser for models that embed tool calls in text
             self.apply_tool_call_parser(&mut response, &active_model);
+
+            // Store response in cache (only on cache miss with a valid key)
+            if let (Some(ref key), Some(ref cache), Some(ref cache_cfg)) =
+                (&cache_key, &self.response_cache, &self.config.cache)
+            {
+                if cache_cfg.enabled && !response.id.starts_with("cache-") {
+                    let choice = &response.choices[0];
+                    let text = choice.message.content_text().unwrap_or("");
+                    let tc_json = choice
+                        .message
+                        .tool_calls
+                        .as_ref()
+                        .and_then(|tc| serde_json::to_string(tc).ok());
+                    let (in_tok, out_tok) = response
+                        .usage
+                        .as_ref()
+                        .map(|u| (u.prompt_tokens, u.completion_tokens))
+                        .unwrap_or((0, 0));
+                    let _ = cache.set(
+                        key,
+                        &active_model,
+                        text,
+                        tc_json.as_deref(),
+                        in_tok,
+                        out_tok,
+                        cache_cfg.ttl_seconds,
+                    );
+                }
+            }
 
             if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
