@@ -70,7 +70,7 @@ pub struct Implementation {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
@@ -79,14 +79,14 @@ pub struct InitializeResult {
     pub server_info: Option<Implementation>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerCapabilities {
     pub tools: Option<ToolsCapability>,
     pub resources: Option<Value>,
     pub prompts: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsCapability {
     #[serde(rename = "listChanged")]
     pub list_changed: Option<bool>,

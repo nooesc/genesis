@@ -540,6 +540,8 @@ pub enum McpCommand {
     List,
     #[command(about = "Test connectivity to all configured MCP servers")]
     Test,
+    #[command(about = "Run Genesis as an MCP server on stdio (for Claude Desktop, etc.)")]
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -5460,6 +5462,57 @@ async fn run_update() -> Result<String, CliError> {
     Ok(steps.join("\n"))
 }
 
+/// Bridge between the MCP server and the Genesis tool registry.
+struct RegistryMcpBackend {
+    registry: genesis_tools::ToolRegistry,
+    context: genesis_tools::ToolContext,
+}
+
+impl genesis_mcp::McpToolBackend for RegistryMcpBackend {
+    fn list_tools(&self) -> Vec<genesis_mcp::McpServerToolDef> {
+        self.registry
+            .definitions()
+            .into_iter()
+            .map(|def| genesis_mcp::McpServerToolDef {
+                name: def.name,
+                description: Some(def.description),
+                input_schema: def.parameters.unwrap_or_else(|| {
+                    serde_json::json!({"type": "object", "properties": {}})
+                }),
+            })
+            .collect()
+    }
+
+    fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        // Convert JSON arguments to BTreeMap<String, String>
+        let mut args = std::collections::BTreeMap::new();
+        if let Some(obj) = arguments.as_object() {
+            for (k, v) in obj {
+                let s = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => continue,
+                    other => other.to_string(),
+                };
+                args.insert(k.clone(), s);
+            }
+        }
+
+        let call = genesis_tools::ToolCall {
+            name: name.to_owned(),
+            arguments: args,
+        };
+
+        match self.registry.execute(&call, &self.context) {
+            Ok(output) => Ok(output.content),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 async fn run_mcp(
     config_path: Option<PathBuf>,
     command: McpCommand,
@@ -5502,6 +5555,27 @@ async fn run_mcp(
                 ));
             }
             Ok(lines.join("\n"))
+        }
+        McpCommand::Serve => {
+            // Run Genesis as an MCP server on stdio
+            let registry = genesis_tools::default_registry();
+            let context = genesis_tools::ToolContext {
+                session_id: format!("mcp-server-{}", std::process::id()),
+                profile: loaded.config.profile.clone(),
+                data_dir: loaded.config.storage.data_dir.to_string_lossy().to_string(),
+                allow_destructive_tools: false,
+                terminal_backend: None,
+                default_working_dir: None,
+            };
+
+            let backend = std::sync::Arc::new(RegistryMcpBackend { registry, context });
+            let config = genesis_mcp::McpServeConfig::default();
+
+            genesis_mcp::run_stdio_server(config, backend)
+                .await
+                .map_err(|e| CliError::Other(format!("MCP server error: {e}")))?;
+
+            Ok("MCP server exited".to_owned())
         }
         McpCommand::Test => {
             let servers = &loaded.config.mcp_servers;
@@ -8517,6 +8591,13 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "mcp", "test"])
             .expect("mcp test command should parse");
         assert!(matches!(cli.command, Command::Mcp(McpCommand::Test)));
+    }
+
+    #[test]
+    fn parses_mcp_serve_command() {
+        let cli = Cli::try_parse_from(["genesis", "mcp", "serve"])
+            .expect("mcp serve command should parse");
+        assert!(matches!(cli.command, Command::Mcp(McpCommand::Serve)));
     }
 
     #[test]

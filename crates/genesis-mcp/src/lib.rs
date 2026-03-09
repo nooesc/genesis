@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod protocol;
+pub mod server;
 pub mod transport;
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use tracing::{error, info, warn};
 
 pub use client::{McpClient, McpServerConfig};
 pub use protocol::{McpPromptDef, McpResourceDef, PromptGetResult, ResourceReadResult};
+pub use server::{McpServeConfig, McpToolBackend, McpServerToolDef, run_stdio_server};
 
 #[derive(Debug, Error)]
 pub enum McpError {
