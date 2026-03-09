@@ -55,6 +55,7 @@ pub enum SkillHubError {
     Json(serde_json::Error),
     Parse(String),
     NotFound(String),
+    Network(String),
     UnsupportedSource(&'static str),
 }
 
@@ -65,6 +66,7 @@ impl std::fmt::Display for SkillHubError {
             Self::Json(err) => write!(f, "json error: {err}"),
             Self::Parse(err) => write!(f, "parse error: {err}"),
             Self::NotFound(name) => write!(f, "skill not found: {name}"),
+            Self::Network(msg) => write!(f, "network error: {msg}"),
             Self::UnsupportedSource(kind) => {
                 write!(f, "source type is not supported yet: {kind}")
             }
@@ -159,7 +161,9 @@ impl SkillHubClient {
     pub fn install(&self, manifest: &SkillManifest) -> Result<SkillLock, SkillHubError> {
         match &manifest.source {
             SkillSource::Local => self.install_local(manifest),
-            SkillSource::GitHub { .. } => Err(SkillHubError::UnsupportedSource("github")),
+            SkillSource::GitHub { owner, repo, path } => {
+                self.install_github(manifest, owner, repo, path)
+            }
             SkillSource::Registry { .. } => Err(SkillHubError::UnsupportedSource("registry")),
         }
     }
@@ -186,6 +190,39 @@ impl SkillHubClient {
             fs::remove_dir_all(&destination_dir)?;
         }
         copy_dir_recursive(&source_dir, &destination_dir)?;
+
+        let lock = SkillLock {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            source: manifest.source.clone(),
+            installed_at: now_unix_timestamp(),
+            checksum: checksum_dir(&destination_dir)?,
+        };
+
+        let mut locks = load_lock_file(&self.lock_path)?;
+        locks.retain(|existing| existing.name != lock.name);
+        locks.push(lock.clone());
+        locks.sort_by(|left, right| left.name.cmp(&right.name));
+        save_lock_file(&self.lock_path, &locks)?;
+
+        Ok(lock)
+    }
+
+    fn install_github(
+        &self,
+        manifest: &SkillManifest,
+        owner: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<SkillLock, SkillHubError> {
+        fs::create_dir_all(&self.installed_dir)?;
+        let destination_dir = self.installed_dir.join(&manifest.name);
+        if destination_dir.exists() {
+            fs::remove_dir_all(&destination_dir)?;
+        }
+        fs::create_dir_all(&destination_dir)?;
+
+        fetch_github_dir(owner, repo, path, &destination_dir)?;
 
         let lock = SkillLock {
             name: manifest.name.clone(),
@@ -266,6 +303,79 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SkillHubE
     }
 
     Ok(())
+}
+
+/// Fetch a directory from GitHub using the Contents API and write files to `dest`.
+fn fetch_github_dir(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    dest: &Path,
+) -> Result<(), SkillHubError> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("genesis-skills-hub")
+        .build()
+        .map_err(|e| SkillHubError::Network(e.to_string()))?;
+
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
+    let mut request = client.get(&url);
+
+    // Use GITHUB_TOKEN if available for rate limiting / private repos
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .send()
+        .map_err(|e| SkillHubError::Network(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(SkillHubError::Network(format!(
+            "GitHub API returned {} for {}",
+            response.status(),
+            url,
+        )));
+    }
+
+    let entries: Vec<GitHubContent> = response
+        .json()
+        .map_err(|e| SkillHubError::Network(format!("failed to parse GitHub response: {e}")))?;
+
+    for entry in entries {
+        let dest_path = dest.join(&entry.name);
+        match entry.content_type.as_str() {
+            "dir" => {
+                fs::create_dir_all(&dest_path)?;
+                let sub_path = format!("{path}/{}", entry.name);
+                fetch_github_dir(owner, repo, &sub_path, &dest_path)?;
+            }
+            "file" => {
+                let download_url = entry.download_url.ok_or_else(|| {
+                    SkillHubError::Network(format!("no download_url for {}", entry.name))
+                })?;
+                let mut dl_request = client.get(&download_url);
+                if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                    dl_request = dl_request.bearer_auth(token);
+                }
+                let content = dl_request
+                    .send()
+                    .and_then(|r| r.bytes())
+                    .map_err(|e| SkillHubError::Network(e.to_string()))?;
+                fs::write(&dest_path, &content)?;
+            }
+            _ => {} // skip symlinks, submodules, etc.
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct GitHubContent {
+    name: String,
+    #[serde(rename = "type")]
+    content_type: String,
+    download_url: Option<String>,
 }
 
 fn checksum_dir(path: &Path) -> Result<String, SkillHubError> {
@@ -477,9 +587,9 @@ mod tests {
     }
 
     #[test]
-    fn install_rejects_remote_sources_for_now() {
-        let available = TempDir::new("skills-hub-remote-available");
-        let installed = TempDir::new("skills-hub-remote-installed");
+    fn install_rejects_registry_source() {
+        let available = TempDir::new("skills-hub-registry-available");
+        let installed = TempDir::new("skills-hub-registry-installed");
         let client = SkillHubClient::new(available.path(), installed.path());
         let manifest = SkillManifest {
             name: "remote".to_owned(),
@@ -488,14 +598,35 @@ mod tests {
             author: "Eve".to_owned(),
             license: "MIT".to_owned(),
             tags: vec!["remote".to_owned()],
-            source: SkillSource::GitHub {
-                owner: "nooesc".to_owned(),
-                repo: "genesis".to_owned(),
-                path: "skills/remote".to_owned(),
+            source: SkillSource::Registry {
+                url: "https://example.com".to_owned(),
             },
         };
 
-        let err = client.install(&manifest).expect_err("remote install should fail");
-        assert!(matches!(err, SkillHubError::UnsupportedSource("github")));
+        let err = client.install(&manifest).expect_err("registry install should fail");
+        assert!(matches!(err, SkillHubError::UnsupportedSource("registry")));
+    }
+
+    #[test]
+    fn github_install_returns_network_error_for_nonexistent_repo() {
+        let available = TempDir::new("skills-hub-gh-available");
+        let installed = TempDir::new("skills-hub-gh-installed");
+        let client = SkillHubClient::new(available.path(), installed.path());
+        let manifest = SkillManifest {
+            name: "nonexistent".to_owned(),
+            description: "Does not exist".to_owned(),
+            version: "1.0.0".to_owned(),
+            author: "Eve".to_owned(),
+            license: "MIT".to_owned(),
+            tags: vec![],
+            source: SkillSource::GitHub {
+                owner: "this-owner-does-not-exist-12345".to_owned(),
+                repo: "this-repo-does-not-exist-67890".to_owned(),
+                path: "skills/nope".to_owned(),
+            },
+        };
+
+        let err = client.install(&manifest).expect_err("should fail for nonexistent repo");
+        assert!(matches!(err, SkillHubError::Network(_)));
     }
 }

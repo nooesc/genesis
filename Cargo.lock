@@ -709,6 +709,7 @@ dependencies = [
  "hex",
  "rand",
  "regex",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

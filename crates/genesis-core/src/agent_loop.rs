@@ -15,7 +15,7 @@ use tracing::{debug, info, info_span, warn};
 use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
-use crate::hooks::{HookConfig, HookEvent, HookResult, HookRunner};
+use crate::hooks::{HookEvent, HookResult, HookRunner};
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
@@ -1918,6 +1918,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::HookConfig;
     use std::io::{Read, Write};
 
     fn test_agent() -> AgentLoop {

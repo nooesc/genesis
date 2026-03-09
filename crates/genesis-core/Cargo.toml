@@ -15,6 +15,7 @@ genesis-storage = { path = "../genesis-storage" }
 genesis-tools = { path = "../genesis-tools" }
 genesis-types = { path = "../genesis-types" }
 rand.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
