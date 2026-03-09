@@ -288,6 +288,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/pairing/clear-pending", post(clear_pending_handler))
         // Tool introspection
         .route("/tools", get(list_tools_handler))
+        // Config introspection
+        .route("/config", get(config_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -1136,6 +1138,47 @@ async fn list_tools_handler(
         "mcp_count": mcp_count,
         "total": count + mcp_count,
     })))
+}
+
+async fn config_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let config = &state.loaded.config;
+    Json(serde_json::json!({
+        "provider": {
+            "backend": config.provider.backend,
+            "model": config.provider.model,
+        },
+        "tool_provider": config.tool_provider.as_ref().map(|tp| serde_json::json!({
+            "backend": tp.backend,
+            "model": tp.model,
+        })),
+        "fallback_providers": config.fallback_providers.iter().map(|fp| serde_json::json!({
+            "backend": fp.backend,
+            "model": fp.model,
+        })).collect::<Vec<_>>(),
+        "runtime": {
+            "max_concurrency": config.runtime.max_concurrency,
+            "max_turns": config.runtime.max_turns,
+            "max_context_messages": config.runtime.max_context_messages,
+            "max_context_tokens": config.runtime.max_context_tokens,
+            "max_iterations": config.runtime.max_iterations,
+            "budget_limit": config.runtime.budget_limit,
+            "allow_destructive_tools": config.runtime.allow_destructive_tools,
+            "thinking_budget": config.runtime.thinking_budget,
+            "reasoning_effort": config.runtime.reasoning_effort,
+            "context_security": format!("{:?}", config.runtime.context_security),
+        },
+        "gateway": config.gateway.as_ref().map(|g| serde_json::json!({
+            "idle_timeout_minutes": g.idle_timeout_minutes,
+            "daily_reset_hour": g.daily_reset_hour,
+            "rate_limit_rpm": g.rate_limit_rpm,
+            "webhooks_count": g.webhooks.len(),
+        })),
+        "mcp_servers": config.mcp_servers.keys().collect::<Vec<_>>(),
+        "profile": config.profile,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 async fn chat_handler(
