@@ -398,6 +398,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/webhooks/dead-letters", get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler))
         .route("/templates", get(list_templates_handler))
         .route("/templates/{name}", get(get_template_handler))
+        .route("/workflows/validate", post(workflow_validate_handler))
+        .route("/workflows/run", post(workflow_run_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -1918,6 +1920,90 @@ async fn get_template_handler(
         }
         None => Err((StatusCode::NOT_FOUND, format!("Template '{name}' not found"))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow endpoints
+// ---------------------------------------------------------------------------
+
+async fn workflow_validate_handler(
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing 'yaml' field in request body".to_owned(),
+            )
+        })?;
+
+    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse workflow: {e}"),
+        )
+    })?;
+
+    let issues = genesis_core::workflow::validate_workflow(&workflow);
+    Ok(Json(serde_json::json!({
+        "valid": issues.is_empty(),
+        "workflow_name": workflow.name,
+        "steps": workflow.steps.len(),
+        "issues": issues,
+    })))
+}
+
+async fn workflow_run_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing 'yaml' field in request body".to_owned(),
+            )
+        })?;
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let session_id = body
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("workflow-api");
+
+    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse workflow: {e}"),
+        )
+    })?;
+
+    let issues = genesis_core::workflow::validate_workflow(&workflow);
+    if !issues.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Workflow validation failed: {}", issues.join("; ")),
+        ));
+    }
+
+    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let result = service
+        .run_workflow(&workflow, input, session_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Workflow execution failed: {e}"),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!(result)))
 }
 
 // ---------------------------------------------------------------------------

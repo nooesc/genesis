@@ -21,6 +21,7 @@ pub mod personality;
 pub mod tagger;
 pub mod templates;
 pub mod toolset;
+pub mod workflow;
 pub mod trajectory;
 
 use std::path::Path;

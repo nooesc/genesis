@@ -591,6 +591,107 @@ impl<'a> SessionExecutionService<'a> {
             result: executed.result,
         })
     }
+
+    /// Execute a multi-step workflow, running each step as an independent agent turn.
+    ///
+    /// Each step's output is captured and made available to subsequent steps via
+    /// `{{step_name}}` template variables. The workflow's `{{input}}` variable is
+    /// replaced with the provided `input` string.
+    pub async fn run_workflow(
+        &self,
+        workflow: &crate::workflow::WorkflowDefinition,
+        input: &str,
+        session_id: &str,
+    ) -> Result<crate::workflow::WorkflowResult, SessionExecutionError> {
+        use crate::workflow::{render_prompt, StepResult, WorkflowResult};
+        use std::collections::HashMap;
+
+        let span = info_span!("workflow.run", workflow = %workflow.name, session_id = session_id);
+        let _guard = span.enter();
+
+        info!(
+            steps = workflow.steps.len(),
+            "starting workflow execution"
+        );
+
+        let mut step_outputs: HashMap<String, String> = HashMap::new();
+        let mut step_results: Vec<StepResult> = Vec::new();
+        let mut total_input_tokens: u32 = 0;
+        let mut total_output_tokens: u32 = 0;
+        let mut final_output = String::new();
+
+        for (i, step) in workflow.steps.iter().enumerate() {
+            let rendered_prompt = render_prompt(&step.prompt, input, &step_outputs);
+            info!(
+                step = i + 1,
+                step_name = %step.name,
+                "executing workflow step"
+            );
+
+            // Per-step model overrides can be added later; currently uses the
+            // service-level model for all steps.
+
+            let step_session_id = format!("{session_id}__wf__{}", step.name);
+            let turn_input = SessionTurnInput {
+                session_id: &step_session_id,
+                session_platform: "workflow",
+                delivery_platform: DeliveryPlatform::Cli,
+                prompt: &rendered_prompt,
+                title: Some(&format!("Workflow: {} / {}", workflow.name, step.name)),
+                images: vec![],
+            };
+
+            let outcome = self.run_turn(turn_input).await?;
+
+            let step_output = outcome.result.response.clone();
+            total_input_tokens += outcome.result.total_input_tokens;
+            total_output_tokens += outcome.result.total_output_tokens;
+
+            step_outputs.insert(step.name.clone(), step_output.clone());
+            step_results.push(StepResult {
+                step_name: step.name.clone(),
+                output: step_output.clone(),
+                input_tokens: outcome.result.total_input_tokens,
+                output_tokens: outcome.result.total_output_tokens,
+            });
+
+            final_output = step_output;
+
+            info!(
+                step = i + 1,
+                step_name = %step.name,
+                input_tokens = outcome.result.total_input_tokens,
+                output_tokens = outcome.result.total_output_tokens,
+                "completed workflow step"
+            );
+
+            if step.terminal {
+                info!(
+                    step_name = %step.name,
+                    "terminal step reached, ending workflow early"
+                );
+                break;
+            }
+        }
+
+        let result = WorkflowResult {
+            workflow_name: workflow.name.clone(),
+            steps_completed: step_results.len(),
+            step_results,
+            final_output,
+            total_input_tokens,
+            total_output_tokens,
+        };
+
+        info!(
+            steps_completed = result.steps_completed,
+            total_input_tokens = result.total_input_tokens,
+            total_output_tokens = result.total_output_tokens,
+            "workflow execution complete"
+        );
+
+        Ok(result)
+    }
 }
 
 /// Spawns child agent loops as background tokio tasks.

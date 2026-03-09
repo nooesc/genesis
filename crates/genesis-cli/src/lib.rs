@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/analytics", "/template", "/clear",
+                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/clear",
             ],
         }
     }
@@ -2621,6 +2621,129 @@ async fn run_chat(
                         println!("Unknown template '{arg}'. Available: {}", names.join(", "));
                     }
                 }
+            }
+            continue;
+        }
+
+        // Handle /workflow — run a YAML-defined multi-step workflow
+        if trimmed.starts_with("/workflow") {
+            let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
+            let sub = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if sub.is_empty() || sub == "help" {
+                println!(
+                    "Usage:\n\
+                     /workflow run <file.yaml> [input]  - Run a workflow from YAML file\n\
+                     /workflow validate <file.yaml>     - Validate a workflow definition\n\
+                     /workflow show <file.yaml>         - Show workflow steps\n\
+                     \n\
+                     Example workflow YAML:\n\
+                     name: research_pipeline\n\
+                     description: Research and summarize a topic\n\
+                     steps:\n\
+                       - name: research\n\
+                         prompt: \"Research: {{{{input}}}}\"\n\
+                       - name: summarize\n\
+                         prompt: \"Summarize: {{{{research}}}}\"\n\
+                         terminal: true"
+                );
+            } else if sub == "validate" {
+                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                if file.is_empty() {
+                    println!("Usage: /workflow validate <file.yaml>");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::workflow::parse_workflow(&yaml) {
+                            Ok(wf) => {
+                                let issues = genesis_core::workflow::validate_workflow(&wf);
+                                if issues.is_empty() {
+                                    println!("Workflow '{}' is valid ({} steps).", wf.name, wf.steps.len());
+                                } else {
+                                    println!("Workflow '{}' has {} issue(s):", wf.name, issues.len());
+                                    for issue in &issues {
+                                        println!("  - {issue}");
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Failed to parse workflow: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else if sub == "show" {
+                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                if file.is_empty() {
+                    println!("Usage: /workflow show <file.yaml>");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::workflow::parse_workflow(&yaml) {
+                            Ok(wf) => {
+                                println!("Workflow: {} — {}", wf.name, wf.description);
+                                for (i, step) in wf.steps.iter().enumerate() {
+                                    let model_str = step.model.as_deref().unwrap_or("default");
+                                    let terminal_str = if step.terminal { " [terminal]" } else { "" };
+                                    println!("  Step {}: {} (model: {}){}", i + 1, step.name, model_str, terminal_str);
+                                    // Show truncated prompt
+                                    let prompt_preview = if step.prompt.len() > 80 {
+                                        format!("{}...", &step.prompt[..80])
+                                    } else {
+                                        step.prompt.clone()
+                                    };
+                                    println!("    Prompt: {prompt_preview}");
+                                }
+                            }
+                            Err(e) => println!("Failed to parse workflow: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else if sub == "run" {
+                let rest = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let (file, input_text) = rest.split_once(' ').unwrap_or((rest, ""));
+                if file.is_empty() {
+                    println!("Usage: /workflow run <file.yaml> [input text]");
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(yaml) => match genesis_core::workflow::parse_workflow(&yaml) {
+                            Ok(wf) => {
+                                let issues = genesis_core::workflow::validate_workflow(&wf);
+                                if !issues.is_empty() {
+                                    println!("Workflow has validation issues:");
+                                    for issue in &issues {
+                                        println!("  - {issue}");
+                                    }
+                                    println!("Fix these before running.");
+                                } else {
+                                    println!("Running workflow '{}' ({} steps)...", wf.name, wf.steps.len());
+                                    let wf_session_id = format!("{session_id}__wf__{}", wf.name);
+                                    match service.run_workflow(&wf, input_text, &wf_session_id).await {
+                                        Ok(result) => {
+                                            println!("\nWorkflow '{}' complete!", result.workflow_name);
+                                            println!("Steps completed: {}/{}", result.steps_completed, wf.steps.len());
+                                            println!("Total tokens: {} in / {} out", result.total_input_tokens, result.total_output_tokens);
+                                            for sr in &result.step_results {
+                                                println!("\n--- Step: {} ---", sr.step_name);
+                                                // Show first 500 chars of output
+                                                let preview = if sr.output.len() > 500 {
+                                                    format!("{}...", &sr.output[..500])
+                                                } else {
+                                                    sr.output.clone()
+                                                };
+                                                println!("{preview}");
+                                            }
+                                            println!("\n--- Final Output ---");
+                                            println!("{}", result.final_output);
+                                        }
+                                        Err(e) => println!("Workflow execution failed: {e}"),
+                                    }
+                                }
+                            }
+                            Err(e) => println!("Failed to parse workflow: {e}"),
+                        },
+                        Err(e) => println!("Failed to read file '{file}': {e}"),
+                    }
+                }
+            } else {
+                println!("Unknown workflow subcommand '{sub}'. Use /workflow help.");
             }
             continue;
         }
@@ -6049,6 +6172,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /audit        - View audit log (stats, purge <days>)\n\
              /analytics    - Tool and LLM usage analytics\n\
              /template     - Apply an agent template (archetype)\n\
+             /workflow     - Run a YAML-defined multi-step workflow\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
