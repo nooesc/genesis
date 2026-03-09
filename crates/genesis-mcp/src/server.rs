@@ -14,13 +14,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
     Implementation, InitializeResult, JsonRpcError,
     ServerCapabilities, ToolsCapability,
 };
+
+const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Server types
@@ -146,17 +148,17 @@ pub async fn run_stdio_server(
 
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => {
+        match read_limited_stdin_line(&mut reader, MAX_STDIN_FRAME_BYTES).await {
+            Ok(Some(next_line)) => {
+                line = next_line;
+            }
+            Ok(None) => {
                 info!("MCP server: stdin closed, shutting down");
                 break;
             }
-            Ok(_) => {}
             Err(e) => {
-                error!(error = %e, "MCP server: failed to read from stdin");
-                return Err(crate::McpError::Transport(format!(
-                    "stdin read error: {e}"
-                )));
+                error!(error = %e, "MCP server: invalid frame");
+                return Err(crate::McpError::Protocol(format!("invalid frame: {e}")));
             }
         }
 
@@ -188,6 +190,35 @@ pub async fn run_stdio_server(
     }
 
     Ok(())
+}
+
+async fn read_limited_stdin_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, crate::McpError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut limited_reader = reader.take((max_bytes as u64).saturating_add(1));
+    let bytes_read = limited_reader
+        .read_until(b'\n', &mut line)
+        .await
+        .map_err(|e| crate::McpError::Transport(format!("stdin read error: {e}")))?;
+
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+
+    if !line.ends_with(b"\n") && bytes_read > max_bytes {
+        return Err(crate::McpError::Protocol(format!(
+            "frame exceeds {max_bytes} bytes"
+        )));
+    }
+
+    String::from_utf8(line).map_err(|error| {
+        crate::McpError::Protocol(format!("incoming frame was not valid UTF-8: {error}"))
+    })
 }
 
 /// Handle a single JSON-RPC request and return a response.
@@ -295,14 +326,7 @@ fn handle_tools_call(
             OutgoingResponse::success(request.id, result)
         }
         Err(error_msg) => {
-            let result = serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": error_msg,
-                }],
-                "isError": true,
-            });
-            OutgoingResponse::success(request.id, result)
+            OutgoingResponse::error(request.id, -32603, error_msg)
         }
     }
 }
@@ -458,10 +482,10 @@ mod tests {
         })));
 
         let resp = handle_request(&config, &backend, &req);
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], true);
-        let content = result["content"].as_array().unwrap();
-        assert!(content[0]["text"].as_str().unwrap().contains("intentional failure"));
+        assert!(resp.error.is_some());
+        let error = resp.error.unwrap();
+        assert_eq!(error.code, -32603);
+        assert!(error.message.contains("intentional failure"));
     }
 
     #[test]

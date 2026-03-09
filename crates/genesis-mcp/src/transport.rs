@@ -8,13 +8,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use futures_util::StreamExt;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, error, warn};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::McpError;
+
+const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Trait for MCP transport implementations.
 ///
@@ -101,9 +105,9 @@ impl StdioTransport {
         let pending_for_reader = Arc::clone(&pending);
         let reader = BufReader::new(stdout);
         tokio::spawn(async move {
-            let mut lines = reader.lines();
+            let mut reader = reader;
             loop {
-                match lines.next_line().await {
+                match read_limited_stdin_line(&mut reader, MAX_STDIN_FRAME_BYTES).await {
                     Ok(Some(line)) => {
                         let line = line.trim().to_owned();
                         if line.is_empty() {
@@ -162,6 +166,9 @@ impl McpTransport for StdioTransport {
 
             let json = serde_json::to_string(&request)
                 .map_err(|e| McpError::Protocol(format!("failed to serialize request: {e}")))?;
+            if json.len() > MAX_STDIN_FRAME_BYTES {
+                return Err(McpError::Protocol("JSON-RPC request too large".to_owned()));
+            }
 
             let (tx, rx) = oneshot::channel();
             {
@@ -193,6 +200,9 @@ impl McpTransport for StdioTransport {
         });
         let json = serde_json::to_string(&msg)
             .map_err(|e| McpError::Protocol(format!("failed to serialize notification: {e}")))?;
+        if json.len() > MAX_STDIN_FRAME_BYTES {
+            return Err(McpError::Protocol("JSON-RPC notification too large".to_owned()));
+        }
 
         self.outgoing_tx
             .send(json)
@@ -245,6 +255,79 @@ impl HttpTransport {
     }
 }
 
+async fn read_limited_stdin_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, McpError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut limited = reader.take((max_bytes as u64).saturating_add(1));
+    let bytes_read = limited
+        .read_until(b'\n', &mut line)
+        .await
+        .map_err(|e| McpError::Transport(format!("mcp stdout read error: {e}")))?;
+
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+
+    if !line.ends_with(b"\n") && bytes_read > max_bytes {
+        return Err(McpError::Protocol(format!(
+            "incoming MCP frame exceeds {max_bytes} bytes"
+        )));
+    }
+
+    String::from_utf8(line).map_err(|error| {
+        McpError::Protocol(format!("incoming MCP frame was not valid UTF-8: {error}"))
+    })
+}
+
+async fn read_http_body_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, McpError> {
+    let mut body = Vec::new();
+    let mut downloaded = 0usize;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            McpError::Protocol(format!("failed to read HTTP response body: {error}"))
+        })?;
+        if downloaded.saturating_add(chunk.len()) > max_bytes {
+            return Err(McpError::Protocol(format!(
+                "HTTP response body exceeds {max_bytes} bytes"
+            )));
+        }
+        downloaded = downloaded.saturating_add(chunk.len());
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+async fn read_http_body_text(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, McpError> {
+    let bytes = read_http_body_bytes(response, max_bytes).await?;
+    String::from_utf8(bytes).map_err(|error| {
+        McpError::Protocol(format!("HTTP response body was not valid UTF-8: {error}"))
+    })
+}
+
+async fn read_http_response_json(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<JsonRpcResponse, McpError> {
+    let body = read_http_body_bytes(response, max_bytes).await?;
+    serde_json::from_slice(&body).map_err(|e| {
+        McpError::Protocol(format!("failed to parse JSON-RPC response: {e}"))
+    })
+}
+
 impl McpTransport for HttpTransport {
     fn request(
         &self,
@@ -276,17 +359,15 @@ impl McpTransport for HttpTransport {
 
             let status = response.status();
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = read_http_body_text(response, MAX_HTTP_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|error| format!("[unreadable response body: {error}]"));
                 return Err(McpError::Transport(format!(
                     "HTTP {status}: {body}"
                 )));
             }
 
-            let resp: JsonRpcResponse = response.json().await.map_err(|e| {
-                McpError::Protocol(format!("failed to parse JSON-RPC response: {e}"))
-            })?;
-
-            Ok(resp)
+            read_http_response_json(response, MAX_HTTP_RESPONSE_BYTES).await
         })
     }
 

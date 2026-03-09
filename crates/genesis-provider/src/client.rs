@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
 
 use crate::api_types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
@@ -15,6 +16,7 @@ const MAX_RETRIES: u32 = 3;
 const BASE_DELAY: Duration = Duration::from_secs(1);
 /// Maximum delay cap.
 const MAX_DELAY: Duration = Duration::from_secs(8);
+const MAX_NON_STREAMING_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 pub type ChatCompletionChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, ProviderError>> + Send>>;
@@ -148,7 +150,12 @@ impl ChatClient {
                     }
 
                     if !is_retryable_status(status.as_u16()) || attempt == MAX_RETRIES {
-                        let resp_body = response.text().await.unwrap_or_default();
+                        let resp_body = read_text_with_limit(
+                            response,
+                            MAX_NON_STREAMING_RESPONSE_BYTES,
+                        )
+                        .await
+                        .unwrap_or_else(|error| format!("unreadable response body: {error}"));
                         warn!(
                             endpoint = self.endpoint.as_str(),
                             model,
@@ -237,7 +244,12 @@ impl ChatClient {
         let body = Self::prepare_body(&mut request, &self.backend)?;
         let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
-        let completion: ChatCompletionResponse = match response.json().await {
+        let completion: ChatCompletionResponse = match read_json_with_limit(
+            response,
+            MAX_NON_STREAMING_RESPONSE_BYTES,
+        )
+        .await
+        {
             Ok(completion) => completion,
             Err(error) => {
                 error!(
@@ -298,7 +310,12 @@ impl ChatClient {
         let body = serde_json::to_value(&anthropic_req)?;
         let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
 
-        let anthropic_resp: AnthropicResponse = match response.json().await {
+        let anthropic_resp: AnthropicResponse = match read_json_with_limit(
+            response,
+            MAX_NON_STREAMING_RESPONSE_BYTES,
+        )
+        .await
+        {
             Ok(resp) => resp,
             Err(error) => {
                 error!(
@@ -359,7 +376,12 @@ impl ChatClient {
         let body = serde_json::to_value(&gemini_req)?;
         let response = self.send_with_retry(&url, &body, &request.model).await?;
 
-        let gemini_resp: gemini_types::GeminiResponse = match response.json().await {
+        let gemini_resp: gemini_types::GeminiResponse = match read_json_with_limit(
+            response,
+            MAX_NON_STREAMING_RESPONSE_BYTES,
+        )
+        .await
+        {
             Ok(resp) => resp,
             Err(error) => {
                 error!(
@@ -768,6 +790,45 @@ fn backoff_delay(attempt: u32) -> Duration {
     };
     let final_ms = (capped_ms as i64 + jitter).max(100) as u64;
     Duration::from_millis(final_ms)
+}
+
+async fn read_response_body_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    let mut bytes = Vec::new();
+    let mut downloaded = 0usize;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(ProviderError::Http)?;
+        if downloaded.saturating_add(chunk.len()) > max_bytes {
+            return Err(ProviderError::ResponseTooLarge { max_bytes });
+        }
+
+        downloaded = downloaded.saturating_add(chunk.len());
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes)
+}
+
+async fn read_text_with_limit(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, ProviderError> {
+    let bytes = read_response_body_bytes(response, max_bytes).await?;
+    String::from_utf8(bytes).map_err(|error| ProviderError::ResponseBodyNotUtf8 {
+        message: error.to_string(),
+    })
+}
+
+async fn read_json_with_limit<T: DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<T, ProviderError> {
+    let bytes = read_response_body_bytes(response, max_bytes).await?;
+    serde_json::from_slice(&bytes).map_err(ProviderError::from)
 }
 
 fn take_next_sse_event(buffer: &mut String) -> Option<String> {
