@@ -7,6 +7,7 @@ pub mod dataset;
 pub mod cost;
 pub mod eval;
 pub mod execution;
+pub mod guardrails;
 pub mod hooks;
 pub mod moa;
 pub mod nudge;

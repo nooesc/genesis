@@ -410,6 +410,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/bus/stats", get(bus_stats_handler))
         .route("/eval/validate", post(eval_validate_handler))
         .route("/eval/run", post(eval_run_handler))
+        .route("/guardrails/check", post(guardrails_check_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -2160,6 +2161,36 @@ async fn eval_run_handler(
     })?;
 
     Ok(Json(serde_json::json!(report)))
+}
+
+// ---------------------------------------------------------------------------
+// Guardrails endpoints
+// ---------------------------------------------------------------------------
+
+async fn guardrails_check_handler(
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let text = body.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Missing 'text' field".to_owned())
+    })?;
+    let direction = body.get("direction").and_then(|v| v.as_str()).unwrap_or("input");
+
+    // Parse config from request body, or use a sensible default
+    let config: genesis_core::guardrails::GuardrailConfig = body
+        .get("config")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_else(|| genesis_core::guardrails::GuardrailConfig {
+            detect_pii: true,
+            pii_action: genesis_core::guardrails::ViolationAction::Warn,
+            ..genesis_core::guardrails::GuardrailConfig::default()
+        });
+
+    let result = match direction {
+        "output" => genesis_core::guardrails::check_output(&config, text),
+        _ => genesis_core::guardrails::check_input(&config, text),
+    };
+
+    Ok(Json(serde_json::json!(result)))
 }
 
 // ---------------------------------------------------------------------------
