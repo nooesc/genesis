@@ -1094,14 +1094,14 @@ fn generate_session_title(prompt: &str) -> String {
 
     let normalized: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if normalized.len() <= MAX_LEN {
+    let truncated: String = normalized.chars().take(MAX_LEN).collect();
+
+    if truncated.len() == normalized.len() {
         return normalized;
     }
 
-    // Find the last space before the limit
-    let truncated = &normalized[..MAX_LEN];
-    let end = truncated.rfind(' ').unwrap_or(MAX_LEN);
-    format!("{}...", &normalized[..end])
+    let end = truncated.rfind(' ').unwrap_or(truncated.len());
+    format!("{}...", &truncated[..end])
 }
 
 /// Convert a DeliveryPlatform to its string representation.

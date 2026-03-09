@@ -828,9 +828,12 @@ impl AgentLoop {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
                 self.last_prompt_tokens = usage.prompt_tokens;
-                if let Err(err) =
-                    self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)
-                {
+                if let Err(err) = self.record_usage_with_model(
+                    &active_model,
+                    turns_used,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                ) {
                     return Err(self.report_error(&hook_session, "usage_record", err));
                 }
                 self.hooks.on_llm_response(
@@ -1220,7 +1223,12 @@ impl AgentLoop {
                     total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
                     self.last_prompt_tokens = turn_input_tokens;
                     if let Err(err) =
-                        self.record_usage(turns_used, turn_input_tokens, turn_output_tokens)
+                        self.record_usage_with_model(
+                            &active_model,
+                            turns_used,
+                            turn_input_tokens,
+                            turn_output_tokens,
+                        )
                     {
                         return Err(self.report_error(&hook_session, "usage_record", err));
                     }
@@ -1392,9 +1400,12 @@ impl AgentLoop {
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
                         self.last_prompt_tokens = usage.prompt_tokens;
-                        if let Err(err) =
-                            self.record_usage(turns_used, usage.prompt_tokens, usage.completion_tokens)
-                        {
+                        if let Err(err) = self.record_usage_with_model(
+                            &fb_model,
+                            turns_used,
+                            usage.prompt_tokens,
+                            usage.completion_tokens,
+                        ) {
                             return Err(self.report_error(&hook_session, "usage_record", err));
                         }
                     }
@@ -1683,8 +1694,18 @@ impl AgentLoop {
 
     /// Record token usage from an LLM turn and check the budget.
     fn record_usage(&mut self, turn: usize, input_tokens: u32, output_tokens: u32) -> Result<(), AgentError> {
+        self.record_usage_with_model(self.client.model(), turn, input_tokens, output_tokens)
+    }
+
+    fn record_usage_with_model(
+        &mut self,
+        model: &str,
+        turn: usize,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Result<(), AgentError> {
         self.cost.record_turn(
-            self.client.model(),
+            model,
             turn,
             input_tokens,
             output_tokens,
