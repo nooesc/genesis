@@ -43,8 +43,8 @@ impl SlashCompleter {
                 "/help", "/history", "/export", "/tokens", "/session",
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/cache", "/stats", "/tag", "/title",
-                "/tree", "/clear",
+                "/personality", "/system", "/cache", "/stats", "/tag",
+                "/title", "/tree", "/clear",
             ],
         }
     }
@@ -2479,6 +2479,24 @@ async fn run_chat(
                     Ok(None) => println!("Session '{target_id}' not found."),
                     Err(e) => println!("Error looking up session: {e}"),
                 }
+            }
+            continue;
+        }
+
+        // Handle /system — view or set system prompt override
+        if trimmed.starts_with("/system") {
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            if arg.is_empty() {
+                println!("Current system prompt: (use the default agent prompt)");
+                println!("Override with: /system <prompt text>");
+                println!("Clear override: /system reset");
+            } else if arg == "reset" {
+                service.clear_system_prompt_override();
+                println!("System prompt override cleared. Using default.");
+            } else {
+                service.set_system_prompt_override(arg.to_owned());
+                println!("System prompt override set. Takes effect on next turn.");
             }
             continue;
         }
@@ -5885,6 +5903,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /tools        - List available tools\n\
              /skills       - List saved skills\n\
              /model [spec] - Show or switch model (e.g. /model anthropic/claude-sonnet-4-20250514)\n\
+             /system [txt] - View or set system prompt override (reset to clear)\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
              /title [text] - View or set session title\n\
              /tree         - Show conversation branch tree\n\

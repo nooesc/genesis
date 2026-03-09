@@ -112,6 +112,11 @@ impl<'a> SessionExecutionService<'a> {
         self.system_prompt_override = Some(prompt);
     }
 
+    /// Clear the system prompt override, reverting to the default.
+    pub fn clear_system_prompt_override(&mut self) {
+        self.system_prompt_override = None;
+    }
+
     /// Set a response format constraint for all chat completions in this
     /// service instance (e.g. json_object or json_schema).
     pub fn set_response_format(&mut self, format: genesis_provider::ResponseFormat) {
