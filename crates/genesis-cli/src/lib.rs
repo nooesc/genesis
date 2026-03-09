@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Datelike, Local, Timelike};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::{AgentError, StreamEvent};
 use genesis_core::replay::{load_and_report, ReplayEventCounts, ReplayReport};
@@ -283,6 +283,11 @@ pub enum Command {
     Toolset(ToolsetCommand),
     #[command(subcommand, about = "List and preview agent personalities")]
     Personality(PersonalityCommand),
+    #[command(about = "Generate shell completions for bash, zsh, fish, elvish, or powershell")]
+    Completions {
+        #[arg(help = "Shell to generate completions for (bash, zsh, fish, elvish, powershell)")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1532,6 +1537,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Toolset(toolset_command) => run_toolset(toolset_command, cli.json),
         Command::Personality(personality_command) => run_personality(personality_command, cli.json),
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
+            Ok(String::new())
+        }
     }
 }
 
