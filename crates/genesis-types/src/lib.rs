@@ -19,6 +19,7 @@ pub struct ConversationMessage {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryPlatform {
     Cli,
+    Api,
     Telegram,
     Discord,
     Slack,

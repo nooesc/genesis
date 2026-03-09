@@ -1055,6 +1055,7 @@ pub fn delivery_platform_str(platform: &DeliveryPlatform) -> &'static str {
         DeliveryPlatform::Slack => "slack",
         DeliveryPlatform::HomeAssistant => "homeassistant",
         DeliveryPlatform::WhatsApp => "whatsapp",
+        DeliveryPlatform::Api => "api",
     }
 }
 
@@ -1067,6 +1068,7 @@ pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
             DeliveryPlatform::HomeAssistant
         }
         "whatsapp" => DeliveryPlatform::WhatsApp,
+        "api" => DeliveryPlatform::Api,
         _ => DeliveryPlatform::Cli,
     }
 }
