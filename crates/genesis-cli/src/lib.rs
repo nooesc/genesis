@@ -5856,6 +5856,19 @@ async fn verify_api_connectivity(loaded: &LoadedConfig) -> Result<u128, String> 
 
 /// Well-known models grouped by provider.
 /// Returns (provider, model_id, short_description).
+/// Rough cost estimate based on typical per-million-token pricing.
+/// Returns (estimated_cost_usd, pricing_note).
+fn estimate_token_cost(input_tokens: u32, output_tokens: u32) -> Option<(f64, &'static str)> {
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
+    // Use GPT-4.1-mini pricing as a reasonable middle-ground estimate:
+    // $0.40 / 1M input, $1.60 / 1M output
+    let input_cost = (input_tokens as f64 / 1_000_000.0) * 0.40;
+    let output_cost = (output_tokens as f64 / 1_000_000.0) * 1.60;
+    Some((input_cost + output_cost, "GPT-4.1-mini pricing"))
+}
+
 fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         // Anthropic
@@ -5930,10 +5943,19 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
         "tokens" | "usage" => {
             let session = store.get_session(session_id).ok()??;
             let total = session.total_input_tokens + session.total_output_tokens;
-            Some(format!(
+            // Rough cost estimate based on common pricing
+            let cost_estimate = estimate_token_cost(
+                session.total_input_tokens as u32,
+                session.total_output_tokens as u32,
+            );
+            let mut output = format!(
                 "Session: {}\nInput tokens:  {}\nOutput tokens: {}\nTotal tokens:  {}",
                 session_id, session.total_input_tokens, session.total_output_tokens, total
-            ))
+            );
+            if let Some((cost, note)) = cost_estimate {
+                output.push_str(&format!("\nEst. cost:     ${:.4} ({note})", cost));
+            }
+            Some(output)
         }
         "session" => Some(format!("Current session: {session_id}")),
         "compress" => {

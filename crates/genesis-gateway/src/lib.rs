@@ -363,8 +363,37 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health/mcp", get(mcp_status_handler))
         .route("/metrics", get(prometheus_metrics_handler))
         .merge(rate_limited)
+        .layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
         .with_state(state)
+}
+
+/// Middleware that logs every request with method, path, status, and duration.
+async fn request_logging_middleware(
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let start = std::time::Instant::now();
+
+    let response = next.run(request).await;
+
+    let duration = start.elapsed();
+    let status = response.status().as_u16();
+
+    // Skip logging health checks to reduce noise
+    if path != "/health" {
+        info!(
+            method = %method,
+            path = %path,
+            status = status,
+            duration_ms = duration.as_millis() as u64,
+            "request completed"
+        );
+    }
+
+    response
 }
 
 async fn auth_middleware(
