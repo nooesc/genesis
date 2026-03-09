@@ -3207,11 +3207,11 @@ async fn run_serve(
     });
     let scheduler = genesis_core::scheduler::SchedulerRuntime::new(db_path, executor);
     let sched_cancel = scheduler.cancellation_handle();
-    tokio::spawn(scheduler.run());
+    let sched_handle = tokio::spawn(scheduler.run());
 
     println!("genesis gateway listening on {addr}");
     let shutdown_state = std::sync::Arc::clone(&state);
-    axum::serve(listener, router)
+    let serve_result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             let uptime = shutdown_state.started_at.elapsed().as_secs();
@@ -3235,12 +3235,17 @@ async fn run_serve(
                 }
             }
         })
-        .await
-        .map_err(|e| CliError::Io(e))?;
+        .await;
 
     // Stop the scheduler
     sched_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Err(error) = sched_handle.await {
+        return Err(CliError::Other(format!(
+            "scheduler task failed during shutdown: {error}"
+        )));
+    }
 
+    serve_result.map_err(|e| CliError::Io(e))?;
     Ok("server stopped".to_owned())
 }
 
