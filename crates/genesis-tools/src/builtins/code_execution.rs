@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::{truncate_output_bytes, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -37,6 +39,10 @@ pub struct CodeExecutionTool;
 
 /// Environment variables allowed into the sandboxed Python process.
 const ALLOWED_ENV: &[&str] = &["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
+
+fn is_no_process_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(3)
+}
 
 impl ToolHandler for CodeExecutionTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
@@ -87,7 +93,7 @@ impl ToolHandler for CodeExecutionTool {
         // Ensure Python doesn't buffer output
         cmd.env("PYTHONUNBUFFERED", "1");
 
-        let child = cmd
+        let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -97,31 +103,104 @@ impl ToolHandler for CodeExecutionTool {
             })?;
 
         let tool_name = call.name.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = child.wait_with_output();
-            let _ = tx.send(result);
-        });
+        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let output = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-            Ok(result) => result.map_err(|e| ToolError::ExecutionFailed {
-                tool: tool_name.clone(),
-                reason: format!("error collecting output: {e}"),
-            })?,
-            Err(_) => {
-                return Err(ToolError::ExecutionFailed {
-                    tool: tool_name,
-                    reason: format!(
-                        "code execution timed out after {timeout_secs}s. \
-                         Use the `timeout_secs` argument to increase the limit."
-                    ),
-                });
-            }
+        let stdout_handle = {
+            let stdout = child.stdout.take();
+            let stdout_buf = stdout_buf.clone();
+            std::thread::spawn(move || {
+                if let Some(mut stdout) = stdout {
+                    if let Ok(mut buf) = stdout_buf.lock() {
+                        let _ = stdout.read_to_end(&mut buf);
+                    }
+                }
+            })
         };
 
-        let stdout = truncate_output_bytes(&output.stdout);
-        let stderr = truncate_output_bytes(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+        let stderr_handle = {
+            let stderr = child.stderr.take();
+            let stderr_buf = stderr_buf.clone();
+            std::thread::spawn(move || {
+                if let Some(mut stderr) = stderr {
+                    if let Ok(mut buf) = stderr_buf.lock() {
+                        let _ = stderr.read_to_end(&mut buf);
+                    }
+                }
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let mut timed_out = false;
+        let mut status: Option<std::process::ExitStatus> = None;
+        loop {
+            match child.try_wait() {
+                Ok(Some(child_status)) => {
+                    status = Some(child_status);
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        timed_out = true;
+
+                        if let Ok(Some(child_status)) = child.try_wait() {
+                            status = Some(child_status);
+                            timed_out = false;
+                            break;
+                        }
+
+                        if let Err(err) = child.kill() {
+                            if !is_no_process_error(&err) {
+                                let _ = child.wait();
+                                return Err(ToolError::ExecutionFailed {
+                                    tool: tool_name,
+                                    reason: format!("failed to kill timed-out process: {err}"),
+                                });
+                            }
+                        }
+
+                        if let Ok(child_status) = child.wait() {
+                            status = Some(child_status);
+                        }
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: tool_name,
+                        reason: format!("error checking code execution status: {err}"),
+                    });
+                }
+            }
+        }
+
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+
+        if timed_out {
+            return Err(ToolError::ExecutionFailed {
+                tool: tool_name,
+                reason: format!(
+                    "code execution timed out after {timeout_secs}s. \
+                     Use the `timeout_secs` argument to increase the limit."
+                ),
+            });
+        }
+
+        let output_status = status.ok_or_else(|| ToolError::ExecutionFailed {
+            tool: tool_name.clone(),
+            reason: "code execution exited without a status".to_owned(),
+        })?;
+        let stdout = stdout_buf
+            .lock()
+            .map(|buf| truncate_output_bytes(&buf))
+            .unwrap_or_default();
+        let stderr = stderr_buf
+            .lock()
+            .map(|buf| truncate_output_bytes(&buf))
+            .unwrap_or_default();
+        let exit_code = output_status.code().unwrap_or(-1);
 
         let mut content = String::new();
         if !stdout.is_empty() {
