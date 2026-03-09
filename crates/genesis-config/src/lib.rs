@@ -203,6 +203,24 @@ pub struct GatewayConfig {
     /// env var when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_rpm: Option<u32>,
+    /// Webhook URLs to POST event notifications to. Events include:
+    /// `message_received`, `tool_called`, `response_sent`, `error`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<WebhookConfig>,
+}
+
+/// Configuration for a single webhook endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookConfig {
+    /// URL to POST event payloads to.
+    pub url: String,
+    /// Optional shared secret for HMAC-SHA256 signature verification.
+    /// When set, a `X-Genesis-Signature` header is included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Event types to send. If empty, all events are sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -820,6 +838,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     idle_timeout_minutes: None,
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
+                    webhooks: Vec::new(),
                 })
                 .idle_timeout_minutes = Some(v);
         }
@@ -840,6 +859,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     idle_timeout_minutes: None,
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
+                    webhooks: Vec::new(),
                 })
                 .daily_reset_hour = Some(v);
         }
@@ -854,6 +874,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     idle_timeout_minutes: None,
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
+                    webhooks: Vec::new(),
                 })
                 .rate_limit_rpm = Some(v);
         }

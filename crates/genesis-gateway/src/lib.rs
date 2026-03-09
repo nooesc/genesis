@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod platforms;
 pub mod verify;
+pub mod webhooks;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -93,6 +94,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Optional per-IP rate limiter.
     pub rate_limiter: Option<RateLimiter>,
+    /// Webhook event dispatcher for external notifications.
+    pub webhooks: webhooks::WebhookDispatcher,
     /// Timestamp when the gateway started (for uptime reporting).
     pub started_at: std::time::Instant,
 }
@@ -104,12 +107,17 @@ impl AppState {
         mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
         rate_limit_rpm: Option<u32>,
     ) -> Self {
+        let webhook_configs = loaded.config.gateway
+            .as_ref()
+            .map(|g| g.webhooks.clone())
+            .unwrap_or_default();
         Self {
             loaded,
             api_key,
             mcp,
             http_client: reqwest::Client::new(),
             rate_limiter: rate_limit_rpm.map(RateLimiter::new),
+            webhooks: webhooks::WebhookDispatcher::new(webhook_configs),
             started_at: std::time::Instant::now(),
         }
     }
@@ -1162,8 +1170,18 @@ async fn chat_handler(
         })
         .collect();
 
+    let webhooks = state.webhooks.clone();
     async move {
         info!("received chat request");
+
+        // Emit message_received webhook
+        webhooks.emit(
+            webhooks::WebhookEventType::MessageReceived,
+            Some(&session_id),
+            Some(&request.platform),
+            serde_json::json!({"message_length": request.message.len()}),
+        );
+
         let outcome = service
             .run_turn(SessionTurnInput {
                 session_id: &session_id,
@@ -1175,6 +1193,13 @@ async fn chat_handler(
             })
             .await
             .map_err(|e| {
+                // Emit error webhook
+                webhooks.emit(
+                    webhooks::WebhookEventType::Error,
+                    Some(&session_id),
+                    Some(&request.platform),
+                    serde_json::json!({"error": e.to_string()}),
+                );
                 error!(
                     request_id = request_id.as_str(),
                     error = %e,
@@ -1187,6 +1212,21 @@ async fn chat_handler(
             turns_used = outcome.result.turns_used,
             tool_calls_made = outcome.result.tool_calls_made,
             "chat request completed"
+        );
+
+        // Emit response_sent webhook
+        webhooks.emit(
+            webhooks::WebhookEventType::ResponseSent,
+            Some(&session_id),
+            Some(&request.platform),
+            serde_json::json!({
+                "turns_used": outcome.result.turns_used,
+                "tool_calls_made": outcome.result.tool_calls_made,
+                "response_length": outcome.result.response.len(),
+                "estimated_cost": outcome.result.estimated_cost,
+                "input_tokens": outcome.result.total_input_tokens,
+                "output_tokens": outcome.result.total_output_tokens,
+            }),
         );
 
         Ok(Json(ChatResponse {
