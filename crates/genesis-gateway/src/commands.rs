@@ -61,6 +61,8 @@ pub fn handle_command(
              \u{2022} /new \u{2014} Start a fresh conversation\n\
              \u{2022} /id \u{2014} Show current session ID\n\
              \u{2022} /config \u{2014} Show current model and session info\n\
+             \u{2022} /model \u{2014} Show current model\n\
+             \u{2022} /cost \u{2014} Show estimated cost for this session\n\
              \u{2022} /help \u{2014} Show this message"
                 .to_owned(),
         ),
@@ -95,6 +97,36 @@ pub fn handle_command(
             }
 
             CommandResult::Reply(lines.join("\n"))
+        }
+
+        "/model" => CommandResult::Reply(format!(
+            "{} / {}",
+            config.provider.backend, config.provider.model
+        )),
+
+        "/cost" => {
+            let session = store.get_session(session_id).ok().flatten();
+            match session {
+                Some(s) => {
+                    let model = &config.provider.model;
+                    let cost = genesis_provider::pricing::estimate_cost(
+                        model,
+                        s.total_input_tokens as u32,
+                        s.total_output_tokens as u32,
+                    );
+                    let mut lines = vec![format!(
+                        "Token usage: {} input + {} output",
+                        s.total_input_tokens, s.total_output_tokens
+                    )];
+                    if let Some(cost) = cost {
+                        lines.push(format!("Estimated cost: {cost}"));
+                    } else {
+                        lines.push("Estimated cost: unknown (model not in pricing table)".to_owned());
+                    }
+                    CommandResult::Reply(lines.join("\n"))
+                }
+                None => CommandResult::Reply("No session data available.".to_owned()),
+            }
         }
 
         _ => {
@@ -302,6 +334,34 @@ mod tests {
                 assert!(msg.contains("Messages: 1"));
                 assert!(msg.contains("Platform: telegram"));
                 assert!(msg.contains("Title: Support"));
+            }
+            CommandResult::PassThrough => panic!("expected Reply"),
+        }
+    }
+
+    #[test]
+    fn model_command_shows_backend_and_model() {
+        let store = test_store();
+        match handle_command("/model", "test", &store, &test_config()) {
+            CommandResult::Reply(msg) => {
+                assert!(msg.contains("openai"));
+                assert!(msg.contains("gpt-4.1-mini"));
+            }
+            CommandResult::PassThrough => panic!("expected Reply"),
+        }
+    }
+
+    #[test]
+    fn cost_command_shows_token_usage() {
+        let store = test_store();
+        store.create_session("s1", "telegram", None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None)
+            .unwrap();
+
+        match handle_command("/cost", "s1", &store, &test_config()) {
+            CommandResult::Reply(msg) => {
+                assert!(msg.contains("Token usage:"));
             }
             CommandResult::PassThrough => panic!("expected Reply"),
         }
