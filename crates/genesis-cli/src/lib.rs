@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/cache", "/stats", "/tag", "/title",
-                "/clear",
+                "/tree", "/clear",
             ],
         }
     }
@@ -2733,10 +2733,30 @@ async fn run_serve(
     tokio::spawn(scheduler.run());
 
     println!("genesis gateway listening on {addr}");
+    let shutdown_state = std::sync::Arc::clone(&state);
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            let uptime = shutdown_state.started_at.elapsed().as_secs();
+            let requests = shutdown_state.requests_total.load(std::sync::atomic::Ordering::Relaxed);
+            let errors = shutdown_state.errors_total.load(std::sync::atomic::Ordering::Relaxed);
+            let input_tokens = shutdown_state.input_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
+            let output_tokens = shutdown_state.output_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
             println!("\nshutting down gateway...");
+            println!(
+                "  uptime: {}s | requests: {} | errors: {} | tokens: {} in / {} out",
+                uptime, requests, errors, input_tokens, output_tokens
+            );
+
+            // Prune expired cache entries on shutdown
+            let cache = genesis_storage::ResponseCacheStore::new(
+                &shutdown_state.loaded.config.storage.database_path,
+            );
+            if let Ok(pruned) = cache.prune_expired() {
+                if pruned > 0 {
+                    println!("  pruned {pruned} expired cache entries");
+                }
+            }
         })
         .await
         .map_err(|e| CliError::Io(e))?;
@@ -5867,6 +5887,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /model [spec] - Show or switch model (e.g. /model anthropic/claude-sonnet-4-20250514)\n\
              /personality  - List or set personality (e.g. /personality pirate)\n\
              /title [text] - View or set session title\n\
+             /tree         - Show conversation branch tree\n\
              /tag [name]   - View, add, or remove (-name) session tags\n\
              /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
@@ -5963,6 +5984,63 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                     Some(lines.join("\n"))
                 }
                 Err(_) => Some("No stored memories.".to_owned()),
+            }
+        }
+        "tree" => {
+            // Show the conversation tree rooted at the current session
+            let _session = store.get_session(session_id).ok()??;
+            // Walk up to the root
+            let mut root_id = session_id.to_owned();
+            let mut visited = std::collections::HashSet::new();
+            while let Ok(Some(s)) = store.get_session(&root_id) {
+                if let Some(parent) = s.parent_session_id {
+                    if visited.contains(&parent) {
+                        break;
+                    }
+                    visited.insert(root_id.clone());
+                    root_id = parent;
+                } else {
+                    break;
+                }
+            }
+            // Print tree from root
+            fn print_tree(
+                store: &SessionStore,
+                id: &str,
+                current: &str,
+                prefix: &str,
+                is_last: bool,
+                lines: &mut Vec<String>,
+            ) {
+                let connector = if prefix.is_empty() { "" } else if is_last { "└── " } else { "├── " };
+                let title = store
+                    .get_session(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.title)
+                    .unwrap_or_else(|| "(untitled)".to_owned());
+                let marker = if id == current { " ← you" } else { "" };
+                lines.push(format!("{prefix}{connector}{id} — {title}{marker}"));
+                if let Ok(children) = store.list_children(id) {
+                    let child_prefix = if prefix.is_empty() {
+                        "".to_owned()
+                    } else if is_last {
+                        format!("{prefix}    ")
+                    } else {
+                        format!("{prefix}│   ")
+                    };
+                    for (i, child) in children.iter().enumerate() {
+                        let last = i == children.len() - 1;
+                        print_tree(store, &child.id, current, &child_prefix, last, lines);
+                    }
+                }
+            }
+            let mut lines = Vec::new();
+            print_tree(store, &root_id, session_id, "", false, &mut lines);
+            if lines.len() <= 1 {
+                Some("No conversation branches. Use /fork to create one.".to_owned())
+            } else {
+                Some(lines.join("\n"))
             }
         }
         "title" => {

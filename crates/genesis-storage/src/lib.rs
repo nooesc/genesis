@@ -969,6 +969,45 @@ impl SessionStore {
         Ok(summaries)
     }
 
+    /// List all sessions that were forked from a given parent session.
+    pub fn list_children(&self, parent_id: &str) -> Result<Vec<SessionSummary>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens,
+                        parent_session_id, created_at, updated_at
+                 FROM sessions WHERE parent_session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let summaries = stmt
+            .query_map(params![parent_id], |row| {
+                Ok(SessionSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    platform: row.get(2)?,
+                    total_input_tokens: row.get(3)?,
+                    total_output_tokens: row.get(4)?,
+                    parent_session_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(summaries)
+    }
+
     /// Delete a session and all its messages and search index entries.
     pub fn delete_session(&self, session_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
