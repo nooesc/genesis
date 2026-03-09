@@ -17,7 +17,7 @@ use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use axum::extract::Path;
@@ -1620,7 +1620,7 @@ async fn chat_handler(
 async fn openai_chat_completions_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<OpenAiCompletionsRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     // Extract the last user message as the prompt
     let prompt = request
         .messages
@@ -1644,6 +1644,35 @@ async fn openai_chat_completions_handler(
         .and_then(|m| m.get("content").and_then(|c| c.as_str()))
         .map(str::to_owned);
 
+    let session_id = default_api_session_id();
+    let request_id = default_request_id();
+    let model = request.model.clone();
+    let streaming = request.stream.unwrap_or(false);
+
+    let span = info_span!(
+        "gateway.openai_compat",
+        request_id = request_id.as_str(),
+        session_id = session_id.as_str(),
+        model = model.as_str(),
+        streaming,
+    );
+
+    if streaming {
+        openai_streaming_response(state, prompt, system_prompt, session_id, model, span).await
+    } else {
+        openai_blocking_response(state, prompt, system_prompt, session_id, model, span).await
+    }
+}
+
+/// Non-streaming OpenAI-compatible response.
+async fn openai_blocking_response(
+    state: Arc<AppState>,
+    prompt: String,
+    system_prompt: Option<String>,
+    session_id: String,
+    model: String,
+    span: tracing::Span,
+) -> Result<Response, (StatusCode, String)> {
     let loaded = &state.loaded;
     let mut service = SessionExecutionService::new(loaded);
     if let Some(mcp) = &state.mcp {
@@ -1652,16 +1681,6 @@ async fn openai_chat_completions_handler(
     if let Some(sp) = system_prompt {
         service.set_system_prompt_override(sp);
     }
-
-    let session_id = default_api_session_id();
-    let request_id = default_request_id();
-    let model = request.model.clone();
-    let span = info_span!(
-        "gateway.openai_compat",
-        request_id = request_id.as_str(),
-        session_id = session_id.as_str(),
-        model = model.as_str(),
-    );
 
     async move {
         info!("received OpenAI-compatible chat completions request");
@@ -1684,15 +1703,7 @@ async fn openai_chat_completions_handler(
                 )
             })?;
 
-        let finish_reason = if outcome.result.pending_clarification.is_some() {
-            "stop"
-        } else if outcome.result.tool_calls_made > 0 {
-            "stop"
-        } else {
-            "stop"
-        };
-
-        Ok(Json(serde_json::json!({
+        let body = serde_json::json!({
             "id": format!("chatcmpl-{}", session_id),
             "object": "chat.completion",
             "created": std::time::SystemTime::now()
@@ -1706,17 +1717,150 @@ async fn openai_chat_completions_handler(
                     "role": "assistant",
                     "content": outcome.result.response,
                 },
-                "finish_reason": finish_reason,
+                "finish_reason": "stop",
             }],
             "usage": {
                 "prompt_tokens": outcome.result.total_input_tokens,
                 "completion_tokens": outcome.result.total_output_tokens,
                 "total_tokens": outcome.result.total_input_tokens + outcome.result.total_output_tokens,
             },
-        })))
+        });
+
+        Ok(Json(body).into_response())
     }
     .instrument(span)
     .await
+}
+
+/// Streaming OpenAI-compatible response (SSE with `data: {...}` chunks).
+///
+/// Follows the OpenAI streaming format:
+/// - Each chunk: `data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"content":"..."}}]}`
+/// - Final: `data: [DONE]`
+async fn openai_streaming_response(
+    state: Arc<AppState>,
+    prompt: String,
+    system_prompt: Option<String>,
+    session_id: String,
+    model: String,
+    span: tracing::Span,
+) -> Result<Response, (StatusCode, String)> {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+    let state_for_task = Arc::clone(&state);
+    let session_id_for_task = session_id.clone();
+    let model_for_task = model.clone();
+
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let completion_id = format!("chatcmpl-{}", session_id);
+
+    tokio::spawn(async move {
+        let loaded = &state_for_task.loaded;
+        let mut service = SessionExecutionService::new(loaded);
+        if let Some(mcp) = &state_for_task.mcp {
+            service.set_mcp(std::sync::Arc::clone(mcp));
+        }
+        if let Some(sp) = system_prompt {
+            service.set_system_prompt_override(sp);
+        }
+
+        info!("received OpenAI-compatible streaming chat completions request");
+
+        // Send initial role chunk
+        let initial_chunk = serde_json::json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": &model_for_task,
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "" },
+                "finish_reason": null,
+            }],
+        });
+        let _ = tx.send(Ok(Event::default()
+            .data(serde_json::to_string(&initial_chunk).unwrap_or_default())));
+
+        let completion_id_for_event = completion_id.clone();
+        let model_for_event = model_for_task.clone();
+        let tx_for_event = tx.clone();
+
+        let run_result = service
+            .run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id_for_task,
+                    session_platform: "api",
+                    delivery_platform: delivery_platform_from_str("api"),
+                    prompt: &prompt,
+                    title: None,
+                    images: Vec::new(),
+                },
+                |event| {
+                    if let StreamEvent::Chunk(chunk) = event {
+                        let data = serde_json::json!({
+                            "id": &completion_id_for_event,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": &model_for_event,
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": chunk },
+                                "finish_reason": null,
+                            }],
+                        });
+                        let _ = tx_for_event.send(Ok(Event::default()
+                            .data(serde_json::to_string(&data).unwrap_or_default())));
+                    }
+                },
+            )
+            .await;
+
+        // Send finish chunk
+        let finish_chunk = serde_json::json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": &model_for_task,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        });
+        let _ = tx.send(Ok(Event::default()
+            .data(serde_json::to_string(&finish_chunk).unwrap_or_default())));
+
+        // Send usage chunk if we got a successful outcome
+        if let Ok(outcome) = run_result {
+            let usage_chunk = serde_json::json!({
+                "id": &completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": &model_for_task,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": outcome.result.total_input_tokens,
+                    "completion_tokens": outcome.result.total_output_tokens,
+                    "total_tokens": outcome.result.total_input_tokens + outcome.result.total_output_tokens,
+                },
+            });
+            let _ = tx.send(Ok(Event::default()
+                .data(serde_json::to_string(&usage_chunk).unwrap_or_default())));
+        }
+
+        // Send [DONE] sentinel
+        let _ = tx.send(Ok(Event::default().data("[DONE]")));
+    }.instrument(span));
+
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            yield event;
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
 }
 
 /// OpenAI-compatible `/v1/models` endpoint.
@@ -1747,7 +1891,6 @@ struct OpenAiCompletionsRequest {
     #[allow(dead_code)]
     max_tokens: Option<u32>,
     #[serde(default)]
-    #[allow(dead_code)]
     stream: Option<bool>,
 }
 
