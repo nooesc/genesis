@@ -53,6 +53,23 @@ const PRICING: &[(&str, ModelPricing)] = &[
     ("gemini-2.5-pro", ModelPricing { input_per_million: 1.25, output_per_million: 10.0 }),
     ("gemini-2.5-flash", ModelPricing { input_per_million: 0.15, output_per_million: 0.60 }),
     ("gemini-2.0-flash", ModelPricing { input_per_million: 0.10, output_per_million: 0.40 }),
+    // DeepSeek
+    ("deepseek-chat", ModelPricing { input_per_million: 0.27, output_per_million: 1.10 }),
+    ("deepseek-reasoner", ModelPricing { input_per_million: 0.55, output_per_million: 2.19 }),
+    // Mistral
+    ("mistral-large", ModelPricing { input_per_million: 2.0, output_per_million: 6.0 }),
+    ("mistral-small", ModelPricing { input_per_million: 0.10, output_per_million: 0.30 }),
+    ("codestral", ModelPricing { input_per_million: 0.30, output_per_million: 0.90 }),
+    // Meta Llama (via API providers)
+    ("llama-4-maverick", ModelPricing { input_per_million: 0.20, output_per_million: 0.60 }),
+    ("llama-4-scout", ModelPricing { input_per_million: 0.15, output_per_million: 0.40 }),
+    ("llama-3.3-70b", ModelPricing { input_per_million: 0.18, output_per_million: 0.36 }),
+    // Qwen (via API providers)
+    ("qwen-2.5-72b", ModelPricing { input_per_million: 0.35, output_per_million: 0.70 }),
+    ("qwen-2.5-coder-32b", ModelPricing { input_per_million: 0.15, output_per_million: 0.30 }),
+    // xAI Grok
+    ("grok-3", ModelPricing { input_per_million: 3.0, output_per_million: 15.0 }),
+    ("grok-3-mini", ModelPricing { input_per_million: 0.30, output_per_million: 0.50 }),
 ];
 
 /// Look up pricing for a model by name.
@@ -183,5 +200,35 @@ mod tests {
         // "gpt-4.1-mini" should match "gpt-4.1-mini" not "gpt-4.1"
         let pricing = lookup_pricing("gpt-4.1-mini").unwrap();
         assert_eq!(pricing.input_per_million, 0.40); // mini pricing, not base
+    }
+
+    #[test]
+    fn deepseek_pricing() {
+        let pricing = lookup_pricing("deepseek-chat").unwrap();
+        assert_eq!(pricing.input_per_million, 0.27);
+    }
+
+    #[test]
+    fn mistral_pricing() {
+        let pricing = lookup_pricing("mistral-large-latest").unwrap();
+        assert_eq!(pricing.input_per_million, 2.0);
+    }
+
+    #[test]
+    fn llama_pricing() {
+        let pricing = lookup_pricing("llama-4-maverick").unwrap();
+        assert_eq!(pricing.input_per_million, 0.20);
+    }
+
+    #[test]
+    fn grok_pricing() {
+        let pricing = lookup_pricing("grok-3-mini").unwrap();
+        assert_eq!(pricing.input_per_million, 0.30);
+    }
+
+    #[test]
+    fn openrouter_prefix_stripped() {
+        let pricing = lookup_pricing("deepseek/deepseek-chat").unwrap();
+        assert_eq!(pricing.input_per_million, 0.27);
     }
 }
