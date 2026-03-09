@@ -82,6 +82,61 @@ impl RateLimiter {
     }
 }
 
+/// Prometheus-style histogram with fixed bucket boundaries.
+pub struct HistogramBuckets {
+    /// Bucket boundaries in milliseconds.
+    boundaries: &'static [u64],
+    /// Count of observations in each bucket (cumulative).
+    counts: Vec<u64>,
+    /// Total count of all observations.
+    total_count: u64,
+    /// Sum of all observed values (for computing mean).
+    total_sum: f64,
+}
+
+const DURATION_BUCKETS: &[u64] = &[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000];
+
+impl HistogramBuckets {
+    fn new(boundaries: &'static [u64]) -> Self {
+        Self {
+            boundaries,
+            counts: vec![0; boundaries.len()],
+            total_count: 0,
+            total_sum: 0.0,
+        }
+    }
+
+    fn observe(&mut self, value_ms: u64) {
+        self.total_count += 1;
+        self.total_sum += value_ms as f64;
+        for (i, &boundary) in self.boundaries.iter().enumerate() {
+            if value_ms <= boundary {
+                self.counts[i] += 1;
+            }
+        }
+    }
+
+    fn format_prometheus(&self, name: &str, help: &str) -> String {
+        let mut out = format!(
+            "# HELP {name} {help}\n# TYPE {name} histogram\n"
+        );
+        let mut cumulative = 0u64;
+        for (i, &boundary) in self.boundaries.iter().enumerate() {
+            cumulative += self.counts[i];
+            out.push_str(&format!(
+                "{name}_bucket{{le=\"{boundary}\"}} {cumulative}\n"
+            ));
+        }
+        out.push_str(&format!(
+            "{name}_bucket{{le=\"+Inf\"}} {}\n",
+            self.total_count
+        ));
+        out.push_str(&format!("{name}_sum {}\n", self.total_sum));
+        out.push_str(&format!("{name}_count {}\n", self.total_count));
+        out
+    }
+}
+
 /// Shared application state for all request handlers.
 pub struct AppState {
     pub loaded: genesis_config::LoadedConfig,
@@ -109,6 +164,8 @@ pub struct AppState {
     pub output_tokens_total: AtomicU64,
     /// Total streaming requests.
     pub stream_requests_total: AtomicU64,
+    /// Request duration histogram buckets (in ms): [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, +Inf]
+    pub request_duration_histogram: Mutex<HistogramBuckets>,
 }
 
 impl AppState {
@@ -135,6 +192,7 @@ impl AppState {
             input_tokens_total: AtomicU64::new(0),
             output_tokens_total: AtomicU64::new(0),
             stream_requests_total: AtomicU64::new(0),
+            request_duration_histogram: Mutex::new(HistogramBuckets::new(DURATION_BUCKETS)),
         }
     }
 }
@@ -581,6 +639,27 @@ async fn prometheus_metrics_handler(
         state.loaded.config.provider.model
     );
 
+    // Webhook delivery metrics
+    let (wh_delivered, wh_retried, wh_failed) = state.webhooks.metrics();
+
+    // Audit log total
+    let audit_total: i64 = genesis_storage::AuditLogStore::new(db_path)
+        .stats()
+        .unwrap_or_default()
+        .iter()
+        .map(|(_, c)| c)
+        .sum();
+
+    // Request duration histogram
+    let duration_histogram = if let Ok(hist) = state.request_duration_histogram.lock() {
+        hist.format_prometheus(
+            "genesis_request_duration_ms",
+            "Chat request duration in milliseconds.",
+        )
+    } else {
+        String::new()
+    };
+
     let body = format!(
         "# HELP genesis_uptime_seconds Time since gateway started.\n\
          # TYPE genesis_uptime_seconds gauge\n\
@@ -615,6 +694,19 @@ async fn prometheus_metrics_handler(
          # HELP genesis_cache_hits_total Total response cache hits.\n\
          # TYPE genesis_cache_hits_total counter\n\
          genesis_cache_hits_total {cache_hits}\n\
+         # HELP genesis_webhook_delivered_total Webhooks successfully delivered.\n\
+         # TYPE genesis_webhook_delivered_total counter\n\
+         genesis_webhook_delivered_total {wh_delivered}\n\
+         # HELP genesis_webhook_retried_total Webhook delivery retries.\n\
+         # TYPE genesis_webhook_retried_total counter\n\
+         genesis_webhook_retried_total {wh_retried}\n\
+         # HELP genesis_webhook_failed_total Webhooks that failed all retries.\n\
+         # TYPE genesis_webhook_failed_total counter\n\
+         genesis_webhook_failed_total {wh_failed}\n\
+         # HELP genesis_audit_entries_total Total audit log entries.\n\
+         # TYPE genesis_audit_entries_total gauge\n\
+         genesis_audit_entries_total {audit_total}\n\
+         {duration_histogram}\
          # HELP genesis_info Build and configuration info.\n\
          # TYPE genesis_info gauge\n\
          genesis_info{{version=\"{version}\",model=\"{model}\"}} 1\n",
@@ -1833,6 +1925,7 @@ async fn chat_handler(
 
     let webhooks = state.webhooks.clone();
     let metrics_state = Arc::clone(&state);
+    let request_started = std::time::Instant::now();
     async move {
         info!("received chat request");
         metrics_state.requests_total.fetch_add(1, Ordering::Relaxed);
@@ -1893,9 +1986,12 @@ async fn chat_handler(
             }),
         );
 
-        // Record token metrics
+        // Record token metrics + duration histogram
         metrics_state.input_tokens_total.fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
         metrics_state.output_tokens_total.fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
+        if let Ok(mut hist) = metrics_state.request_duration_histogram.lock() {
+            hist.observe(request_started.elapsed().as_millis() as u64);
+        }
 
         Ok(Json(ChatResponse {
             session_id: outcome.session_id,
