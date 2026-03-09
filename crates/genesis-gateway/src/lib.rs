@@ -13,7 +13,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -330,6 +330,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Cache management
         .route("/cache/stats", get(cache_stats_handler))
         .route("/cache/clear", post(cache_clear_handler))
+        .route("/audit", get(audit_recent_handler))
+        .route("/audit/stats", get(audit_stats_handler))
+        .route("/audit/session/{id}", get(audit_session_handler))
+        .route("/audit/purge", post(audit_purge_handler))
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
@@ -1659,6 +1663,92 @@ async fn cache_clear_handler(
     match cache.clear() {
         Ok(deleted) => Json(serde_json::json!({
             "cleared": deleted,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": e.to_string(),
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AuditQueryParams {
+    limit: Option<usize>,
+    event_type: Option<String>,
+}
+
+async fn audit_recent_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AuditQueryParams>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let limit = params.limit.unwrap_or(50);
+    let entries = if let Some(ref event_type) = params.event_type {
+        store.by_event_type(event_type, limit).unwrap_or_default()
+    } else {
+        store.recent(limit).unwrap_or_default()
+    };
+    Json(serde_json::json!({
+        "entries": entries,
+        "count": entries.len(),
+    }))
+}
+
+async fn audit_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let stats = store.stats().unwrap_or_default();
+    let total: i64 = stats.iter().map(|(_, c)| c).sum();
+    Json(serde_json::json!({
+        "total_entries": total,
+        "by_event_type": stats.into_iter().map(|(t, c)| {
+            serde_json::json!({"event_type": t, "count": c})
+        }).collect::<Vec<_>>(),
+    }))
+}
+
+async fn audit_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<AuditQueryParams>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let limit = params.limit.unwrap_or(100);
+    let entries = store.by_session(&id, limit).unwrap_or_default();
+    Json(serde_json::json!({
+        "session_id": id,
+        "entries": entries,
+        "count": entries.len(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct AuditPurgeRequest {
+    older_than_days: Option<u32>,
+}
+
+async fn audit_purge_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AuditPurgeRequest>,
+) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(
+        &state.loaded.config.storage.database_path,
+    );
+    let days = request.older_than_days.unwrap_or(90);
+    match store.purge_older_than(days) {
+        Ok(deleted) => Json(serde_json::json!({
+            "purged": deleted,
+            "older_than_days": days,
         })),
         Err(e) => Json(serde_json::json!({
             "error": e.to_string(),

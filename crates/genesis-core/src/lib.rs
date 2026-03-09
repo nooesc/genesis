@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod audit;
 pub mod compress;
 pub mod context_security;
 pub mod dataset;

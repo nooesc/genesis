@@ -44,7 +44,7 @@ impl SlashCompleter {
                 "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/clear",
+                "/title", "/tree", "/audit", "/clear",
             ],
         }
     }
@@ -6009,6 +6009,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
              /tag [name]   - View, add, or remove (-name) session tags\n\
              /stats        - Show session statistics\n\
              /cache        - Show cache stats (clear, prune)\n\
+             /audit        - View audit log (stats, purge <days>)\n\
              /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
@@ -6258,6 +6259,52 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                          Commands: /cache clear, /cache prune"
                     )),
                     Err(e) => Some(format!("Cache stats unavailable: {e}")),
+                }
+            }
+        }
+        "audit" => {
+            let audit_store = genesis_storage::AuditLogStore::new(store.database_path());
+            let sub = _args.trim();
+            if sub == "stats" {
+                match audit_store.stats() {
+                    Ok(stats) => {
+                        let total: i64 = stats.iter().map(|(_, c)| c).sum();
+                        let mut lines = vec![format!("Audit log: {total} total entries")];
+                        for (event_type, count) in &stats {
+                            lines.push(format!("  {event_type}: {count}"));
+                        }
+                        lines.push("Commands: /audit, /audit stats, /audit purge <days>".into());
+                        Some(lines.join("\n"))
+                    }
+                    Err(e) => Some(format!("Audit stats unavailable: {e}")),
+                }
+            } else if sub.starts_with("purge") {
+                let days: u32 = sub.strip_prefix("purge").unwrap_or("90").trim().parse().unwrap_or(90);
+                match audit_store.purge_older_than(days) {
+                    Ok(n) => Some(format!("Purged {n} audit entries older than {days} days.")),
+                    Err(e) => Some(format!("Audit purge failed: {e}")),
+                }
+            } else {
+                // Show recent entries (default: 20)
+                let limit: usize = sub.parse().unwrap_or(20);
+                match audit_store.recent(limit) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            Some("No audit log entries.".into())
+                        } else {
+                            let mut lines = vec![format!("Recent audit entries (showing {}):", entries.len())];
+                            for entry in &entries {
+                                let session = entry.session_id.as_deref().unwrap_or("-");
+                                lines.push(format!(
+                                    "  [{}] {} session={} {}",
+                                    entry.created_at, entry.event_type, session,
+                                    entry.details
+                                ));
+                            }
+                            Some(lines.join("\n"))
+                        }
+                    }
+                    Err(e) => Some(format!("Audit log unavailable: {e}")),
                 }
             }
         }

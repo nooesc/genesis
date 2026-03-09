@@ -466,6 +466,9 @@ impl<'a> SessionExecutionService<'a> {
             agent.set_response_cache(cache);
         }
 
+        // Attach audit logging hooks
+        agent.set_hooks(crate::audit::AuditHooks::shared(db_path));
+
         Ok(agent)
     }
 

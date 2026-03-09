@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -388,6 +388,19 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                event_type TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_session
+                ON audit_log(session_id);
+            CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
+                ON audit_log(event_type);
+            CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
+                ON audit_log(created_at);
             ",
         )
         .map_err(|source| StorageError::Sqlite {
@@ -3463,6 +3476,230 @@ impl ChannelStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+/// A single audit log entry representing an agent action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub session_id: Option<String>,
+    pub event_type: String,
+    pub details: String,
+    pub created_at: String,
+}
+
+/// SQLite-backed audit log for tracking agent actions.
+///
+/// Records tool calls, LLM requests, config changes, and other security-relevant
+/// events with structured JSON details. Supports querying by session, event type,
+/// and time range.
+pub struct AuditLogStore {
+    database_path: PathBuf,
+}
+
+impl AuditLogStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Record an audit event.
+    pub fn log(
+        &self,
+        session_id: Option<&str>,
+        event_type: &str,
+        details: &serde_json::Value,
+    ) -> Result<i64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let details_str = details.to_string();
+        connection
+            .execute(
+                "INSERT INTO audit_log (session_id, event_type, details)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, event_type, details_str],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(connection.last_insert_rowid())
+    }
+
+    /// Query audit entries for a specific session.
+    pub fn by_session(&self, session_id: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, event_type, details, created_at
+                 FROM audit_log
+                 WHERE session_id = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![session_id, limit as i64], |row| {
+                Ok(AuditEntry {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    details: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(entries)
+    }
+
+    /// Query audit entries by event type.
+    pub fn by_event_type(&self, event_type: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, event_type, details, created_at
+                 FROM audit_log
+                 WHERE event_type = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![event_type, limit as i64], |row| {
+                Ok(AuditEntry {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    details: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(entries)
+    }
+
+    /// Query recent audit entries across all sessions.
+    pub fn recent(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, event_type, details, created_at
+                 FROM audit_log
+                 ORDER BY id DESC
+                 LIMIT ?1",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(AuditEntry {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    details: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(entries)
+    }
+
+    /// Count total audit entries and entries per event type.
+    pub fn stats(&self) -> Result<Vec<(String, i64)>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT event_type, COUNT(*) as cnt
+                 FROM audit_log
+                 GROUP BY event_type
+                 ORDER BY cnt DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stats = Vec::new();
+        for row in rows {
+            stats.push(row.map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?);
+        }
+        Ok(stats)
+    }
+
+    /// Delete audit entries older than the given number of days.
+    pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM audit_log WHERE created_at < datetime('now', '-' || ?1 || ' days')",
+                params![days],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted as u64)
+    }
+}
+
 /// A cached LLM response entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedResponse {
@@ -4779,5 +5016,101 @@ mod tests {
 
         let entry = cache.get("tc-key").unwrap().expect("should exist");
         assert_eq!(entry.tool_calls_json.as_deref(), Some(tc));
+    }
+
+    #[test]
+    fn audit_log_records_and_queries_by_session() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        let details = serde_json::json!({"tool": "shell_execute", "args": "ls"});
+        store.log(Some("s1"), "tool_call", &details).unwrap();
+        store.log(Some("s1"), "llm_request", &serde_json::json!({"model": "gpt-4"})).unwrap();
+        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "memory_create"})).unwrap();
+
+        let entries = store.by_session("s1", 100).unwrap();
+        assert_eq!(entries.len(), 2);
+        // Most recent first
+        assert_eq!(entries[0].event_type, "llm_request");
+        assert_eq!(entries[1].event_type, "tool_call");
+    }
+
+    #[test]
+    fn audit_log_queries_by_event_type() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(Some("s1"), "tool_call", &serde_json::json!({"tool": "a"})).unwrap();
+        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "b"})).unwrap();
+        store.log(Some("s1"), "llm_request", &serde_json::json!({})).unwrap();
+
+        let entries = store.by_event_type("tool_call", 100).unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn audit_log_recent_returns_all() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(None, "config_change", &serde_json::json!({"key": "model"})).unwrap();
+        store.log(Some("s1"), "tool_call", &serde_json::json!({})).unwrap();
+
+        let entries = store.recent(100).unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn audit_log_stats_groups_by_type() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
+        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
+        store.log(None, "llm_request", &serde_json::json!({})).unwrap();
+
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].0, "tool_call");
+        assert_eq!(stats[0].1, 2);
+        assert_eq!(stats[1].0, "llm_request");
+        assert_eq!(stats[1].1, 1);
+    }
+
+    #[test]
+    fn audit_log_purge_deletes_nothing_for_recent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        store.log(None, "test", &serde_json::json!({})).unwrap();
+
+        let deleted = store.purge_older_than(30).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(store.recent(100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn audit_log_limit_works() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        super::bootstrap(&db_path).unwrap();
+
+        let store = super::AuditLogStore::new(&db_path);
+        for i in 0..10 {
+            store.log(Some("s1"), "tool_call", &serde_json::json!({"i": i})).unwrap();
+        }
+
+        let entries = store.by_session("s1", 3).unwrap();
+        assert_eq!(entries.len(), 3);
     }
 }
