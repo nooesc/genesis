@@ -60,11 +60,12 @@ impl ToolHandler for SessionExportTool {
             "json" => export_json(&session_id, session_title.as_deref(), &messages),
             "markdown" | "md" => export_markdown(&session_id, session_title.as_deref(), &messages),
             "chatml" => export_chatml(&messages),
+            "jsonl" | "finetune" => export_jsonl(&messages),
             _ => {
                 return Err(ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!(
-                        "unsupported format '{format}'; use 'markdown', 'json', or 'chatml'"
+                        "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
                     ),
                 })
             }
@@ -174,6 +175,36 @@ pub fn export_json(
     });
 
     serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Export as OpenAI fine-tuning JSONL format.
+///
+/// Each output line is a complete training example:
+/// `{"messages": [{"role": "...", "content": "..."}]}`
+///
+/// Tool calls and tool results are omitted — only user/assistant/system
+/// text turns are included.
+pub fn export_jsonl(messages: &[(String, Option<String>, Option<String>, String)]) -> String {
+    let filtered: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|(role, content, _, _)| {
+            matches!(role.as_str(), "user" | "assistant" | "system")
+                && content.as_ref().map_or(false, |c| !c.is_empty())
+        })
+        .map(|(role, content, _, _)| {
+            serde_json::json!({
+                "role": role,
+                "content": content.as_deref().unwrap_or(""),
+            })
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return String::new();
+    }
+
+    let example = serde_json::json!({ "messages": filtered });
+    serde_json::to_string(&example).unwrap_or_default() + "\n"
 }
 
 pub fn export_chatml(messages: &[(String, Option<String>, Option<String>, String)]) -> String {
@@ -341,5 +372,79 @@ mod tests {
             }
             other => panic!("expected ExecutionFailed, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn export_jsonl_produces_valid_finetune_format() {
+        let messages = vec![
+            (
+                "system".to_owned(),
+                Some("You are helpful.".to_owned()),
+                None,
+                "2024-01-01 10:00:00".to_owned(),
+            ),
+            (
+                "user".to_owned(),
+                Some("Hello!".to_owned()),
+                None,
+                "2024-01-01 10:00:01".to_owned(),
+            ),
+            (
+                "assistant".to_owned(),
+                Some("Hi there!".to_owned()),
+                None,
+                "2024-01-01 10:00:02".to_owned(),
+            ),
+        ];
+
+        let jsonl = export_jsonl(&messages);
+        let parsed: serde_json::Value =
+            serde_json::from_str(jsonl.trim()).expect("should be valid JSON");
+        let msgs = parsed["messages"].as_array().expect("should have messages array");
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "Hello!");
+        assert_eq!(msgs[2]["role"], "assistant");
+    }
+
+    #[test]
+    fn export_jsonl_filters_tool_messages() {
+        let messages = vec![
+            (
+                "user".to_owned(),
+                Some("Do something".to_owned()),
+                None,
+                "2024-01-01 10:00:00".to_owned(),
+            ),
+            (
+                "assistant".to_owned(),
+                None, // tool call only, no text
+                Some(r#"[{"name":"echo"}]"#.to_owned()),
+                "2024-01-01 10:00:01".to_owned(),
+            ),
+            (
+                "tool".to_owned(),
+                Some("echo result".to_owned()),
+                None,
+                "2024-01-01 10:00:02".to_owned(),
+            ),
+            (
+                "assistant".to_owned(),
+                Some("Done!".to_owned()),
+                None,
+                "2024-01-01 10:00:03".to_owned(),
+            ),
+        ];
+
+        let jsonl = export_jsonl(&messages);
+        let parsed: serde_json::Value =
+            serde_json::from_str(jsonl.trim()).expect("should be valid JSON");
+        let msgs = parsed["messages"].as_array().expect("should have messages");
+        // Should only include user "Do something" and assistant "Done!"
+        // (tool messages and assistant with no text content are filtered)
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], "Do something");
+        assert_eq!(msgs[1]["content"], "Done!");
     }
 }

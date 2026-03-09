@@ -664,7 +664,9 @@ async fn export_session_handler(
 
     let format = params.format.unwrap_or_else(|| "markdown".to_owned());
 
-    use genesis_tools::builtins::export::{export_chatml, export_json, export_markdown};
+    use genesis_tools::builtins::export::{
+        export_chatml, export_json, export_jsonl, export_markdown,
+    };
 
     let (content, content_type) = match format.as_str() {
         "json" => (
@@ -676,10 +678,14 @@ async fn export_session_handler(
             "text/markdown; charset=utf-8",
         ),
         "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
+        "jsonl" | "finetune" => (
+            export_jsonl(&messages),
+            "application/jsonl; charset=utf-8",
+        ),
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unsupported format '{format}'; use 'markdown', 'json', or 'chatml'"),
+                format!("unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"),
             ))
         }
     };
