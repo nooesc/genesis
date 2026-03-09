@@ -98,6 +98,17 @@ pub struct AppState {
     pub webhooks: webhooks::WebhookDispatcher,
     /// Timestamp when the gateway started (for uptime reporting).
     pub started_at: std::time::Instant,
+    // --- Metrics counters ---
+    /// Total chat requests processed (including stream and batch).
+    pub requests_total: AtomicU64,
+    /// Total errors returned across all endpoints.
+    pub errors_total: AtomicU64,
+    /// Total input tokens processed.
+    pub input_tokens_total: AtomicU64,
+    /// Total output tokens generated.
+    pub output_tokens_total: AtomicU64,
+    /// Total streaming requests.
+    pub stream_requests_total: AtomicU64,
 }
 
 impl AppState {
@@ -119,6 +130,11 @@ impl AppState {
             rate_limiter: rate_limit_rpm.map(RateLimiter::new),
             webhooks: webhooks::WebhookDispatcher::new(webhook_configs),
             started_at: std::time::Instant::now(),
+            requests_total: AtomicU64::new(0),
+            errors_total: AtomicU64::new(0),
+            input_tokens_total: AtomicU64::new(0),
+            output_tokens_total: AtomicU64::new(0),
+            stream_requests_total: AtomicU64::new(0),
         }
     }
 }
@@ -341,6 +357,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        .route("/metrics", get(prometheus_metrics_handler))
         .merge(rate_limited)
         .layer(cors)
         .with_state(state)
@@ -486,6 +503,80 @@ async fn mcp_status_handler(
             total_prompts: 0,
         }),
     }
+}
+
+/// Prometheus-compatible metrics endpoint.
+///
+/// Returns metrics in Prometheus text exposition format (text/plain).
+/// No external dependency needed — just formatted strings.
+async fn prometheus_metrics_handler(
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let uptime = state.started_at.elapsed().as_secs();
+    let requests = state.requests_total.load(Ordering::Relaxed);
+    let errors = state.errors_total.load(Ordering::Relaxed);
+    let input_tokens = state.input_tokens_total.load(Ordering::Relaxed);
+    let output_tokens = state.output_tokens_total.load(Ordering::Relaxed);
+    let stream_reqs = state.stream_requests_total.load(Ordering::Relaxed);
+
+    let db_path = &state.loaded.config.storage.database_path;
+    let total_sessions = SessionStore::new(db_path)
+        .session_count()
+        .unwrap_or(0) as u64;
+    let active_schedules = ScheduleStore::new(db_path)
+        .list_enabled()
+        .map(|s| s.len() as u64)
+        .unwrap_or(0);
+
+    let mcp_servers = match &state.mcp {
+        Some(mcp) => mcp.server_count().await as u64,
+        None => 0,
+    };
+
+    let model = format!(
+        "{}/{}",
+        state.loaded.config.provider.backend,
+        state.loaded.config.provider.model
+    );
+
+    let body = format!(
+        "# HELP genesis_uptime_seconds Time since gateway started.\n\
+         # TYPE genesis_uptime_seconds gauge\n\
+         genesis_uptime_seconds {uptime}\n\
+         # HELP genesis_requests_total Total chat requests processed.\n\
+         # TYPE genesis_requests_total counter\n\
+         genesis_requests_total {requests}\n\
+         # HELP genesis_errors_total Total errors returned.\n\
+         # TYPE genesis_errors_total counter\n\
+         genesis_errors_total {errors}\n\
+         # HELP genesis_stream_requests_total Total streaming requests.\n\
+         # TYPE genesis_stream_requests_total counter\n\
+         genesis_stream_requests_total {stream_reqs}\n\
+         # HELP genesis_input_tokens_total Total input tokens processed.\n\
+         # TYPE genesis_input_tokens_total counter\n\
+         genesis_input_tokens_total {input_tokens}\n\
+         # HELP genesis_output_tokens_total Total output tokens generated.\n\
+         # TYPE genesis_output_tokens_total counter\n\
+         genesis_output_tokens_total {output_tokens}\n\
+         # HELP genesis_sessions_total Total sessions in database.\n\
+         # TYPE genesis_sessions_total gauge\n\
+         genesis_sessions_total {total_sessions}\n\
+         # HELP genesis_active_schedules Number of active scheduled tasks.\n\
+         # TYPE genesis_active_schedules gauge\n\
+         genesis_active_schedules {active_schedules}\n\
+         # HELP genesis_mcp_servers Connected MCP server count.\n\
+         # TYPE genesis_mcp_servers gauge\n\
+         genesis_mcp_servers {mcp_servers}\n\
+         # HELP genesis_info Build and configuration info.\n\
+         # TYPE genesis_info gauge\n\
+         genesis_info{{version=\"{version}\",model=\"{model}\"}} 1\n",
+        version = env!("CARGO_PKG_VERSION"),
+    );
+
+    Response::builder()
+        .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        .body(axum::body::Body::from(body))
+        .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
 }
 
 /// Query parameters for listing sessions.
@@ -1539,8 +1630,10 @@ async fn chat_handler(
         .collect();
 
     let webhooks = state.webhooks.clone();
+    let metrics_state = Arc::clone(&state);
     async move {
         info!("received chat request");
+        metrics_state.requests_total.fetch_add(1, Ordering::Relaxed);
 
         // Emit message_received webhook
         webhooks.emit(
@@ -1561,6 +1654,7 @@ async fn chat_handler(
             })
             .await
             .map_err(|e| {
+                metrics_state.errors_total.fetch_add(1, Ordering::Relaxed);
                 // Emit error webhook
                 webhooks.emit(
                     webhooks::WebhookEventType::Error,
@@ -1596,6 +1690,10 @@ async fn chat_handler(
                 "output_tokens": outcome.result.total_output_tokens,
             }),
         );
+
+        // Record token metrics
+        metrics_state.input_tokens_total.fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
+        metrics_state.output_tokens_total.fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
 
         Ok(Json(ChatResponse {
             session_id: outcome.session_id,
@@ -1673,6 +1771,8 @@ async fn openai_blocking_response(
     model: String,
     span: tracing::Span,
 ) -> Result<Response, (StatusCode, String)> {
+    state.requests_total.fetch_add(1, Ordering::Relaxed);
+
     let loaded = &state.loaded;
     let mut service = SessionExecutionService::new(loaded);
     if let Some(mcp) = &state.mcp {
@@ -1745,6 +1845,9 @@ async fn openai_streaming_response(
     model: String,
     span: tracing::Span,
 ) -> Result<Response, (StatusCode, String)> {
+    state.requests_total.fetch_add(1, Ordering::Relaxed);
+    state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
+
     let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
     let state_for_task = Arc::clone(&state);
     let session_id_for_task = session_id.clone();
@@ -2828,5 +2931,80 @@ mod tests {
         let json = r#"{"platform": "whatsapp"}"#;
         let query: PairingPlatformQuery = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(query.platform.as_deref(), Some("whatsapp"));
+    }
+
+    #[test]
+    fn app_state_metrics_counters_start_at_zero() {
+        let config = genesis_config::GenesisConfig {
+            schema_version: 1,
+            profile: "test".to_owned(),
+            provider: genesis_config::ProviderConfig {
+                backend: "openai".to_owned(),
+                model: "gpt-4.1-mini".to_owned(),
+                base_url: None,
+                api_key_env: None,
+                extra_body: None,
+                tool_call_parser: None,
+            },
+            tool_provider: None,
+            fallback_providers: Vec::new(),
+            mcp_servers: std::collections::HashMap::new(),
+            storage: genesis_config::StorageConfig {
+                data_dir: std::path::PathBuf::from("/tmp/genesis"),
+                database_path: std::path::PathBuf::from("/tmp/genesis/genesis.db"),
+            },
+            runtime: genesis_config::RuntimeConfig {
+                max_concurrency: 4,
+                allow_destructive_tools: false,
+                max_turns: 20,
+                max_context_messages: None,
+                budget_limit: None,
+                terminal: None,
+                thinking_budget: None,
+                max_context_tokens: None,
+                max_iterations: None,
+                context_security: genesis_config::ContextSecurityPolicy::default(),
+                reasoning_effort: None,
+            },
+            gateway: None,
+            toolsets: std::collections::HashMap::new(),
+        };
+        let loaded = genesis_config::LoadedConfig {
+            config,
+            paths: genesis_config::AppPaths {
+                config_path: std::path::PathBuf::from("/tmp/genesis.toml"),
+                data_dir: std::path::PathBuf::from("/tmp/genesis"),
+                database_path: std::path::PathBuf::from("/tmp/genesis/genesis.db"),
+            },
+        };
+        let state = AppState::new(loaded, None, None, None);
+        assert_eq!(state.requests_total.load(Ordering::Relaxed), 0);
+        assert_eq!(state.errors_total.load(Ordering::Relaxed), 0);
+        assert_eq!(state.input_tokens_total.load(Ordering::Relaxed), 0);
+        assert_eq!(state.output_tokens_total.load(Ordering::Relaxed), 0);
+        assert_eq!(state.stream_requests_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn openai_completions_request_deserializes_with_stream() {
+        let json = r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        }"#;
+        let req: OpenAiCompletionsRequest = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(req.model, "gpt-4");
+        assert_eq!(req.stream, Some(true));
+        assert_eq!(req.messages.len(), 1);
+    }
+
+    #[test]
+    fn openai_completions_request_stream_defaults_to_none() {
+        let json = r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}]
+        }"#;
+        let req: OpenAiCompletionsRequest = serde_json::from_str(json).expect("should deserialize");
+        assert!(req.stream.is_none());
     }
 }
