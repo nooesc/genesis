@@ -6315,6 +6315,14 @@ fn format_insights(data: &InsightsData, model: &str) -> String {
         }
     }
 
+    if !data.tool_usage.is_empty() {
+        lines.push(String::new());
+        lines.push("  top tools:".to_owned());
+        for (name, count) in data.tool_usage.iter().take(10) {
+            lines.push(format!("    {name}: {count} calls"));
+        }
+    }
+
     if !data.sessions_per_day.is_empty() {
         lines.push(String::new());
         lines.push("  activity:".to_owned());
@@ -8905,6 +8913,16 @@ storage:
                 ("cli".to_owned(), 8),
                 ("api".to_owned(), 2),
             ],
+            tokens_per_day: vec![
+                ("2026-03-07".to_owned(), 1500, 900),
+                ("2026-03-08".to_owned(), 3500, 2100),
+            ],
+            tool_usage: vec![
+                ("shell_exec".to_owned(), 15),
+                ("echo".to_owned(), 5),
+            ],
+            avg_input_tokens: 500,
+            avg_output_tokens: 300,
         };
         let output = format_insights(&data, "gpt-4.1-mini");
         assert!(output.contains("sessions:        10"));

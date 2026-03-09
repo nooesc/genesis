@@ -669,6 +669,14 @@ pub struct InsightsData {
     pub sessions_per_day: Vec<(String, u64)>,
     /// Sessions per platform (platform → count).
     pub platform_breakdown: Vec<(String, u64)>,
+    /// Token usage per day (date, input_tokens, output_tokens).
+    pub tokens_per_day: Vec<(String, u64, u64)>,
+    /// Tool usage breakdown (tool_name → call count), sorted by frequency.
+    pub tool_usage: Vec<(String, u64)>,
+    /// Average input tokens per session.
+    pub avg_input_tokens: u64,
+    /// Average output tokens per session.
+    pub avg_output_tokens: u64,
 }
 
 /// Session persistence layer.
@@ -1265,13 +1273,99 @@ impl SessionStore {
             .filter_map(|r| r.ok())
             .collect();
 
+        // Tokens per day
+        let mut stmt = connection
+            .prepare(
+                "SELECT date(created_at) as day, \
+                 COALESCE(SUM(total_input_tokens), 0), \
+                 COALESCE(SUM(total_output_tokens), 0) \
+                 FROM sessions WHERE created_at >= datetime('now', ?) \
+                 GROUP BY day ORDER BY day",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let tokens_per_day: Vec<(String, u64, u64)> = stmt
+            .query_map([format!("-{days} days")], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Tool usage breakdown — extract tool names from tool_calls_json
+        let mut stmt = connection
+            .prepare(
+                "SELECT tool_calls_json FROM messages m \
+                 JOIN sessions s ON m.session_id = s.id \
+                 WHERE m.role = 'assistant' AND m.tool_calls_json IS NOT NULL \
+                 AND s.created_at >= datetime('now', ?)",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let tool_jsons: Vec<String> = stmt
+            .query_map([format!("-{days} days")], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut tool_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for json_str in &tool_jsons {
+            if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
+                for call in calls {
+                    if let Some(name) = call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .or_else(|| call.get("name").and_then(|n| n.as_str()))
+                    {
+                        *tool_counts.entry(name.to_owned()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut tool_usage: Vec<(String, u64)> = tool_counts.into_iter().collect();
+        tool_usage.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let sessions_count = count as u64;
+        let avg_input = if sessions_count > 0 {
+            input as u64 / sessions_count
+        } else {
+            0
+        };
+        let avg_output = if sessions_count > 0 {
+            output as u64 / sessions_count
+        } else {
+            0
+        };
+
         Ok(InsightsData {
             period_days: days,
-            sessions_count: count as u64,
+            sessions_count,
             total_input_tokens: input as u64,
             total_output_tokens: output as u64,
             sessions_per_day,
             platform_breakdown,
+            tokens_per_day,
+            tool_usage,
+            avg_input_tokens: avg_input,
+            avg_output_tokens: avg_output,
         })
     }
 
