@@ -6,7 +6,7 @@
 //!
 //! ## Setup
 //! 1. Create a Discord application at https://discord.com/developers/applications
-//! 2. Set `DISCORD_BOT_TOKEN` and `DISCORD_PUBLIC_KEY` environment variables
+//! 2. Set `DISCORD_PUBLIC_KEY` environment variable
 //! 3. Set the Interactions endpoint URL to `https://your-server/discord/interactions`
 
 use std::sync::Arc;
@@ -22,10 +22,6 @@ use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::verify::verify_discord_signature;
 use crate::AppState;
-
-pub fn bot_token() -> Option<String> {
-    std::env::var("DISCORD_BOT_TOKEN").ok()
-}
 
 pub fn public_key() -> Option<String> {
     std::env::var("DISCORD_PUBLIC_KEY").ok()
@@ -48,6 +44,7 @@ pub struct DiscordInteraction {
     #[serde(rename = "type")]
     pub interaction_type: u8,
     pub id: Option<String>,
+    pub application_id: Option<String>,
     pub token: Option<String>,
     pub data: Option<InteractionData>,
     pub channel_id: Option<String>,
@@ -156,6 +153,13 @@ pub async fn interactions_handler(
             .token
             .clone()
             .ok_or(StatusCode::BAD_REQUEST)?;
+        let application_id = match interaction.application_id.clone() {
+            Some(application_id) => application_id,
+            None => {
+                warn!("discord interaction missing application_id");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        };
 
         // Extract the message from command options
         let message = extract_message(&interaction).unwrap_or_default();
@@ -244,23 +248,6 @@ pub async fn interactions_handler(
             state.loaded.config.gateway.as_ref(),
         );
 
-        // Respond with deferred message immediately
-        let token = match bot_token() {
-            Some(t) => t,
-            None => {
-                error!("DISCORD_BOT_TOKEN not set");
-                return Ok(Json(
-                    serde_json::to_value(InteractionResponse {
-                        response_type: RESPONSE_CHANNEL_MESSAGE,
-                        data: Some(InteractionResponseData {
-                            content: "Bot configuration error.".to_owned(),
-                        }),
-                    })
-                    .unwrap(),
-                ));
-            }
-        };
-
         // Spawn background task to process and follow up
         tokio::spawn(
             async move {
@@ -294,7 +281,13 @@ pub async fn interactions_handler(
 
                 // Edit the deferred response with the actual reply
                 if let Err(e) =
-                    edit_followup(&state.http_client, &token, &interaction_token, &reply_text).await
+                    edit_followup(
+                        &state.http_client,
+                        &application_id,
+                        &interaction_token,
+                        &reply_text,
+                    )
+                    .await
                 {
                     error!(error = %e, "failed to send discord followup");
                 }
@@ -351,7 +344,7 @@ fn extract_username(interaction: &DiscordInteraction) -> String {
 /// Edit the original deferred interaction response with the agent's reply.
 async fn edit_followup(
     client: &reqwest::Client,
-    bot_token: &str,
+    application_id: &str,
     interaction_token: &str,
     content: &str,
 ) -> Result<(), String> {
@@ -362,10 +355,10 @@ async fn edit_followup(
         content.to_owned()
     };
 
-    // Use the interaction token to edit the original response
+    // Use interaction identifiers to patch the original response
     let resp = client
         .patch(format!(
-            "https://discord.com/api/v10/webhooks/{bot_token}/{interaction_token}/messages/@original"
+            "https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}/messages/@original"
         ))
         .json(&EditFollowup {
             content: truncated,
@@ -399,6 +392,7 @@ mod tests {
         let json = r#"{
             "type": 2,
             "id": "12345",
+            "application_id": "app-123",
             "token": "abc-token",
             "channel_id": "chan-1",
             "data": {
@@ -425,6 +419,7 @@ mod tests {
     fn extract_message_returns_none_for_no_data() {
         let interaction = DiscordInteraction {
             interaction_type: 2,
+            application_id: None,
             id: None,
             token: None,
             data: None,
