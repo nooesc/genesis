@@ -281,6 +281,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
+        .route("/chat/ws", get(websocket_handler))
         .route("/chat/batch", post(chat_batch_handler))
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/purge", delete(purge_sessions_handler))
@@ -1964,6 +1965,182 @@ async fn openai_streaming_response(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket chat endpoint
+// ---------------------------------------------------------------------------
+
+/// WebSocket chat handler.
+///
+/// Accepts a WebSocket connection and processes messages bidirectionally.
+/// Client sends JSON: `{"message": "...", "session_id": "...", "platform": "..."}`
+/// Server sends JSON events:
+/// - `{"type": "chunk", "content": "..."}`
+/// - `{"type": "tool_call", "tool": "..."}`
+/// - `{"type": "done", "response": "...", "session_id": "...", ...}`
+/// - `{"type": "error", "error": "..."}`
+async fn websocket_handler(
+    State(state): State<Arc<AppState>>,
+    ws: axum::extract::WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| websocket_session(state, socket))
+}
+
+async fn websocket_session(
+    state: Arc<AppState>,
+    mut socket: axum::extract::ws::WebSocket,
+) {
+    use axum::extract::ws::Message;
+
+    info!("WebSocket client connected");
+
+    while let Some(msg) = socket.recv().await {
+        let msg = match msg {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Close(_)) => break,
+            Ok(_) => continue, // Ignore binary/ping/pong
+            Err(_) => break,
+        };
+
+        // Parse the incoming message
+        let request: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "error": format!("Invalid JSON: {e}"),
+                });
+                let _ = socket.send(Message::Text(err.to_string().into())).await;
+                continue;
+            }
+        };
+
+        let message = match request.get("message").and_then(|m| m.as_str()) {
+            Some(m) => m.to_owned(),
+            None => {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "error": "Missing 'message' field",
+                });
+                let _ = socket.send(Message::Text(err.to_string().into())).await;
+                continue;
+            }
+        };
+
+        let session_id = request
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(default_api_session_id);
+        let platform = request
+            .get("platform")
+            .and_then(|p| p.as_str())
+            .unwrap_or("websocket");
+        let system_prompt = request
+            .get("system_prompt")
+            .and_then(|s| s.as_str())
+            .map(str::to_owned);
+
+        state.requests_total.fetch_add(1, Ordering::Relaxed);
+        state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
+
+        let mut service = SessionExecutionService::new(&state.loaded);
+        if let Some(mcp) = &state.mcp {
+            service.set_mcp(std::sync::Arc::clone(mcp));
+        }
+        if let Some(sp) = system_prompt {
+            service.set_system_prompt_override(sp);
+        }
+
+        // Collect chunks to send via WebSocket
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        let session_id_for_stream = session_id.clone();
+        let platform_owned = platform.to_owned();
+        let run_result = {
+            let tx = tx.clone();
+            service
+                .run_turn_streaming(
+                    SessionTurnInput {
+                        session_id: &session_id_for_stream,
+                        session_platform: &platform_owned,
+                        delivery_platform: delivery_platform_from_str(&platform_owned),
+                        prompt: &message,
+                        title: None,
+                        images: Vec::new(),
+                    },
+                    move |event| {
+                        let json = match event {
+                            StreamEvent::Chunk(chunk) => {
+                                serde_json::json!({"type": "chunk", "content": chunk})
+                            }
+                            StreamEvent::ToolCallStart { name } => {
+                                serde_json::json!({"type": "tool_call", "tool": name})
+                            }
+                            StreamEvent::ToolCallEnd { name } => {
+                                serde_json::json!({"type": "tool_call_end", "tool": name})
+                            }
+                            StreamEvent::ClarificationNeeded { question } => {
+                                serde_json::json!({"type": "clarification", "question": question})
+                            }
+                        };
+                        let _ = tx.send(json.to_string());
+                    },
+                )
+                .await
+        };
+        drop(tx);
+
+        // Drain buffered events to the WebSocket
+        while let Some(event_json) = rx.recv().await {
+            if socket
+                .send(Message::Text(event_json.into()))
+                .await
+                .is_err()
+            {
+                return; // Client disconnected
+            }
+        }
+
+        // Send final result
+        let final_msg = match run_result {
+            Ok(outcome) => {
+                state
+                    .input_tokens_total
+                    .fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
+                state
+                    .output_tokens_total
+                    .fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
+                serde_json::json!({
+                    "type": "done",
+                    "session_id": outcome.session_id,
+                    "response": outcome.result.response,
+                    "turns_used": outcome.result.turns_used,
+                    "tool_calls_made": outcome.result.tool_calls_made,
+                    "total_input_tokens": outcome.result.total_input_tokens,
+                    "total_output_tokens": outcome.result.total_output_tokens,
+                })
+            }
+            Err(e) => {
+                state.errors_total.fetch_add(1, Ordering::Relaxed);
+                serde_json::json!({
+                    "type": "error",
+                    "error": e.to_string(),
+                })
+            }
+        };
+
+        if socket
+            .send(Message::Text(final_msg.to_string().into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    info!("WebSocket client disconnected");
 }
 
 /// OpenAI-compatible `/v1/models` endpoint.

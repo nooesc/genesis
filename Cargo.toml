@@ -21,7 +21,7 @@ version = "0.1.0"
 [workspace.dependencies]
 async-stream = "0.3.6"
 base64 = "0.22"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4.40", features = ["clock"] }
 clap = { version = "4.5.32", features = ["derive"] }
 dirs = "6.0.0"
