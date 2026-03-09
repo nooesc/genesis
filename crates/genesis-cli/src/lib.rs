@@ -2517,6 +2517,32 @@ fn mcp_startup_strict(loaded: &LoadedConfig) -> Result<bool, CliError> {
     Ok(is_production_environment() || is_production_profile(&loaded.config.profile))
 }
 
+fn resolve_api_key_required(_profile: &str) -> Result<bool, CliError> {
+    if let Some(result) = parse_bool_env("GENESIS_API_KEY_REQUIRED") {
+        return result;
+    }
+
+    Ok(false)
+}
+
+fn parse_trusted_proxies() -> Result<Vec<std::net::IpAddr>, CliError> {
+    match std::env::var("GENESIS_TRUSTED_PROXIES") {
+        Ok(value) => value
+            .split(',')
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry.parse::<std::net::IpAddr>().map_err(|_| {
+                    CliError::Other(format!(
+                        "invalid value for GENESIS_TRUSTED_PROXIES: {entry}"
+                    ))
+                })
+            })
+            .collect(),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
 async fn build_session_service<'a>(
     loaded: &'a LoadedConfig,
     strict_startup: bool,
@@ -3178,7 +3204,8 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
         "starting genesis scheduler daemon for provider {} / {}",
         loaded.config.provider.backend, loaded.config.provider.model
     );
-    let service = SessionExecutionService::new(loaded);
+    let strict_startup = mcp_startup_strict(loaded)?;
+    let service = build_session_service(loaded, strict_startup, false).await?;
 
     loop {
         let store = ScheduleStore::new(&loaded.config.storage.database_path);
@@ -3224,12 +3251,21 @@ async fn run_serve(
     let mcp = service.mcp_manager();
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
+    let api_key_required = resolve_api_key_required(&loaded.config.profile)?;
+    let trusted_proxies = parse_trusted_proxies()?;
     // Env var overrides config file setting
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .or_else(|| loaded.config.gateway.as_ref().and_then(|g| g.rate_limit_rpm));
-    let state = std::sync::Arc::new(AppState::new(loaded, api_key, mcp, rate_limit_rpm));
+    let state = std::sync::Arc::new(AppState::new(
+        loaded,
+        api_key,
+        api_key_required,
+        mcp,
+        rate_limit_rpm,
+        trusted_proxies,
+    ));
     let router = build_router(std::sync::Arc::clone(&state));
 
     let addr = format!("{host}:{port}");

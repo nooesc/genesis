@@ -4,6 +4,7 @@ pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
 
+use std::collections::HashSet;
 use std::path::Path;
 use genesis_storage::PairingStore;
 
@@ -13,7 +14,7 @@ pub enum PairingCheck {
     Approved,
     /// User is not approved — a pairing code was generated and should be shown.
     NeedsPairing(String),
-    /// Pairing is at capacity (too many pending codes) — reject with message.
+    /// User is at capacity (too many pending codes) — reject with message.
     AtCapacity,
 }
 
@@ -34,10 +35,44 @@ pub fn check_pairing(
     user_id: &str,
     user_name: &str,
 ) -> Result<PairingCheck, PairingCheckError> {
+    if platform.eq_ignore_ascii_case("homeassistant") {
+        return Ok(PairingCheck::Approved);
+    }
+
+    let platform = platform.to_ascii_lowercase();
+
+    let platform_allow_all = match platform.as_str() {
+        "telegram" => "TELEGRAM_ALLOW_ALL_USERS",
+        "discord" => "DISCORD_ALLOW_ALL_USERS",
+        "whatsapp" => "WHATSAPP_ALLOW_ALL_USERS",
+        "slack" => "SLACK_ALLOW_ALL_USERS",
+        _ => "",
+    };
+
+    if is_truthy_env(platform_allow_all) {
+        return Ok(PairingCheck::Approved);
+    }
+
+    let platform_allowlist = std::env::var(platform_allowlist_env(platform.as_str()))
+        .unwrap_or_default();
+    let global_allowlist = std::env::var("GATEWAY_ALLOWED_USERS").unwrap_or_default();
+
+    if platform_allowlist.is_empty() && global_allowlist.is_empty() {
+        if is_truthy_env("GATEWAY_ALLOW_ALL_USERS") {
+            return Ok(PairingCheck::Approved);
+        }
+    } else {
+        let mut allowed_ids = parse_env_id_set(&platform_allowlist);
+        allowed_ids.extend(parse_env_id_set(&global_allowlist));
+
+        if is_user_in_allowlist(&allowed_ids, user_id) {
+            return Ok(PairingCheck::Approved);
+        }
+    }
+
     let store = PairingStore::new(database_path);
 
-    // If already approved, fast-path
-    match store.is_approved(platform, user_id) {
+    match store.is_approved(platform.as_str(), user_id) {
         Ok(true) => return Ok(PairingCheck::Approved),
         Err(e) => {
             tracing::error!(error = %e, "pairing lookup failed");
@@ -47,7 +82,7 @@ pub fn check_pairing(
     }
 
     // Not approved — generate a code
-    match store.generate_code(platform, user_id, user_name) {
+    match store.generate_code(platform.as_str(), user_id, user_name) {
         Ok(Some(code)) => Ok(PairingCheck::NeedsPairing(code)),
         Ok(None) => Ok(PairingCheck::AtCapacity),
         Err(e) => {
@@ -55,6 +90,52 @@ pub fn check_pairing(
             Err(PairingCheckError::StoreUnavailable)
         }
     }
+}
+
+fn platform_allowlist_env(platform: &str) -> &'static str {
+    match platform {
+        "telegram" => "TELEGRAM_ALLOWED_USERS",
+        "discord" => "DISCORD_ALLOWED_USERS",
+        "whatsapp" => "WHATSAPP_ALLOWED_USERS",
+        "slack" => "SLACK_ALLOWED_USERS",
+        _ => "",
+    }
+}
+
+fn is_truthy_env(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn parse_env_id_set(value: &str) -> HashSet<String> {
+    value
+        .split(',')
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_user_in_allowlist(allowed: &HashSet<String>, user_id: &str) -> bool {
+    let mut candidates = HashSet::new();
+    candidates.insert(user_id.to_owned());
+    if let Some((short_user_id, _)) = user_id.split_once('@') {
+        if !short_user_id.is_empty() {
+            candidates.insert(short_user_id.to_owned());
+        }
+    }
+
+    !candidates.is_disjoint(allowed)
 }
 
 /// Format a pairing reply message for a user who needs to be approved.

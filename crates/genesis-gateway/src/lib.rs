@@ -141,14 +141,19 @@ impl HistogramBuckets {
 pub struct AppState {
     pub loaded: genesis_config::LoadedConfig,
     /// Optional API key for gateway authentication.
-    /// When set, all non-health requests must include `Authorization: Bearer <key>`.
+    /// When set, protected routes require `Authorization: Bearer <key>`.
+    /// If absent and `api_key_required` is true, protected routes are rejected.
     pub api_key: Option<String>,
+    /// Whether protected routes must require an API key.
+    pub api_key_required: bool,
     /// Shared MCP manager for external tool servers (connected at startup).
     pub mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
     /// Shared HTTP client for outbound platform API calls (connection pooling).
     pub http_client: reqwest::Client,
     /// Optional per-IP rate limiter.
     pub rate_limiter: Option<RateLimiter>,
+    /// Trusted reverse proxy IPs allowed to supply forwarded headers.
+    pub trusted_proxies: Vec<IpAddr>,
     /// Webhook event dispatcher for external notifications.
     pub webhooks: webhooks::WebhookDispatcher,
     /// Timestamp when the gateway started (for uptime reporting).
@@ -174,8 +179,10 @@ impl AppState {
     pub fn new(
         loaded: genesis_config::LoadedConfig,
         api_key: Option<String>,
+        api_key_required: bool,
         mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
         rate_limit_rpm: Option<u32>,
+        trusted_proxies: Vec<IpAddr>,
     ) -> Self {
         let webhook_configs = loaded.config.gateway
             .as_ref()
@@ -183,11 +190,13 @@ impl AppState {
             .unwrap_or_default();
         let bus_db_path = loaded.config.storage.database_path.clone();
         Self {
-            loaded,
             api_key,
+            api_key_required,
             mcp,
             http_client: reqwest::Client::new(),
             rate_limiter: rate_limit_rpm.map(RateLimiter::new),
+            trusted_proxies,
+            loaded,
             webhooks: webhooks::WebhookDispatcher::new(webhook_configs),
             started_at: std::time::Instant::now(),
             requests_total: AtomicU64::new(0),
@@ -339,7 +348,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Protected routes (require API key when configured)
+    // Protected routes (require API key when configured/required)
     let protected = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
@@ -416,6 +425,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // OpenAI-compatible API
         .route("/v1/chat/completions", post(openai_chat_completions_handler))
         .route("/v1/models", get(openai_models_handler))
+        .route("/metrics", get(prometheus_metrics_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -442,7 +452,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
-        .route("/metrics", get(prometheus_metrics_handler))
         .merge(rate_limited)
         .layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
@@ -484,6 +493,7 @@ async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let expected_key = match &state.api_key {
         Some(key) => key,
+        None if state.api_key_required => return Err(StatusCode::UNAUTHORIZED),
         None => return Ok(next.run(request).await),
     };
 
@@ -493,9 +503,12 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok());
 
     let token = auth_header.and_then(|value| {
-        let lower = value.get(..7)?;
-        if lower.eq_ignore_ascii_case("bearer ") {
-            Some(&value[7..])
+        let value = value.trim();
+        let mut parts = value.splitn(2, ' ');
+        let scheme = parts.next()?.trim();
+        let credentials = parts.next()?.trim();
+        if scheme.eq_ignore_ascii_case("bearer") {
+            Some(credentials)
         } else {
             None
         }
@@ -509,32 +522,43 @@ async fn auth_middleware(
 
 /// Extracts the client IP from the request.
 ///
-/// Checks `X-Forwarded-For` and `X-Real-IP` headers first (for reverse-proxy
-/// setups), then falls back to the peer socket address via `ConnectInfo`.
-fn client_ip<B>(request: &Request<B>) -> Option<IpAddr> {
-    // X-Forwarded-For: first entry is the original client
-    if let Some(forwarded) = request.headers().get("x-forwarded-for") {
-        if let Ok(val) = forwarded.to_str() {
-            if let Some(first) = val.split(',').next() {
-                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+/// Extracts the client IP from proxy headers when the peer socket belongs to a
+/// trusted proxy; otherwise falls back to the peer socket address via
+/// `ConnectInfo`.
+fn client_ip<B>(state: &AppState, request: &Request<B>) -> Option<IpAddr> {
+    let peer_ip = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    let peer_is_trusted_proxy = peer_ip
+        .and_then(|ip| Some(state.trusted_proxies.contains(&ip)))
+        .unwrap_or(false);
+
+    if peer_is_trusted_proxy {
+        // X-Forwarded-For: first entry is the original client
+        if let Some(forwarded) = request.headers().get("x-forwarded-for") {
+            if let Ok(val) = forwarded.to_str() {
+                if let Some(first) = val.split(',').next() {
+                    if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+
+        // X-Real-IP
+        if let Some(real_ip) = request.headers().get("x-real-ip") {
+            if let Ok(val) = real_ip.to_str() {
+                if let Ok(ip) = val.trim().parse::<IpAddr>() {
                     return Some(ip);
                 }
             }
         }
     }
-    // X-Real-IP
-    if let Some(real_ip) = request.headers().get("x-real-ip") {
-        if let Ok(val) = real_ip.to_str() {
-            if let Ok(ip) = val.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
+
     // Peer address via ConnectInfo (populated by axum::serve)
-    request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip())
+    peer_ip
 }
 
 async fn rate_limit_middleware(
@@ -546,7 +570,7 @@ async fn rate_limit_middleware(
         Some(l) => l,
         None => return Ok(next.run(request).await),
     };
-    let ip = client_ip(&request).unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    let ip = client_ip(&state, &request).unwrap_or(IpAddr::from([127, 0, 0, 1]));
     if limiter.check(ip) {
         Ok(next.run(request).await)
     } else {
@@ -3373,7 +3397,14 @@ mod tests {
     #[test]
     fn build_router_creates_routes() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = Arc::new(AppState::new(loaded, None, None, None));
+        let state = Arc::new(AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+        ));
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
     }
@@ -3474,14 +3505,14 @@ mod tests {
     #[test]
     fn rate_limiter_none_when_no_rpm() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = AppState::new(loaded, None, None, None);
+        let state = AppState::new(loaded, None, false, None, None, Vec::new());
         assert!(state.rate_limiter.is_none());
     }
 
     #[test]
     fn rate_limiter_some_when_rpm_set() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = AppState::new(loaded, None, None, Some(60));
+        let state = AppState::new(loaded, None, false, None, Some(60), Vec::new());
         assert!(state.rate_limiter.is_some());
     }
 
@@ -3796,7 +3827,7 @@ mod tests {
                 database_path: std::path::PathBuf::from("/tmp/genesis/genesis.db"),
             },
         };
-        let state = AppState::new(loaded, None, None, None);
+        let state = AppState::new(loaded, None, false, None, None, Vec::new());
         assert_eq!(state.requests_total.load(Ordering::Relaxed), 0);
         assert_eq!(state.errors_total.load(Ordering::Relaxed), 0);
         assert_eq!(state.input_tokens_total.load(Ordering::Relaxed), 0);
