@@ -41,7 +41,7 @@ impl SlashCompleter {
         Self {
             commands: vec![
                 "/help", "/history", "/export", "/tokens", "/session",
-                "/new", "/undo", "/retry", "/fork", "/search",
+                "/new", "/undo", "/retry", "/fork", "/resume", "/search",
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/clear",
             ],
@@ -2393,6 +2393,10 @@ async fn run_chat(
         .map_err(|e| CliError::Other(format!("readline init failed: {e}")))?;
     rl.set_helper(Some(SlashCompleter::new()));
 
+    // Load persistent readline history
+    let history_path = loaded.config.storage.data_dir.join("chat_history.txt");
+    let _ = rl.load_history(&history_path);
+
     let model = &loaded.config.provider.model;
     let mut session_id = session_id;
 
@@ -2445,6 +2449,39 @@ async fn run_chat(
             continue;
         }
 
+        // Handle /resume <session_id> — switch to a different session
+        if trimmed.starts_with("/resume") {
+            let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            if parts.len() < 2 || parts[1].trim().is_empty() {
+                // No arg — list recent sessions to pick from
+                match store.list_recent_sessions(10) {
+                    Ok(sessions) if !sessions.is_empty() => {
+                        println!("Recent sessions:");
+                        for s in &sessions {
+                            let title = s.title.as_deref().unwrap_or("(untitled)");
+                            println!("  {} — {} ({})", s.id, title, s.platform);
+                        }
+                        println!("\nUsage: /resume <session_id>");
+                    }
+                    Ok(_) => println!("No sessions found."),
+                    Err(e) => println!("Failed to list sessions: {e}"),
+                }
+            } else {
+                let target_id = parts[1].trim();
+                match store.get_session(target_id) {
+                    Ok(Some(_)) => {
+                        let old_id = session_id.clone();
+                        session_id = target_id.to_owned();
+                        let msgs = store.load_messages(&session_id).unwrap_or_default();
+                        println!("Switched from {old_id} → {session_id} ({} messages)", msgs.len());
+                    }
+                    Ok(None) => println!("Session '{target_id}' not found."),
+                    Err(e) => println!("Error looking up session: {e}"),
+                }
+            }
+            continue;
+        }
+
         // Handle /fork — branch the conversation into a new session
         if trimmed == "/fork" {
             let new_id = default_session_id();
@@ -2467,6 +2504,9 @@ async fn run_chat(
 
         run_streaming_turn(&service, &session_id, trimmed, model).await?;
     }
+
+    // Save readline history for next session
+    let _ = rl.save_history(&history_path);
 
     Ok(format!("chat session saved as {session_id}"))
 }
@@ -5759,22 +5799,23 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
 
     match name {
         "help" | "h" => Some(
-            "/help       - Show this help\n\
-             /history    - Show recent conversation history\n\
-             /export     - Export session as Markdown\n\
-             /tokens     - Show session token usage\n\
-             /session    - Show current session ID\n\
-             /new        - Start a new session\n\
-             /undo       - Undo last turn (remove last user-assistant exchange)\n\
-             /retry      - Undo last turn and re-send the user message\n\
-             /fork       - Branch conversation into a new session\n\
-             /search <q> - Search past sessions for a query\n\
-             /memories   - Show stored memories\n\
-             /compress   - Trim old messages, keeping recent context\n\
-             /tools      - List available tools\n\
-             /skills     - List saved skills\n\
-             /model      - Show active model\n\
-             /clear      - Clear the screen\n\
+            "/help         - Show this help\n\
+             /history      - Show recent conversation history\n\
+             /export       - Export session as Markdown\n\
+             /tokens       - Show session token usage\n\
+             /session      - Show current session ID\n\
+             /new          - Start a new session\n\
+             /undo         - Undo last turn (remove last user-assistant exchange)\n\
+             /retry        - Undo last turn and re-send the user message\n\
+             /fork         - Branch conversation into a new session\n\
+             /resume [id]  - Switch to another session (lists recent if no ID)\n\
+             /search <q>   - Search past sessions for a query\n\
+             /memories     - Show stored memories\n\
+             /compress     - Trim old messages, keeping recent context\n\
+             /tools        - List available tools\n\
+             /skills       - List saved skills\n\
+             /model        - Show active model\n\
+             /clear        - Clear the screen\n\
              Use \\ at end of line for multi-line input"
                 .to_owned(),
         ),
