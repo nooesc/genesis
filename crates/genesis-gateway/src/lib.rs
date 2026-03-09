@@ -258,6 +258,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/fork", post(fork_session_handler))
         .route("/sessions/{id}/title", patch(update_session_title_handler))
         .route("/sessions/{id}/export", get(export_session_handler))
+        .route("/messages/search", get(search_messages_handler))
         .route("/usage", get(usage_handler))
         .route("/insights", get(insights_handler))
         // Skills CRUD
@@ -688,6 +689,33 @@ async fn purge_sessions_handler(
     Ok(Json(serde_json::json!({
         "purged": purged,
         "older_than_days": params.older_than_days,
+    })))
+}
+
+#[derive(Deserialize)]
+struct SearchMessagesQuery {
+    q: String,
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    50
+}
+
+async fn search_messages_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<SearchMessagesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let results = store
+        .search_messages(&params.q, params.limit)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search error: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "query": params.q,
+        "results": results,
+        "count": results.len(),
     })))
 }
 

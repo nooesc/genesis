@@ -650,6 +650,16 @@ pub struct SessionSummary {
     pub updated_at: String,
 }
 
+/// A message search result — matching message with session context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageSearchResult {
+    pub session_id: String,
+    pub session_title: Option<String>,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
 /// Aggregate token usage statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageStats {
@@ -1110,6 +1120,54 @@ impl SessionStore {
             })?;
 
         Ok(summaries)
+    }
+
+    /// Search message content across all sessions using FTS5.
+    ///
+    /// Returns matching messages with their session context, ordered by
+    /// relevance. Limited to `max_results` entries.
+    pub fn search_messages(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<MessageSearchResult>, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT ss.session_id, s.title, ss.content
+                 FROM session_search ss
+                 JOIN sessions s ON s.id = ss.session_id
+                 WHERE session_search MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let results = stmt
+            .query_map(params![query, max_results as i64], |row| {
+                Ok(MessageSearchResult {
+                    session_id: row.get(0)?,
+                    session_title: row.get(1)?,
+                    role: String::new(), // FTS doesn't store role
+                    content: row.get(2)?,
+                    created_at: String::new(), // FTS doesn't store timestamp
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(results)
     }
 
     /// Get a session summary by ID.
