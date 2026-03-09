@@ -39,6 +39,10 @@ pub struct GenesisConfig {
     /// distribution name to a map of tool name -> inclusion probability (0.0-1.0).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub toolsets: HashMap<String, HashMap<String, f64>>,
+    /// Agent personality name (e.g. "pirate", "zen", "hacker").
+    /// Adjusts the agent's conversational tone without changing capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
 }
 
 /// Configuration for a single MCP server.
@@ -258,6 +262,8 @@ struct FileConfig {
     gateway: Option<GatewayConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     toolsets: Option<HashMap<String, HashMap<String, f64>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personality: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -391,6 +397,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         },
         gateway: None,
         toolsets: HashMap::new(),
+        personality: None,
     })
 }
 
@@ -607,6 +614,7 @@ pub fn load_from_map(
             runtime,
             gateway: file_config.gateway,
             toolsets: file_config.toolsets.unwrap_or_default(),
+            personality: file_config.personality,
         },
         paths: AppPaths {
             config_path: paths.config_path,

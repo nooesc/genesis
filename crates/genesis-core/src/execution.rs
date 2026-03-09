@@ -345,6 +345,9 @@ impl<'a> SessionExecutionService<'a> {
         if let Some(id) = self.system_prompt_override.as_deref() {
             prompt_builder = prompt_builder.identity(id);
         }
+        if let Some(ref p) = self.loaded.config.personality {
+            prompt_builder = prompt_builder.personality(p);
+        }
         if let Some(s) = skills_section.as_deref() {
             prompt_builder = prompt_builder.skills(s);
         }
@@ -1073,6 +1076,7 @@ mod tests {
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
+                personality: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

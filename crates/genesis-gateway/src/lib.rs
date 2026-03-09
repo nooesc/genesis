@@ -2968,6 +2968,7 @@ mod tests {
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),
+            personality: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,

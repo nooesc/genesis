@@ -413,6 +413,7 @@ mod tests {
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),
+            personality: None,
         }
     }
 

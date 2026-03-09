@@ -240,6 +240,7 @@ mod tests {
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
+                personality: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

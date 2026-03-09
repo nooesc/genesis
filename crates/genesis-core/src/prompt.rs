@@ -75,6 +75,7 @@ pub struct SystemPromptBuilder<'a> {
     profile: &'a str,
     tools: &'a [ToolDefinition],
     custom_identity: Option<&'a str>,
+    personality: Option<&'a str>,
     skills_section: Option<&'a str>,
     user_model_section: Option<&'a str>,
     context_section: Option<&'a str>,
@@ -88,6 +89,7 @@ impl<'a> SystemPromptBuilder<'a> {
             profile,
             tools,
             custom_identity: None,
+            personality: None,
             skills_section: None,
             user_model_section: None,
             context_section: None,
@@ -98,6 +100,13 @@ impl<'a> SystemPromptBuilder<'a> {
 
     pub fn identity(mut self, identity: &'a str) -> Self {
         self.custom_identity = Some(identity);
+        self
+    }
+
+    /// Set a personality name (e.g. "pirate", "zen", "hacker").
+    /// The personality's prompt prefix is prepended to the behavioral instructions.
+    pub fn personality(mut self, name: &'a str) -> Self {
+        self.personality = Some(name);
         self
     }
 
@@ -135,6 +144,13 @@ impl<'a> SystemPromptBuilder<'a> {
                 .unwrap_or(DEFAULT_AGENT_IDENTITY)
                 .to_owned(),
         );
+
+        // Personality prefix (if set and found)
+        if let Some(name) = self.personality {
+            if let Some(p) = crate::personality::get_personality(name) {
+                parts.push(format!("## Personality\n\n{}", p.system_prompt_prefix));
+            }
+        }
 
         // Core behavioral instructions
         parts.push(BEHAVIORAL_INSTRUCTIONS.to_owned());
@@ -804,5 +820,33 @@ mod tests {
             .delivery_platform("cli")
             .build();
         assert!(!prompt.contains("Delivery Platform"));
+    }
+
+    #[test]
+    fn builder_personality_adds_section() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .personality("pirate")
+            .build();
+        assert!(prompt.contains("## Personality"));
+        assert!(prompt.contains("seafarer"));
+    }
+
+    #[test]
+    fn builder_personality_unknown_is_ignored() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .personality("nonexistent")
+            .build();
+        assert!(!prompt.contains("## Personality"));
+    }
+
+    #[test]
+    fn builder_personality_with_identity() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .identity("You are a custom bot.")
+            .personality("zen")
+            .build();
+        assert!(prompt.contains("You are a custom bot."));
+        assert!(prompt.contains("## Personality"));
+        assert!(prompt.contains("calmly"));
     }
 }
