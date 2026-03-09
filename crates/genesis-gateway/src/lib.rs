@@ -291,6 +291,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/tools", get(list_tools_handler))
         // Config introspection
         .route("/config", get(config_handler))
+        // OpenAI-compatible API
+        .route("/v1/chat/completions", post(openai_chat_completions_handler))
+        .route("/v1/models", get(openai_models_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -1349,6 +1352,145 @@ async fn chat_handler(
     }
     .instrument(span)
     .await
+}
+
+/// OpenAI-compatible `/v1/chat/completions` endpoint.
+///
+/// Accepts the standard OpenAI request format and routes the last user message
+/// through the Genesis agent, returning a response in OpenAI's format.
+/// This allows any OpenAI SDK client to talk to Genesis directly.
+async fn openai_chat_completions_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<OpenAiCompletionsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Extract the last user message as the prompt
+    let prompt = request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "no user message found in messages array".to_owned(),
+            )
+        })?
+        .to_owned();
+
+    // Extract optional system prompt
+    let system_prompt = request
+        .messages
+        .iter()
+        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        .map(str::to_owned);
+
+    let loaded = &state.loaded;
+    let mut service = SessionExecutionService::new(loaded);
+    if let Some(mcp) = &state.mcp {
+        service.set_mcp(std::sync::Arc::clone(mcp));
+    }
+    if let Some(sp) = system_prompt {
+        service.set_system_prompt_override(sp);
+    }
+
+    let session_id = default_api_session_id();
+    let request_id = default_request_id();
+    let model = request.model.clone();
+    let span = info_span!(
+        "gateway.openai_compat",
+        request_id = request_id.as_str(),
+        session_id = session_id.as_str(),
+        model = model.as_str(),
+    );
+
+    async move {
+        info!("received OpenAI-compatible chat completions request");
+
+        let outcome = service
+            .run_turn(SessionTurnInput {
+                session_id: &session_id,
+                session_platform: "api",
+                delivery_platform: delivery_platform_from_str("api"),
+                prompt: &prompt,
+                title: None,
+                images: Vec::new(),
+            })
+            .await
+            .map_err(|e| {
+                error!(error = %e, "OpenAI-compat request failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("execution error: {e}"),
+                )
+            })?;
+
+        let finish_reason = if outcome.result.pending_clarification.is_some() {
+            "stop"
+        } else if outcome.result.tool_calls_made > 0 {
+            "stop"
+        } else {
+            "stop"
+        };
+
+        Ok(Json(serde_json::json!({
+            "id": format!("chatcmpl-{}", session_id),
+            "object": "chat.completion",
+            "created": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": outcome.result.response,
+                },
+                "finish_reason": finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": outcome.result.total_input_tokens,
+                "completion_tokens": outcome.result.total_output_tokens,
+                "total_tokens": outcome.result.total_input_tokens + outcome.result.total_output_tokens,
+            },
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// OpenAI-compatible `/v1/models` endpoint.
+async fn openai_models_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let config = &state.loaded.config;
+    let model_id = format!("{}/{}", config.provider.backend, config.provider.model);
+    Json(serde_json::json!({
+        "object": "list",
+        "data": [{
+            "id": model_id,
+            "object": "model",
+            "created": 0,
+            "owned_by": config.provider.backend,
+        }],
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompletionsRequest {
+    model: String,
+    messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    stream: Option<bool>,
 }
 
 async fn chat_stream_handler(
