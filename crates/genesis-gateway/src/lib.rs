@@ -257,6 +257,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/{id}/messages", get(session_messages_handler))
         .route("/sessions/{id}/fork", post(fork_session_handler))
         .route("/sessions/{id}/title", patch(update_session_title_handler))
+        .route("/sessions/{id}/export", get(export_session_handler))
         .route("/usage", get(usage_handler))
         .route("/insights", get(insights_handler))
         // Skills CRUD
@@ -607,6 +608,69 @@ async fn update_session_title_handler(
         "title": request.title,
         "updated": updated,
     })))
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: Option<String>,
+}
+
+async fn export_session_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<ExportQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+
+    let session_title = store
+        .get_session(&id)
+        .ok()
+        .flatten()
+        .and_then(|s| s.title);
+
+    let stored = store
+        .load_messages(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    if stored.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no messages found for session '{id}'"),
+        ));
+    }
+
+    let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
+        .into_iter()
+        .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+        .collect();
+
+    let format = params.format.unwrap_or_else(|| "markdown".to_owned());
+
+    use genesis_tools::builtins::export::{export_chatml, export_json, export_markdown};
+
+    let (content, content_type) = match format.as_str() {
+        "json" => (
+            export_json(&id, session_title.as_deref(), &messages),
+            "application/json",
+        ),
+        "markdown" | "md" => (
+            export_markdown(&id, session_title.as_deref(), &messages),
+            "text/markdown; charset=utf-8",
+        ),
+        "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unsupported format '{format}'; use 'markdown', 'json', or 'chatml'"),
+            ))
+        }
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", content_type)
+        .body(axum::body::Body::from(content))
+        .unwrap())
 }
 
 async fn purge_sessions_handler(

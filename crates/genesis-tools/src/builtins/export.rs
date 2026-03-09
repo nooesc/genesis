@@ -98,7 +98,7 @@ impl ToolHandler for SessionExportTool {
     }
 }
 
-fn export_markdown(
+pub fn export_markdown(
     session_id: &str,
     title: Option<&str>,
     messages: &[(String, Option<String>, Option<String>, String)],
@@ -140,7 +140,7 @@ fn export_markdown(
     md
 }
 
-fn export_json(
+pub fn export_json(
     session_id: &str,
     title: Option<&str>,
     messages: &[(String, Option<String>, Option<String>, String)],
@@ -176,7 +176,7 @@ fn export_json(
     serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_owned())
 }
 
-fn export_chatml(messages: &[(String, Option<String>, Option<String>, String)]) -> String {
+pub fn export_chatml(messages: &[(String, Option<String>, Option<String>, String)]) -> String {
     let mut output = String::new();
 
     for (role, content, tool_calls, _) in messages {
