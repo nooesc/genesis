@@ -493,6 +493,70 @@ impl ToolRuntime {
         let mut defs = self.registry.definitions();
         if let Some(mcp) = &self.mcp {
             defs.extend(mcp.tool_definitions().await);
+
+            // Add resource/prompt tools if any servers expose them
+            if !mcp.resource_definitions().await.is_empty() {
+                defs.push(genesis_types::ToolDefinition {
+                    name: "mcp_list_resources".to_owned(),
+                    description: "List available MCP resources from all connected servers. Returns resource URIs, names, and descriptions.".to_owned(),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                    })),
+                });
+                defs.push(genesis_types::ToolDefinition {
+                    name: "mcp_read_resource".to_owned(),
+                    description: "Read an MCP resource by URI. Use mcp_list_resources first to discover available resources.".to_owned(),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "server": {
+                                "type": "string",
+                                "description": "The MCP server name that owns this resource"
+                            },
+                            "uri": {
+                                "type": "string",
+                                "description": "The resource URI to read"
+                            }
+                        },
+                        "required": ["server", "uri"]
+                    })),
+                });
+            }
+
+            if !mcp.prompt_definitions().await.is_empty() {
+                defs.push(genesis_types::ToolDefinition {
+                    name: "mcp_list_prompts".to_owned(),
+                    description: "List available MCP prompt templates from all connected servers. Returns prompt names, descriptions, and required arguments.".to_owned(),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                    })),
+                });
+                defs.push(genesis_types::ToolDefinition {
+                    name: "mcp_get_prompt".to_owned(),
+                    description: "Get an MCP prompt template by name with optional arguments. Returns the expanded prompt messages.".to_owned(),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "server": {
+                                "type": "string",
+                                "description": "The MCP server name that owns this prompt"
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "The prompt template name"
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "description": "Optional arguments to fill in the prompt template",
+                                "additionalProperties": { "type": "string" }
+                            }
+                        },
+                        "required": ["server", "name"]
+                    })),
+                });
+            }
         }
         defs
     }
@@ -506,6 +570,103 @@ impl ToolRuntime {
     pub async fn execute_async(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         if call.name.starts_with("mcp_") {
             if let Some(mcp) = &self.mcp {
+                // Handle built-in MCP resource/prompt operations
+                match call.name.as_str() {
+                    "mcp_list_resources" => {
+                        let resources = mcp.resource_definitions().await;
+                        let mut lines = Vec::new();
+                        for (server, res) in &resources {
+                            let desc = res.description.as_deref().unwrap_or("");
+                            let mime = res.mime_type.as_deref().unwrap_or("unknown");
+                            lines.push(format!(
+                                "- [{}] {} ({}) — {} [{}]",
+                                server, res.name, res.uri, desc, mime
+                            ));
+                        }
+                        let content = if lines.is_empty() {
+                            "No MCP resources available.".to_owned()
+                        } else {
+                            format!("Available MCP resources ({}):\n{}", lines.len(), lines.join("\n"))
+                        };
+                        return Ok(ToolOutput {
+                            content,
+                            metadata: std::collections::BTreeMap::new(),
+                        });
+                    }
+                    "mcp_read_resource" => {
+                        let server = call.arguments.get("server").ok_or_else(|| {
+                            ToolError::MissingArgument { tool: call.name.clone(), argument: "server" }
+                        })?;
+                        let uri = call.arguments.get("uri").ok_or_else(|| {
+                            ToolError::MissingArgument { tool: call.name.clone(), argument: "uri" }
+                        })?;
+                        let result = mcp.read_resource(server, uri).await.map_err(|e| {
+                            ToolError::ExecutionFailed { tool: call.name.clone(), reason: e.to_string() }
+                        })?;
+                        let content = result.contents.iter()
+                            .filter_map(|c| c.text.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        return Ok(ToolOutput {
+                            content,
+                            metadata: std::collections::BTreeMap::new(),
+                        });
+                    }
+                    "mcp_list_prompts" => {
+                        let prompts = mcp.prompt_definitions().await;
+                        let mut lines = Vec::new();
+                        for (server, prompt) in &prompts {
+                            let desc = prompt.description.as_deref().unwrap_or("");
+                            let args = prompt.arguments.as_ref()
+                                .map(|a| a.iter().map(|arg| {
+                                    let req = if arg.required == Some(true) { " (required)" } else { "" };
+                                    format!("{}{}", arg.name, req)
+                                }).collect::<Vec<_>>().join(", "))
+                                .unwrap_or_default();
+                            lines.push(format!(
+                                "- [{}] {} — {} [args: {}]",
+                                server, prompt.name, desc, if args.is_empty() { "none" } else { &args }
+                            ));
+                        }
+                        let content = if lines.is_empty() {
+                            "No MCP prompts available.".to_owned()
+                        } else {
+                            format!("Available MCP prompts ({}):\n{}", lines.len(), lines.join("\n"))
+                        };
+                        return Ok(ToolOutput {
+                            content,
+                            metadata: std::collections::BTreeMap::new(),
+                        });
+                    }
+                    "mcp_get_prompt" => {
+                        let server = call.arguments.get("server").ok_or_else(|| {
+                            ToolError::MissingArgument { tool: call.name.clone(), argument: "server" }
+                        })?;
+                        let name = call.arguments.get("name").ok_or_else(|| {
+                            ToolError::MissingArgument { tool: call.name.clone(), argument: "name" }
+                        })?;
+                        let arguments = call.arguments.get("arguments")
+                            .and_then(|v| serde_json::from_str::<std::collections::HashMap<String, String>>(v).ok());
+                        let result = mcp.get_prompt(server, name, arguments).await.map_err(|e| {
+                            ToolError::ExecutionFailed { tool: call.name.clone(), reason: e.to_string() }
+                        })?;
+                        let mut content = String::new();
+                        if let Some(desc) = &result.description {
+                            content.push_str(&format!("Description: {desc}\n\n"));
+                        }
+                        for msg in &result.messages {
+                            let text = msg.content.text.as_deref().unwrap_or("");
+                            content.push_str(&format!("[{}]: {}\n", msg.role, text));
+                        }
+                        return Ok(ToolOutput {
+                            content,
+                            metadata: std::collections::BTreeMap::new(),
+                        });
+                    }
+                    _ => {}
+                }
+
+                // Generic MCP tool call dispatch
                 let args = if call.arguments.is_empty() {
                     None
                 } else {
