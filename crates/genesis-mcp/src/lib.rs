@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 pub use client::{McpClient, McpServerConfig};
+pub use protocol::{McpPromptDef, McpResourceDef, PromptGetResult, ResourceReadResult};
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -191,6 +192,101 @@ impl McpManager {
     pub async fn tool_count(&self) -> usize {
         let clients = self.clients.read().await;
         clients.values().map(|c| c.tools().len()).sum()
+    }
+
+    /// Returns all resource definitions from all connected servers.
+    ///
+    /// Resources are returned with their server name for routing.
+    pub async fn resource_definitions(&self) -> Vec<(String, McpResourceDef)> {
+        let clients = self.clients.read().await;
+        clients
+            .iter()
+            .flat_map(|(name, c)| {
+                c.resources()
+                    .iter()
+                    .map(move |r| (name.clone(), r.clone()))
+            })
+            .collect()
+    }
+
+    /// Returns all prompt definitions from all connected servers.
+    ///
+    /// Prompts are returned with their server name for routing.
+    pub async fn prompt_definitions(&self) -> Vec<(String, McpPromptDef)> {
+        let clients = self.clients.read().await;
+        clients
+            .iter()
+            .flat_map(|(name, c)| {
+                c.prompts()
+                    .iter()
+                    .map(move |p| (name.clone(), p.clone()))
+            })
+            .collect()
+    }
+
+    /// Read a resource from a specific server.
+    pub async fn read_resource(
+        &self,
+        server_name: &str,
+        uri: &str,
+    ) -> Result<ResourceReadResult, McpError> {
+        let first_err = {
+            let clients = self.clients.read().await;
+            let client = clients
+                .get(server_name)
+                .ok_or_else(|| McpError::UnknownTool(format!("server {server_name}")))?;
+            match client.read_resource(uri).await {
+                Ok(result) => return Ok(result),
+                Err(e) => e,
+            }
+        };
+
+        if !first_err.is_retriable() {
+            return Err(first_err);
+        }
+
+        if !self.reconnect_server(server_name).await {
+            return Err(first_err);
+        }
+
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server_name)
+            .ok_or_else(|| McpError::UnknownTool(format!("server {server_name}")))?;
+        client.read_resource(uri).await
+    }
+
+    /// Get a prompt from a specific server.
+    pub async fn get_prompt(
+        &self,
+        server_name: &str,
+        prompt_name: &str,
+        arguments: Option<HashMap<String, String>>,
+    ) -> Result<PromptGetResult, McpError> {
+        let first_err = {
+            let clients = self.clients.read().await;
+            let client = clients
+                .get(server_name)
+                .ok_or_else(|| McpError::UnknownTool(format!("server {server_name}")))?;
+            match client.get_prompt(prompt_name, arguments.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(e) => e,
+            }
+        };
+
+        if !first_err.is_retriable() {
+            return Err(first_err);
+        }
+
+        if !self.reconnect_server(server_name).await {
+            return Err(first_err);
+        }
+
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server_name)
+            .ok_or_else(|| McpError::UnknownTool(format!("server {server_name}")))?;
+        client.get_prompt(prompt_name, arguments).await
     }
 
     /// Returns the names of all configured servers and whether they are connected.

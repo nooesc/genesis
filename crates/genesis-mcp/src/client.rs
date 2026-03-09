@@ -9,7 +9,9 @@ use tracing::{debug, info};
 
 use crate::protocol::{
     InitializeParams, InitializeResult, ClientCapabilities, Implementation,
-    McpToolDef, ToolCallParams, ToolCallResult, ToolsListResult,
+    McpPromptDef, McpResourceDef, McpToolDef, PromptGetParams, PromptGetResult,
+    PromptsListResult, ResourceReadParams, ResourceReadResult, ResourcesListResult,
+    ToolCallParams, ToolCallResult, ToolsListResult,
 };
 use crate::transport::{HttpTransport, McpTransport, StdioTransport};
 use crate::McpError;
@@ -68,6 +70,8 @@ pub struct McpClient {
     transport: Box<dyn McpTransport>,
     call_timeout: Duration,
     tools: Vec<McpToolDef>,
+    resources: Vec<McpResourceDef>,
+    prompts: Vec<McpPromptDef>,
 }
 
 impl McpClient {
@@ -180,11 +184,81 @@ impl McpClient {
             Vec::new()
         };
 
+        // Discover resources
+        let resources = if init_result.capabilities.resources.is_some() {
+            let res_resp = transport
+                .request("resources/list", Some(json!({})), connect_timeout)
+                .await?;
+
+            if let Some(err) = res_resp.error {
+                debug!(
+                    server = name.as_str(),
+                    error = err.message.as_str(),
+                    "resources/list returned error, skipping"
+                );
+                Vec::new()
+            } else {
+                let res_result: ResourcesListResult = res_resp
+                    .result
+                    .ok_or_else(|| McpError::Protocol("resources/list missing result".into()))
+                    .and_then(|v| {
+                        serde_json::from_value(v).map_err(|e| {
+                            McpError::Protocol(format!("failed to parse resources: {e}"))
+                        })
+                    })?;
+
+                info!(
+                    server = name.as_str(),
+                    count = res_result.resources.len(),
+                    "discovered MCP resources"
+                );
+                res_result.resources
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Discover prompts
+        let prompts = if init_result.capabilities.prompts.is_some() {
+            let pr_resp = transport
+                .request("prompts/list", Some(json!({})), connect_timeout)
+                .await?;
+
+            if let Some(err) = pr_resp.error {
+                debug!(
+                    server = name.as_str(),
+                    error = err.message.as_str(),
+                    "prompts/list returned error, skipping"
+                );
+                Vec::new()
+            } else {
+                let pr_result: PromptsListResult = pr_resp
+                    .result
+                    .ok_or_else(|| McpError::Protocol("prompts/list missing result".into()))
+                    .and_then(|v| {
+                        serde_json::from_value(v).map_err(|e| {
+                            McpError::Protocol(format!("failed to parse prompts: {e}"))
+                        })
+                    })?;
+
+                info!(
+                    server = name.as_str(),
+                    count = pr_result.prompts.len(),
+                    "discovered MCP prompts"
+                );
+                pr_result.prompts
+            }
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             name,
             transport,
             call_timeout,
             tools,
+            resources,
+            prompts,
         })
     }
 
@@ -211,6 +285,87 @@ impl McpClient {
                 parameters: t.input_schema.clone(),
             })
             .collect()
+    }
+
+    /// Returns the discovered MCP resource definitions.
+    pub fn resources(&self) -> &[McpResourceDef] {
+        &self.resources
+    }
+
+    /// Returns the discovered MCP prompt definitions.
+    pub fn prompts(&self) -> &[McpPromptDef] {
+        &self.prompts
+    }
+
+    /// Read a resource by URI from this MCP server.
+    pub async fn read_resource(&self, uri: &str) -> Result<ResourceReadResult, McpError> {
+        let params = ResourceReadParams {
+            uri: uri.to_owned(),
+        };
+
+        let resp = self
+            .transport
+            .request(
+                "resources/read",
+                Some(serde_json::to_value(&params).map_err(|e| {
+                    McpError::Protocol(format!("failed to serialize resource read: {e}"))
+                })?),
+                self.call_timeout,
+            )
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(McpError::ToolCallFailed(format!(
+                "resources/read {}: {} (code {})",
+                uri, err.message, err.code
+            )));
+        }
+
+        resp.result
+            .ok_or_else(|| McpError::Protocol("resources/read missing result".into()))
+            .and_then(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    McpError::Protocol(format!("failed to parse resource read result: {e}"))
+                })
+            })
+    }
+
+    /// Get a prompt by name from this MCP server, with optional arguments.
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Option<HashMap<String, String>>,
+    ) -> Result<PromptGetResult, McpError> {
+        let params = PromptGetParams {
+            name: name.to_owned(),
+            arguments,
+        };
+
+        let resp = self
+            .transport
+            .request(
+                "prompts/get",
+                Some(serde_json::to_value(&params).map_err(|e| {
+                    McpError::Protocol(format!("failed to serialize prompt get: {e}"))
+                })?),
+                self.call_timeout,
+            )
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(McpError::ToolCallFailed(format!(
+                "prompts/get {}: {} (code {})",
+                name, err.message, err.code
+            )));
+        }
+
+        resp.result
+            .ok_or_else(|| McpError::Protocol("prompts/get missing result".into()))
+            .and_then(|v| {
+                serde_json::from_value(v).map_err(|e| {
+                    McpError::Protocol(format!("failed to parse prompt get result: {e}"))
+                })
+            })
     }
 
     /// Call a tool on this MCP server.

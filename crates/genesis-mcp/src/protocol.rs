@@ -1,5 +1,6 @@
 //! MCP protocol message types (JSON-RPC 2.0 based).
 
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -126,6 +127,94 @@ pub struct ContentPart {
     pub text: Option<String>,
 }
 
+// --- MCP Resources ---
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourcesListResult {
+    pub resources: Vec<McpResourceDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceDef {
+    pub uri: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceReadParams {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourceReadResult {
+    pub contents: Vec<ResourceContent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResourceContent {
+    pub uri: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: Option<String>,
+    pub text: Option<String>,
+    pub blob: Option<String>,
+}
+
+// --- MCP Prompts ---
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptsListResult {
+    pub prompts: Vec<McpPromptDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPromptDef {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<PromptArgument>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptGetParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptGetResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptMessage {
+    pub role: String,
+    pub content: PromptContent,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptContent {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    pub text: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +312,96 @@ mod tests {
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["name"], "read_file");
         assert_eq!(json["arguments"]["path"], "/tmp/test.txt");
+    }
+
+    #[test]
+    fn resources_list_result_deserializes() {
+        let json = r#"{
+            "resources": [{
+                "uri": "file:///etc/hosts",
+                "name": "hosts",
+                "description": "System hosts file",
+                "mimeType": "text/plain"
+            }]
+        }"#;
+        let result: ResourcesListResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].uri, "file:///etc/hosts");
+        assert_eq!(result.resources[0].name, "hosts");
+        assert_eq!(result.resources[0].mime_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn resource_read_result_deserializes() {
+        let json = r#"{
+            "contents": [{
+                "uri": "file:///etc/hosts",
+                "mimeType": "text/plain",
+                "text": "127.0.0.1 localhost"
+            }]
+        }"#;
+        let result: ResourceReadResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.contents.len(), 1);
+        assert_eq!(result.contents[0].text.as_deref(), Some("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn prompts_list_result_deserializes() {
+        let json = r#"{
+            "prompts": [{
+                "name": "code-review",
+                "description": "Review code for bugs",
+                "arguments": [{
+                    "name": "language",
+                    "description": "Programming language",
+                    "required": true
+                }]
+            }]
+        }"#;
+        let result: PromptsListResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.prompts.len(), 1);
+        assert_eq!(result.prompts[0].name, "code-review");
+        let args = result.prompts[0].arguments.as_ref().unwrap();
+        assert_eq!(args[0].name, "language");
+        assert_eq!(args[0].required, Some(true));
+    }
+
+    #[test]
+    fn prompt_get_result_deserializes() {
+        let json = r#"{
+            "description": "A code review prompt",
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": "Please review this code"
+                }
+            }]
+        }"#;
+        let result: PromptGetResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.description.as_deref(), Some("A code review prompt"));
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content.text.as_deref(), Some("Please review this code"));
+    }
+
+    #[test]
+    fn prompt_get_params_serializes() {
+        let params = PromptGetParams {
+            name: "code-review".to_owned(),
+            arguments: Some(HashMap::from([("language".to_owned(), "rust".to_owned())])),
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["name"], "code-review");
+        assert_eq!(json["arguments"]["language"], "rust");
+    }
+
+    #[test]
+    fn resource_read_params_serializes() {
+        let params = ResourceReadParams {
+            uri: "file:///etc/hosts".to_owned(),
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["uri"], "file:///etc/hosts");
     }
 }
