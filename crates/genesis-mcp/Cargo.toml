@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 genesis-config = { path = "../genesis-config" }
 genesis-types = { path = "../genesis-types" }
+futures-util = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

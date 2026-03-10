@@ -74,7 +74,7 @@ fn run_hook(config: &HookConfig, context: &serde_json::Value) -> HookResult {
         .stderr(Stdio::piped());
 
     let spawn_result = command.spawn();
-    let result = match spawn_result {
+    match spawn_result {
         Ok(mut child) => {
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
@@ -118,9 +118,7 @@ fn run_hook(config: &HookConfig, context: &serde_json::Value) -> HookResult {
             stderr: err.to_string(),
             duration_ms: started.elapsed().as_millis() as u64,
         },
-    };
-
-    result
+    }
 }
 
 fn read_stream(stream: Option<impl Read>) -> String {

@@ -34,19 +34,19 @@ pub fn build_nudge_prompt(loaded: &LoadedConfig) -> String {
 
     if let Some(ref section) = memories_section {
         prompt.push_str("\n## Current Memories\n");
-        prompt.push_str(&section);
+        prompt.push_str(section);
         prompt.push('\n');
     }
 
     if let Some(ref section) = user_model_section {
         prompt.push_str("\n## User Model\n");
-        prompt.push_str(&section);
+        prompt.push_str(section);
         prompt.push('\n');
     }
 
     if let Some(ref section) = sessions_section {
         prompt.push_str("\n## Recent Sessions\n");
-        prompt.push_str(&section);
+        prompt.push_str(section);
         prompt.push('\n');
     }
 

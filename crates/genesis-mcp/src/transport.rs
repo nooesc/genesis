@@ -279,13 +279,15 @@ where
         )));
     }
 
-    String::from_utf8(line).map_err(|error| {
-        McpError::Protocol(format!("incoming MCP frame was not valid UTF-8: {error}"))
-    })
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| {
+            McpError::Protocol(format!("incoming MCP frame was not valid UTF-8: {error}"))
+        })
 }
 
 async fn read_http_body_bytes(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, McpError> {
     let mut body = Vec::new();

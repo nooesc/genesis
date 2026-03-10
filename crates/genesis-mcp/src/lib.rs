@@ -368,17 +368,14 @@ pub fn build_server_configs(
                     connect_timeout,
                     call_timeout,
                 })
-            } else if let Some(url) = &entry.url {
-                // HTTP transport
-                Some(McpServerConfig::Http {
+            } else {
+                entry.url.as_ref().map(|url| McpServerConfig::Http {
                     name: name.clone(),
                     url: url.clone(),
                     headers: entry.headers.clone().unwrap_or_default(),
                     connect_timeout,
                     call_timeout,
                 })
-            } else {
-                None
             }
         })
         .collect()

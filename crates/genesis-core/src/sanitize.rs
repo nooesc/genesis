@@ -3,7 +3,6 @@
 /// Strips API keys, tokens, and other secrets from text before it enters the
 /// conversation context. This prevents accidental credential leakage when error
 /// messages or tool results contain sensitive values.
-
 /// Known secret patterns and their redaction labels.
 const PATTERNS: &[SecretPattern] = &[
     // GitHub tokens (classic PATs, OAuth, app, fine-grained)

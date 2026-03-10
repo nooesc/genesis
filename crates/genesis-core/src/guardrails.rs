@@ -251,15 +251,15 @@ pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
     }
 
     // Check JSON output requirement
-    if config.require_json_output {
-        if serde_json::from_str::<serde_json::Value>(&content).is_err() {
-            blocked = true;
-            violations.push(Violation {
-                rule: "require_json_output".to_owned(),
-                message: "Output is not valid JSON".to_owned(),
-                action: ViolationAction::Block,
-            });
-        }
+    if config.require_json_output
+        && serde_json::from_str::<serde_json::Value>(&content).is_err()
+    {
+        blocked = true;
+        violations.push(Violation {
+            rule: "require_json_output".to_owned(),
+            message: "Output is not valid JSON".to_owned(),
+            action: ViolationAction::Block,
+        });
     }
 
     // Check custom rules for output
