@@ -1575,14 +1575,10 @@ async fn embed_single_memory_handler(
     let memory_store = MemoryStore::new(db_path);
     let embedding_store = EmbeddingStore::new(db_path);
 
-    // Find the memory
-    let memories = memory_store
-        .list(10000)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
-
-    let memory = memories
-        .iter()
-        .find(|m| m.id == id)
+    // Find the memory by direct ID lookup
+    let memory = memory_store
+        .get(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
 
     genesis_core::embedding::embed_and_store(

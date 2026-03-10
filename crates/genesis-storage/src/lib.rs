@@ -3032,6 +3032,36 @@ impl MemoryStore {
             })
     }
 
+    /// Get a single memory by ID. Returns `None` if not found.
+    pub fn get(&self, id: &str) -> Result<Option<StoredMemory>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at
+                 FROM memories WHERE id = ?1",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let result = stmt
+            .query_row(params![id], |row| {
+                Ok(StoredMemory {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(result)
+    }
+
     /// Full-text search across stored memories.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
@@ -5796,6 +5826,59 @@ mod tests {
         assert_eq!(analytics[0].call_count, 2);
         assert_eq!(analytics[0].total_input_tokens, 300);
         assert_eq!(analytics[0].total_output_tokens, 130);
+    }
+}
+
+#[cfg(test)]
+mod memory_store_tests {
+    use super::{bootstrap, MemoryStore, SessionStore};
+    use tempfile::tempdir;
+
+    fn setup(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'hello world', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'preference', 'likes rust', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        db_path
+    }
+
+    #[test]
+    fn get_returns_existing_memory() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let memory = store.get("mem1").unwrap();
+        assert!(memory.is_some());
+        let memory = memory.unwrap();
+        assert_eq!(memory.id, "mem1");
+        assert_eq!(memory.kind, "fact");
+        assert_eq!(memory.content, "hello world");
+    }
+
+    #[test]
+    fn get_returns_none_for_nonexistent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let memory = store.get("nonexistent").unwrap();
+        assert!(memory.is_none());
     }
 }
 

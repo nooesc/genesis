@@ -307,15 +307,15 @@ pub struct EmbeddingConfig {
     /// Env var name holding the API key. Falls back to standard provider env vars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// Number of dimensions in the embedding vector. Must match the model.
-    /// Default: 1536 (text-embedding-3-small).
-    #[serde(default = "default_embedding_dimensions")]
-    pub dimensions: usize,
+    /// Number of dimensions in the embedding vector.
+    /// Only sent to embedding APIs that support it (e.g. OpenAI).
+    /// When `None`, the model's default dimensions are used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<usize>,
 }
 
 fn default_embedding_backend() -> String { "openai".to_owned() }
 fn default_embedding_model() -> String { "text-embedding-3-small".to_owned() }
-fn default_embedding_dimensions() -> usize { 1536 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
@@ -324,7 +324,7 @@ impl Default for EmbeddingConfig {
             model: default_embedding_model(),
             base_url: None,
             api_key_env: None,
-            dimensions: default_embedding_dimensions(),
+            dimensions: None,
         }
     }
 }

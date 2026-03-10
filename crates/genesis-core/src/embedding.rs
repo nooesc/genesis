@@ -99,7 +99,7 @@ impl EmbeddingProvider {
             http,
             endpoint,
             model: resolved.model,
-            dimensions: Some(config.dimensions),
+            dimensions: config.dimensions,
         })
     }
 
@@ -135,6 +135,18 @@ impl EmbeddingProvider {
         let response: EmbeddingResponse = response.json().await?;
         if response.data.is_empty() {
             return Err(EmbeddingError::EmptyResponse);
+        }
+
+        // Validate returned vector dimensions when configured
+        if let Some(expected) = self.dimensions {
+            for item in &response.data {
+                if item.embedding.len() != expected {
+                    return Err(EmbeddingError::DimensionMismatch {
+                        expected,
+                        actual: item.embedding.len(),
+                    });
+                }
+            }
         }
 
         Ok(response.data.into_iter().map(|d| d.embedding).collect())
@@ -235,7 +247,7 @@ pub async fn hybrid_search(
         }
         SearchMode::Vector => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
-            vector_search(query, limit, embedding_store, provider).await
+            vector_search(query, limit, memory_store, embedding_store, provider).await
         }
         SearchMode::Hybrid => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
@@ -243,17 +255,19 @@ pub async fn hybrid_search(
             // Run FTS5 and vector search, then merge with RRF
             let fts_results = memory_store.search(query, limit * 2)?;
             let vector_results =
-                vector_search(query, limit * 2, embedding_store, provider).await?;
+                vector_search(query, limit * 2, memory_store, embedding_store, provider).await?;
 
             Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
         }
     }
 }
 
-/// Vector-only search: embed the query, compare against all stored embeddings.
+/// Vector-only search: embed the query, compare against all stored embeddings,
+/// then fetch memory details only for the top-ranked results.
 async fn vector_search(
     query: &str,
     limit: usize,
+    memory_store: &MemoryStore,
     embedding_store: &EmbeddingStore,
     provider: &EmbeddingProvider,
 ) -> Result<Vec<ScoredMemory>, EmbeddingError> {
@@ -264,33 +278,29 @@ async fn vector_search(
         return Ok(Vec::new());
     }
 
-    // Score all memories by cosine similarity
+    // Score all embeddings by cosine similarity (only needs IDs + vectors)
     let mut scored: Vec<(String, f32)> = all_embeddings
         .iter()
         .map(|(id, emb)| (id.clone(), cosine_similarity(&query_embedding, emb)))
         .collect();
 
-    // Sort by similarity descending
+    // Sort by similarity descending and keep only top results
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
-    // Load memory details for the top results
-    let memory_store = MemoryStore::new(embedding_store.database_path());
-    let all_memories = memory_store.list(1000)?;
-
-    let memory_map: std::collections::HashMap<&str, &StoredMemory> =
-        all_memories.iter().map(|m| (m.id.as_str(), m)).collect();
-
-    Ok(scored
-        .into_iter()
-        .filter_map(|(id, sim)| {
-            memory_map.get(id.as_str()).map(|&memory| ScoredMemory {
-                memory: memory.clone(),
+    // Fetch memory details only for the top-ranked results
+    let mut results = Vec::with_capacity(scored.len());
+    for (id, sim) in scored {
+        if let Some(memory) = memory_store.get(&id)? {
+            results.push(ScoredMemory {
+                memory,
                 score: sim as f64,
                 source: "vector".to_owned(),
-            })
-        })
-        .collect())
+            });
+        }
+    }
+
+    Ok(results)
 }
 
 /// Merge FTS5 and vector search results using Reciprocal Rank Fusion.
