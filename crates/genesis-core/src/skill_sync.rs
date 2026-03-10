@@ -30,6 +30,8 @@ pub struct SyncStats {
     pub updated: usize,
     /// Skills that were already at the latest version and untouched.
     pub unchanged: usize,
+    /// Skills the user had previously deleted -- we skipped re-adding them.
+    pub deleted_skipped: usize,
     /// Skills the user had modified -- we preserved their version.
     pub user_modified_preserved: usize,
     /// Manifest entries cleaned because the skill was removed from bundled set.
@@ -42,14 +44,12 @@ pub struct SyncStats {
 #[derive(Debug)]
 pub enum SyncError {
     Io(io::Error),
-    Hash(String),
 }
 
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "skill sync IO error: {e}"),
-            Self::Hash(msg) => write!(f, "skill sync hash error: {msg}"),
         }
     }
 }
@@ -68,7 +68,8 @@ impl From<io::Error> for SyncError {
 
 /// On-disk manifest stored at `<user_skills_dir>/.bundled_manifest`.
 ///
-/// Format: one line per entry, `skill_name:hex_hash`.
+/// Format: one line per entry, `skill_name<TAB>hex_hash`.
+/// A tab separator is used to avoid conflicts with colons in skill names.
 /// An entry with a hash of `DELETED` means the user explicitly deleted that
 /// skill and we must not re-add it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +92,8 @@ impl BundledManifest {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                if let Some((name, hash)) = line.split_once(':') {
+                // Support both tab (current) and colon (legacy) separators.
+                if let Some((name, hash)) = line.split_once('\t').or_else(|| line.split_once(':')) {
                     entries.insert(name.to_owned(), hash.to_owned());
                 }
             }
@@ -111,7 +113,7 @@ impl BundledManifest {
         let mut content = String::new();
         for (name, hash) in &self.entries {
             content.push_str(name);
-            content.push(':');
+            content.push('\t');
             content.push_str(hash);
             content.push('\n');
         }
@@ -233,7 +235,7 @@ pub fn sync_bundled_skills(bundled_dir: &Path, user_dir: &Path) -> Result<SyncSt
         // --- Scenario: user deleted this skill previously ---
         if manifest.is_deleted(name) {
             // Respect the deletion. Don't re-add.
-            stats.unchanged += 1;
+            stats.deleted_skipped += 1;
             continue;
         }
 
@@ -251,7 +253,7 @@ pub fn sync_bundled_skills(bundled_dir: &Path, user_dir: &Path) -> Result<SyncSt
                     // We previously synced this skill but the user removed it.
                     // Respect the deletion.
                     manifest.mark_deleted(name);
-                    stats.unchanged += 1;
+                    stats.deleted_skipped += 1;
                 }
             }
             continue;
@@ -292,7 +294,12 @@ pub fn sync_bundled_skills(bundled_dir: &Path, user_dir: &Path) -> Result<SyncSt
                         copy_dir_recursive(&user_skill_dir, &backup_skill)?;
                         // Replace with new bundled version.
                         fs::remove_dir_all(&user_skill_dir)?;
-                        copy_dir_recursive(bundled_path, &user_skill_dir)?;
+                        if let Err(e) = copy_dir_recursive(bundled_path, &user_skill_dir) {
+                            // Rollback: restore from backup so the skill isn't lost.
+                            let _ = fs::remove_dir_all(&user_skill_dir);
+                            copy_dir_recursive(&backup_skill, &user_skill_dir)?;
+                            return Err(e);
+                        }
                         manifest.set(name, &bundled_hash);
                         stats.updated += 1;
                     } else {
@@ -457,6 +464,45 @@ mod tests {
         assert!(!tmp.exists());
         // The actual file should exist.
         assert!(path.exists());
+    }
+
+    #[test]
+    fn manifest_uses_tab_separator() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".bundled_manifest");
+
+        let mut m = BundledManifest::load(&path).unwrap();
+        m.set("alpha", "aaa111");
+        m.save().unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("alpha\taaa111"), "manifest should use tab separator");
+        assert!(!raw.contains("alpha:aaa111"), "manifest should not use colon separator");
+    }
+
+    #[test]
+    fn manifest_handles_colon_in_skill_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".bundled_manifest");
+
+        let mut m = BundledManifest::load(&path).unwrap();
+        m.set("my:skill:name", "abc123");
+        m.save().unwrap();
+
+        let m2 = BundledManifest::load(&path).unwrap();
+        assert_eq!(m2.get("my:skill:name"), Some("abc123"));
+    }
+
+    #[test]
+    fn manifest_reads_legacy_colon_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".bundled_manifest");
+        // Simulate a legacy manifest with colon separators (no colons in names).
+        fs::write(&path, "alpha:abc123\nbeta:def456\n").unwrap();
+
+        let m = BundledManifest::load(&path).unwrap();
+        assert_eq!(m.get("alpha"), Some("abc123"));
+        assert_eq!(m.get("beta"), Some("def456"));
     }
 
     // -- dir_hash tests -------------------------------------------------------
@@ -648,11 +694,12 @@ mod tests {
         // Second sync: should detect the deletion and mark it.
         let stats = sync_bundled_skills(bundled.path(), user.path()).unwrap();
         assert_eq!(stats.new_copied, 0);
-        assert_eq!(stats.unchanged, 1); // counted as "unchanged" since we skip it
+        assert_eq!(stats.deleted_skipped, 1);
 
-        // Third sync: still should not re-add.
+        // Third sync: still should not re-add (now uses the DELETED marker path).
         let stats = sync_bundled_skills(bundled.path(), user.path()).unwrap();
         assert_eq!(stats.new_copied, 0);
+        assert_eq!(stats.deleted_skipped, 1);
         assert!(!user.path().join("greet").exists());
 
         // Manifest should have DELETED marker.
@@ -729,6 +776,7 @@ mod tests {
         assert_eq!(stats.user_modified_preserved, 1);
         assert_eq!(stats.updated, 0);
         assert_eq!(stats.unchanged, 0);
+        assert_eq!(stats.deleted_skipped, 0);
     }
 
     #[test]
