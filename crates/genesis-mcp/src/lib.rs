@@ -127,7 +127,7 @@ impl McpManager {
 
     /// Returns all tool definitions from all connected servers.
     ///
-    /// Tools are prefixed with `mcp_{server_name}_` to avoid naming collisions.
+    /// Tools are prefixed with `mcp_{server_name}__` to avoid naming collisions.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let clients = self.clients.read().await;
         clients
@@ -136,7 +136,7 @@ impl McpManager {
             .collect()
     }
 
-    /// Call a tool by its prefixed name (e.g., `mcp_filesystem_read_file`).
+    /// Call a tool by its prefixed name (e.g., `mcp_filesystem__read_file`).
     ///
     /// Parses the prefix to route to the correct server. If the call fails
     /// with a transport error, attempts to reconnect and retry once.
@@ -323,19 +323,23 @@ impl McpManager {
     }
 }
 
-/// Parse a prefixed tool name like `mcp_filesystem_read_file` into
+/// Parse a prefixed tool name like `mcp_filesystem__read_file` into
 /// `("filesystem", "read_file")`.
+///
+/// Uses a double-underscore (`__`) separator between the server name and
+/// tool name so that server names containing underscores (e.g. `my_server`)
+/// are parsed unambiguously.
 fn parse_mcp_tool_name(prefixed: &str) -> Result<(&str, &str), McpError> {
     let rest = prefixed
         .strip_prefix("mcp_")
         .ok_or_else(|| McpError::UnknownTool(prefixed.to_owned()))?;
 
-    let underscore_pos = rest
-        .find('_')
+    let sep_pos = rest
+        .find("__")
         .ok_or_else(|| McpError::UnknownTool(prefixed.to_owned()))?;
 
-    let server_name = &rest[..underscore_pos];
-    let tool_name = &rest[underscore_pos + 1..];
+    let server_name = &rest[..sep_pos];
+    let tool_name = &rest[sep_pos + 2..];
 
     if server_name.is_empty() || tool_name.is_empty() {
         return Err(McpError::UnknownTool(prefixed.to_owned()));
@@ -387,16 +391,23 @@ mod tests {
 
     #[test]
     fn parse_tool_name_valid() {
-        let (server, tool) = parse_mcp_tool_name("mcp_filesystem_read_file").unwrap();
+        let (server, tool) = parse_mcp_tool_name("mcp_filesystem__read_file").unwrap();
         assert_eq!(server, "filesystem");
         assert_eq!(tool, "read_file");
     }
 
     #[test]
     fn parse_tool_name_with_underscores_in_tool() {
-        let (server, tool) = parse_mcp_tool_name("mcp_github_create_pull_request").unwrap();
+        let (server, tool) = parse_mcp_tool_name("mcp_github__create_pull_request").unwrap();
         assert_eq!(server, "github");
         assert_eq!(tool, "create_pull_request");
+    }
+
+    #[test]
+    fn parse_tool_name_with_underscores_in_server() {
+        let (server, tool) = parse_mcp_tool_name("mcp_my_server__read_file").unwrap();
+        assert_eq!(server, "my_server");
+        assert_eq!(tool, "read_file");
     }
 
     #[test]
@@ -405,9 +416,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_name_no_double_underscore() {
+        // Single underscore should fail now
+        assert!(parse_mcp_tool_name("mcp_filesystem_read_file").is_err());
+    }
+
+    #[test]
     fn parse_tool_name_empty_parts() {
         assert!(parse_mcp_tool_name("mcp_").is_err());
-        assert!(parse_mcp_tool_name("mcp__tool").is_err());
+        assert!(parse_mcp_tool_name("mcp___tool").is_err()); // empty server name
+        assert!(parse_mcp_tool_name("mcp_server__").is_err()); // empty tool name
     }
 
     #[test]
@@ -511,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn manager_call_unknown_tool_errors() {
         let manager = McpManager::connect_all(vec![]).await;
-        let result = manager.call_tool("mcp_nonexistent_tool", None).await;
+        let result = manager.call_tool("mcp_nonexistent__tool", None).await;
         assert!(result.is_err());
     }
 

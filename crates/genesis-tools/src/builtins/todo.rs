@@ -1,14 +1,18 @@
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-/// In-memory task list for agent planning.
+/// In-memory task list for agent planning, keyed by session ID.
 ///
 /// Unlike persistent storage tools, the todo list lives only for the duration
 /// of the current process. It helps the agent decompose complex tasks,
 /// track progress, and report completion status.
-static TODO_LIST: Mutex<Vec<TodoItem>> = Mutex::new(Vec::new());
+///
+/// Each session gets its own isolated todo list so that concurrent sessions
+/// (e.g. via the gateway) do not leak state to each other.
+static TODO_LISTS: LazyLock<Mutex<HashMap<String, Vec<TodoItem>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 struct TodoItem {
@@ -46,7 +50,7 @@ fn parse_status(s: &str) -> Result<TodoStatus, String> {
 pub struct TodoTool;
 
 impl ToolHandler for TodoTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let action = call
             .arguments
             .get("action")
@@ -54,6 +58,8 @@ impl ToolHandler for TodoTool {
                 tool: call.name.clone(),
                 argument: "action",
             })?;
+
+        let session_id = &context.session_id;
 
         match action.as_str() {
             "add" => {
@@ -65,7 +71,8 @@ impl ToolHandler for TodoTool {
                         argument: "text",
                     })?;
 
-                let mut list = TODO_LIST.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().unwrap();
+                let list = lists.entry(session_id.clone()).or_default();
                 let id = list.len() + 1;
                 list.push(TodoItem {
                     id,
@@ -105,7 +112,8 @@ impl ToolHandler for TodoTool {
                     reason: e,
                 })?;
 
-                let mut list = TODO_LIST.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().unwrap();
+                let list = lists.entry(session_id.clone()).or_default();
                 let item = list.iter_mut().find(|item| item.id == id).ok_or_else(|| {
                     ToolError::ExecutionFailed {
                         tool: call.name.clone(),
@@ -123,7 +131,9 @@ impl ToolHandler for TodoTool {
                 })
             }
             "list" => {
-                let list = TODO_LIST.lock().unwrap();
+                let lists = TODO_LISTS.lock().unwrap();
+                let empty = Vec::new();
+                let list = lists.get(session_id).unwrap_or(&empty);
                 if list.is_empty() {
                     return Ok(ToolOutput {
                         content: "(no todos)".to_owned(),
@@ -158,7 +168,8 @@ impl ToolHandler for TodoTool {
                 })
             }
             "clear" => {
-                let mut list = TODO_LIST.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().unwrap();
+                let list = lists.entry(session_id.clone()).or_default();
                 let count = list.len();
                 list.clear();
 
@@ -193,13 +204,25 @@ mod tests {
         }
     }
 
-    fn clear_todos() {
-        TODO_LIST.lock().unwrap().clear();
+    fn ctx_with_session(session_id: &str) -> ToolContext {
+        ToolContext {
+            session_id: session_id.to_owned(),
+            profile: "test".to_owned(),
+            data_dir: "/tmp".to_owned(),
+            allow_destructive_tools: true,
+            terminal_backend: None,
+            default_working_dir: None,
+        }
+    }
+
+    fn clear_todos(session_id: &str) {
+        let mut lists = TODO_LISTS.lock().unwrap();
+        lists.remove(session_id);
     }
 
     #[test]
     fn todo_add_and_list() {
-        clear_todos();
+        clear_todos("test");
         let tool = TodoTool;
 
         // Add
@@ -225,7 +248,7 @@ mod tests {
 
     #[test]
     fn todo_update_status() {
-        clear_todos();
+        clear_todos("test");
         let tool = TodoTool;
 
         // Add
@@ -276,7 +299,7 @@ mod tests {
 
     #[test]
     fn todo_clear() {
-        clear_todos();
+        clear_todos("test");
         let tool = TodoTool;
 
         let call = ToolCall {
@@ -305,7 +328,7 @@ mod tests {
 
     #[test]
     fn todo_empty_list() {
-        clear_todos();
+        clear_todos("test");
         let tool = TodoTool;
 
         let call = ToolCall {
@@ -330,5 +353,60 @@ mod tests {
             }
             _ => panic!("expected ExecutionFailed"),
         }
+    }
+
+    #[test]
+    fn todo_sessions_are_isolated() {
+        clear_todos("session-a");
+        clear_todos("session-b");
+        let tool = TodoTool;
+
+        // Add to session A
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "task for A".to_owned()),
+            ]),
+        };
+        tool.run(&call, &ctx_with_session("session-a")).unwrap();
+
+        // Add to session B
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "task for B".to_owned()),
+            ]),
+        };
+        tool.run(&call, &ctx_with_session("session-b")).unwrap();
+
+        // Session A should only see its own todo
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+        };
+        let output_a = tool.run(&call, &ctx_with_session("session-a")).unwrap();
+        assert!(output_a.content.contains("task for A"));
+        assert!(!output_a.content.contains("task for B"));
+
+        // Session B should only see its own todo
+        let output_b = tool.run(&call, &ctx_with_session("session-b")).unwrap();
+        assert!(output_b.content.contains("task for B"));
+        assert!(!output_b.content.contains("task for A"));
+
+        // Clearing session A should not affect session B
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "clear".to_owned())]),
+        };
+        tool.run(&call, &ctx_with_session("session-a")).unwrap();
+
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+        };
+        let output_b = tool.run(&call, &ctx_with_session("session-b")).unwrap();
+        assert!(output_b.content.contains("task for B"));
     }
 }

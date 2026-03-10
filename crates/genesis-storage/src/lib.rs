@@ -516,6 +516,9 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v3(&connection, database_path)?;
     migrate_to_v4(&connection, database_path)?;
     migrate_to_v5(&connection, database_path)?;
+    migrate_to_v6(&connection, database_path)?;
+    migrate_to_v7(&connection, database_path)?;
+    migrate_to_v8(&connection, database_path)?;
 
     connection
         .execute(
@@ -618,6 +621,85 @@ fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), St
         .execute_batch(
             "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v5 → v6: add response_cache and audit_log tables.
+fn migrate_to_v6(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS response_cache (
+                cache_key TEXT PRIMARY KEY,
+                model TEXT NOT NULL,
+                response TEXT NOT NULL,
+                tool_calls_json TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                event_type TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_session
+                ON audit_log(session_id);
+            CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
+                ON audit_log(event_type);
+            CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
+                ON audit_log(created_at);",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v6 → v7: add channels table for platform channel caching.
+fn migrate_to_v7(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS channels (
+                platform TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                channel_name TEXT NOT NULL,
+                channel_type TEXT NOT NULL DEFAULT 'channel',
+                is_member INTEGER NOT NULL DEFAULT 0,
+                cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, channel_id)
+            );",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v7 → v8: add sticker_cache table for Telegram sticker descriptions.
+fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS sticker_cache (
+                file_unique_id TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                emoji TEXT NOT NULL DEFAULT '',
+                sticker_set TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );",
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -4351,8 +4433,9 @@ mod sticker_cache_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap, discover_legacy_source, inspect, latest_import_run, record_import_run,
-        ImportStatus, LegacyImportSource, SessionStore, SCHEMA_VERSION,
+        bootstrap, discover_legacy_source, inspect, latest_import_run, migrate_to_v6,
+        migrate_to_v7, migrate_to_v8, open, record_import_run, ImportStatus, LegacyImportSource,
+        SessionStore, SCHEMA_VERSION,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -5655,5 +5738,88 @@ mod tests {
         assert_eq!(analytics[0].call_count, 2);
         assert_eq!(analytics[0].total_input_tokens, 300);
         assert_eq!(analytics[0].total_output_tokens, 130);
+    }
+
+    #[test]
+    fn migrations_v6_v7_v8_are_idempotent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+
+        // First bootstrap creates all tables
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        // Running bootstrap again (which re-runs all migrations) should not fail
+        // because all migrations use CREATE TABLE IF NOT EXISTS
+        bootstrap(&database_path).expect("second bootstrap should succeed");
+
+        let health = inspect(&database_path).expect("inspect should succeed");
+        assert_eq!(health.schema_version, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn v6_migration_creates_response_cache_and_audit_log() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Create minimal schema without response_cache/audit_log
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+
+        // Run v6 migration
+        migrate_to_v6(&connection, &database_path).expect("v6 migration should succeed");
+
+        // Verify tables exist by querying them
+        connection
+            .execute(
+                "INSERT INTO response_cache (cache_key, model, response, expires_at) VALUES ('k', 'm', 'r', '2099-01-01')",
+                [],
+            )
+            .expect("response_cache should exist");
+        connection
+            .execute(
+                "INSERT INTO audit_log (event_type) VALUES ('test')",
+                [],
+            )
+            .expect("audit_log should exist");
+    }
+
+    #[test]
+    fn v7_migration_creates_channels_table() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Run v7 migration
+        migrate_to_v7(&connection, &database_path).expect("v7 migration should succeed");
+
+        // Verify table exists
+        connection
+            .execute(
+                "INSERT INTO channels (platform, channel_id, channel_name) VALUES ('slack', 'C1', 'general')",
+                [],
+            )
+            .expect("channels table should exist");
+    }
+
+    #[test]
+    fn v8_migration_creates_sticker_cache_table() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Run v8 migration
+        migrate_to_v8(&connection, &database_path).expect("v8 migration should succeed");
+
+        // Verify table exists
+        connection
+            .execute(
+                "INSERT INTO sticker_cache (file_unique_id, description) VALUES ('abc', 'a cat')",
+                [],
+            )
+            .expect("sticker_cache table should exist");
     }
 }
