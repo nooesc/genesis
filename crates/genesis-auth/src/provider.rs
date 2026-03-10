@@ -29,8 +29,10 @@ pub const CODEX_DEVICE_POLL_URL: &str =
 pub const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 pub const CODEX_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
+pub const CODEX_PROVIDER_ID: &str = "openai-codex";
+
 const PROVIDERS: &[AuthProviderConfig] = &[AuthProviderConfig {
-    id: "openai-codex",
+    id: CODEX_PROVIDER_ID,
     name: "OpenAI Codex (ChatGPT)",
     auth_type: AuthType::OAuthExternal,
     inference_base_url: CODEX_INFERENCE_URL,
@@ -61,8 +63,8 @@ mod tests {
 
     #[test]
     fn lookup_finds_codex_provider() {
-        let p = lookup("openai-codex").unwrap();
-        assert_eq!(p.id, "openai-codex");
+        let p = lookup(CODEX_PROVIDER_ID).unwrap();
+        assert_eq!(p.id, CODEX_PROVIDER_ID);
         assert_eq!(p.auth_type, AuthType::OAuthExternal);
         assert_eq!(p.inference_base_url, CODEX_INFERENCE_URL);
         assert_eq!(p.client_id, Some(CODEX_OAUTH_CLIENT_ID));
@@ -81,6 +83,6 @@ mod tests {
     #[test]
     fn oauth_providers_includes_codex() {
         let oauth = oauth_providers();
-        assert!(oauth.iter().any(|p| p.id == "openai-codex"));
+        assert!(oauth.iter().any(|p| p.id == CODEX_PROVIDER_ID));
     }
 }

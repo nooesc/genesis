@@ -4,7 +4,7 @@ use crate::error::AuthError;
 use crate::jwt;
 use crate::provider::{
     CODEX_DEVICE_CODE_URL, CODEX_DEVICE_POLL_URL, CODEX_DEVICE_VERIFY_URL, CODEX_INFERENCE_URL,
-    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, CODEX_REDIRECT_URI,
+    CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL, CODEX_PROVIDER_ID, CODEX_REDIRECT_URI,
 };
 use crate::store::{self, CodexTokens};
 
@@ -76,8 +76,10 @@ pub async fn request_device_code(
             message: e.to_string(),
         })?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         return Err(AuthError::DeviceCodeRequest {
-            message: format!("status {}", resp.status()),
+            message: format!("status {status}: {body}"),
         });
     }
     let data: serde_json::Value = resp
@@ -188,8 +190,10 @@ pub async fn exchange_code_for_tokens(
             message: e.to_string(),
         })?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         return Err(AuthError::TokenExchange {
-            message: format!("status {}", resp.status()),
+            message: format!("status {status}: {body}"),
         });
     }
     let data: serde_json::Value =
@@ -208,6 +212,11 @@ pub async fn exchange_code_for_tokens(
         .as_str()
         .unwrap_or("")
         .to_owned();
+
+    if refresh_token.is_empty() {
+        tracing::warn!("Token exchange returned no refresh_token — token refresh will not work");
+    }
+
     Ok(CodexTokens {
         access_token,
         refresh_token,
@@ -232,8 +241,10 @@ pub async fn refresh_access_token(
             message: e.to_string(),
         })?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         return Err(AuthError::TokenRefresh {
-            message: format!("status {}", resp.status()),
+            message: format!("status {status}: {body}"),
         });
     }
     let data: serde_json::Value =
@@ -268,6 +279,9 @@ pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCrede
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned());
 
+    // TODO: Add fd-lock file locking around token refresh to prevent concurrent
+    // processes from racing on the same auth store. See design doc for the
+    // lock-read-recheck-refresh-write-unlock protocol.
     if jwt::is_expiring(access_token, TOKEN_REFRESH_SKEW_SECS) {
         tracing::debug!("Codex access token expiring, attempting refresh");
         let client = reqwest::Client::new();
@@ -276,7 +290,7 @@ pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCrede
                 let api_key = new_tokens.access_token.clone();
                 store::save_codex_tokens(auth_store_path, new_tokens, &codex.source)?;
                 return Ok(ResolvedCredentials {
-                    provider: "openai-codex".to_owned(),
+                    provider: CODEX_PROVIDER_ID.to_owned(),
                     base_url,
                     api_key,
                     source: "auth-store".to_owned(),
@@ -289,7 +303,7 @@ pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCrede
     }
 
     Ok(ResolvedCredentials {
-        provider: "openai-codex".to_owned(),
+        provider: CODEX_PROVIDER_ID.to_owned(),
         base_url,
         api_key: access_token.clone(),
         source: "auth-store".to_owned(),
@@ -340,7 +354,7 @@ pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthEr
         .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned());
 
     Ok(ResolvedCredentials {
-        provider: "openai-codex".to_owned(),
+        provider: CODEX_PROVIDER_ID.to_owned(),
         base_url,
         api_key,
         source: "device-code".to_owned(),
@@ -439,7 +453,7 @@ mod tests {
         )
         .unwrap();
         let creds = resolve_credentials(&path).await.unwrap();
-        assert_eq!(creds.provider, "openai-codex");
+        assert_eq!(creds.provider, CODEX_PROVIDER_ID);
         assert_eq!(creds.api_key, fake_jwt);
         assert_eq!(creds.base_url, CODEX_INFERENCE_URL);
     }

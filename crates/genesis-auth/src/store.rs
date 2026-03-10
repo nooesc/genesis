@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::provider::CODEX_PROVIDER_ID;
 use crate::AuthError;
 
 const AUTH_STORE_VERSION: u32 = 1;
@@ -91,10 +92,10 @@ pub fn write_store(path: &Path, store: &AuthStore) -> Result<(), AuthError> {
 /// Save Codex tokens into the auth store, setting it as the active provider.
 pub fn save_codex_tokens(path: &Path, tokens: CodexTokens, source: &str) -> Result<(), AuthError> {
     let mut store = read_store(path)?;
-    store.active_provider = Some("openai-codex".to_owned());
+    store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
     store.updated_at = chrono::Utc::now().to_rfc3339();
     store.providers.insert(
-        "openai-codex".to_owned(),
+        CODEX_PROVIDER_ID.to_owned(),
         ProviderState::Codex(CodexState {
             tokens,
             last_refresh: Some(chrono::Utc::now().to_rfc3339()),
@@ -119,7 +120,7 @@ pub fn clear_active_provider(path: &Path) -> Result<Option<String>, AuthError> {
 
 /// Get the Codex state from the store, if it exists.
 pub fn get_codex_state(store: &AuthStore) -> Option<&CodexState> {
-    match store.providers.get("openai-codex") {
+    match store.providers.get(CODEX_PROVIDER_ID) {
         Some(ProviderState::Codex(state)) => Some(state),
         _ => None,
     }
@@ -145,9 +146,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("auth.json");
         let mut store = AuthStore::default();
-        store.active_provider = Some("openai-codex".to_owned());
+        store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
         store.providers.insert(
-            "openai-codex".to_owned(),
+            CODEX_PROVIDER_ID.to_owned(),
             ProviderState::Codex(CodexState {
                 tokens: CodexTokens {
                     access_token: "access-123".to_owned(),
@@ -160,7 +161,7 @@ mod tests {
         );
         write_store(&path, &store).unwrap();
         let loaded = read_store(&path).unwrap();
-        assert_eq!(loaded.active_provider, Some("openai-codex".to_owned()));
+        assert_eq!(loaded.active_provider, Some(CODEX_PROVIDER_ID.to_owned()));
         let codex = get_codex_state(&loaded).unwrap();
         assert_eq!(codex.tokens.access_token, "access-123");
         assert_eq!(codex.source, "device-code");
@@ -180,7 +181,7 @@ mod tests {
         )
         .unwrap();
         let store = read_store(&path).unwrap();
-        assert_eq!(store.active_provider, Some("openai-codex".to_owned()));
+        assert_eq!(store.active_provider, Some(CODEX_PROVIDER_ID.to_owned()));
         let codex = get_codex_state(&store).unwrap();
         assert_eq!(codex.tokens.access_token, "at");
         assert_eq!(codex.auth_mode, "chatgpt");
@@ -200,7 +201,7 @@ mod tests {
         )
         .unwrap();
         let removed = clear_active_provider(&path).unwrap();
-        assert_eq!(removed, Some("openai-codex".to_owned()));
+        assert_eq!(removed, Some(CODEX_PROVIDER_ID.to_owned()));
         let store = read_store(&path).unwrap();
         assert!(store.active_provider.is_none());
         assert!(store.providers.is_empty());
