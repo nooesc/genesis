@@ -10,16 +10,18 @@
 //! 4. Register the webhook URL: `POST https://api.telegram.org/bot<TOKEN>/setWebhook`
 //!    with `{"url": "https://your-server/telegram/webhook"}`
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use base64::Engine;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
-use genesis_storage::SessionStore;
+use genesis_storage::{SessionStore, StickerCacheStore};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::verify::verify_telegram_webhook_secret;
 use crate::AppState;
@@ -53,6 +55,8 @@ pub struct TelegramMessage {
     pub audio: Option<TelegramAudio>,
     /// Photo attachments (array of sizes, largest last).
     pub photo: Option<Vec<TelegramPhoto>>,
+    /// Sticker message.
+    pub sticker: Option<TelegramSticker>,
     /// Caption for photo/audio/voice messages.
     pub caption: Option<String>,
 }
@@ -75,6 +79,18 @@ pub struct TelegramPhoto {
     pub file_id: String,
     pub width: i64,
     pub height: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TelegramSticker {
+    pub file_id: String,
+    pub file_unique_id: String,
+    #[serde(default)]
+    pub is_animated: bool,
+    #[serde(default)]
+    pub is_video: bool,
+    pub emoji: Option<String>,
+    pub set_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +239,185 @@ async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_i
     Ok(result.text)
 }
 
+// --- Sticker analysis helpers ---
+
+/// Build a context string for a sticker message.
+///
+/// For static (non-animated, non-video) stickers, downloads the image and
+/// analyzes it with a vision LLM, caching the result. For animated/video
+/// stickers, returns emoji-based context only since they can't be analyzed
+/// as static images.
+async fn resolve_sticker_prompt(
+    sticker: &TelegramSticker,
+    client: &reqwest::Client,
+    token: &str,
+    config: &genesis_config::GenesisConfig,
+) -> String {
+    let emoji = sticker.emoji.as_deref().unwrap_or("");
+    let set_name = sticker.set_name.as_deref().unwrap_or("unknown");
+
+    // Animated and video stickers can't be analyzed as static images.
+    if sticker.is_animated || sticker.is_video {
+        return format!(
+            "[The user sent an animated sticker {emoji} from \"{set_name}\". \
+             Animated stickers cannot be visually analyzed.]"
+        );
+    }
+
+    // Check the cache first.
+    let cache = StickerCacheStore::new(&config.storage.database_path);
+    match cache.get(&sticker.file_unique_id) {
+        Ok(Some(cached)) => {
+            debug!(
+                file_unique_id = sticker.file_unique_id.as_str(),
+                "sticker cache hit"
+            );
+            return format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, "sticker cache lookup failed, proceeding with analysis");
+        }
+    }
+
+    // Download and analyze the sticker via vision LLM.
+    match analyze_sticker_image(client, token, &sticker.file_id, config).await {
+        Ok(description) => {
+            info!(
+                file_unique_id = sticker.file_unique_id.as_str(),
+                "sticker analyzed via vision"
+            );
+            // Cache the result.
+            if let Err(e) = cache.set(&sticker.file_unique_id, &description, emoji, set_name) {
+                warn!(error = %e, "failed to cache sticker description");
+            }
+            format_sticker_context(emoji, set_name, &description)
+        }
+        Err(e) => {
+            warn!(error = %e, "sticker vision analysis failed, using emoji fallback");
+            format!(
+                "[The user sent a sticker {emoji} from \"{set_name}\". \
+                 Vision analysis failed: {e}]"
+            )
+        }
+    }
+}
+
+/// Format a sticker context string for the agent prompt.
+fn format_sticker_context(emoji: &str, set_name: &str, description: &str) -> String {
+    format!(
+        "[The user sent a sticker {emoji} from \"{set_name}\". It shows: \"{description}\"]"
+    )
+}
+
+/// Download a sticker image from Telegram and analyze it with a vision LLM.
+async fn analyze_sticker_image(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+    config: &genesis_config::GenesisConfig,
+) -> Result<String, String> {
+    // Step 1: Get the file path from Telegram.
+    let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
+    let resp = client
+        .post(&get_file_url)
+        .json(&serde_json::json!({ "file_id": file_id }))
+        .send()
+        .await
+        .map_err(|e| format!("getFile request failed: {e}"))?;
+
+    let file_resp: GetFileResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse getFile response: {e}"))?;
+
+    if !file_resp.ok {
+        return Err("Telegram getFile returned not ok".to_owned());
+    }
+
+    let file_path = file_resp
+        .result
+        .and_then(|r| r.file_path)
+        .ok_or_else(|| "no file_path in getFile response".to_owned())?;
+
+    // Step 2: Download the sticker image.
+    let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let image_bytes = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("sticker download failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read sticker bytes: {e}"))?;
+
+    if image_bytes.is_empty() {
+        return Err("downloaded sticker file is empty".to_owned());
+    }
+
+    // Determine MIME type from file extension.
+    let ext = file_path.rsplit('.').next().unwrap_or("webp");
+    let mime = match ext {
+        "webp" => "image/webp",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => "image/webp", // Telegram stickers are typically WebP
+    };
+
+    // Step 3: Encode as base64 data URI.
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+    let data_uri = format!("data:{mime};base64,{b64}");
+
+    // Step 4: Call the vision LLM.
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let provider = genesis_provider::resolve(
+        &config.provider.backend,
+        &config.provider.model,
+        config.provider.base_url.as_deref(),
+        config.provider.api_key_env.as_deref(),
+        &env,
+    );
+
+    let vision_client = genesis_provider::ChatClient::new(&provider)
+        .map_err(|e| format!("failed to create vision client: {e}"))?;
+
+    let request = genesis_provider::ChatCompletionRequest {
+        model: String::new(), // ChatClient fills this from its config
+        messages: vec![genesis_provider::ChatMessage::user_with_images(
+            "Describe this sticker in 1-2 sentences. Focus on what it depicts — \
+             character, action, emotion, and any text visible in the image.",
+            vec![genesis_provider::ImageUrl {
+                url: data_uri,
+                detail: Some("low".to_owned()),
+            }],
+        )],
+        tools: Vec::new(),
+        temperature: Some(0.2),
+        max_tokens: Some(150),
+        stream: None,
+        stream_options: None,
+        response_format: None,
+        tool_choice: None,
+        thinking: None,
+        extra_body: config.provider.extra_body.clone(),
+    };
+
+    let response = vision_client
+        .complete(request)
+        .await
+        .map_err(|e| format!("vision LLM call failed: {e}"))?;
+
+    let description = response
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_ref())
+        .and_then(|c| c.text())
+        .map(|t| t.trim().to_owned())
+        .ok_or_else(|| "vision LLM returned empty response".to_owned())?;
+
+    Ok(description)
+}
+
 // --- Handler ---
 
 /// Webhook handler for Telegram updates.
@@ -266,10 +461,13 @@ pub async fn webhook_handler(
         Text(String),
         Voice { file_id: String, duration: i64 },
         Audio { file_id: String, duration: i64, file_name: String },
+        Sticker(TelegramSticker),
     }
 
     let input = if let Some(t) = message.text.filter(|t| !t.is_empty()) {
         MessageInput::Text(t)
+    } else if let Some(sticker) = message.sticker {
+        MessageInput::Sticker(sticker)
     } else if let Some(photos) = &message.photo {
         let best = photos.last();
         let caption = message.caption.as_deref().unwrap_or("");
@@ -429,6 +627,15 @@ pub async fn webhook_handler(
                             )
                         }
                     }
+                }
+                MessageInput::Sticker(sticker) => {
+                    resolve_sticker_prompt(
+                        &sticker,
+                        &state.http_client,
+                        &token,
+                        &state.loaded.config,
+                    )
+                    .await
                 }
             };
 
@@ -732,5 +939,137 @@ mod tests {
         let json = r#"{"text": "Hello world, this is a test."}"#;
         let resp: WhisperResponse = serde_json::from_str(json).expect("should parse");
         assert_eq!(resp.text, "Hello world, this is a test.");
+    }
+
+    #[test]
+    fn telegram_sticker_message_deserializes() {
+        let json = r#"{
+            "update_id": 200,
+            "message": {
+                "message_id": 10,
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 100, "first_name": "Cole"},
+                "sticker": {
+                    "file_id": "CAACAgIAAxkBAAIBe2abc",
+                    "file_unique_id": "AgADuQAD1234",
+                    "is_animated": false,
+                    "is_video": false,
+                    "emoji": "😀",
+                    "set_name": "TestPack"
+                }
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        let sticker = msg.sticker.expect("should have sticker");
+        assert_eq!(sticker.file_id, "CAACAgIAAxkBAAIBe2abc");
+        assert_eq!(sticker.file_unique_id, "AgADuQAD1234");
+        assert!(!sticker.is_animated);
+        assert!(!sticker.is_video);
+        assert_eq!(sticker.emoji.as_deref(), Some("😀"));
+        assert_eq!(sticker.set_name.as_deref(), Some("TestPack"));
+    }
+
+    #[test]
+    fn telegram_animated_sticker_deserializes() {
+        let json = r#"{
+            "update_id": 201,
+            "message": {
+                "message_id": 11,
+                "chat": {"id": 42, "type": "private"},
+                "sticker": {
+                    "file_id": "CAACAgIAAxkBAAIBe2xyz",
+                    "file_unique_id": "AgADuQAD5678",
+                    "is_animated": true,
+                    "is_video": false,
+                    "emoji": "🎉",
+                    "set_name": "AnimatedPack"
+                }
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        let sticker = msg.sticker.expect("should have sticker");
+        assert!(sticker.is_animated);
+        assert_eq!(sticker.set_name.as_deref(), Some("AnimatedPack"));
+    }
+
+    #[test]
+    fn telegram_video_sticker_deserializes() {
+        let json = r#"{
+            "update_id": 202,
+            "message": {
+                "message_id": 12,
+                "chat": {"id": 42, "type": "private"},
+                "sticker": {
+                    "file_id": "CAACAgIvideo",
+                    "file_unique_id": "AgADvideo",
+                    "is_animated": false,
+                    "is_video": true
+                }
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        let msg = update.message.expect("should have message");
+        let sticker = msg.sticker.expect("should have sticker");
+        assert!(sticker.is_video);
+        assert!(sticker.emoji.is_none());
+        assert!(sticker.set_name.is_none());
+    }
+
+    #[test]
+    fn sticker_fields_extracted() {
+        let sticker = TelegramSticker {
+            file_id: "CAACAgIAAxkBAAIBe2abc".to_owned(),
+            file_unique_id: "AgADuQAD1234".to_owned(),
+            is_animated: false,
+            is_video: false,
+            emoji: Some("😺".to_owned()),
+            set_name: Some("CatPack".to_owned()),
+        };
+        assert_eq!(sticker.file_id, "CAACAgIAAxkBAAIBe2abc");
+        assert_eq!(sticker.file_unique_id, "AgADuQAD1234");
+        assert!(!sticker.is_animated);
+        assert!(!sticker.is_video);
+        assert_eq!(sticker.emoji.as_deref(), Some("😺"));
+        assert_eq!(sticker.set_name.as_deref(), Some("CatPack"));
+    }
+
+    #[test]
+    fn format_sticker_context_produces_expected_output() {
+        let result = format_sticker_context("😀", "MyPack", "A cat waving");
+        assert_eq!(
+            result,
+            "[The user sent a sticker 😀 from \"MyPack\". It shows: \"A cat waving\"]"
+        );
+    }
+
+    #[test]
+    fn format_sticker_context_handles_empty_emoji() {
+        let result = format_sticker_context("", "StickerSet", "A dog sleeping");
+        assert_eq!(
+            result,
+            "[The user sent a sticker  from \"StickerSet\". It shows: \"A dog sleeping\"]"
+        );
+    }
+
+    #[test]
+    fn sticker_cache_integration_with_format() {
+        // Test that cached sticker data produces the right context string.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let cache = StickerCacheStore::new(&db_path);
+        cache
+            .set("unique-123", "A happy frog jumping", "🐸", "FrogPack")
+            .expect("cache set");
+
+        let cached = cache.get("unique-123").unwrap().unwrap();
+        let context = format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
+        assert_eq!(
+            context,
+            "[The user sent a sticker 🐸 from \"FrogPack\". It shows: \"A happy frog jumping\"]"
+        );
     }
 }
