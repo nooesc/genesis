@@ -61,7 +61,7 @@ pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolContext {
     pub session_id: String,
     pub profile: String,
@@ -78,7 +78,7 @@ pub struct ToolContext {
 }
 
 /// Configurable terminal backend for shell command execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum TerminalBackend {
     /// Execute inside a Docker container.
@@ -105,6 +105,9 @@ pub enum TerminalBackend {
     #[serde(rename = "singularity")]
     Singularity {
         image: String,
+        cpu: f32,
+        memory_mb: u32,
+        persistent: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         bind: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,27 +116,40 @@ pub enum TerminalBackend {
     /// Execute via Modal cloud sandbox (`modal shell --cmd ...`).
     #[serde(rename = "modal")]
     Modal {
-        /// Modal app or sandbox name.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        app: Option<String>,
-        /// GPU type to request (e.g. "T4", "A10G").
-        #[serde(skip_serializing_if = "Option::is_none")]
-        gpu: Option<String>,
         /// Docker image to use for the sandbox.
         #[serde(skip_serializing_if = "Option::is_none")]
         image: Option<String>,
-        /// Timeout in seconds for the sandbox.
+        cpu: f32,
+        memory_mb: u32,
+        disk_mb: u32,
+        persistent: bool,
+        /// GPU type to request (e.g. "T4", "A10G").
         #[serde(skip_serializing_if = "Option::is_none")]
-        timeout: Option<u64>,
+        gpu: Option<String>,
+        /// Modal app or sandbox name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
     /// Execute in a Daytona workspace (`daytona exec ...`).
     #[serde(rename = "daytona")]
     Daytona {
-        /// Workspace ID or name.
-        workspace: String,
-        /// Project within the workspace.
+        /// Docker image to use for the workspace.
         #[serde(skip_serializing_if = "Option::is_none")]
-        project: Option<String>,
+        image: Option<String>,
+        cpu: f32,
+        memory_mb: u32,
+        disk_mb: u32,
+        persistent: bool,
+        /// Daytona target (runner/region).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Daytona API URL override.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
 }
 
@@ -1785,7 +1801,11 @@ mod tests {
             app: Some("my-app".to_owned()),
             gpu: Some("A10G".to_owned()),
             image: None,
-            timeout: Some(300),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         };
         let json = serde_json::to_string(&backend).expect("serialize");
         assert!(json.contains("\"type\":\"modal\""));
@@ -1796,8 +1816,14 @@ mod tests {
     #[test]
     fn terminal_backend_daytona_round_trips() {
         let backend = super::TerminalBackend::Daytona {
-            workspace: "ws-123".to_owned(),
-            project: Some("main".to_owned()),
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: Some("us".to_owned()),
+            api_url: None,
+            working_dir: None,
         };
         let json = serde_json::to_string(&backend).expect("serialize");
         assert!(json.contains("\"type\":\"daytona\""));

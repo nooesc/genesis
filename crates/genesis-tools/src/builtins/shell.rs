@@ -136,6 +136,7 @@ pub fn build_command(
             image,
             bind,
             working_dir: default_dir,
+            ..
         }) => {
             // Singularity/Apptainer: `singularity exec [--bind ...] [--pwd ...] image sh -c cmd`
             let mut cmd = Command::new("singularity");
@@ -155,9 +156,9 @@ pub fn build_command(
             app,
             gpu,
             image,
-            timeout,
+            ..
         }) => {
-            // Modal cloud sandbox: `modal shell [--gpu ...] [--image ...] [--timeout ...] --cmd 'command'`
+            // Modal cloud sandbox: `modal shell [--app ...] [--gpu ...] [--image ...] --cmd 'command'`
             let mut cmd = Command::new("modal");
             cmd.arg("shell");
             if let Some(a) = app {
@@ -169,27 +170,20 @@ pub fn build_command(
             if let Some(img) = image {
                 cmd.arg("--image").arg(img);
             }
-            if let Some(t) = timeout {
-                cmd.arg("--timeout").arg(t.to_string());
-            }
             cmd.arg("--cmd").arg(command);
             cmd
         }
         Some(crate::TerminalBackend::Daytona {
-            workspace,
-            project,
+            working_dir: default_dir,
+            ..
         }) => {
-            // Daytona workspace: `daytona exec [--project ...] workspace -- sh -c 'command'`
+            // Daytona workspace: `daytona exec -- sh -c 'command'`
             let mut cmd = Command::new("daytona");
-            cmd.arg("exec");
-            if let Some(p) = project {
-                cmd.arg("--project").arg(p);
+            cmd.arg("exec").arg("--").arg("sh").arg("-c").arg(command);
+            let dir = working_dir.or(default_dir.as_ref());
+            if let Some(d) = dir {
+                cmd.current_dir(d);
             }
-            cmd.arg(workspace)
-                .arg("--")
-                .arg("sh")
-                .arg("-c")
-                .arg(command);
             cmd
         }
         None => {
@@ -657,6 +651,9 @@ mod tests {
     fn build_command_singularity_backend() {
         let backend = Some(crate::TerminalBackend::Singularity {
             image: "ubuntu.sif".to_owned(),
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: true,
             bind: Some(vec!["/data:/data".to_owned(), "/scratch:/scratch".to_owned()]),
             working_dir: Some("/workspace".to_owned()),
         });
@@ -676,6 +673,9 @@ mod tests {
     fn build_command_singularity_minimal() {
         let backend = Some(crate::TerminalBackend::Singularity {
             image: "pytorch.sif".to_owned(),
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: true,
             bind: None,
             working_dir: None,
         });
@@ -692,7 +692,11 @@ mod tests {
             app: Some("my-sandbox".to_owned()),
             gpu: Some("T4".to_owned()),
             image: Some("python:3.11".to_owned()),
-            timeout: Some(600),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         });
         let cmd = build_command("python train.py", None, &backend);
         let prog = cmd.get_program();
@@ -705,8 +709,6 @@ mod tests {
         assert!(args.contains(&std::ffi::OsStr::new("T4")));
         assert!(args.contains(&std::ffi::OsStr::new("--image")));
         assert!(args.contains(&std::ffi::OsStr::new("python:3.11")));
-        assert!(args.contains(&std::ffi::OsStr::new("--timeout")));
-        assert!(args.contains(&std::ffi::OsStr::new("600")));
         assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
         assert!(args.contains(&std::ffi::OsStr::new("python train.py")));
     }
@@ -717,7 +719,11 @@ mod tests {
             app: None,
             gpu: None,
             image: None,
-            timeout: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         });
         let cmd = build_command("echo hi", None, &backend);
         let args: Vec<_> = cmd.get_args().collect();
@@ -730,30 +736,39 @@ mod tests {
     #[test]
     fn build_command_daytona_backend() {
         let backend = Some(crate::TerminalBackend::Daytona {
-            workspace: "ws-abc123".to_owned(),
-            project: Some("my-project".to_owned()),
+            image: None,
+            cpu: 2.0,
+            memory_mb: 8192,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
         });
         let cmd = build_command("npm test", None, &backend);
         let prog = cmd.get_program();
         assert_eq!(prog, "daytona");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("exec")));
-        assert!(args.contains(&std::ffi::OsStr::new("--project")));
-        assert!(args.contains(&std::ffi::OsStr::new("my-project")));
-        assert!(args.contains(&std::ffi::OsStr::new("ws-abc123")));
         assert!(args.contains(&std::ffi::OsStr::new("npm test")));
     }
 
     #[test]
     fn build_command_daytona_minimal() {
         let backend = Some(crate::TerminalBackend::Daytona {
-            workspace: "dev-ws".to_owned(),
-            project: None,
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
         });
         let cmd = build_command("ls", None, &backend);
         let args: Vec<_> = cmd.get_args().collect();
-        assert!(!args.contains(&std::ffi::OsStr::new("--project")));
-        assert!(args.contains(&std::ffi::OsStr::new("dev-ws")));
+        assert!(args.contains(&std::ffi::OsStr::new("exec")));
+        assert!(args.contains(&std::ffi::OsStr::new("ls")));
     }
 
     #[test]
