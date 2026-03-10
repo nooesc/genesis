@@ -754,6 +754,73 @@ pub enum SkillsCommand {
         #[arg(help = "Path to a directory containing a SKILL.md file")]
         path: String,
     },
+    #[command(subcommand, about = "Browse, install, and manage skills from registries")]
+    Hub(HubCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HubCommand {
+    #[command(about = "Browse available skills from all sources")]
+    Browse {
+        #[arg(long, default_value = "1", help = "Page number")]
+        page: usize,
+        #[arg(long, default_value = "20", help = "Results per page")]
+        size: usize,
+        #[arg(long, help = "Filter by source name")]
+        source: Option<String>,
+    },
+    #[command(about = "Search skills across registries")]
+    Search {
+        #[arg(help = "Search query")]
+        query: String,
+        #[arg(long, help = "Filter by source name")]
+        source: Option<String>,
+        #[arg(long, default_value = "20", help = "Maximum results to return")]
+        limit: usize,
+    },
+    #[command(about = "Inspect a skill without installing (preview + security scan)")]
+    Inspect {
+        #[arg(help = "Skill name to inspect")]
+        name: String,
+    },
+    #[command(about = "Install a skill from a registry (quarantine, scan, install)")]
+    Install {
+        #[arg(help = "Skill name to install")]
+        name: String,
+        #[arg(long, help = "Force install even if security scan reports issues")]
+        force: bool,
+    },
+    #[command(about = "Uninstall a hub-installed skill")]
+    Uninstall {
+        #[arg(help = "Skill name to uninstall")]
+        name: String,
+    },
+    #[command(about = "Re-run security scans and integrity checks on installed skills")]
+    Audit,
+    #[command(about = "List installed hub skills")]
+    Installed,
+    #[command(subcommand, about = "Manage custom GitHub repo sources (taps)")]
+    Tap(TapCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TapCommand {
+    #[command(about = "List configured taps")]
+    List,
+    #[command(about = "Add a GitHub repository as a skill source")]
+    Add {
+        #[arg(help = "Tap name (e.g. 'community')")]
+        name: String,
+        #[arg(help = "GitHub owner/repo (e.g. 'nooesc/genesis-skills')")]
+        repo: String,
+        #[arg(long, default_value = "skills", help = "Path within the repo where skills live")]
+        path: String,
+    },
+    #[command(about = "Remove a tap by name")]
+    Remove {
+        #[arg(help = "Tap name to remove")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1386,6 +1453,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
                 SkillsCommand::InstallLocal { path } => {
                     run_skills_install_local(&store, &path)
+                }
+                SkillsCommand::Hub(hub_command) => {
+                    run_skills_hub(hub_command, &loaded, cli.json)
                 }
             }
         }
@@ -8062,6 +8132,266 @@ fn run_skills_install_local(store: &SkillStore, path: &str) -> Result<String, Cl
         "installed skill '{}' v{} from {}",
         parsed.frontmatter.name, parsed.frontmatter.version, path
     ))
+}
+
+fn run_skills_hub(
+    command: HubCommand,
+    loaded: &LoadedConfig,
+    json: bool,
+) -> Result<String, CliError> {
+    let data_dir = &loaded.config.storage.data_dir;
+    let mut hub = genesis_core::skills_hub::SkillsHub::new(data_dir);
+
+    // Add optional bundled skills source
+    let optional_dir = data_dir.join("skills").join("optional");
+    hub.add_optional_source(&optional_dir);
+
+    // Load configured taps
+    if let Err(e) = hub.load_taps() {
+        eprintln!("warning: failed to load taps: {e}");
+    }
+
+    match command {
+        HubCommand::Browse { page, size, source } => {
+            let (manifests, total) = hub
+                .browse(page, size, source.as_deref())
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "skills": manifests,
+                    "total": total,
+                    "page": page,
+                    "page_size": size,
+                }))?);
+            }
+
+            if manifests.is_empty() {
+                return Ok("no skills found".to_owned());
+            }
+
+            let total_pages = total.div_ceil(size);
+            let mut lines = vec![format!(
+                "skills hub  (page {page}/{total_pages}, {total} total)"
+            )];
+            for m in &manifests {
+                let tags = if m.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", m.tags.join(", "))
+                };
+                lines.push(format!(
+                    "  {} v{}  {}{}\n    source: {}  author: {}  license: {}",
+                    m.name, m.version, m.description, tags, m.source, m.author, m.license
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Search { query, source, limit } => {
+            let results = hub
+                .search(&query, source.as_deref(), limit)
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&results)?);
+            }
+
+            if results.is_empty() {
+                return Ok(format!("no skills matching \"{query}\""));
+            }
+
+            let mut lines = vec![format!("found {} skill(s) matching \"{}\"", results.len(), query)];
+            for m in &results {
+                let tags = if m.tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", m.tags.join(", "))
+                };
+                lines.push(format!(
+                    "  {} v{}: {}{}  ({})",
+                    m.name, m.version, m.description, tags, m.source
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Inspect { name } => {
+            let (manifest, report) = hub
+                .inspect(&name)
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "manifest": manifest,
+                    "security": {
+                        "verdict": format!("{:?}", report.verdict),
+                        "findings": report.findings.len(),
+                        "summary": report.summary(),
+                    },
+                }))?);
+            }
+
+            let mut lines = vec![
+                format!("skill: {}", manifest.name),
+                format!("description: {}", manifest.description),
+                format!("version: {}", manifest.version),
+                format!("author: {}", manifest.author),
+                format!("license: {}", manifest.license),
+                format!("source: {}", manifest.source),
+            ];
+            if !manifest.tags.is_empty() {
+                lines.push(format!("tags: {}", manifest.tags.join(", ")));
+            }
+            lines.push(String::new());
+            lines.push("security scan:".to_owned());
+            lines.push(format!("  {}", report.summary()));
+            for finding in &report.findings {
+                let file = finding.file.as_deref().unwrap_or("(unknown)");
+                let line = finding
+                    .line
+                    .map(|l| format!(":{l}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  [{:?}] {}{}: {} ({})",
+                    finding.severity, file, line, finding.description, finding.category
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Install { name, force } => {
+            let (lock, report) = hub
+                .install(&name, force)
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "installed": lock,
+                    "security": {
+                        "verdict": format!("{:?}", report.verdict),
+                        "findings": report.findings.len(),
+                    },
+                }))?);
+            }
+
+            let mut lines = vec![format!(
+                "installed skill '{}' v{} from {}",
+                lock.name, lock.version, lock.source
+            )];
+            lines.push(format!("  content hash: {}", lock.content_hash));
+            lines.push(format!("  security: {}", report.summary()));
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Uninstall { name } => {
+            hub.uninstall(&name)
+                .map_err(|e| CliError::Other(e.to_string()))?;
+            Ok(format!("uninstalled skill '{name}'"))
+        }
+
+        HubCommand::Audit => {
+            let results = hub
+                .audit()
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&results)?);
+            }
+
+            if results.is_empty() {
+                return Ok("no hub-installed skills to audit".to_owned());
+            }
+
+            let mut lines = vec![format!("auditing {} installed skill(s)", results.len())];
+            for r in &results {
+                let integrity = if r.integrity_ok { "ok" } else { "MODIFIED" };
+                lines.push(format!(
+                    "  {} — verdict: {}  findings: {}  integrity: {}",
+                    r.name, r.verdict, r.finding_count, integrity
+                ));
+                if !r.integrity_ok {
+                    lines.push("    WARNING: content has been modified since installation".to_owned());
+                }
+            }
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Installed => {
+            let installed = hub
+                .list_installed()
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+            if json {
+                return Ok(serde_json::to_string_pretty(&installed)?);
+            }
+
+            if installed.is_empty() {
+                return Ok("no hub-installed skills".to_owned());
+            }
+
+            let mut lines = vec![format!("{} hub-installed skill(s)", installed.len())];
+            for lock in &installed {
+                let hash_preview = &lock.hash_value()[..12.min(lock.hash_value().len())];
+                lines.push(format!(
+                    "  {} v{}  {}  hash: {}...",
+                    lock.name, lock.version, lock.source, hash_preview
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+
+        HubCommand::Tap(tap_cmd) => match tap_cmd {
+            TapCommand::List => {
+                let taps = hub
+                    .list_taps()
+                    .map_err(|e| CliError::Other(e.to_string()))?;
+
+                if json {
+                    return Ok(serde_json::to_string_pretty(&taps)?);
+                }
+
+                if taps.is_empty() {
+                    return Ok("no taps configured".to_owned());
+                }
+
+                let mut lines = vec![format!("{} tap(s) configured", taps.len())];
+                for tap in &taps {
+                    lines.push(format!("  {tap}"));
+                }
+                Ok(lines.join("\n"))
+            }
+            TapCommand::Add { name, repo, path } => {
+                let parts: Vec<&str> = repo.splitn(2, '/').collect();
+                if parts.len() != 2 {
+                    return Err(CliError::Other(
+                        "repo must be in 'owner/repo' format (e.g. 'nooesc/genesis-skills')".to_owned(),
+                    ));
+                }
+
+                let tap = genesis_core::skills_hub::Tap {
+                    name: name.clone(),
+                    owner: parts[0].to_owned(),
+                    repo: parts[1].to_owned(),
+                    path,
+                };
+
+                hub.add_tap(tap)
+                    .map_err(|e| CliError::Other(e.to_string()))?;
+                Ok(format!("added tap '{name}'"))
+            }
+            TapCommand::Remove { name } => {
+                let removed = hub
+                    .remove_tap(&name)
+                    .map_err(|e| CliError::Other(e.to_string()))?;
+                if removed {
+                    Ok(format!("removed tap '{name}'"))
+                } else {
+                    Err(CliError::Other(format!("tap '{name}' not found")))
+                }
+            }
+        },
+    }
 }
 
 fn format_subagent_list(subs: &[genesis_storage::StoredSubagent]) -> String {
