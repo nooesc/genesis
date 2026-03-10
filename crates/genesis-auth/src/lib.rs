@@ -6,4 +6,4 @@ pub mod store;
 
 pub use codex::ResolvedCredentials;
 pub use error::AuthError;
-pub use store::{default_auth_path, CodexTokens};
+pub use store::{default_auth_path, AuthMode, CodexTokens, CredentialSource};

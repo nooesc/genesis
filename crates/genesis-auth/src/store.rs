@@ -9,6 +9,23 @@ use crate::AuthError;
 const AUTH_STORE_VERSION: u32 = 1;
 const AUTH_FILE_NAME: &str = "auth.json";
 
+/// How the credential was obtained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialSource {
+    DeviceCode,
+    CodexMigration,
+    #[cfg(test)]
+    Test,
+}
+
+/// Authentication mode for stored credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    Chatgpt,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthStore {
     pub version: u32,
@@ -28,8 +45,8 @@ pub enum ProviderState {
 pub struct CodexState {
     pub tokens: CodexTokens,
     pub last_refresh: Option<String>,
-    pub auth_mode: String,
-    pub source: String,
+    pub auth_mode: AuthMode,
+    pub source: CredentialSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,17 +107,18 @@ pub fn write_store(path: &Path, store: &AuthStore) -> Result<(), AuthError> {
 }
 
 /// Save Codex tokens into the auth store, setting it as the active provider.
-pub fn save_codex_tokens(path: &Path, tokens: CodexTokens, source: &str) -> Result<(), AuthError> {
+pub fn save_codex_tokens(path: &Path, tokens: CodexTokens, source: CredentialSource) -> Result<(), AuthError> {
     let mut store = read_store(path)?;
     store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
-    store.updated_at = chrono::Utc::now().to_rfc3339();
+    let now = chrono::Utc::now().to_rfc3339();
+    store.updated_at = now.clone();
     store.providers.insert(
         CODEX_PROVIDER_ID.to_owned(),
         ProviderState::Codex(CodexState {
             tokens,
-            last_refresh: Some(chrono::Utc::now().to_rfc3339()),
-            auth_mode: "chatgpt".to_owned(),
-            source: source.to_owned(),
+            last_refresh: Some(now),
+            auth_mode: AuthMode::Chatgpt,
+            source,
         }),
     );
     write_store(path, &store)
@@ -155,8 +173,8 @@ mod tests {
                     refresh_token: "refresh-456".to_owned(),
                 },
                 last_refresh: Some("2026-01-01T00:00:00Z".to_owned()),
-                auth_mode: "chatgpt".to_owned(),
-                source: "device-code".to_owned(),
+                auth_mode: AuthMode::Chatgpt,
+                source: CredentialSource::DeviceCode,
             }),
         );
         write_store(&path, &store).unwrap();
@@ -164,7 +182,7 @@ mod tests {
         assert_eq!(loaded.active_provider, Some(CODEX_PROVIDER_ID.to_owned()));
         let codex = get_codex_state(&loaded).unwrap();
         assert_eq!(codex.tokens.access_token, "access-123");
-        assert_eq!(codex.source, "device-code");
+        assert_eq!(codex.source, CredentialSource::DeviceCode);
     }
 
     #[test]
@@ -177,14 +195,14 @@ mod tests {
                 access_token: "at".to_owned(),
                 refresh_token: "rt".to_owned(),
             },
-            "device-code",
+            CredentialSource::Test,
         )
         .unwrap();
         let store = read_store(&path).unwrap();
         assert_eq!(store.active_provider, Some(CODEX_PROVIDER_ID.to_owned()));
         let codex = get_codex_state(&store).unwrap();
         assert_eq!(codex.tokens.access_token, "at");
-        assert_eq!(codex.auth_mode, "chatgpt");
+        assert_eq!(codex.auth_mode, AuthMode::Chatgpt);
     }
 
     #[test]
@@ -197,7 +215,7 @@ mod tests {
                 access_token: "at".to_owned(),
                 refresh_token: "rt".to_owned(),
             },
-            "device-code",
+            CredentialSource::Test,
         )
         .unwrap();
         let removed = clear_active_provider(&path).unwrap();
@@ -232,5 +250,13 @@ mod tests {
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn credential_source_serializes_as_kebab_case() {
+        let json = serde_json::to_string(&CredentialSource::DeviceCode).unwrap();
+        assert_eq!(json, "\"device-code\"");
+        let json = serde_json::to_string(&CredentialSource::CodexMigration).unwrap();
+        assert_eq!(json, "\"codex-migration\"");
     }
 }

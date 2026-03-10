@@ -5285,7 +5285,7 @@ async fn run_login(
         let input = input.trim().to_lowercase();
 
         if input == "y" || input == "yes" {
-            genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, "codex-migration")?;
+            genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, genesis_auth::store::CredentialSource::CodexMigration)?;
             update_provider_in_file(
                 &paths.config_path,
                 Some("openai-codex"),

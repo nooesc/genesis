@@ -364,7 +364,7 @@ async fn resolve_credentials_inner(
         match refresh_access_token(&client, &codex.tokens.refresh_token).await {
             Ok(new_tokens) => {
                 let api_key = new_tokens.access_token.clone();
-                store::save_codex_tokens(auth_store_path, new_tokens, &codex.source)?;
+                store::save_codex_tokens(auth_store_path, new_tokens, codex.source.clone())?;
                 return Ok(ResolvedCredentials {
                     provider: CODEX_PROVIDER_ID.to_owned(),
                     base_url,
@@ -422,7 +422,7 @@ pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthEr
 
     let tokens = exchange_code_for_tokens(&client, &authorization_code, &code_verifier).await?;
     let api_key = tokens.access_token.clone();
-    store::save_codex_tokens(auth_store_path, tokens, "device-code")?;
+    store::save_codex_tokens(auth_store_path, tokens, store::CredentialSource::DeviceCode)?;
 
     Ok(ResolvedCredentials {
         provider: CODEX_PROVIDER_ID.to_owned(),
@@ -514,7 +514,7 @@ mod tests {
                 access_token: fake_jwt.clone(),
                 refresh_token: "rt".to_owned(),
             },
-            "test",
+            store::CredentialSource::Test,
         )
         .unwrap();
         let creds = resolve_credentials(&path).await.unwrap();
@@ -546,7 +546,7 @@ mod tests {
                 access_token: fake_jwt.clone(),
                 refresh_token: "rt".to_owned(),
             },
-            "test",
+            store::CredentialSource::Test,
         )
         .unwrap();
 
