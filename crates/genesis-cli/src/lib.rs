@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1627,7 +1627,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             Ok(String::new())
         }
         Command::Uninstall { remove_data, remove_config, force } => {
-            run_uninstall(remove_data, remove_config, force)
+            run_uninstall(cli.config.as_deref(), remove_data, remove_config, force)
         }
     }
 }
@@ -5758,18 +5758,29 @@ async fn run_update() -> Result<String, CliError> {
     Ok(steps.join("\n"))
 }
 
-fn run_uninstall(remove_data: bool, remove_config: bool, force: bool) -> Result<String, CliError> {
+fn run_uninstall(
+    config_override: Option<&Path>,
+    remove_data: bool,
+    remove_config: bool,
+    force: bool,
+) -> Result<String, CliError> {
     use std::io::IsTerminal;
 
     let exe_path = std::env::current_exe().map_err(CliError::Io)?;
-    let paths = genesis_config::AppPaths::resolve(None)?;
-    // config_path is e.g. ~/Library/Application Support/genesis/config.yaml
-    // config directory is its parent
-    let config_dir = paths
-        .config_path
-        .parent()
-        .map(|p| p.to_path_buf());
-    let data_dir = paths.data_dir.clone();
+
+    // Try loading the full config (respects storage.data_dir and GENESIS_DATA_DIR).
+    // Fall back to platform-default paths if the config file is already gone or unreadable.
+    let (config_dir, data_dir) = match load(config_override) {
+        Ok(loaded) => {
+            let cd = loaded.paths.config_path.parent().map(|p| p.to_path_buf());
+            (cd, loaded.paths.data_dir)
+        }
+        Err(_) => {
+            let paths = genesis_config::AppPaths::resolve(config_override)?;
+            let cd = paths.config_path.parent().map(|p| p.to_path_buf());
+            (cd, paths.data_dir)
+        }
+    };
 
     // Build the plan of what will be removed
     let mut plan: Vec<String> = Vec::new();
