@@ -200,6 +200,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             allow_destructive_tools: execution_context.allow_destructive_tools,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         },
         mcp: None,
     }
@@ -906,6 +907,11 @@ impl ToolRuntime {
     /// Set the terminal backend for shell command execution.
     pub fn set_terminal_backend(&mut self, backend: genesis_tools::TerminalBackend) {
         self.context.terminal_backend = Some(backend);
+    }
+
+    /// Set the sandbox manager for lifecycle-managed backends.
+    pub fn set_sandbox_manager(&mut self, manager: std::sync::Arc<dyn std::any::Any + Send + Sync>) {
+        self.context.sandbox_manager = Some(manager);
     }
 
     /// Create a new ToolRuntime with a different session ID.

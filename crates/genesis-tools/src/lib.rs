@@ -61,7 +61,7 @@ pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolContext {
     pub session_id: String,
     pub profile: String,
@@ -75,6 +75,23 @@ pub struct ToolContext {
     /// tool call's `working_dir` argument. Used by worktree isolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_working_dir: Option<String>,
+    /// Sandbox manager for lifecycle-managed backends (Singularity, Modal, Daytona).
+    /// Uses `Arc<dyn Any>` to avoid genesis-tools depending on genesis-core.
+    /// Actual type is `Arc<genesis_core::sandbox::manager::SandboxManager>`.
+    #[serde(skip)]
+    pub sandbox_manager: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl PartialEq for ToolContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.profile == other.profile
+            && self.data_dir == other.data_dir
+            && self.allow_destructive_tools == other.allow_destructive_tools
+            && self.terminal_backend == other.terminal_backend
+            && self.default_working_dir == other.default_working_dir
+        // sandbox_manager intentionally excluded from equality comparison
+    }
 }
 
 /// Configurable terminal backend for shell command execution.
@@ -1630,6 +1647,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

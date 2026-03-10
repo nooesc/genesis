@@ -197,6 +197,19 @@ pub fn build_command(
     }
 }
 
+/// Returns true if the backend is a sandboxed container environment.
+/// Sandboxed backends provide their own security boundary, so host-level
+/// dangerous command checks can be skipped — the container is the guard.
+pub fn is_sandboxed_backend(backend: &Option<crate::TerminalBackend>) -> bool {
+    matches!(
+        backend,
+        Some(crate::TerminalBackend::Docker { .. })
+            | Some(crate::TerminalBackend::Singularity { .. })
+            | Some(crate::TerminalBackend::Modal { .. })
+            | Some(crate::TerminalBackend::Daytona { .. })
+    )
+}
+
 pub struct ShellExecTool;
 
 impl ToolHandler for ShellExecTool {
@@ -209,19 +222,21 @@ impl ToolHandler for ShellExecTool {
                 argument: "command",
             })?;
 
-        // Check for dangerous patterns before executing
-        if let Some(danger) = check_dangerous(command) {
-            return Err(ToolError::ApprovalDenied {
-                tool: call.name.clone(),
-                reason: format!(
-                    "command blocked: {danger}. Command: `{}`",
-                    if command.len() > 80 {
-                        format!("{}...", &command[..77])
-                    } else {
-                        command.clone()
-                    }
-                ),
-            });
+        // Skip dangerous command checks for sandboxed backends — the container is the security boundary
+        if !is_sandboxed_backend(&context.terminal_backend) {
+            if let Some(danger) = check_dangerous(command) {
+                return Err(ToolError::ApprovalDenied {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "command blocked: {danger}. Command: `{}`",
+                        if command.len() > 80 {
+                            format!("{}...", &command[..77])
+                        } else {
+                            command.clone()
+                        }
+                    ),
+                });
+            }
         }
 
         let working_dir = call
@@ -388,6 +403,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
@@ -468,6 +484,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: Some("/tmp".to_owned()),
+            sandbox_manager: None,
         };
 
         let output = tool.run(&call, &context).expect("should succeed");
@@ -496,6 +513,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: Some("/tmp".to_owned()),
+            sandbox_manager: None,
         };
 
         let output = tool.run(&call, &context).expect("should succeed");
@@ -783,5 +801,49 @@ mod tests {
         let args: Vec<_> = cmd.get_args().collect();
         // The explicit working dir should be used
         assert!(args.contains(&std::ffi::OsStr::new("explicit")));
+    }
+
+    #[test]
+    fn is_sandboxed_backend_classification() {
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Singularity {
+            image: "test.sif".to_owned(),
+            bind: None,
+            working_dir: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: false,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Docker {
+            container: "test".to_owned(),
+            user: None,
+            working_dir: None,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Modal {
+            app: None,
+            gpu: None,
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: false,
+            working_dir: None,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Daytona {
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: false,
+            target: None,
+            api_url: None,
+            working_dir: None,
+        })));
+        assert!(!is_sandboxed_backend(&None));
+        assert!(!is_sandboxed_backend(&Some(crate::TerminalBackend::Ssh {
+            host: "test".to_owned(),
+            user: None,
+            port: None,
+            identity_file: None,
+        })));
     }
 }

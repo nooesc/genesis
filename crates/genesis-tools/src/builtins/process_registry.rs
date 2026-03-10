@@ -910,18 +910,21 @@ impl ToolHandler for BackgroundShellExecTool {
         }
 
         // Background mode: check for dangerous patterns first.
-        if let Some(danger) = check_dangerous(command) {
-            return Err(ToolError::ApprovalDenied {
-                tool: call.name.clone(),
-                reason: format!(
-                    "command blocked: {danger}. Command: `{}`",
-                    if command.len() > 80 {
-                        format!("{}...", &command[..77])
-                    } else {
-                        command.clone()
-                    }
-                ),
-            });
+        // Skip the check for sandboxed backends — the container is the security boundary.
+        if !super::shell::is_sandboxed_backend(&context.terminal_backend) {
+            if let Some(danger) = check_dangerous(command) {
+                return Err(ToolError::ApprovalDenied {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "command blocked: {danger}. Command: `{}`",
+                        if command.len() > 80 {
+                            format!("{}...", &command[..77])
+                        } else {
+                            command.clone()
+                        }
+                    ),
+                });
+            }
         }
 
         let working_dir = call
@@ -982,6 +985,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
