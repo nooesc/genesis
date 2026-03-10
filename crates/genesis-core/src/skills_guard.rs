@@ -158,9 +158,9 @@ struct PatternRule {
     description: &'static str,
     category: ThreatCategory,
     severity: Severity,
-    /// If set, the finding is suppressed when this substring appears on the same line.
+    /// If set, the finding is suppressed when this regex matches the same line.
     /// Used to avoid false positives (e.g. pinned `pip install pkg==1.0`).
-    exclude: Option<&'static str>,
+    exclude: Option<Regex>,
 }
 
 /// Build the master pattern list. Called once per process via `LazyLock`.
@@ -168,6 +168,7 @@ fn build_patterns() -> Vec<PatternRule> {
     // Helper that panics on bad regex — all patterns are compile-time constants
     // so a panic here indicates a developer bug, not a runtime error.
     let r = |pat: &str| Regex::new(pat).expect("skills_guard: invalid regex pattern");
+    let excl = |pat: &str| Some(Regex::new(pat).expect("skills_guard: invalid exclude regex"));
 
     vec![
         // ---- 1. Data exfiltration ----
@@ -498,21 +499,24 @@ fn build_patterns() -> Vec<PatternRule> {
             description: "unpinned pip install",
             category: ThreatCategory::SupplyChainRisk,
             severity: Severity::Medium,
-            exclude: Some("=="),
+            exclude: excl(r"=="),
         },
         PatternRule {
             regex: r(r"(?i)\bnpm\s+install\b"),
             description: "unpinned npm install",
             category: ThreatCategory::SupplyChainRisk,
             severity: Severity::Medium,
-            exclude: Some("@"),
+            // Match pinned versions: `pkg@1.0` or `@scope/pkg@1.0` (@ followed
+            // by a non-scope path, i.e. \w+@\d). Scoped-but-unpinned packages
+            // like `@scope/pkg` are NOT excluded and correctly flagged.
+            exclude: excl(r"\w@\d"),
         },
         PatternRule {
             regex: r(r"(?i)\bcargo\s+install\b"),
             description: "unpinned cargo install",
             category: ThreatCategory::SupplyChainRisk,
             severity: Severity::Medium,
-            exclude: Some("--version"),
+            exclude: excl(r"--version"),
         },
 
         // ---- 9. Credential exposure ----
@@ -551,6 +555,8 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Critical,
             exclude: None,
         },
+
+        // (Category 10, structural anomalies, is handled in `collect_files`.)
 
         // ---- 11. Advanced injection ----
         PatternRule {
@@ -720,9 +726,22 @@ pub fn scan_skill_directory(
 
     // ---- Content checks on text files ----
     for (rel_path, abs_path) in &text_files {
-        if let Ok(content) = std::fs::read_to_string(abs_path) {
-            scan_patterns(&content, Some(rel_path), &mut findings);
-            scan_unicode(&content, Some(rel_path), &mut findings);
+        match std::fs::read_to_string(abs_path) {
+            Ok(content) => {
+                scan_patterns(&content, Some(rel_path), &mut findings);
+                scan_unicode(&content, Some(rel_path), &mut findings);
+            }
+            Err(e) => {
+                // A file that we enumerated but cannot read is suspicious —
+                // a malicious skill could chmod 000 a payload to hide it.
+                findings.push(Finding {
+                    category: ThreatCategory::StructuralAnomaly,
+                    severity: Severity::High,
+                    description: format!("file unreadable: {e}"),
+                    file: Some(rel_path.clone()),
+                    line: None,
+                });
+            }
         }
     }
 
@@ -758,8 +777,11 @@ fn collect_files(
             .to_string_lossy()
             .to_string();
 
+        // Use a single symlink_metadata() call to avoid TOCTOU races.
+        let meta = path.symlink_metadata()?;
+
         // Symlink check
-        if path.symlink_metadata()?.file_type().is_symlink() {
+        if meta.file_type().is_symlink() {
             findings.push(Finding {
                 category: ThreatCategory::StructuralAnomaly,
                 severity: Severity::High,
@@ -771,11 +793,10 @@ fn collect_files(
             continue;
         }
 
-        if path.is_dir() {
+        if meta.is_dir() {
             collect_files(root, &path, file_count, total_size, text_files, findings)?;
         } else {
             *file_count += 1;
-            let meta = std::fs::metadata(&path)?;
             let size = meta.len();
             *total_size += size;
 
@@ -819,10 +840,10 @@ fn scan_patterns(content: &str, file: Option<&str>, findings: &mut Vec<Finding>)
     for (line_idx, line) in content.lines().enumerate() {
         for rule in PATTERNS.iter() {
             if rule.regex.is_match(line) {
-                // If the rule has an exclude substring and it appears on this
-                // line, skip the finding (e.g. pinned `pip install pkg==1.0`).
-                if let Some(excl) = rule.exclude {
-                    if line.contains(excl) {
+                // If the rule has an exclude regex and it matches this line,
+                // skip the finding (e.g. pinned `pip install pkg==1.0`).
+                if let Some(ref excl) = rule.exclude {
+                    if excl.is_match(line) {
                         continue;
                     }
                 }
@@ -886,7 +907,7 @@ fn compute_verdict(trust: TrustLevel, findings: &[Finding]) -> Verdict {
         }
         TrustLevel::Trusted => match max_severity {
             Severity::Critical => Verdict::Dangerous,
-            Severity::High => Verdict::Caution,
+            Severity::High | Severity::Medium => Verdict::Caution,
             _ => Verdict::Safe,
         },
         TrustLevel::Community => match max_severity {
@@ -1204,6 +1225,31 @@ mod tests {
         assert!(has_category(&r, ThreatCategory::SupplyChainRisk));
     }
 
+    #[test]
+    fn detects_unpinned_scoped_npm_install() {
+        // Scoped but unpinned packages must still be flagged.
+        let r = scan("npm install @angular/core");
+        assert!(r.findings.iter().any(|f| {
+            f.category == ThreatCategory::SupplyChainRisk && f.description.contains("npm")
+        }));
+    }
+
+    #[test]
+    fn does_not_flag_pinned_npm_install() {
+        let r = scan("npm install lodash@4.17.21");
+        assert!(!r.findings.iter().any(|f| {
+            f.category == ThreatCategory::SupplyChainRisk && f.description.contains("npm")
+        }));
+    }
+
+    #[test]
+    fn does_not_flag_pinned_scoped_npm_install() {
+        let r = scan("npm install @angular/core@17.0.0");
+        assert!(!r.findings.iter().any(|f| {
+            f.category == ThreatCategory::SupplyChainRisk && f.description.contains("npm")
+        }));
+    }
+
     // ============================================================
     // 9. Credential exposure
     // ============================================================
@@ -1314,6 +1360,25 @@ mod tests {
         }));
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn detects_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().expect("tempdir");
+        let f = dir.path().join("hidden.txt");
+        std::fs::write(&f, "secret payload").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let r = scan_skill_directory("unreadable-skill", dir.path(), TrustLevel::Community).unwrap();
+        assert!(r.findings.iter().any(|f| {
+            f.category == ThreatCategory::StructuralAnomaly
+                && f.description.contains("unreadable")
+        }));
+
+        // Restore permissions so tempdir cleanup succeeds.
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
     // ============================================================
     // 11. Advanced injection
     // ============================================================
@@ -1401,6 +1466,17 @@ mod tests {
         let r = scan_skill_text(
             "trusted-skill",
             "sudo apt-get install something",
+            TrustLevel::Trusted,
+        );
+        assert_eq!(r.verdict, Verdict::Caution);
+    }
+
+    #[test]
+    fn trusted_caution_on_medium() {
+        // Trusted skills with medium-severity findings should be Caution, not Safe.
+        let r = scan_skill_text(
+            "trusted-skill",
+            "subprocess.call(['echo', 'hello'])",
             TrustLevel::Trusted,
         );
         assert_eq!(r.verdict, Verdict::Caution);
