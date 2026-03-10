@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use base64::Engine as _;
 use serde_json::json;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
@@ -486,6 +488,45 @@ fn cleanup_daemon_and_socket(session_name: &str) {
 
     // Remove the socket directory
     let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+/// Remove screenshot files older than 24 hours from the given directory.
+fn cleanup_old_screenshots(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let cutoff = Duration::from_secs(24 * 60 * 60);
+
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|mtime| SystemTime::now().duration_since(mtime).ok());
+
+        if let Some(age) = age {
+            if age > cutoff {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Shared HTTP client for the vision API.
+fn vision_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("failed to build vision HTTP client")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1103,396 @@ impl ToolHandler for BrowserBack {
     }
 }
 
+/// Press a keyboard key in the browser.
+pub struct BrowserPress {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserPress {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let key = call
+            .arguments
+            .get("key")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "key",
+            })?;
+
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let args = BTreeMap::from([("key".to_owned(), key.clone())]);
+
+        run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "press",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let response = json!({
+            "success": true,
+            "pressed": key,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Close the browser session and release all resources.
+pub struct BrowserClose {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserClose {
+    fn run(&self, _call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let sid = &context.session_id;
+
+        self.manager.close_session(sid);
+
+        let response = json!({
+            "success": true,
+            "closed": true,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Retrieve console messages and JavaScript errors from the browser.
+pub struct BrowserConsole {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserConsole {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let clear = call
+            .arguments
+            .get("clear")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let mut console_args = BTreeMap::new();
+        if clear {
+            console_args.insert("clear".to_owned(), "true".to_owned());
+        }
+
+        let mut error_args = BTreeMap::new();
+        if clear {
+            error_args.insert("clear".to_owned(), "true".to_owned());
+        }
+
+        // Fetch console messages (default to empty on failure)
+        let console_result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "console",
+            &console_args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )
+        .unwrap_or_else(|_| json!({}));
+
+        // Fetch JS errors (default to empty on failure)
+        let errors_result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "errors",
+            &error_args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )
+        .unwrap_or_else(|_| json!({}));
+
+        // Parse console messages from data.messages array
+        let console_messages: Vec<serde_json::Value> = console_result
+            .pointer("/data/messages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|msg| {
+                        json!({
+                            "type": msg.get("type").and_then(|v| v.as_str()).unwrap_or("log"),
+                            "text": msg.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                            "source": "console",
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Parse JS errors from data.errors array
+        let js_errors: Vec<serde_json::Value> = errors_result
+            .pointer("/data/errors")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|err| {
+                        json!({
+                            "message": err.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                            "source": "exception",
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let total_messages = console_messages.len();
+        let total_errors = js_errors.len();
+
+        let response = json!({
+            "success": true,
+            "console_messages": console_messages,
+            "js_errors": js_errors,
+            "total_messages": total_messages,
+            "total_errors": total_errors,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Get all images from the current browser page.
+pub struct BrowserGetImages {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserGetImages {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let js_code = r#"JSON.stringify([...document.images].map(img => ({src: img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight})).filter(img => img.src && !img.src.startsWith('data:')))"#;
+
+        let args = BTreeMap::from([("expression".to_owned(), js_code.to_owned())]);
+
+        let result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "eval",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        // Parse the result string into a Vec of image objects
+        let images: Vec<serde_json::Value> = result
+            .pointer("/data/result")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
+        let count = images.len();
+
+        let response = json!({
+            "success": true,
+            "images": images,
+            "count": count,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Take a screenshot and analyze it using a vision model.
+pub struct BrowserVision {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserVision {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let question = call
+            .arguments
+            .get("question")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "question",
+            })?;
+
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let annotate = call
+            .arguments
+            .get("annotate")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        // Create screenshots directory
+        let screenshots_dir =
+            std::path::PathBuf::from(&context.data_dir).join("browser_screenshots");
+        std::fs::create_dir_all(&screenshots_dir).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("failed to create screenshots directory: {e}"),
+        })?;
+
+        // Clean up old screenshots
+        cleanup_old_screenshots(&screenshots_dir);
+
+        // Generate screenshot path
+        let uuid_hex = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let screenshot_path = screenshots_dir.join(format!("browser_screenshot_{uuid_hex}.png"));
+        let screenshot_path_str = screenshot_path.to_string_lossy().to_string();
+
+        // Take screenshot
+        let mut screenshot_args = BTreeMap::new();
+        if annotate {
+            screenshot_args.insert("annotate".to_owned(), "true".to_owned());
+        }
+        screenshot_args.insert("path".to_owned(), screenshot_path_str.clone());
+
+        run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "screenshot",
+            &screenshot_args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        // Verify screenshot exists
+        if !screenshot_path.exists() {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: "Screenshot file was not created".to_owned(),
+            });
+        }
+
+        // Read and base64-encode the screenshot
+        let screenshot_bytes =
+            std::fs::read(&screenshot_path).map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to read screenshot file: {e}"),
+            })?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&screenshot_bytes);
+
+        // Get vision model config
+        let api_base = std::env::var("OPENAI_API_BASE")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+        let api_key =
+            std::env::var("OPENAI_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: "OPENAI_API_KEY environment variable not set".to_owned(),
+            })?;
+        let model = std::env::var("AUXILIARY_VISION_MODEL")
+            .unwrap_or_else(|_| "gpt-4o".to_owned());
+
+        // Build vision API request
+        let vision_url = format!("{api_base}/chat/completions");
+        let body = json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": question,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{b64}"),
+                        },
+                    },
+                ],
+            }],
+            "max_tokens": 1024,
+        });
+
+        let client = vision_http_client();
+        let resp = client
+            .post(&vision_url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("vision API request failed: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let resp_body = resp.text().unwrap_or_default();
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("vision API returned {status}: {resp_body}"),
+            });
+        }
+
+        let resp_json: serde_json::Value =
+            resp.json().map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to parse vision API response: {e}"),
+            })?;
+
+        let analysis = resp_json
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+
+        let response = json!({
+            "success": true,
+            "analysis": analysis,
+            "screenshot_path": screenshot_path_str,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1364,5 +1795,39 @@ mod tests {
         };
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(err.to_string().contains("Invalid direction"));
+    }
+
+    #[test]
+    fn browser_press_requires_key() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserPress { manager: mgr };
+        let call = ToolCall {
+            name: "browser_press".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        assert!(matches!(
+            tool.run(&call, &ctx()).unwrap_err(),
+            ToolError::MissingArgument {
+                argument: "key",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_vision_requires_question() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserVision { manager: mgr };
+        let call = ToolCall {
+            name: "browser_vision".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        assert!(matches!(
+            tool.run(&call, &ctx()).unwrap_err(),
+            ToolError::MissingArgument {
+                argument: "question",
+                ..
+            }
+        ));
     }
 }
