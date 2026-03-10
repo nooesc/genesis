@@ -5,8 +5,8 @@ use std::time::Instant;
 use genesis_config::{LoadedConfig, TerminalConfig};
 use genesis_provider::{client_from_config, ChatMessage, MessageContent, ProviderError};
 use genesis_storage::{
-    bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, SubagentStore,
-    UserModelStore,
+    bootstrap, format_user_traits, SandboxStore, SessionStore, StorageError, StoredMessage,
+    SubagentStore, UserModelStore,
 };
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
@@ -16,6 +16,7 @@ use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::{SystemPromptBuilder, load_context_file};
+use crate::sandbox::manager::SandboxManager;
 use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded, ToolRuntime};
 
@@ -348,6 +349,20 @@ impl<'a> SessionExecutionService<'a> {
         // Set terminal backend if configured
         if let Some(terminal) = &self.loaded.config.runtime.terminal {
             tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
+
+            // Create SandboxManager for lifecycle-managed backends
+            match terminal {
+                TerminalConfig::Singularity { .. }
+                | TerminalConfig::Modal { .. }
+                | TerminalConfig::Daytona { .. } => {
+                    let sandbox_store = SandboxStore::new(
+                        &self.loaded.config.storage.database_path,
+                    );
+                    let manager = std::sync::Arc::new(SandboxManager::new(sandbox_store, 300));
+                    tool_runtime.set_sandbox_manager(manager);
+                }
+                _ => {}
+            }
         }
 
         // Set default working directory (worktree isolation)
@@ -1641,5 +1656,71 @@ mod tests {
         service.set_personality_override("pirate".to_owned());
         // The personality_override field should be set
         assert_eq!(service.personality_override.as_deref(), Some("pirate"));
+    }
+
+    #[test]
+    fn terminal_config_to_backend_singularity() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Singularity {
+            image: "docker://ubuntu:22.04".to_owned(),
+            cpu: 2.0,
+            memory_mb: 8192,
+            persistent: true,
+            bind: Some(vec!["/data:/data".to_owned()]),
+            working_dir: Some("/workspace".to_owned()),
+        };
+        let backend = terminal_config_to_backend(&config);
+        match backend {
+            genesis_tools::TerminalBackend::Singularity {
+                image,
+                cpu,
+                memory_mb,
+                persistent,
+                ..
+            } => {
+                assert_eq!(image, "docker://ubuntu:22.04");
+                assert_eq!(cpu, 2.0);
+                assert_eq!(memory_mb, 8192);
+                assert!(persistent);
+            }
+            _ => panic!("expected Singularity"),
+        }
+    }
+
+    #[test]
+    fn terminal_config_to_backend_modal() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Modal {
+            image: Some("python:3.11".to_owned()),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            gpu: Some("T4".to_owned()),
+            app: None,
+            working_dir: None,
+        };
+        let backend = terminal_config_to_backend(&config);
+        assert!(matches!(backend, genesis_tools::TerminalBackend::Modal { .. }));
+    }
+
+    #[test]
+    fn terminal_config_to_backend_daytona() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Daytona {
+            image: Some("ubuntu:22.04".to_owned()),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
+        };
+        let backend = terminal_config_to_backend(&config);
+        assert!(matches!(backend, genesis_tools::TerminalBackend::Daytona { .. }));
     }
 }
