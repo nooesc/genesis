@@ -1,15 +1,11 @@
-// Items in this module are used by the browser tool structs (added in a
-// subsequent task).  Suppress dead-code warnings until then.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::ToolError;
+use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 300;
@@ -701,6 +697,372 @@ fn close_browserbase_session(bb_session_id: &str) -> Result<(), ToolError> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool structs
+// ---------------------------------------------------------------------------
+
+/// Navigate the browser to a URL. Creates a new session if one does not exist.
+pub struct BrowserNavigate {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserNavigate {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let url = call
+            .arguments
+            .get("url")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "url",
+            })?;
+
+        let sid = &context.session_id;
+
+        // Cleanup stale sessions before potentially creating a new one
+        self.manager.cleanup_stale_sessions();
+
+        let session_name = self.manager.get_or_create_session(sid)?;
+        let (_, cdp_url) = self.manager.get_session_cmd_info(sid).unwrap_or_default();
+
+        let args = BTreeMap::from([("url".to_owned(), url.clone())]);
+        let result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "open",
+            &args,
+            Duration::from_secs(60),
+        )?;
+
+        let title = result
+            .pointer("/data/title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let nav_url = result
+            .pointer("/data/url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(url.as_str())
+            .to_owned();
+
+        let mut response = json!({
+            "success": true,
+            "url": nav_url,
+            "title": title,
+        });
+
+        // Check for bot detection
+        if check_bot_detection(&title) {
+            response["bot_detection_warning"] =
+                json!("Page title matches known bot-detection patterns. The page may not have loaded correctly.");
+        }
+
+        // Check first navigation hints
+        let (was_first, features) = self.manager.consume_first_nav(sid);
+        if was_first {
+            let stealth_features: Vec<&String> = features
+                .iter()
+                .filter(|(_, v)| **v)
+                .map(|(k, _)| k)
+                .collect();
+            response["stealth_features"] = json!(stealth_features);
+
+            let proxies_active = features.get("proxies").copied().unwrap_or(false);
+            let is_local = features.get("local").copied().unwrap_or(false);
+            if !proxies_active && !is_local {
+                response["stealth_warning"] = json!(
+                    "Proxies are not active. Some sites may block direct cloud browser IPs."
+                );
+            }
+        }
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Take a snapshot of the current browser page (accessibility tree).
+pub struct BrowserSnapshot {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserSnapshot {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let full = call
+            .arguments
+            .get("full")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let mut args = BTreeMap::new();
+        if !full {
+            args.insert("compact".to_owned(), "true".to_owned());
+        }
+
+        let result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "snapshot",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let snapshot_text = result
+            .pointer("/data/text")
+            .and_then(|v| v.as_str())
+            .or_else(|| result.get("output").and_then(|v| v.as_str()))
+            .unwrap_or("");
+
+        let element_count = result
+            .pointer("/data/refs")
+            .and_then(|v| v.as_object())
+            .map(|o| o.len())
+            .unwrap_or(0);
+
+        let truncated = truncate_snapshot(snapshot_text, SNAPSHOT_MAX_CHARS);
+
+        let response = json!({
+            "success": true,
+            "snapshot": truncated,
+            "element_count": element_count,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Click an element identified by its accessibility ref.
+pub struct BrowserClick {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserClick {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let element_ref = call
+            .arguments
+            .get("ref")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "ref",
+            })?;
+
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let normalized = normalize_ref(element_ref);
+        let args = BTreeMap::from([("ref".to_owned(), normalized.clone())]);
+
+        run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "click",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let response = json!({
+            "success": true,
+            "clicked": normalized,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Type text into an element identified by its accessibility ref.
+pub struct BrowserType {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserType {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let element_ref = call
+            .arguments
+            .get("ref")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "ref",
+            })?;
+
+        let text = call
+            .arguments
+            .get("text")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "text",
+            })?;
+
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let normalized = normalize_ref(element_ref);
+        let args = BTreeMap::from([
+            ("ref".to_owned(), normalized.clone()),
+            ("value".to_owned(), text.clone()),
+        ]);
+
+        run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "fill",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let response = json!({
+            "success": true,
+            "typed": text,
+            "element": normalized,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Scroll the browser page up or down.
+pub struct BrowserScroll {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserScroll {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let direction = call
+            .arguments
+            .get("direction")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "direction",
+            })?;
+
+        if direction != "up" && direction != "down" {
+            return Err(ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!(
+                    "Invalid direction '{}'. Must be 'up' or 'down'.",
+                    direction
+                ),
+            });
+        }
+
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let args = BTreeMap::from([("direction".to_owned(), direction.clone())]);
+
+        run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "scroll",
+            &args,
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let response = json!({
+            "success": true,
+            "scrolled": direction,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+/// Navigate the browser back to the previous page.
+pub struct BrowserBack {
+    pub manager: Arc<BrowserManager>,
+}
+
+impl ToolHandler for BrowserBack {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let sid = &context.session_id;
+
+        let (session_name, cdp_url) =
+            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
+                }
+            })?;
+
+        self.manager.touch_session(sid);
+
+        let result = run_browser_command_raw(
+            &session_name,
+            cdp_url.as_deref(),
+            "back",
+            &BTreeMap::new(),
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
+        )?;
+
+        let url = result
+            .pointer("/data/url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+
+        let response = json!({
+            "success": true,
+            "url": url,
+        });
+
+        Ok(ToolOutput {
+            content: response.to_string(),
+            metadata: BTreeMap::new(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -910,5 +1272,97 @@ mod tests {
         assert!(body.get("proxies").is_none());
         assert!(body.get("browserSettings").is_none());
         assert_eq!(body["keepAlive"], true);
+    }
+
+    #[test]
+    fn browser_navigate_requires_url() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserNavigate { manager: mgr };
+        let call = ToolCall {
+            name: "browser_navigate".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_click_requires_ref() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserClick { manager: mgr };
+        let call = ToolCall {
+            name: "browser_click".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "ref",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_snapshot_without_session_fails() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserSnapshot { manager: mgr };
+        let call = ToolCall {
+            name: "browser_snapshot".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn browser_type_requires_ref_and_text() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserType {
+            manager: mgr.clone(),
+        };
+
+        let call = ToolCall {
+            name: "browser_type".to_owned(),
+            arguments: BTreeMap::from([("text".to_owned(), "hello".to_owned())]),
+        };
+        assert!(matches!(
+            tool.run(&call, &ctx()).unwrap_err(),
+            ToolError::MissingArgument {
+                argument: "ref",
+                ..
+            }
+        ));
+
+        let call = ToolCall {
+            name: "browser_type".to_owned(),
+            arguments: BTreeMap::from([("ref".to_owned(), "@e1".to_owned())]),
+        };
+        assert!(matches!(
+            tool.run(&call, &ctx()).unwrap_err(),
+            ToolError::MissingArgument {
+                argument: "text",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_scroll_validates_direction() {
+        let mgr = Arc::new(BrowserManager::new());
+        let tool = BrowserScroll { manager: mgr };
+        let call = ToolCall {
+            name: "browser_scroll".to_owned(),
+            arguments: BTreeMap::from([("direction".to_owned(), "left".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(err.to_string().contains("Invalid direction"));
     }
 }
