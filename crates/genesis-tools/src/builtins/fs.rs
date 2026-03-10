@@ -24,7 +24,12 @@ impl ToolHandler for ReadFileTool {
         })?;
 
         let content = if content.len() > MAX_READ_BYTES {
-            let mut truncated = content[..MAX_READ_BYTES].to_string();
+            // Walk back from MAX_READ_BYTES to find a valid UTF-8 char boundary
+            let mut end = MAX_READ_BYTES;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut truncated = content[..end].to_string();
             truncated.push_str("\n... (file truncated)");
             truncated
         } else {

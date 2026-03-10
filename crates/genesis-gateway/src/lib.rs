@@ -516,7 +516,9 @@ async fn auth_middleware(
     });
 
     match token {
-        Some(t) if t == expected_key => Ok(next.run(request).await),
+        Some(t) if verify::constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => {
+            Ok(next.run(request).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
@@ -801,7 +803,7 @@ async fn get_session_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     match session {
-        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
         None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
     }
 }
@@ -980,11 +982,11 @@ async fn export_session_handler(
         }
     };
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(content))
-        .unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to build response: {e}")))
 }
 
 async fn purge_sessions_handler(
@@ -1184,11 +1186,11 @@ async fn bulk_export_handler(
         _ => "application/jsonl; charset=utf-8",
     };
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(output))
-        .unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to build response: {e}")))
 }
 
 #[derive(Deserialize)]
@@ -1227,7 +1229,7 @@ async fn insights_handler(
         .insights(params.days)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok(Json(serde_json::to_value(data).unwrap()))
+    Ok(Json(serde_json::to_value(data).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
 
 async fn usage_handler(
@@ -1238,7 +1240,7 @@ async fn usage_handler(
         .usage_stats()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok(Json(serde_json::to_value(stats).unwrap()))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
 
 
@@ -1289,7 +1291,7 @@ async fn get_skill_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     match skill {
-        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
         None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
     }
 }
@@ -1310,7 +1312,7 @@ async fn upsert_skill_handler(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok(Json(serde_json::to_value(skill).unwrap()))
+    Ok(Json(serde_json::to_value(skill).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
 
 async fn delete_skill_handler(
@@ -1470,7 +1472,7 @@ async fn get_schedule_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     match schedule {
-        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
         None => Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
     }
 }
@@ -1484,7 +1486,7 @@ async fn create_schedule_handler(
         .create(&request.id, &request.cron_expression, &request.destination, &request.prompt)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(schedule).unwrap())))
+    Ok((StatusCode::CREATED, Json(serde_json::to_value(schedule).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
 }
 
 async fn delete_schedule_handler(
@@ -1571,7 +1573,7 @@ async fn get_user_trait_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     match user_trait {
-        Some(t) => Ok(Json(serde_json::to_value(t).unwrap())),
+        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
         None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
     }
 }
@@ -1590,7 +1592,7 @@ async fn observe_user_trait_handler(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok((StatusCode::OK, Json(serde_json::to_value(observed).unwrap())))
+    Ok((StatusCode::OK, Json(serde_json::to_value(observed).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
 }
 
 async fn delete_user_trait_handler(
@@ -1621,7 +1623,7 @@ async fn get_subagent_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     match subagent {
-        Some(s) => Ok(Json(serde_json::to_value(s).unwrap())),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
         None => Err((StatusCode::NOT_FOUND, format!("subagent '{id}' not found"))),
     }
 }
@@ -1664,7 +1666,7 @@ async fn skill_usage_stats_handler(
         .stats(&name)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
-    Ok(Json(serde_json::to_value(stats).unwrap()))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
 
 async fn skill_usage_recent_handler(

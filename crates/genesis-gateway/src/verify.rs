@@ -167,7 +167,7 @@ pub fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[
 }
 
 /// Constant-time comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
