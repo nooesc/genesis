@@ -19,17 +19,51 @@ use std::path::Path;
 use genesis_storage::SessionStore;
 use tracing::{debug, warn};
 
+/// Append a delivery-mirror record directly to an existing session by its ID.
+///
+/// Use this when the session ID is already known (e.g. API handlers).
+/// Unlike [`append_delivery_mirror`], no ID transformation is applied.
+/// This function is intentionally infallible — errors are logged but never
+/// propagated.
+pub fn append_delivery_mirror_to_session(
+    database_path: &Path,
+    session_id: &str,
+    content: &str,
+    source: &str,
+) {
+    let store = SessionStore::new(database_path);
+
+    match store.append_mirror_message(session_id, content, source) {
+        Ok(message_id) => {
+            debug!(
+                session_id,
+                message_id,
+                source,
+                "delivery mirror appended (direct)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                session_id,
+                error = %e,
+                "mirror: failed to append mirror message"
+            );
+        }
+    }
+}
+
 /// Append a delivery-mirror record to the session for `platform`/`chat_id`.
 ///
-/// If the session doesn't exist yet, it is created automatically so the
-/// mirror record has a home. This function is intentionally infallible —
-/// errors are logged but never propagated.
+/// Resolves the session ID from platform + chat_id using the same conventions
+/// as the platform webhook handlers. If the session doesn't exist yet, it is
+/// created automatically. This function is intentionally infallible — errors
+/// are logged but never propagated.
 ///
 /// # Arguments
 ///
 /// * `database_path` - Path to the SQLite database.
 /// * `platform` - Platform identifier (e.g. "telegram", "slack", "discord").
-/// * `chat_id` - Platform-specific chat/channel identifier.
+/// * `chat_id` - Platform-specific chat/channel identifier (NOT a session ID).
 /// * `content` - The message text that was dispatched.
 /// * `source` - Label for the origin of the dispatch (e.g. "cli", "api", "schedule").
 pub fn append_delivery_mirror(

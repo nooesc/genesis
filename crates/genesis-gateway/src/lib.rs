@@ -2353,12 +2353,9 @@ async fn chat_handler(
         );
 
         // Append delivery mirror for cross-platform visibility.
-        // The mirror records the response in the session so the agent has
-        // visibility into what was dispatched, regardless of which source
-        // (API, CLI, schedule) triggered the turn.
-        mirror::append_delivery_mirror(
+        // Use the direct variant since we already have the session ID.
+        mirror::append_delivery_mirror_to_session(
             &metrics_state.loaded.config.storage.database_path,
-            &request.platform,
             &session_id,
             &outcome.result.response,
             "api",
@@ -2957,9 +2954,9 @@ async fn chat_stream_handler(
                 );
 
                 // Append delivery mirror for cross-platform visibility.
-                mirror::append_delivery_mirror(
+                // Use the direct variant since we already have the session ID.
+                mirror::append_delivery_mirror_to_session(
                     &state_for_task.loaded.config.storage.database_path,
-                    &platform,
                     &outcome.session_id,
                     &outcome.result.response,
                     "api",

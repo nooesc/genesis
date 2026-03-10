@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -968,13 +967,11 @@ impl SessionStore {
     ) -> Result<i64, StorageError> {
         let connection = open(&self.database_path)?;
 
-        let timestamp = Utc::now().to_rfc3339();
-
         connection
             .execute(
                 "INSERT INTO messages (session_id, role, content, mirror, mirror_source, created_at)
-                 VALUES (?1, 'assistant', ?2, 1, ?3, ?4)",
-                params![session_id, content, mirror_source, timestamp],
+                 VALUES (?1, 'assistant', ?2, 1, ?3, CURRENT_TIMESTAMP)",
+                params![session_id, content, mirror_source],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
