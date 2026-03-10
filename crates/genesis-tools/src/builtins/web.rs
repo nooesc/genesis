@@ -11,19 +11,9 @@ const TIMEOUT_SECS: u64 = 30;
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("genesis-agent/0.1")
-            .build()
-            .unwrap_or_else(|e| {
-                // Fallback: build a minimal client that still has the timeout.
-                // This path only triggers on TLS backend init failure.
-                eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
-                reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(TIMEOUT_SECS))
-                    .build()
-                    .expect("minimal HTTP client build must succeed")
-            })
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| {
+            b.user_agent("genesis-agent/0.1")
+        })
     })
 }
 
@@ -86,12 +76,10 @@ impl ToolHandler for WebRequestTool {
 
         if let Some(body_content) = body {
             // Only set Content-Type if not already set via custom headers
-            if headers_json.is_none()
-                || !headers_json
-                    .unwrap()
-                    .to_lowercase()
-                    .contains("content-type")
-            {
+            let has_content_type = headers_json
+                .map(|h| h.to_ascii_lowercase().contains("content-type"))
+                .unwrap_or(false);
+            if !has_content_type {
                 request = request.header("Content-Type", "application/json");
             }
             request = request.body(body_content.clone());

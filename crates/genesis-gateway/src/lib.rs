@@ -48,13 +48,19 @@ pub struct RateLimiter {
     max_rpm: u32,
     /// Map from IP -> (count, window_start_epoch_secs).
     entries: Mutex<HashMap<IpAddr, (u32, u64)>>,
+    /// Epoch second of the last purge, used to amortize cleanup.
+    last_purge: std::sync::atomic::AtomicU64,
 }
+
+/// How often (in seconds) to purge stale rate-limit entries.
+const PURGE_INTERVAL_SECS: u64 = 120;
 
 impl RateLimiter {
     pub fn new(max_rpm: u32) -> Self {
         Self {
             max_rpm,
             entries: Mutex::new(HashMap::new()),
+            last_purge: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -75,8 +81,12 @@ impl RateLimiter {
             }
         };
 
-        // Purge stale entries (windows older than 120s)
-        map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 120);
+        // Amortized purge: only scan & remove stale entries periodically
+        let prev = self.last_purge.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(prev) >= PURGE_INTERVAL_SECS {
+            map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < PURGE_INTERVAL_SECS);
+            self.last_purge.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let entry = map.entry(ip).or_insert((0, now));
         if now.saturating_sub(entry.1) >= 60 {
@@ -351,6 +361,20 @@ pub struct McpServerStatus {
     pub connected: bool,
 }
 
+/// Default localhost origins allowed for development when no CORS origins are configured.
+const LOCALHOST_ORIGINS: &[&str] = &[
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",
+];
+
+fn parse_origin_values(origins: &[&str]) -> Vec<axum::http::HeaderValue> {
+    origins.iter().filter_map(|o| o.parse().ok()).collect()
+}
+
 /// Build CORS layer from gateway config.
 ///
 /// - If `cors_origins` contains `"*"`, all origins are allowed.
@@ -376,20 +400,7 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
     if origins.iter().any(|o| o == "*") {
         base.allow_origin(Any)
     } else if origins.is_empty() {
-        // Default: allow common localhost origins for development
-        let localhost_origins = [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8080",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            "http://127.0.0.1:8080",
-        ];
-        let values: Vec<HeaderValue> = localhost_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
-        base.allow_origin(values)
+        base.allow_origin(parse_origin_values(LOCALHOST_ORIGINS))
     } else {
         let values: Vec<HeaderValue> = origins
             .iter()
@@ -402,12 +413,8 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
             })
             .collect();
         if values.is_empty() {
-            error!("all configured CORS origins are invalid, falling back to localhost-only");
-            let fallback: Vec<HeaderValue> = ["http://localhost:3000"]
-                .iter()
-                .filter_map(|o| o.parse().ok())
-                .collect();
-            base.allow_origin(fallback)
+            error!("all configured CORS origins are invalid, falling back to default localhost origins ({LOCALHOST_ORIGINS:?})");
+            base.allow_origin(parse_origin_values(LOCALHOST_ORIGINS))
         } else {
             base.allow_origin(values)
         }

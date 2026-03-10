@@ -11,18 +11,10 @@ const TIMEOUT_SECS: u64 = 30;
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("Mozilla/5.0 (compatible; genesis-agent/0.1)")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .unwrap_or_else(|e| {
-                eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
-                reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(TIMEOUT_SECS))
-                    .build()
-                    .expect("minimal HTTP client build must succeed")
-            })
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| {
+            b.user_agent("Mozilla/5.0 (compatible; genesis-agent/0.1)")
+                .redirect(reqwest::redirect::Policy::limited(5))
+        })
     })
 }
 
@@ -117,12 +109,9 @@ fn extract_text_from_html(html: &str, selector: Option<&str>) -> String {
         html.to_owned()
     };
 
-    // Remove script and style blocks entirely
-    let cleaned = remove_tag_blocks(&working_html, "script");
-    let cleaned = remove_tag_blocks(&cleaned, "style");
-    let cleaned = remove_tag_blocks(&cleaned, "nav");
-    let cleaned = remove_tag_blocks(&cleaned, "header");
-    let cleaned = remove_tag_blocks(&cleaned, "footer");
+    // Remove script, style, and navigation blocks entirely.
+    // Pre-compute lowercase once and pass it through to avoid re-lowercasing on each call.
+    let cleaned = remove_tag_blocks_multi(&working_html, &["script", "style", "nav", "header", "footer"]);
 
     // Strip all remaining HTML tags
     let text = strip_tags(&cleaned);
@@ -140,12 +129,34 @@ fn extract_text_from_html(html: &str, selector: Option<&str>) -> String {
     lines.join("\n")
 }
 
+/// Remove all occurrences of multiple tag types in sequence, computing
+/// lowercase only once.
+fn remove_tag_blocks_multi(html: &str, tags: &[&str]) -> String {
+    let mut current = html.to_owned();
+    let mut lower = html.to_lowercase();
+    let last = tags.len().saturating_sub(1);
+    for (i, tag) in tags.iter().enumerate() {
+        let result = remove_tag_blocks_with_lower(&current, &lower, tag);
+        if i < last {
+            lower = result.to_lowercase();
+        }
+        current = result;
+    }
+    current
+}
+
 /// Remove all occurrences of <tag>...</tag> blocks (including the tags).
+#[cfg(test)]
 fn remove_tag_blocks(html: &str, tag: &str) -> String {
+    let lower = html.to_lowercase();
+    remove_tag_blocks_with_lower(html, &lower, tag)
+}
+
+/// Remove tag blocks using a pre-computed lowercase version of the HTML.
+fn remove_tag_blocks_with_lower(html: &str, lower: &str, tag: &str) -> String {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
     let mut result = String::with_capacity(html.len());
-    let lower = html.to_lowercase();
     let mut pos = 0;
 
     while let Some(start) = lower[pos..].find(&open) {
@@ -154,7 +165,6 @@ fn remove_tag_blocks(html: &str, tag: &str) -> String {
         if let Some(end) = lower[abs_start..].find(&close) {
             pos = abs_start + end + close.len();
         } else {
-            // Unclosed tag — skip to end
             pos = html.len();
         }
     }
@@ -212,20 +222,48 @@ fn strip_tags(html: &str) -> String {
     result
 }
 
-/// Decode common HTML entities.
+/// Decode common HTML entities in a single pass.
 fn decode_entities(text: &str) -> String {
-    text.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
-        .replace("&#x27;", "'")
-        .replace("&#x2F;", "/")
-        .replace("&mdash;", "—")
-        .replace("&ndash;", "–")
-        .replace("&hellip;", "…")
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+
+    while let Some((i, ch)) = chars.next() {
+        if ch != '&' {
+            result.push(ch);
+            continue;
+        }
+
+        // Find the closing ';'
+        let rest = &text[i..];
+        if let Some(semi) = rest.find(';') {
+            let entity = &rest[..semi + 1];
+            let replacement = match entity {
+                "&amp;" => "&",
+                "&lt;" => "<",
+                "&gt;" => ">",
+                "&quot;" => "\"",
+                "&#39;" | "&apos;" | "&#x27;" => "'",
+                "&nbsp;" => " ",
+                "&#x2F;" => "/",
+                "&mdash;" => "\u{2014}",
+                "&ndash;" => "\u{2013}",
+                "&hellip;" => "\u{2026}",
+                _ => {
+                    result.push('&');
+                    continue;
+                }
+            };
+            result.push_str(replacement);
+            // Skip past the entity in the char iterator
+            for _ in 0..entity.len() - 1 {
+                chars.next();
+            }
+        } else {
+            result.push('&');
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

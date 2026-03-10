@@ -77,8 +77,8 @@ fn check_ipv4(ip: Ipv4Addr) -> Result<(), String> {
         || ip.is_link_local()      // 169.254.0.0/16 (includes cloud metadata)
         || ip.is_broadcast()       // 255.255.255.255
         || ip.is_unspecified()     // 0.0.0.0
-        || ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127 // CGN 100.64.0.0/10
-        || ip.octets()[0] == 198 && ip.octets()[1] >= 18 && ip.octets()[1] <= 19  // benchmarking 198.18.0.0/15
+        || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127) // CGN 100.64.0.0/10
+        || (ip.octets()[0] == 198 && ip.octets()[1] >= 18 && ip.octets()[1] <= 19) // benchmarking 198.18.0.0/15
     {
         return Err(format!("access to private/internal IP {ip} is blocked"));
     }

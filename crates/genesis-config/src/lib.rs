@@ -330,7 +330,7 @@ impl Default for EmbeddingConfig {
 }
 
 /// Gateway-specific settings for session lifecycle policies.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct GatewayConfig {
     /// Auto-reset sessions that have been idle for this many minutes.
     /// When a new message arrives and the session's `updated_at` is older
@@ -1020,13 +1020,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
             })?;
             file_config
                 .gateway
-                .get_or_insert(GatewayConfig {
-                    idle_timeout_minutes: None,
-                    daily_reset_hour: None,
-                    rate_limit_rpm: None,
-                    webhooks: Vec::new(),
-                    cors_origins: Vec::new(),
-                })
+                .get_or_insert_with(GatewayConfig::default)
                 .idle_timeout_minutes = Some(v);
         }
         "gateway.daily_reset_hour" => {
@@ -1042,13 +1036,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
             }
             file_config
                 .gateway
-                .get_or_insert(GatewayConfig {
-                    idle_timeout_minutes: None,
-                    daily_reset_hour: None,
-                    rate_limit_rpm: None,
-                    webhooks: Vec::new(),
-                    cors_origins: Vec::new(),
-                })
+                .get_or_insert_with(GatewayConfig::default)
                 .daily_reset_hour = Some(v);
         }
         "gateway.rate_limit_rpm" => {
@@ -1058,13 +1046,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
             })?;
             file_config
                 .gateway
-                .get_or_insert(GatewayConfig {
-                    idle_timeout_minutes: None,
-                    daily_reset_hour: None,
-                    rate_limit_rpm: None,
-                    webhooks: Vec::new(),
-                    cors_origins: Vec::new(),
-                })
+                .get_or_insert_with(GatewayConfig::default)
                 .rate_limit_rpm = Some(v);
         }
         "provider.tool_call_parser" => {
