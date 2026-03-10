@@ -8,7 +8,6 @@ use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 /// Unlike persistent storage tools, the todo list lives only for the duration
 /// of the current process. It helps the agent decompose complex tasks,
 /// track progress, and report completion status.
-
 static TODO_LIST: Mutex<Vec<TodoItem>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone)]

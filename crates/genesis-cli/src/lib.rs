@@ -969,7 +969,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
 
             // Check API key resolution
             let api_key_env = loaded.config.provider.api_key_env.as_deref()
-                .unwrap_or_else(|| match loaded.config.provider.backend.as_str() {
+                .unwrap_or(match loaded.config.provider.backend.as_str() {
                     "anthropic" => "ANTHROPIC_API_KEY",
                     "google" => "GOOGLE_API_KEY",
                     _ => "OPENAI_API_KEY",
@@ -1710,6 +1710,7 @@ struct EvalComparison {
     right_only_tags: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn summarize_replay_reports(
     dir: &str,
     recursive: bool,
@@ -1834,6 +1835,7 @@ fn summarize_replay_reports(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_filtered_replay_reports(
     dir: &str,
     recursive: bool,
@@ -2647,11 +2649,7 @@ async fn run_chat(
         run_streaming_turn(&service, &session_id, &initial, model).await?;
     }
 
-    loop {
-        let input = match read_multiline_input(&mut rl, "you> ", "  .. ") {
-            Some(input) => input,
-            None => break, // EOF or ctrl-c
-        };
+    while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
         let trimmed = input.trim();
 
         if trimmed.is_empty() {
@@ -3119,6 +3117,7 @@ async fn run_chat(
 }
 
 /// Run a single prompt non-interactively and return the response.
+#[allow(clippy::too_many_arguments)]
 async fn run_oneshot(
     config_path: Option<PathBuf>,
     prompt: &str,
@@ -3331,7 +3330,7 @@ async fn run_serve(
         )));
     }
 
-    serve_result.map_err(|e| CliError::Io(e))?;
+    serve_result.map_err(CliError::Io)?;
     Ok("server stopped".to_owned())
 }
 
@@ -3394,6 +3393,7 @@ struct BatchInputLine {
     tags: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_batch(
     config_path: Option<PathBuf>,
     input: String,
@@ -3532,6 +3532,7 @@ async fn run_batch(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_batch_item(
     loaded: &genesis_config::LoadedConfig,
     session_id: &str,
@@ -4585,21 +4586,21 @@ fn run_eval_filter(
                 continue;
             }
         }
-        if success_only {
-            if !matches!(
+        if success_only
+            && !matches!(
                 traj.outcome,
                 Some(genesis_core::trajectory::TrajectoryOutcome::Success)
-            ) {
-                continue;
-            }
+            )
+        {
+            continue;
         }
-        if failure_only {
-            if !matches!(
+        if failure_only
+            && !matches!(
                 traj.outcome,
                 Some(genesis_core::trajectory::TrajectoryOutcome::Failure { .. })
-            ) {
-                continue;
-            }
+            )
+        {
+            continue;
         }
         if let Some(min) = min_steps {
             if traj.steps.len() < min {
@@ -4898,13 +4899,13 @@ fn run_eval_pipeline(
     // Step 3: Filter
     let before_filter = trajectories.len();
     trajectories.retain(|(_, traj)| {
-        if success_only {
-            if !matches!(
+        if success_only
+            && !matches!(
                 traj.outcome,
                 Some(genesis_core::trajectory::TrajectoryOutcome::Success)
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
         if let Some(t) = tag {
             if !traj.tags.iter().any(|tag| tag == t) {
@@ -5550,12 +5551,12 @@ fn run_init_non_interactive(
     if !config_existed {
         // Create parent directory
         if let Some(parent) = paths.config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| CliError::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(CliError::Io)?;
         }
 
         // Write default config
         let yaml = render_example_yaml(config_path.as_deref())?;
-        std::fs::write(&paths.config_path, &yaml).map_err(|e| CliError::Io(e))?;
+        std::fs::write(&paths.config_path, &yaml).map_err(CliError::Io)?;
         steps.push(format!(
             "[+] Created config: {}",
             paths.config_path.display()
@@ -5588,7 +5589,7 @@ fn run_init_non_interactive(
     }
 
     // Step 3: Bootstrap storage
-    std::fs::create_dir_all(&paths.data_dir).map_err(|e| CliError::Io(e))?;
+    std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
     let storage_result = bootstrap(&paths.database_path)?;
     steps.push(format!(
         "[+] Storage ready: {} (schema v{})",
@@ -6211,7 +6212,7 @@ async fn run_benchmark(
     }
 
     let test_prompt = "Say exactly: ping";
-    let runs = runs.max(1).min(20);
+    let runs = runs.clamp(1, 20);
     let mut results = Vec::new();
 
     for (label, backend, model, client) in &providers {
@@ -7607,29 +7608,27 @@ fn build_status_text(loaded: &LoadedConfig) -> String {
     ));
 
     // Counts (best-effort)
-    if db_exists {
-        if let Ok(_) = bootstrap(&loaded.config.storage.database_path) {
-            let session_store = SessionStore::new(&loaded.config.storage.database_path);
-            let skill_store = genesis_storage::SkillStore::new(&loaded.config.storage.database_path);
-            let schedule_store =
-                genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
-            let memory_store =
-                MemoryStore::new(&loaded.config.storage.database_path);
+    if db_exists && bootstrap(&loaded.config.storage.database_path).is_ok() {
+        let session_store = SessionStore::new(&loaded.config.storage.database_path);
+        let skill_store = genesis_storage::SkillStore::new(&loaded.config.storage.database_path);
+        let schedule_store =
+            genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
+        let memory_store =
+            MemoryStore::new(&loaded.config.storage.database_path);
 
-            if let Ok(stats) = session_store.usage_stats() {
-                lines.push(format!("  sessions:  {}", stats.total_sessions));
-                let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
-                lines.push(format!("  tokens:    {total_tokens} total"));
-            }
-            if let Ok(skills) = skill_store.list_all() {
-                lines.push(format!("  skills:    {}", skills.len()));
-            }
-            if let Ok(schedules) = schedule_store.list_all() {
-                lines.push(format!("  schedules: {}", schedules.len()));
-            }
-            if let Ok(memories) = memory_store.list(usize::MAX) {
-                lines.push(format!("  memories:  {}", memories.len()));
-            }
+        if let Ok(stats) = session_store.usage_stats() {
+            lines.push(format!("  sessions:  {}", stats.total_sessions));
+            let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
+            lines.push(format!("  tokens:    {total_tokens} total"));
+        }
+        if let Ok(skills) = skill_store.list_all() {
+            lines.push(format!("  skills:    {}", skills.len()));
+        }
+        if let Ok(schedules) = schedule_store.list_all() {
+            lines.push(format!("  schedules: {}", schedules.len()));
+        }
+        if let Ok(memories) = memory_store.list(usize::MAX) {
+            lines.push(format!("  memories:  {}", memories.len()));
         }
     }
 
@@ -7659,14 +7658,14 @@ fn build_status_json(loaded: &LoadedConfig) -> serde_json::Value {
         "allow_destructive_tools": loaded.config.runtime.allow_destructive_tools,
     });
 
-    if loaded.config.storage.database_path.exists() {
-        if let Ok(_) = bootstrap(&loaded.config.storage.database_path) {
-            let session_store = SessionStore::new(&loaded.config.storage.database_path);
-            if let Ok(stats) = session_store.usage_stats() {
-                data["total_sessions"] = serde_json::json!(stats.total_sessions);
-                data["total_tokens"] =
-                    serde_json::json!(stats.total_input_tokens + stats.total_output_tokens);
-            }
+    if loaded.config.storage.database_path.exists()
+        && bootstrap(&loaded.config.storage.database_path).is_ok()
+    {
+        let session_store = SessionStore::new(&loaded.config.storage.database_path);
+        if let Ok(stats) = session_store.usage_stats() {
+            data["total_sessions"] = serde_json::json!(stats.total_sessions);
+            data["total_tokens"] =
+                serde_json::json!(stats.total_input_tokens + stats.total_output_tokens);
         }
     }
 

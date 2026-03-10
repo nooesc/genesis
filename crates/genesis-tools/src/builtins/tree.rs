@@ -52,7 +52,7 @@ impl ToolHandler for ListTreeTool {
         let mut truncated = false;
 
         // Push the root directory name.
-        lines.push(format!("{path}"));
+        lines.push(path.to_string());
 
         walk_dir(
             root,

@@ -71,7 +71,7 @@ impl ToolHandler for ListProcessesTool {
         // Grab the header line for display.
         let header = lines.next().unwrap_or("").to_owned();
 
-        let mut entries: Vec<PsEntry> = lines.filter_map(|line| parse_ps_line(line)).collect();
+        let mut entries: Vec<PsEntry> = lines.filter_map(parse_ps_line).collect();
 
         // Apply user filter.
         if let Some(u) = user_filter {
@@ -322,7 +322,7 @@ fn get_cpu_info() -> String {
     let uptime = run_cmd("uptime", &[]);
     let mut info = String::new();
 
-    info.push_str(&uptime.trim().to_string());
+    info.push_str(uptime.trim());
     info.push('\n');
 
     if cfg!(target_os = "macos") {
@@ -456,8 +456,7 @@ fn extract_meminfo_value(line: &str, key: &str) -> Option<u64> {
         line.split(':')
             .nth(1)
             .and_then(|v| {
-                v.trim()
-                    .split_whitespace()
+                v.split_whitespace()
                     .next()
                     .and_then(|n| n.parse::<u64>().ok())
             })

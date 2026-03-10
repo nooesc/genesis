@@ -532,7 +532,7 @@ fn client_ip<B>(state: &AppState, request: &Request<B>) -> Option<IpAddr> {
         .map(|ci| ci.0.ip());
 
     let peer_is_trusted_proxy = peer_ip
-        .and_then(|ip| Some(state.trusted_proxies.contains(&ip)))
+        .map(|ip| state.trusted_proxies.contains(&ip))
         .unwrap_or(false);
 
     if peer_is_trusted_proxy {
@@ -660,7 +660,7 @@ async fn prometheus_metrics_handler(
     let db_path = &state.loaded.config.storage.database_path;
     let total_sessions = SessionStore::new(db_path)
         .session_count()
-        .unwrap_or(0) as u64;
+        .unwrap_or(0);
     let active_schedules = ScheduleStore::new(db_path)
         .list_enabled()
         .map(|s| s.len() as u64)
@@ -3056,7 +3056,7 @@ async fn chat_batch_handler(
         ));
     }
 
-    let concurrency = request.concurrency.min(MAX_BATCH_CONCURRENCY).max(1);
+    let concurrency = request.concurrency.clamp(1, MAX_BATCH_CONCURRENCY);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let state = Arc::clone(&state);
 

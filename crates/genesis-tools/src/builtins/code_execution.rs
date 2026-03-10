@@ -570,7 +570,7 @@ fn flatten_args(value: &serde_json::Value) -> BTreeMap<String, String> {
 /// process via a Unix domain socket. The child process imports these stubs and
 /// calls them like regular functions; the calls are routed back to Genesis tools.
 pub fn generate_genesis_tools_module() -> String {
-    let src = String::from(
+    String::from(
         r#""""Auto-generated Genesis tools RPC stubs."""
 import json, os, socket, shlex, time
 
@@ -656,9 +656,7 @@ def browse(url: str):
     """Extract content from a URL as markdown."""
     return _call("browse", {"url": url})
 "#,
-    );
-
-    src
+    )
 }
 
 // ---------------------------------------------------------------------------

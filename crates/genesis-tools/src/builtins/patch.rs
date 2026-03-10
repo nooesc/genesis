@@ -387,7 +387,7 @@ fn build_diff_hint(expected: &str, actual: &str) -> String {
         if exp != act {
             diffs.push(format!("  line {}: expected `{}`, found `{}`", i + 1, exp, act));
             if diffs.len() >= show_limit {
-                diffs.push(format!("  ... and more differences"));
+                diffs.push("  ... and more differences".to_string());
                 break;
             }
         }

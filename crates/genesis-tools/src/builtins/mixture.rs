@@ -39,7 +39,7 @@ impl ToolHandler for MixtureOfAgentsTool {
                 .split(',')
                 .filter_map(|s| {
                     let s = s.trim();
-                    s.split_once('/').or_else(|| Some(("openai", s)))
+                    s.split_once('/').or(Some(("openai", s)))
                 })
                 .take(MAX_MODELS)
                 .collect()
@@ -74,7 +74,8 @@ impl ToolHandler for MixtureOfAgentsTool {
 
         // Query all models in parallel using threads (since ToolHandler::run is sync).
         let env: BTreeMap<String, String> = std::env::vars().collect();
-        let responses: Arc<Mutex<Vec<(String, String, Result<String, String>)>>> =
+        type MoaResult = Vec<(String, String, Result<String, String>)>;
+        let responses: Arc<Mutex<MoaResult>> =
             Arc::new(Mutex::new(Vec::new()));
 
         let prompt_owned = prompt.clone();

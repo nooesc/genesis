@@ -50,7 +50,7 @@ impl ToolHandler for TranscribeTool {
         let api_base = call
             .arguments
             .get("api_base")
-            .or_else(|| {
+            .or({
                 // Fall back to environment variable.
                 None // Handled below via env
             })

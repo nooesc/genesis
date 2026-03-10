@@ -189,7 +189,7 @@ pub fn export_jsonl(messages: &[(String, Option<String>, Option<String>, String)
         .iter()
         .filter(|(role, content, _, _)| {
             matches!(role.as_str(), "user" | "assistant" | "system")
-                && content.as_ref().map_or(false, |c| !c.is_empty())
+                && content.as_ref().is_some_and(|c| !c.is_empty())
         })
         .map(|(role, content, _, _)| {
             serde_json::json!({
@@ -211,13 +211,7 @@ pub fn export_chatml(messages: &[(String, Option<String>, Option<String>, String
     let mut output = String::new();
 
     for (role, content, tool_calls, _) in messages {
-        let role = match role.as_str() {
-            "user" => "user",
-            "assistant" => "assistant",
-            "system" => "system",
-            "tool" => "tool",
-            other => other,
-        };
+        let role = role.as_str();
 
         let text = match (content.as_deref(), tool_calls.as_deref()) {
             (Some(text), Some(tc)) if !text.is_empty() && !tc.is_empty() && tc != "null" => {
