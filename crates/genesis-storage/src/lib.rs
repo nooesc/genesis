@@ -178,6 +178,100 @@ mod session_store_tests {
         assert!(store.get_session("recent").unwrap().is_some());
         assert_eq!(store.load_messages("recent").unwrap().len(), 1);
     }
+
+    #[test]
+    fn append_mirror_message_stores_mirror_fields() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-mirror", "telegram", None)
+            .expect("session should be created");
+
+        let msg_id = store
+            .append_mirror_message("session-mirror", "Hello from CLI", "cli")
+            .expect("mirror message should be stored");
+
+        assert!(msg_id > 0);
+
+        let messages = store
+            .load_messages("session-mirror")
+            .expect("messages should load");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content.as_deref(), Some("Hello from CLI"));
+        assert!(messages[0].mirror);
+        assert_eq!(messages[0].mirror_source.as_deref(), Some("cli"));
+    }
+
+    #[test]
+    fn mirror_messages_coexist_with_regular_messages() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-mixed", "slack", None)
+            .expect("session should be created");
+
+        store
+            .append_message("session-mixed", "user", Some("hello"), None, None)
+            .expect("regular message should be stored");
+        store
+            .append_mirror_message("session-mixed", "scheduled reminder", "schedule")
+            .expect("mirror message should be stored");
+        store
+            .append_message("session-mixed", "assistant", Some("got it"), None, None)
+            .expect("regular reply should be stored");
+
+        let messages = store
+            .load_messages("session-mixed")
+            .expect("messages should load");
+
+        assert_eq!(messages.len(), 3);
+        assert!(!messages[0].mirror);
+        assert!(messages[0].mirror_source.is_none());
+        assert!(messages[1].mirror);
+        assert_eq!(messages[1].mirror_source.as_deref(), Some("schedule"));
+        assert!(!messages[2].mirror);
+        assert!(messages[2].mirror_source.is_none());
+    }
+
+    #[test]
+    fn find_session_by_platform_chat_id_resolves_correctly() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("tg-12345", "telegram", Some("Telegram Chat"))
+            .expect("session should be created");
+        store
+            .create_session("slack-general", "slack", Some("Slack General"))
+            .expect("session should be created");
+
+        let tg = store
+            .find_session_by_platform_chat_id("telegram", "12345")
+            .expect("lookup should succeed");
+        assert!(tg.is_some());
+        assert_eq!(tg.unwrap().id, "tg-12345");
+
+        let slack = store
+            .find_session_by_platform_chat_id("slack", "general")
+            .expect("lookup should succeed");
+        assert!(slack.is_some());
+        assert_eq!(slack.unwrap().id, "slack-general");
+
+        let missing = store
+            .find_session_by_platform_chat_id("discord", "99999")
+            .expect("lookup should succeed");
+        assert!(missing.is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
