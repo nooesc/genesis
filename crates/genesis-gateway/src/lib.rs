@@ -48,13 +48,19 @@ pub struct RateLimiter {
     max_rpm: u32,
     /// Map from IP -> (count, window_start_epoch_secs).
     entries: Mutex<HashMap<IpAddr, (u32, u64)>>,
+    /// Epoch second of the last purge, used to amortize cleanup.
+    last_purge: std::sync::atomic::AtomicU64,
 }
+
+/// How often (in seconds) to purge stale rate-limit entries.
+const PURGE_INTERVAL_SECS: u64 = 120;
 
 impl RateLimiter {
     pub fn new(max_rpm: u32) -> Self {
         Self {
             max_rpm,
             entries: Mutex::new(HashMap::new()),
+            last_purge: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -75,8 +81,12 @@ impl RateLimiter {
             }
         };
 
-        // Purge stale entries (windows older than 120s)
-        map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 120);
+        // Amortized purge: only scan & remove stale entries periodically
+        let prev = self.last_purge.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(prev) >= PURGE_INTERVAL_SECS {
+            map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < PURGE_INTERVAL_SECS);
+            self.last_purge.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let entry = map.entry(ip).or_insert((0, now));
         if now.saturating_sub(entry.1) >= 60 {

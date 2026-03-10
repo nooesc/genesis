@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod http;
 pub mod url_safety;
 
 use std::collections::BTreeMap;
