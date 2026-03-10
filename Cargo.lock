@@ -766,6 +766,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "base64",
  "chrono",
  "ed25519-dalek",
  "futures-util",
