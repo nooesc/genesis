@@ -1,4 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use tokio::sync::RwLock;
 
 use crate::error::AuthError;
 use crate::jwt;
@@ -11,6 +14,28 @@ use crate::store::{self, CodexTokens};
 const DEVICE_CODE_POLL_INTERVAL_SECS: u64 = 5;
 const DEVICE_CODE_TIMEOUT_MINS: u32 = 15;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
+const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
+const CACHE_TTL_SECS: u64 = 60;
+
+struct CachedCredentials {
+    creds: ResolvedCredentials,
+    path: PathBuf,
+    cached_at: std::time::Instant,
+}
+
+static CREDENTIALS_CACHE: OnceLock<RwLock<Option<CachedCredentials>>> = OnceLock::new();
+
+fn cache() -> &'static RwLock<Option<CachedCredentials>> {
+    CREDENTIALS_CACHE.get_or_init(|| RwLock::new(None))
+}
+
+/// Read the Codex base URL, allowing override via `GENESIS_CODEX_BASE_URL` env var.
+fn codex_base_url() -> String {
+    std::env::var("GENESIS_CODEX_BASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned())
+}
 
 /// Credentials resolved from the auth store, ready for API calls.
 #[derive(Debug, Clone)]
@@ -276,21 +301,59 @@ pub async fn refresh_access_token(
 }
 
 /// Resolve Codex credentials from the auth store, refreshing if needed.
+///
+/// Uses an in-process cache with a 60-second TTL to avoid repeated disk reads.
+/// The cache also checks that the token is not about to expire; if it is, the
+/// cache is bypassed so the token can be refreshed.
 pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthError> {
+    // Check cache first.
+    {
+        let guard = cache().read().await;
+        if let Some(ref cached) = *guard {
+            let age = cached.cached_at.elapsed();
+            if cached.path == auth_store_path
+                && age.as_secs() < CACHE_TTL_SECS
+                && !jwt::is_expiring(&cached.creds.api_key, TOKEN_REFRESH_SKEW_SECS)
+            {
+                return Ok(cached.creds.clone());
+            }
+        }
+    }
+
+    // Cache miss or stale — resolve from disk.
+    let creds = resolve_credentials_inner(auth_store_path).await?;
+
+    // Update the cache.
+    {
+        let mut guard = cache().write().await;
+        *guard = Some(CachedCredentials {
+            creds: creds.clone(),
+            path: auth_store_path.to_path_buf(),
+            cached_at: std::time::Instant::now(),
+        });
+    }
+
+    Ok(creds)
+}
+
+/// Inner implementation that reads from disk and optionally refreshes the token.
+async fn resolve_credentials_inner(
+    auth_store_path: &Path,
+) -> Result<ResolvedCredentials, AuthError> {
     let store = store::read_store(auth_store_path)?;
     let codex = store::get_codex_state(&store).ok_or(AuthError::NotLoggedIn)?;
     let access_token = &codex.tokens.access_token;
-    let base_url = std::env::var("GENESIS_CODEX_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned());
+    let base_url = codex_base_url();
 
     // TODO: Add fd-lock file locking around token refresh to prevent concurrent
     // processes from racing on the same auth store. See design doc for the
     // lock-read-recheck-refresh-write-unlock protocol.
     if jwt::is_expiring(access_token, TOKEN_REFRESH_SKEW_SECS) {
         tracing::debug!("Codex access token expiring, attempting refresh");
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS))
+            .build()
+            .map_err(AuthError::Http)?;
         match refresh_access_token(&client, &codex.tokens.refresh_token).await {
             Ok(new_tokens) => {
                 let api_key = new_tokens.access_token.clone();
@@ -354,14 +417,9 @@ pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthEr
     let api_key = tokens.access_token.clone();
     store::save_codex_tokens(auth_store_path, tokens, "device-code")?;
 
-    let base_url = std::env::var("GENESIS_CODEX_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned());
-
     Ok(ResolvedCredentials {
         provider: CODEX_PROVIDER_ID.to_owned(),
-        base_url,
+        base_url: codex_base_url(),
         api_key,
         source: "device-code".to_owned(),
     })
@@ -456,5 +514,46 @@ mod tests {
         assert_eq!(creds.provider, CODEX_PROVIDER_ID);
         assert_eq!(creds.api_key, fake_jwt);
         assert_eq!(creds.base_url, CODEX_INFERENCE_URL);
+    }
+
+    #[tokio::test]
+    async fn resolve_credentials_serves_from_cache_after_file_deleted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("auth_cache_test.json");
+
+        // Create a token with far-future expiry
+        let claims = serde_json::json!({"exp": 9999999999_u64});
+        let header = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            r#"{"alg":"RS256"}"#,
+        );
+        let payload = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            serde_json::to_string(&claims).unwrap(),
+        );
+        let fake_jwt = format!("{header}.{payload}.sig");
+
+        store::save_codex_tokens(
+            &path,
+            CodexTokens {
+                access_token: fake_jwt.clone(),
+                refresh_token: "rt".to_owned(),
+            },
+            "test",
+        )
+        .unwrap();
+
+        // First call: resolves from disk and populates cache
+        let creds1 = resolve_credentials(&path).await.unwrap();
+        assert_eq!(creds1.api_key, fake_jwt);
+
+        // Delete the file
+        std::fs::remove_file(&path).unwrap();
+
+        // Second call: should succeed from cache even though file is gone
+        let creds2 = resolve_credentials(&path).await.unwrap();
+        assert_eq!(creds2.api_key, fake_jwt);
+        assert_eq!(creds2.provider, CODEX_PROVIDER_ID);
+        assert_eq!(creds2.source, "auth-store");
     }
 }
