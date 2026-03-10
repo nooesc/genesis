@@ -25,6 +25,7 @@ pub enum DeliveryPlatform {
     Slack,
     HomeAssistant,
     WhatsApp,
+    Signal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

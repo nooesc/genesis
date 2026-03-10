@@ -1,5 +1,6 @@
 pub mod discord;
 pub mod homeassistant;
+pub mod signal;
 pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
@@ -46,6 +47,7 @@ pub fn check_pairing(
         "discord" => "DISCORD_ALLOW_ALL_USERS",
         "whatsapp" => "WHATSAPP_ALLOW_ALL_USERS",
         "slack" => "SLACK_ALLOW_ALL_USERS",
+        "signal" => "SIGNAL_ALLOW_ALL_USERS",
         _ => "",
     };
 
@@ -98,6 +100,7 @@ fn platform_allowlist_env(platform: &str) -> &'static str {
         "discord" => "DISCORD_ALLOWED_USERS",
         "whatsapp" => "WHATSAPP_ALLOWED_USERS",
         "slack" => "SLACK_ALLOWED_USERS",
+        "signal" => "SIGNAL_ALLOWED_USERS",
         _ => "",
     }
 }
