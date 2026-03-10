@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -177,6 +177,100 @@ mod session_store_tests {
         assert!(store.get_session("recent").unwrap().is_some());
         assert_eq!(store.load_messages("recent").unwrap().len(), 1);
     }
+
+    #[test]
+    fn append_mirror_message_stores_mirror_fields() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-mirror", "telegram", None)
+            .expect("session should be created");
+
+        let msg_id = store
+            .append_mirror_message("session-mirror", "Hello from CLI", "cli")
+            .expect("mirror message should be stored");
+
+        assert!(msg_id > 0);
+
+        let messages = store
+            .load_messages("session-mirror")
+            .expect("messages should load");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content.as_deref(), Some("Hello from CLI"));
+        assert!(messages[0].mirror);
+        assert_eq!(messages[0].mirror_source.as_deref(), Some("cli"));
+    }
+
+    #[test]
+    fn mirror_messages_coexist_with_regular_messages() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-mixed", "slack", None)
+            .expect("session should be created");
+
+        store
+            .append_message("session-mixed", "user", Some("hello"), None, None)
+            .expect("regular message should be stored");
+        store
+            .append_mirror_message("session-mixed", "scheduled reminder", "schedule")
+            .expect("mirror message should be stored");
+        store
+            .append_message("session-mixed", "assistant", Some("got it"), None, None)
+            .expect("regular reply should be stored");
+
+        let messages = store
+            .load_messages("session-mixed")
+            .expect("messages should load");
+
+        assert_eq!(messages.len(), 3);
+        assert!(!messages[0].mirror);
+        assert!(messages[0].mirror_source.is_none());
+        assert!(messages[1].mirror);
+        assert_eq!(messages[1].mirror_source.as_deref(), Some("schedule"));
+        assert!(!messages[2].mirror);
+        assert!(messages[2].mirror_source.is_none());
+    }
+
+    #[test]
+    fn find_session_by_platform_chat_id_resolves_correctly() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("tg-12345", "telegram", Some("Telegram Chat"))
+            .expect("session should be created");
+        store
+            .create_session("slack-general", "slack", Some("Slack General"))
+            .expect("session should be created");
+
+        let tg = store
+            .find_session_by_platform_chat_id("telegram", "12345")
+            .expect("lookup should succeed");
+        assert!(tg.is_some());
+        assert_eq!(tg.unwrap().id, "tg-12345");
+
+        let slack = store
+            .find_session_by_platform_chat_id("slack", "general")
+            .expect("lookup should succeed");
+        assert!(slack.is_some());
+        assert_eq!(slack.unwrap().id, "slack-general");
+
+        let missing = store
+            .find_session_by_platform_chat_id("discord", "99999")
+            .expect("lookup should succeed");
+        assert!(missing.is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,6 +381,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 content TEXT,
                 tool_call_id TEXT,
                 tool_calls_json TEXT,
+                mirror INTEGER NOT NULL DEFAULT 0,
+                mirror_source TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -412,6 +508,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v2(&connection, database_path)?;
     migrate_to_v3(&connection, database_path)?;
     migrate_to_v4(&connection, database_path)?;
+    migrate_to_v5(&connection, database_path)?;
 
     connection
         .execute(
@@ -491,6 +588,29 @@ fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Result<(), St
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v4 → v5: add mirror columns to messages for delivery mirroring.
+fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    let has_column: bool = connection
+        .prepare("SELECT mirror FROM messages LIMIT 0")
+        .is_ok();
+
+    if has_column {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch(
+            "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -682,6 +802,12 @@ pub struct StoredMessage {
     pub content: Option<String>,
     pub tool_call_id: Option<String>,
     pub tool_calls_json: Option<String>,
+    /// Whether this message is a delivery mirror (cross-platform visibility record).
+    #[serde(default)]
+    pub mirror: bool,
+    /// Source label for mirrored messages (e.g. "cli", "telegram", "api").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_source: Option<String>,
     pub created_at: String,
 }
 
@@ -826,6 +952,68 @@ impl SessionStore {
             })?;
 
         Ok(message_id)
+    }
+
+    /// Append a delivery-mirror message to a session's transcript.
+    ///
+    /// Mirror messages record what was sent to a platform, giving the agent
+    /// cross-platform visibility into dispatched content. They are stored as
+    /// assistant messages with `mirror = true` and a `mirror_source` label.
+    pub fn append_mirror_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        mirror_source: &str,
+    ) -> Result<i64, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        connection
+            .execute(
+                "INSERT INTO messages (session_id, role, content, mirror, mirror_source, created_at)
+                 VALUES (?1, 'assistant', ?2, 1, ?3, CURRENT_TIMESTAMP)",
+                params![session_id, content, mirror_source],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let message_id = connection.last_insert_rowid();
+
+        // Touch session updated_at
+        connection
+            .execute(
+                "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![session_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        Ok(message_id)
+    }
+
+    /// Find the most recently updated session for a given platform and chat ID.
+    ///
+    /// Platform handlers construct deterministic session IDs from platform + chat_id
+    /// (e.g. `tg-12345`, `slack-C01ABC`, `discord-98765`, `wa-15551234`).
+    /// This method looks up a session by its expected ID pattern.
+    pub fn find_session_by_platform_chat_id(
+        &self,
+        platform: &str,
+        chat_id: &str,
+    ) -> Result<Option<SessionSummary>, StorageError> {
+        let session_id = match platform {
+            "telegram" => format!("tg-{chat_id}"),
+            "slack" => format!("slack-{chat_id}"),
+            "discord" => format!("discord-{chat_id}"),
+            "whatsapp" => format!("wa-{chat_id}"),
+            "homeassistant" => format!("ha-{chat_id}"),
+            _ => format!("{platform}-{chat_id}"),
+        };
+
+        self.get_session(&session_id)
     }
 
     /// Atomically add token usage to a session's running totals.
@@ -1099,8 +1287,8 @@ impl SessionStore {
         // Copy all messages from the source session
         connection
             .execute(
-                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json, created_at)
-                 SELECT ?1, role, content, tool_call_id, tool_calls_json, created_at
+                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json, mirror, mirror_source, created_at)
+                 SELECT ?1, role, content, tool_call_id, tool_calls_json, mirror, mirror_source, created_at
                  FROM messages WHERE session_id = ?2
                  ORDER BY id ASC",
                 params![new_session_id, source_session_id],
@@ -1158,7 +1346,7 @@ impl SessionStore {
 
         let mut stmt = connection
             .prepare(
-                "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, created_at
+                "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, mirror, mirror_source, created_at
                  FROM messages
                  WHERE session_id = ?1
                  ORDER BY id ASC",
@@ -1177,7 +1365,9 @@ impl SessionStore {
                     content: row.get(3)?,
                     tool_call_id: row.get(4)?,
                     tool_calls_json: row.get(5)?,
-                    created_at: row.get(6)?,
+                    mirror: row.get::<_, i64>(6)? != 0,
+                    mirror_source: row.get(7)?,
+                    created_at: row.get(8)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {

@@ -8845,6 +8845,8 @@ storage:
                 content: Some("hello".to_owned()),
                 tool_call_id: None,
                 tool_calls_json: None,
+                mirror: false,
+                mirror_source: None,
                 created_at: "2026-03-08 12:00:00".to_owned(),
             },
             genesis_storage::StoredMessage {
@@ -8854,6 +8856,8 @@ storage:
                 content: Some("hi there".to_owned()),
                 tool_call_id: None,
                 tool_calls_json: None,
+                mirror: false,
+                mirror_source: None,
                 created_at: "2026-03-08 12:00:01".to_owned(),
             },
         ];
@@ -8955,6 +8959,8 @@ storage:
             content: Some("hello".to_owned()),
             tool_call_id: None,
             tool_calls_json: None,
+            mirror: false,
+            mirror_source: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }];
 
@@ -8973,6 +8979,8 @@ storage:
             content: Some(long_content),
             tool_call_id: None,
             tool_calls_json: None,
+            mirror: false,
+            mirror_source: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }];
 
