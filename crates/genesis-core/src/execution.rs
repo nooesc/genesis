@@ -5,8 +5,8 @@ use std::time::Instant;
 use genesis_config::{LoadedConfig, TerminalConfig};
 use genesis_provider::{client_from_config, ChatMessage, MessageContent, ProviderError};
 use genesis_storage::{
-    bootstrap, format_user_traits, SessionStore, StorageError, StoredMessage, SubagentStore,
-    UserModelStore,
+    bootstrap, format_user_traits, SandboxStore, SessionStore, StorageError, StoredMessage,
+    SubagentStore, UserModelStore,
 };
 use genesis_types::DeliveryPlatform;
 use thiserror::Error;
@@ -16,8 +16,55 @@ use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::{SystemPromptBuilder, load_context_file};
+use crate::sandbox::{
+    BackendSpecific, SandboxBackend, SandboxConfig,
+    manager::SandboxManager,
+    singularity::SingularitySandbox,
+    modal::ModalSandbox,
+    daytona::DaytonaSandbox,
+};
 use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded, ToolRuntime};
+
+/// Pre-built sandbox components that persist across turns within a session.
+struct SandboxComponents {
+    manager: Arc<SandboxManager>,
+    backend: Arc<dyn SandboxBackend>,
+    base_config: SandboxConfig,
+}
+
+/// Bridges the async `SandboxManager` into the sync `SandboxExecutor` trait.
+struct SandboxExecutorImpl {
+    manager: Arc<SandboxManager>,
+    backend: Arc<dyn SandboxBackend>,
+    config: SandboxConfig,
+}
+
+impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
+    fn execute_in_sandbox(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<(String, i32), String> {
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.manager
+                    .execute(
+                        self.backend.clone(),
+                        &self.config,
+                        command,
+                        working_dir,
+                        Some(timeout),
+                    )
+                    .await
+                    .map(|r| (r.output, r.exit_code))
+                    .map_err(|e| e.to_string())
+            })
+        })
+    }
+}
 
 pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
@@ -31,6 +78,8 @@ pub struct SessionExecutionService<'a> {
     model_override: Option<(String, String)>,
     /// Override the personality for this service instance.
     personality_override: Option<String>,
+    /// Cached sandbox components for lifecycle-managed backends (persists across turns).
+    sandbox: std::sync::OnceLock<Option<SandboxComponents>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +122,7 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None }
+        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None, sandbox: std::sync::OnceLock::new() }
     }
 
     /// Create a service with MCP servers connected.
@@ -127,6 +176,7 @@ impl<'a> SessionExecutionService<'a> {
             default_working_dir: None,
             model_override: None,
             personality_override: None,
+            sandbox: std::sync::OnceLock::new(),
         })
     }
 
@@ -348,6 +398,21 @@ impl<'a> SessionExecutionService<'a> {
         // Set terminal backend if configured
         if let Some(terminal) = &self.loaded.config.runtime.terminal {
             tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
+
+            // Wire up lifecycle-managed sandbox execution (persists across turns)
+            let components = self.sandbox.get_or_init(|| {
+                create_sandbox_components(self.loaded)
+            });
+            if let Some(c) = components {
+                let mut config = c.base_config.clone();
+                config.task_id = execution_context.plan.session_id.clone();
+                let executor: Arc<dyn genesis_tools::SandboxExecutor> = Arc::new(SandboxExecutorImpl {
+                    manager: c.manager.clone(),
+                    backend: c.backend.clone(),
+                    config,
+                });
+                tool_runtime.set_sandbox_manager(executor);
+            }
         }
 
         // Set default working directory (worktree isolation)
@@ -1138,6 +1203,122 @@ pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
     }
 }
 
+/// Build sandbox components from config, returning None if the terminal config
+/// is not a sandbox backend or if the backend prerequisites are not met.
+fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents> {
+    let terminal = loaded.config.runtime.terminal.as_ref()?;
+
+    let (backend, base_config): (Arc<dyn SandboxBackend>, SandboxConfig) = match terminal {
+        TerminalConfig::Singularity {
+            image,
+            cpu,
+            memory_mb,
+            persistent,
+            bind,
+            working_dir,
+        } => {
+            let sb = match SingularitySandbox::new() {
+                Ok(sb) => sb,
+                Err(e) => {
+                    warn!("singularity backend unavailable: {e}");
+                    return None;
+                }
+            };
+            let config = SandboxConfig {
+                task_id: String::new(), // filled per-turn
+                image: image.clone(),
+                cpu: *cpu,
+                memory_mb: *memory_mb,
+                disk_mb: 0,
+                persistent: *persistent,
+                working_dir: working_dir.clone(),
+                snapshot_data: None,
+                backend_specific: BackendSpecific::Singularity { bind: bind.clone() },
+            };
+            (Arc::new(sb), config)
+        }
+        TerminalConfig::Modal {
+            image,
+            cpu,
+            memory_mb,
+            disk_mb,
+            persistent,
+            gpu,
+            app,
+            working_dir,
+        } => {
+            let data_dir = loaded.config.storage.data_dir.to_string_lossy().into_owned();
+            let sb = match ModalSandbox::new(&data_dir) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    warn!("modal backend unavailable: {e}");
+                    return None;
+                }
+            };
+            let config = SandboxConfig {
+                task_id: String::new(),
+                image: image.clone().unwrap_or_else(|| "python:3.11".to_string()),
+                cpu: *cpu,
+                memory_mb: *memory_mb,
+                disk_mb: *disk_mb,
+                persistent: *persistent,
+                working_dir: working_dir.clone(),
+                snapshot_data: None,
+                backend_specific: BackendSpecific::Modal {
+                    gpu: gpu.clone(),
+                    app: app.clone(),
+                },
+            };
+            (Arc::new(sb), config)
+        }
+        TerminalConfig::Daytona {
+            image,
+            cpu,
+            memory_mb,
+            disk_mb,
+            persistent,
+            target,
+            api_url,
+            working_dir,
+        } => {
+            let sb = match DaytonaSandbox::new() {
+                Ok(sb) => sb,
+                Err(e) => {
+                    warn!("daytona backend unavailable: {e}");
+                    return None;
+                }
+            };
+            let config = SandboxConfig {
+                task_id: String::new(),
+                image: image
+                    .clone()
+                    .unwrap_or_else(|| "nikolaik/python-nodejs:python3.11-nodejs20".to_string()),
+                cpu: *cpu,
+                memory_mb: *memory_mb,
+                disk_mb: *disk_mb,
+                persistent: *persistent,
+                working_dir: working_dir.clone(),
+                snapshot_data: None,
+                backend_specific: BackendSpecific::Daytona {
+                    target: target.clone(),
+                    api_url: api_url.clone(),
+                },
+            };
+            (Arc::new(sb), config)
+        }
+        _ => return None,
+    };
+
+    let store = SandboxStore::new(&loaded.config.storage.database_path);
+    let manager = Arc::new(SandboxManager::new(store, 300));
+
+    Some(SandboxComponents {
+        manager,
+        backend,
+        base_config,
+    })
+}
+
 /// Convert a genesis_config::TerminalConfig to a genesis_tools::TerminalBackend.
 fn terminal_config_to_backend(config: &TerminalConfig) -> genesis_tools::TerminalBackend {
     match config {
@@ -1160,6 +1341,59 @@ fn terminal_config_to_backend(config: &TerminalConfig) -> genesis_tools::Termina
             user: user.clone(),
             port: *port,
             identity_file: identity_file.clone(),
+        },
+        TerminalConfig::Singularity {
+            image,
+            cpu,
+            memory_mb,
+            persistent,
+            bind,
+            working_dir,
+        } => genesis_tools::TerminalBackend::Singularity {
+            image: image.clone(),
+            cpu: *cpu,
+            memory_mb: *memory_mb,
+            persistent: *persistent,
+            bind: bind.clone(),
+            working_dir: working_dir.clone(),
+        },
+        TerminalConfig::Modal {
+            image,
+            cpu,
+            memory_mb,
+            disk_mb,
+            persistent,
+            gpu,
+            app,
+            working_dir,
+        } => genesis_tools::TerminalBackend::Modal {
+            image: image.clone(),
+            cpu: *cpu,
+            memory_mb: *memory_mb,
+            disk_mb: *disk_mb,
+            persistent: *persistent,
+            gpu: gpu.clone(),
+            app: app.clone(),
+            working_dir: working_dir.clone(),
+        },
+        TerminalConfig::Daytona {
+            image,
+            cpu,
+            memory_mb,
+            disk_mb,
+            persistent,
+            target,
+            api_url,
+            working_dir,
+        } => genesis_tools::TerminalBackend::Daytona {
+            image: image.clone(),
+            cpu: *cpu,
+            memory_mb: *memory_mb,
+            disk_mb: *disk_mb,
+            persistent: *persistent,
+            target: target.clone(),
+            api_url: api_url.clone(),
+            working_dir: working_dir.clone(),
         },
     }
 }
@@ -1588,5 +1822,71 @@ mod tests {
         service.set_personality_override("pirate".to_owned());
         // The personality_override field should be set
         assert_eq!(service.personality_override.as_deref(), Some("pirate"));
+    }
+
+    #[test]
+    fn terminal_config_to_backend_singularity() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Singularity {
+            image: "docker://ubuntu:22.04".to_owned(),
+            cpu: 2.0,
+            memory_mb: 8192,
+            persistent: true,
+            bind: Some(vec!["/data:/data".to_owned()]),
+            working_dir: Some("/workspace".to_owned()),
+        };
+        let backend = terminal_config_to_backend(&config);
+        match backend {
+            genesis_tools::TerminalBackend::Singularity {
+                image,
+                cpu,
+                memory_mb,
+                persistent,
+                ..
+            } => {
+                assert_eq!(image, "docker://ubuntu:22.04");
+                assert_eq!(cpu, 2.0);
+                assert_eq!(memory_mb, 8192);
+                assert!(persistent);
+            }
+            _ => panic!("expected Singularity"),
+        }
+    }
+
+    #[test]
+    fn terminal_config_to_backend_modal() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Modal {
+            image: Some("python:3.11".to_owned()),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            gpu: Some("T4".to_owned()),
+            app: None,
+            working_dir: None,
+        };
+        let backend = terminal_config_to_backend(&config);
+        assert!(matches!(backend, genesis_tools::TerminalBackend::Modal { .. }));
+    }
+
+    #[test]
+    fn terminal_config_to_backend_daytona() {
+        use super::terminal_config_to_backend;
+
+        let config = genesis_config::TerminalConfig::Daytona {
+            image: Some("ubuntu:22.04".to_owned()),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
+        };
+        let backend = terminal_config_to_backend(&config);
+        assert!(matches!(backend, genesis_tools::TerminalBackend::Daytona { .. }));
     }
 }

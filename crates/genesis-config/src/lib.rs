@@ -180,6 +180,10 @@ pub struct CacheConfig {
 }
 
 fn default_true() -> bool { true }
+fn default_cpu() -> f32 { 1.0 }
+fn default_memory() -> u32 { 5120 }
+fn default_disk() -> u32 { 51200 }
+fn default_daytona_disk() -> u32 { 10240 }
 fn default_cache_ttl() -> u32 { 3600 }
 fn default_cache_context_messages() -> usize { 4 }
 
@@ -267,7 +271,7 @@ pub enum ContextSecurityPolicy {
 /// Terminal backend configuration for shell command execution.
 /// When configured, `shell_exec` routes commands through the specified backend
 /// instead of the local shell.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "backend")]
 pub enum TerminalConfig {
     /// Execute in a Docker container.
@@ -289,6 +293,61 @@ pub enum TerminalConfig {
         port: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
         identity_file: Option<String>,
+    },
+    /// Execute inside a Singularity/Apptainer container (HPC environments).
+    #[serde(rename = "singularity")]
+    Singularity {
+        image: String,
+        #[serde(default = "default_cpu")]
+        cpu: f32,
+        #[serde(default = "default_memory")]
+        memory_mb: u32,
+        #[serde(default = "default_true")]
+        persistent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// Execute via Modal cloud sandbox.
+    #[serde(rename = "modal")]
+    Modal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
+        #[serde(default = "default_cpu")]
+        cpu: f32,
+        #[serde(default = "default_memory")]
+        memory_mb: u32,
+        #[serde(default = "default_disk")]
+        disk_mb: u32,
+        #[serde(default = "default_true")]
+        persistent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gpu: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+    /// Execute in a Daytona workspace.
+    #[serde(rename = "daytona")]
+    Daytona {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<String>,
+        #[serde(default = "default_cpu")]
+        cpu: f32,
+        #[serde(default = "default_memory")]
+        memory_mb: u32,
+        #[serde(default = "default_daytona_disk")]
+        disk_mb: u32,
+        #[serde(default = "default_true")]
+        persistent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
 }
 
@@ -1535,5 +1594,48 @@ toolsets:
     fn toolsets_default_empty() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.toolsets.is_empty());
+    }
+
+    #[test]
+    fn terminal_config_singularity_round_trips() {
+        let json = r#"{"backend":"singularity","image":"docker://ubuntu:22.04","cpu":2.0,"memory_mb":8192,"persistent":true}"#;
+        let config: super::TerminalConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            super::TerminalConfig::Singularity { image, cpu, memory_mb, persistent, .. } => {
+                assert_eq!(image, "docker://ubuntu:22.04");
+                assert_eq!(*cpu, 2.0);
+                assert_eq!(*memory_mb, 8192);
+                assert!(*persistent);
+            }
+            _ => panic!("expected Singularity"),
+        }
+    }
+
+    #[test]
+    fn terminal_config_modal_defaults() {
+        let json = r#"{"backend":"modal"}"#;
+        let config: super::TerminalConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            super::TerminalConfig::Modal { cpu, memory_mb, disk_mb, persistent, .. } => {
+                assert_eq!(*cpu, 1.0);
+                assert_eq!(*memory_mb, 5120);
+                assert_eq!(*disk_mb, 51200);
+                assert!(*persistent);
+            }
+            _ => panic!("expected Modal"),
+        }
+    }
+
+    #[test]
+    fn terminal_config_daytona_round_trips() {
+        let json = r#"{"backend":"daytona","image":"ubuntu:22.04","disk_mb":10240}"#;
+        let config: super::TerminalConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            super::TerminalConfig::Daytona { image, disk_mb, .. } => {
+                assert_eq!(image.as_deref(), Some("ubuntu:22.04"));
+                assert_eq!(*disk_mb, 10240);
+            }
+            _ => panic!("expected Daytona"),
+        }
     }
 }

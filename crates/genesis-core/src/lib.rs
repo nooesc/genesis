@@ -30,6 +30,7 @@ pub mod templates;
 pub mod toolset;
 pub mod workflow;
 pub mod trajectory;
+pub mod sandbox;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -199,6 +200,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             allow_destructive_tools: execution_context.allow_destructive_tools,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         },
         mcp: None,
     }
@@ -905,6 +907,11 @@ impl ToolRuntime {
     /// Set the terminal backend for shell command execution.
     pub fn set_terminal_backend(&mut self, backend: genesis_tools::TerminalBackend) {
         self.context.terminal_backend = Some(backend);
+    }
+
+    /// Set the sandbox executor for lifecycle-managed backends.
+    pub fn set_sandbox_manager(&mut self, executor: Arc<dyn genesis_tools::SandboxExecutor>) {
+        self.context.sandbox_manager = Some(executor);
     }
 
     /// Create a new ToolRuntime with a different session ID.
