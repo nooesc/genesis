@@ -1,4 +1,5 @@
 pub mod browse;
+pub mod browser;
 pub mod channel_directory;
 pub mod clarify;
 pub mod code_execution;
