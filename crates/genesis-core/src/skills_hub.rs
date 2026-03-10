@@ -494,6 +494,7 @@ impl SkillsHub {
     ) -> Result<(Vec<SkillManifest>, usize), SkillHubError> {
         let all = self.list_all(source_filter)?;
         let total = all.len();
+        let page_size = page_size.max(1);
         let start = page.saturating_sub(1) * page_size;
         let page_items: Vec<SkillManifest> = all.into_iter().skip(start).take(page_size).collect();
         Ok((page_items, total))
@@ -526,7 +527,7 @@ impl SkillsHub {
     /// Inspect a skill: find it across sources and return its manifest
     /// plus a security report from quarantine scanning.
     pub fn inspect(&self, name: &str) -> Result<(SkillManifest, GuardReport), SkillHubError> {
-        let manifest = self.find_manifest(name)?;
+        let (manifest, source) = self.find_manifest_and_source(name)?;
 
         // Fetch into quarantine for inspection
         fs::create_dir_all(&self.quarantine_dir)?;
@@ -536,7 +537,6 @@ impl SkillsHub {
         }
         fs::create_dir_all(&quarantine_path)?;
 
-        let source = self.find_source_for(&manifest)?;
         source.fetch(&manifest, &quarantine_path)?;
 
         let trust = trust_level_for_source(&manifest.source);
@@ -553,7 +553,7 @@ impl SkillsHub {
     ///
     /// If `force` is true, installs even if the guard reports `Dangerous`.
     pub fn install(&self, name: &str, force: bool) -> Result<(SkillLock, GuardReport), SkillHubError> {
-        let manifest = self.find_manifest(name)?;
+        let (manifest, source) = self.find_manifest_and_source(name)?;
 
         // Step 1: Fetch into quarantine
         fs::create_dir_all(&self.quarantine_dir)?;
@@ -563,7 +563,6 @@ impl SkillsHub {
         }
         fs::create_dir_all(&quarantine_path)?;
 
-        let source = self.find_source_for(&manifest)?;
         source.fetch(&manifest, &quarantine_path)?;
 
         // Step 2: Security scan
@@ -742,34 +741,22 @@ impl SkillsHub {
         Ok(all)
     }
 
-    fn find_manifest(&self, name: &str) -> Result<SkillManifest, SkillHubError> {
+    /// Find a manifest by name and return it together with a reference to its
+    /// source provider, performing only a single `list()` pass over all sources.
+    fn find_manifest_and_source(
+        &self,
+        name: &str,
+    ) -> Result<(SkillManifest, &dyn SkillSourceProvider), SkillHubError> {
         for source in &self.sources {
             if let Ok(manifests) = source.list() {
                 for manifest in manifests {
                     if manifest.name == name {
-                        return Ok(manifest);
+                        return Ok((manifest, source.as_ref()));
                     }
                 }
             }
         }
         Err(SkillHubError::NotFound(name.to_owned()))
-    }
-
-    fn find_source_for<'a>(
-        &'a self,
-        manifest: &SkillManifest,
-    ) -> Result<&'a dyn SkillSourceProvider, SkillHubError> {
-        // Match by source type
-        for source in &self.sources {
-            if let Ok(manifests) = source.list() {
-                for m in &manifests {
-                    if m.name == manifest.name && m.source == manifest.source {
-                        return Ok(source.as_ref());
-                    }
-                }
-            }
-        }
-        Err(SkillHubError::NotFound(manifest.name.clone()))
     }
 }
 
@@ -1080,9 +1067,20 @@ fn github_download(
         request = request.bearer_auth(token);
     }
 
-    request
+    let response = request
         .send()
-        .and_then(|r| r.bytes())
+        .map_err(|e| SkillHubError::Network(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(SkillHubError::Network(format!(
+            "GitHub download returned {} for {}",
+            response.status(),
+            url,
+        )));
+    }
+
+    response
+        .bytes()
         .map(|b| b.to_vec())
         .map_err(|e| SkillHubError::Network(e.to_string()))
 }
@@ -1957,6 +1955,39 @@ mod tests {
         assert_eq!(installed.len(), 2);
         assert_eq!(installed[0].name, "alpha");
         assert_eq!(installed[1].name, "beta");
+    }
+
+    #[test]
+    fn hub_browse_page_size_zero_returns_at_least_one() {
+        let dir = tempdir().unwrap();
+        let data_dir = tempdir().unwrap();
+
+        write_skill(
+            dir.path(),
+            "skill-a",
+            &sample_skill_md("skill-a", "Skill A", &["test"]),
+            None,
+        );
+        write_skill(
+            dir.path(),
+            "skill-b",
+            &sample_skill_md("skill-b", "Skill B", &["test"]),
+            None,
+        );
+
+        let mut hub = SkillsHub::with_paths(
+            data_dir.path().join("installed"),
+            data_dir.path().join("quarantine"),
+            data_dir.path().join("lock.json"),
+            data_dir.path().join("taps.json"),
+        );
+        hub.add_optional_source(dir.path());
+
+        let (page, total) = hub.browse(1, 0, None).unwrap();
+        assert_eq!(total, 2);
+        // page_size=0 is clamped to 1, so we should get 1 result, not 0
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].name, "skill-a");
     }
 
     #[test]
