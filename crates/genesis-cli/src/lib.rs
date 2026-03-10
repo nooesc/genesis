@@ -287,23 +287,11 @@ pub enum Command {
     Workflow(WorkflowCommand),
     /// Sign in to an LLM provider (e.g. OpenAI Codex via ChatGPT)
     #[command(about = "Sign in to an LLM provider via OAuth device code flow")]
-    Login {
-        /// Use device code flow directly (skip provider selection)
-        #[arg(long)]
-        device_auth: bool,
-
-        /// Provider to authenticate with (e.g. "openai-codex")
-        #[arg(long)]
-        provider: Option<String>,
-    },
+    Login,
 
     /// Sign out and clear stored authentication credentials
     #[command(about = "Sign out and clear stored OAuth credentials")]
-    Logout {
-        /// Provider to log out from (default: active provider)
-        #[arg(long)]
-        provider: Option<String>,
-    },
+    Logout,
 
     #[command(about = "Generate shell completions for bash, zsh, fish, elvish, or powershell")]
     Completions {
@@ -1621,10 +1609,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(output)
             }
         }
-        Command::Login { device_auth, provider } => {
-            run_login(cli.config, device_auth, provider).await
-        }
-        Command::Logout { provider } => run_logout(cli.config, provider),
+        Command::Login => run_login(cli.config).await,
+        Command::Logout => run_logout(cli.config),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
@@ -3596,7 +3582,8 @@ async fn run_batch_item(
         model,
         loaded.config.provider.base_url.as_deref(),
         loaded.config.provider.api_key_env.as_deref(),
-    )?;
+    )
+    .await?;
 
     let mut agent = genesis_core::agent_loop::AgentLoop::new(
         client,
@@ -3621,7 +3608,8 @@ async fn run_batch_item(
             &tp.model,
             tp.base_url.as_deref(),
             tp.api_key_env.as_deref(),
-        )?;
+        )
+        .await?;
         agent.set_tool_client(tool_client);
     }
 
@@ -3633,7 +3621,8 @@ async fn run_batch_item(
                 &fp.model,
                 fp.base_url.as_deref(),
                 fp.api_key_env.as_deref(),
-            )?;
+            )
+            .await?;
             fallbacks.push(fb_client);
         }
         agent.set_fallback_clients(fallbacks);
@@ -5253,8 +5242,6 @@ fn parse_compression_format(raw: Option<&str>) -> Result<CompressionFormat, CliE
 
 async fn run_login(
     config_path: Option<PathBuf>,
-    _device_auth: bool,
-    _provider: Option<String>,
 ) -> Result<String, CliError> {
     use genesis_config::{update_provider_in_file, AppPaths};
 
@@ -5272,13 +5259,11 @@ async fn run_login(
             let input = input.trim().to_lowercase();
 
             if input.is_empty() || input == "y" || input == "yes" {
-                let codex_config = genesis_auth::provider::lookup("openai-codex")
-                    .expect("openai-codex provider must exist");
                 update_provider_in_file(
                     &paths.config_path,
                     Some("openai-codex"),
                     None,
-                    Some(Some(codex_config.inference_base_url)),
+                    Some(Some(genesis_auth::provider::CODEX_INFERENCE_URL)),
                     None,
                 )?;
                 return Ok(format!(
@@ -5301,13 +5286,11 @@ async fn run_login(
 
         if input == "y" || input == "yes" {
             genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, "codex-migration")?;
-            let codex_config = genesis_auth::provider::lookup("openai-codex")
-                .expect("openai-codex provider must exist");
             update_provider_in_file(
                 &paths.config_path,
                 Some("openai-codex"),
                 None,
-                Some(Some(codex_config.inference_base_url)),
+                Some(Some(genesis_auth::provider::CODEX_INFERENCE_URL)),
                 None,
             )?;
             return Ok(format!(
@@ -5341,12 +5324,11 @@ async fn run_login(
 
 fn run_logout(
     config_path: Option<PathBuf>,
-    _provider: Option<String>,
 ) -> Result<String, CliError> {
     let auth_path = genesis_auth::default_auth_path()?;
     let removed = genesis_auth::store::clear_active_provider(&auth_path)?;
 
-    let _ = config_path; // reserved for future per-provider logout
+    let _ = config_path;
 
     match removed {
         Some(provider_id) => Ok(format!(
@@ -5429,7 +5411,7 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
         let _ = bootstrap(&paths.database_path)?;
 
-        return run_login(config_path, true, Some("openai-codex".to_owned())).await;
+        return run_login(config_path).await;
     }
 
     // Step 2: Choose model
@@ -6211,7 +6193,8 @@ async fn run_benchmark(
             &loaded.config.provider.model,
             loaded.config.provider.base_url.as_deref(),
             loaded.config.provider.api_key_env.as_deref(),
-        )?,
+        )
+        .await?,
     )];
 
     if include_tool_provider {
@@ -6225,7 +6208,8 @@ async fn run_benchmark(
                     &tp.model,
                     tp.base_url.as_deref(),
                     tp.api_key_env.as_deref(),
-                )?,
+                )
+                .await?,
             ));
         }
     }
@@ -6600,6 +6584,7 @@ async fn verify_api_connectivity(loaded: &LoadedConfig) -> Result<u128, String> 
         loaded.config.provider.base_url.as_deref(),
         loaded.config.provider.api_key_env.as_deref(),
     )
+    .await
     .map_err(|e| format!("failed to create client: {e}"))?;
 
     let mut request = ChatCompletionRequest::new(

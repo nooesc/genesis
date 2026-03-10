@@ -442,7 +442,8 @@ impl<'a> SessionExecutionService<'a> {
             model,
             self.loaded.config.provider.base_url.as_deref(),
             self.loaded.config.provider.api_key_env.as_deref(),
-        )?;
+        )
+        .await?;
         debug!(
             provider_backend = %backend,
             model = %model,
@@ -488,7 +489,8 @@ impl<'a> SessionExecutionService<'a> {
                 &tp.model,
                 tp.base_url.as_deref(),
                 tp.api_key_env.as_deref(),
-            )?;
+            )
+            .await?;
             agent.set_tool_client(tool_client);
             debug!(
                 tool_provider_backend = %tp.backend,
@@ -506,7 +508,8 @@ impl<'a> SessionExecutionService<'a> {
                     &fp.model,
                     fp.base_url.as_deref(),
                     fp.api_key_env.as_deref(),
-                )?;
+                )
+                .await?;
                 fallbacks.push(fb_client);
             }
             agent.set_fallback_clients(fallbacks);
@@ -934,7 +937,9 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                     model,
                     loaded.config.provider.base_url.as_deref(),
                     loaded.config.provider.api_key_env.as_deref(),
-                ) {
+                )
+                .await
+                {
                     Ok(c) => c,
                     Err(e) => {
                         error!(error = %e, "failed to create chat client for subagent");

@@ -4,7 +4,7 @@ const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
-const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+use genesis_auth::provider::CODEX_INFERENCE_URL;
 
 /// Resolved provider endpoint ready to use for API calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +51,7 @@ fn default_base_url(backend: &str) -> &str {
         "openai" => OPENAI_BASE_URL,
         "anthropic" => ANTHROPIC_BASE_URL,
         "gemini" | "google" => GEMINI_BASE_URL,
-        "openai-codex" => CODEX_BASE_URL,
+        "openai-codex" => CODEX_INFERENCE_URL,
         _ => OPENAI_BASE_URL,
     }
 }
@@ -84,25 +84,6 @@ fn resolve_api_key(
     }
 
     String::new()
-}
-
-/// Attempt to resolve credentials from the OAuth auth store for the openai-codex backend.
-/// Returns `None` if the backend isn't openai-codex or no OAuth session exists.
-pub fn try_resolve_oauth(backend: &str, model: &str) -> Option<ResolvedProvider> {
-    if !backend.trim().eq_ignore_ascii_case("openai-codex") {
-        return None;
-    }
-
-    let auth_path = genesis_auth::default_auth_path().ok()?;
-    let store = genesis_auth::store::read_store(&auth_path).ok()?;
-    let codex = genesis_auth::store::get_codex_state(&store)?;
-
-    Some(ResolvedProvider {
-        base_url: CODEX_BASE_URL.to_owned(),
-        api_key: codex.tokens.access_token.clone(),
-        model: model.to_owned(),
-        backend: "openai-codex".to_owned(),
-    })
 }
 
 #[cfg(test)]
@@ -204,14 +185,9 @@ mod tests {
     fn resolves_openai_codex_base_url() {
         let env = BTreeMap::new();
         let resolved = resolve("openai-codex", "o3-pro", None, None, &env);
-        assert_eq!(resolved.base_url, CODEX_BASE_URL);
+        assert_eq!(resolved.base_url, CODEX_INFERENCE_URL);
         assert_eq!(resolved.backend, "openai-codex");
         assert_eq!(resolved.model, "o3-pro");
     }
 
-    #[test]
-    fn try_resolve_oauth_returns_none_for_non_codex_backend() {
-        assert!(try_resolve_oauth("openai", "gpt-4").is_none());
-        assert!(try_resolve_oauth("anthropic", "claude").is_none());
-    }
 }
