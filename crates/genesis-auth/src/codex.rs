@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -17,16 +18,15 @@ const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
 const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
 const CACHE_TTL_SECS: u64 = 60;
 
-struct CachedCredentials {
+struct CachedEntry {
     creds: ResolvedCredentials,
-    path: PathBuf,
     cached_at: std::time::Instant,
 }
 
-static CREDENTIALS_CACHE: OnceLock<RwLock<Option<CachedCredentials>>> = OnceLock::new();
+static CREDENTIALS_CACHE: OnceLock<RwLock<HashMap<PathBuf, CachedEntry>>> = OnceLock::new();
 
-fn cache() -> &'static RwLock<Option<CachedCredentials>> {
-    CREDENTIALS_CACHE.get_or_init(|| RwLock::new(None))
+fn cache() -> &'static RwLock<HashMap<PathBuf, CachedEntry>> {
+    CREDENTIALS_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 /// Read the Codex base URL, allowing override via `GENESIS_CODEX_BASE_URL` env var.
@@ -306,34 +306,41 @@ pub async fn refresh_access_token(
 /// The cache also checks that the token is not about to expire; if it is, the
 /// cache is bypassed so the token can be refreshed.
 pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthError> {
-    // Check cache first.
+    // Fast path: check cache under read lock.
     {
         let guard = cache().read().await;
-        if let Some(ref cached) = *guard {
-            let age = cached.cached_at.elapsed();
-            if cached.path == auth_store_path
-                && age.as_secs() < CACHE_TTL_SECS
-                && !jwt::is_expiring(&cached.creds.api_key, TOKEN_REFRESH_SKEW_SECS)
-            {
-                return Ok(cached.creds.clone());
+        if let Some(entry) = guard.get(auth_store_path) {
+            if cache_hit(entry) {
+                return Ok(entry.creds.clone());
             }
         }
     }
 
-    // Cache miss or stale — resolve from disk.
-    let creds = resolve_credentials_inner(auth_store_path).await?;
-
-    // Update the cache.
-    {
-        let mut guard = cache().write().await;
-        *guard = Some(CachedCredentials {
-            creds: creds.clone(),
-            path: auth_store_path.to_path_buf(),
-            cached_at: std::time::Instant::now(),
-        });
+    // Slow path: acquire write lock, double-check, then resolve.
+    // Holding the write lock across the refresh prevents thundering herd
+    // (multiple concurrent callers all triggering parallel token refreshes).
+    let mut guard = cache().write().await;
+    if let Some(entry) = guard.get(auth_store_path) {
+        if cache_hit(entry) {
+            return Ok(entry.creds.clone());
+        }
     }
 
+    let creds = resolve_credentials_inner(auth_store_path).await?;
+    guard.insert(
+        auth_store_path.to_path_buf(),
+        CachedEntry {
+            creds: creds.clone(),
+            cached_at: std::time::Instant::now(),
+        },
+    );
+
     Ok(creds)
+}
+
+fn cache_hit(entry: &CachedEntry) -> bool {
+    entry.cached_at.elapsed().as_secs() < CACHE_TTL_SECS
+        && !jwt::is_expiring(&entry.creds.api_key, TOKEN_REFRESH_SKEW_SECS)
 }
 
 /// Inner implementation that reads from disk and optionally refreshes the token.
