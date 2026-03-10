@@ -121,6 +121,7 @@ fn resolve_session_id(platform: &str, chat_id: &str) -> String {
         "discord" => format!("discord-{chat_id}"),
         "whatsapp" => format!("wa-{chat_id}"),
         "homeassistant" => format!("ha-{chat_id}"),
+        "signal" => format!("signal-{chat_id}"),
         other => format!("{other}-{chat_id}"),
     }
 }

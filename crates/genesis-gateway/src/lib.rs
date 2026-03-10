@@ -438,7 +438,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/discord/interactions", post(platforms::discord::interactions_handler))
         .route("/slack/events", post(platforms::slack::events_handler))
         .route("/whatsapp/webhook", get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler))
-        .route("/homeassistant/webhook", post(platforms::homeassistant::webhook_handler));
+        .route("/homeassistant/webhook", post(platforms::homeassistant::webhook_handler))
+        .route("/signal/webhook", post(platforms::signal::webhook_handler))
+        .route("/signal/poll", post(platforms::signal::poll_handler));
 
     // Rate-limited routes (protected + platform webhooks)
     let rate_limited = Router::new()
