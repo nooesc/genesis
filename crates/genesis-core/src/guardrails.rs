@@ -286,7 +286,11 @@ impl CompiledGuardrails {
                 ),
                 action: ViolationAction::Redact,
             });
-            content = output[..self.config.max_response_length].to_owned();
+            let mut boundary = self.config.max_response_length;
+            while boundary > 0 && !output.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            content = output[..boundary].to_owned();
             content.push_str("\n[Response truncated by guardrail]");
         }
 
