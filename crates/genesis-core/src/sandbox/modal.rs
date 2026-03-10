@@ -4,8 +4,6 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, warn};
-
 use super::{
     BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance,
 };
@@ -246,17 +244,10 @@ impl SandboxBackend for ModalSandbox {
     async fn cleanup(
         &self,
         instance: &SandboxInstance,
-        persistent: bool,
+        _persistent: bool,
     ) -> Result<(), SandboxError> {
-        // If persistent, snapshot before terminating so state can be resumed.
-        if persistent {
-            match self.snapshot(instance).await {
-                Ok(Some(_)) => debug!(id = %instance.id, "modal snapshot saved before cleanup"),
-                Ok(None) => debug!(id = %instance.id, "no modal snapshot data before cleanup"),
-                Err(e) => warn!(id = %instance.id, error = %e, "modal snapshot failed before cleanup"),
-            }
-        }
-
+        // Snapshot is handled by SandboxManager::snapshot_and_cleanup before
+        // this method is called — no need to snapshot again here.
         let args = serde_json::json!({ "sandbox_id": instance.id });
         self.call_sidecar("terminate", &args).await?;
         Ok(())

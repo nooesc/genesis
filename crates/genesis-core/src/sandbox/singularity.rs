@@ -162,7 +162,10 @@ pub fn build_start_args(
 pub fn prepare_exec_command(command: &str, cwd: Option<&str>) -> (String, String) {
     match cwd {
         Some(dir) if dir.starts_with('~') => {
-            (format!("cd {dir} && {command}"), "/tmp".to_string())
+            // Quote the directory to guard against spaces and metacharacters.
+            // Use double-quotes to preserve tilde expansion in bash.
+            let quoted = format!("\"{}\"", dir.replace('"', "\\\""));
+            (format!("cd {quoted} && {command}"), "/tmp".to_string())
         }
         Some(dir) => (command.to_string(), dir.to_string()),
         None => (command.to_string(), "/tmp".to_string()),
@@ -478,7 +481,14 @@ mod tests {
     #[test]
     fn test_prepare_exec_command_tilde() {
         let (cmd, pwd) = prepare_exec_command("ls -la", Some("~/workspace"));
-        assert_eq!(cmd, "cd ~/workspace && ls -la");
+        assert_eq!(cmd, "cd \"~/workspace\" && ls -la");
+        assert_eq!(pwd, "/tmp");
+    }
+
+    #[test]
+    fn test_prepare_exec_command_tilde_with_spaces() {
+        let (cmd, pwd) = prepare_exec_command("ls", Some("~/my project"));
+        assert_eq!(cmd, "cd \"~/my project\" && ls");
         assert_eq!(pwd, "/tmp");
     }
 

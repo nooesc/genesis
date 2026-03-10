@@ -91,7 +91,10 @@ impl DaytonaSandbox {
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            // No global read timeout — the execute endpoint can run commands
+            // for minutes; per-request timeout is sent server-side via
+            // DaytonaExecRequest::timeout.
             .build()
             .map_err(SandboxError::HttpError)?;
 
