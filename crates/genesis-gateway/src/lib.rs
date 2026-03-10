@@ -4,6 +4,7 @@
 //! can send messages to Eve and receive responses.
 
 pub mod commands;
+pub mod mirror;
 pub mod platforms;
 pub mod verify;
 pub mod webhooks;
@@ -2351,6 +2352,18 @@ async fn chat_handler(
             }),
         );
 
+        // Append delivery mirror for cross-platform visibility.
+        // The mirror records the response in the session so the agent has
+        // visibility into what was dispatched, regardless of which source
+        // (API, CLI, schedule) triggered the turn.
+        mirror::append_delivery_mirror(
+            &metrics_state.loaded.config.storage.database_path,
+            &request.platform,
+            &session_id,
+            &outcome.result.response,
+            "api",
+        );
+
         // Record token metrics + duration histogram
         metrics_state.input_tokens_total.fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
         metrics_state.output_tokens_total.fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
@@ -2942,6 +2955,16 @@ async fn chat_stream_handler(
                     tool_calls_made = outcome.result.tool_calls_made,
                     "streaming chat request completed"
                 );
+
+                // Append delivery mirror for cross-platform visibility.
+                mirror::append_delivery_mirror(
+                    &state_for_task.loaded.config.storage.database_path,
+                    &platform,
+                    &outcome.session_id,
+                    &outcome.result.response,
+                    "api",
+                );
+
                 if let Ok(payload) = serde_json::to_string(&StreamDoneResponse {
                     session_id: outcome.session_id,
                     response: outcome.result.response,

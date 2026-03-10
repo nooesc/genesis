@@ -1192,6 +1192,8 @@ mod tests {
                 r#"[{"id":"tool-1","type":"function","function":{"name":"echo","arguments":"{\"message\":\"hi\"}"}}]"#
                     .to_owned(),
             ),
+            mirror: false,
+            mirror_source: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }])
         .expect("history should restore");

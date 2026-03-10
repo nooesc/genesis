@@ -253,6 +253,15 @@ pub async fn events_handler(
             {
                 error!(error = %e, "failed to post slack message");
             }
+
+            // Append delivery mirror for cross-platform visibility.
+            crate::mirror::append_delivery_mirror(
+                &state.loaded.config.storage.database_path,
+                "slack",
+                &channel,
+                &reply_text,
+                "slack",
+            );
         }
         .instrument(span),
     );

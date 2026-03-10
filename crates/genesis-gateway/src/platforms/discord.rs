@@ -292,6 +292,15 @@ pub async fn interactions_handler(
                 {
                     error!(error = %e, "failed to send discord followup");
                 }
+
+                // Append delivery mirror for cross-platform visibility.
+                crate::mirror::append_delivery_mirror(
+                    &state.loaded.config.storage.database_path,
+                    "discord",
+                    &channel_id,
+                    &reply_text,
+                    "discord",
+                );
             }
             .instrument(span),
         );

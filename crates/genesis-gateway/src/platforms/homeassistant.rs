@@ -167,6 +167,19 @@ pub async fn webhook_handler(
         "home assistant turn completed"
     );
 
+    // Append delivery mirror for cross-platform visibility.
+    let ha_chat_id = request
+        .entity_id
+        .as_deref()
+        .unwrap_or("default");
+    crate::mirror::append_delivery_mirror(
+        &state.loaded.config.storage.database_path,
+        "homeassistant",
+        ha_chat_id,
+        &outcome.result.response,
+        "homeassistant",
+    );
+
     Ok(Json(HomeAssistantResponse {
         response: outcome.result.response,
         session_id: outcome.session_id,

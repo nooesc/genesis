@@ -463,6 +463,15 @@ pub async fn webhook_handler(
             if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply_text, Some(message_id)).await {
                 error!(error = %e, "failed to send telegram reply");
             }
+
+            // Append delivery mirror for cross-platform visibility.
+            crate::mirror::append_delivery_mirror(
+                &state.loaded.config.storage.database_path,
+                "telegram",
+                &chat_id.to_string(),
+                &reply_text,
+                "telegram",
+            );
         }
         .instrument(span),
     );

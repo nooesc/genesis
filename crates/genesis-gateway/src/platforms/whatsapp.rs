@@ -353,6 +353,15 @@ pub async fn webhook_handler(
                         {
                             error!(error = %e, "failed to send whatsapp reply");
                         }
+
+                        // Append delivery mirror for cross-platform visibility.
+                        crate::mirror::append_delivery_mirror(
+                            &state.loaded.config.storage.database_path,
+                            "whatsapp",
+                            &from,
+                            &reply_text,
+                            "whatsapp",
+                        );
                     }
                     .instrument(span),
                 );
