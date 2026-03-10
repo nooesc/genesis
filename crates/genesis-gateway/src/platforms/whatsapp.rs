@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};

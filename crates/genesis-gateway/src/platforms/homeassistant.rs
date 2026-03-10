@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
 use axum::http::{header, HeaderMap, StatusCode};
