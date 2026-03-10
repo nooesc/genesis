@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod replay;
 pub mod sanitize;
 pub mod scheduler;
+pub mod skill_sync;
 pub mod skills;
 pub mod skills_hub;
 pub mod quality;
