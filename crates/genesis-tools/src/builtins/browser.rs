@@ -49,6 +49,7 @@ struct SessionInfo {
 
 pub struct BrowserManager {
     sessions: Mutex<HashMap<String, SessionInfo>>,
+    inactivity_timeout: Duration,
 }
 
 impl Default for BrowserManager {
@@ -59,23 +60,31 @@ impl Default for BrowserManager {
 
 impl BrowserManager {
     pub fn new() -> Self {
+        let timeout_secs: u64 = std::env::var("BROWSER_INACTIVITY_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
         Self {
             sessions: Mutex::new(HashMap::new()),
+            inactivity_timeout: Duration::from_secs(timeout_secs),
         }
     }
 
-    /// Returns the session_name for the given session_id, creating a new
-    /// session if one does not already exist.
+    /// Returns `(session_name, cdp_url)` for the given session_id, creating a
+    /// new session if one does not already exist.
     ///
     /// For cloud mode (Browserbase), the network call to create a session is
     /// done outside the lock. A TOCTOU race is handled by checking after
     /// re-acquiring the lock and closing the redundant Browserbase session.
-    pub fn get_or_create_session(&self, session_id: &str) -> Result<String, ToolError> {
+    pub fn get_or_create_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(String, Option<String>), ToolError> {
         // Fast path: session already exists
         {
             let sessions = self.sessions.lock().unwrap();
             if let Some(info) = sessions.get(session_id) {
-                return Ok(info.session_name.clone());
+                return Ok((info.session_name.clone(), info.cdp_url.clone()));
             }
         }
 
@@ -90,17 +99,17 @@ impl BrowserManager {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(existing) = sessions.get(session_id) {
             // Another thread created a session in the meantime
-            let name = existing.session_name.clone();
+            let result = (existing.session_name.clone(), existing.cdp_url.clone());
             // Close the redundant Browserbase session if we created one
             if let Some(bb_id) = &new_info.bb_session_id {
                 let _ = close_browserbase_session(bb_id);
             }
-            return Ok(name);
+            return Ok(result);
         }
 
-        let name = new_info.session_name.clone();
+        let result = (new_info.session_name.clone(), new_info.cdp_url.clone());
         sessions.insert(session_id.to_owned(), new_info);
-        Ok(name)
+        Ok(result)
     }
 
     /// Update the last_activity timestamp for a session and cleanup stale ones.
@@ -114,12 +123,25 @@ impl BrowserManager {
         self.cleanup_stale_sessions();
     }
 
-    /// Returns (session_name, cdp_url) for the given session_id if it exists.
-    pub fn get_session_cmd_info(&self, session_id: &str) -> Option<(String, Option<String>)> {
-        let sessions = self.sessions.lock().unwrap();
-        sessions
-            .get(session_id)
-            .map(|info| (info.session_name.clone(), info.cdp_url.clone()))
+    /// Resolve session info for a tool call that requires an active session.
+    /// Touches the session and returns an error if no session exists.
+    pub fn require_session(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+    ) -> Result<(String, Option<String>), ToolError> {
+        let info = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .get(session_id)
+                .map(|info| (info.session_name.clone(), info.cdp_url.clone()))
+        };
+        let result = info.ok_or_else(|| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "No active browser session. Call browser_navigate first.".to_owned(),
+        })?;
+        self.touch_session(session_id);
+        Ok(result)
     }
 
     /// Mark first_nav as false and return (was_first_nav, features).
@@ -175,17 +197,11 @@ impl BrowserManager {
 
     /// Remove sessions that have been inactive longer than the timeout.
     fn cleanup_stale_sessions(&self) {
-        let timeout_secs: u64 = std::env::var("BROWSER_INACTIVITY_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
-        let timeout = Duration::from_secs(timeout_secs);
-
         let stale: Vec<String> = {
             let sessions = self.sessions.lock().unwrap();
             sessions
                 .iter()
-                .filter(|(_, info)| info.last_activity.elapsed() > timeout)
+                .filter(|(_, info)| info.last_activity.elapsed() > self.inactivity_timeout)
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -282,20 +298,14 @@ fn generate_session_name(session_id: &str) -> String {
 /// Truncate text to a maximum character count, splitting at a char boundary.
 /// Appends a truncation marker if the text was shortened.
 fn truncate_snapshot(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
+    match text.char_indices().nth(max_chars) {
+        None => text.to_owned(),
+        Some((byte_end, _)) => {
+            let mut truncated = text[..byte_end].to_owned();
+            truncated.push_str("\n[... content truncated ...]");
+            truncated
+        }
     }
-
-    // Find the byte index of the max_chars-th character
-    let byte_end = text
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
-
-    let mut truncated = text[..byte_end].to_owned();
-    truncated.push_str("\n[... content truncated ...]");
-    truncated
 }
 
 /// Check whether a page title matches known bot-detection patterns.
@@ -360,25 +370,24 @@ fn find_agent_browser() -> Result<String, ToolError> {
     })
 }
 
-/// Build the environment variables for a browser command invocation.
-fn build_browser_env(session_name: &str) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = std::env::vars().collect();
-
-    // Ensure /usr/bin is in PATH
-    if let Some(path) = env.get("PATH") {
-        if !path.contains("/usr/bin") {
-            env.insert("PATH".to_owned(), format!("{path}:/usr/bin"));
-        }
-    } else {
-        env.insert("PATH".to_owned(), "/usr/bin:/usr/local/bin".to_owned());
-    }
-
+/// Apply browser-specific environment overrides to a Command.
+/// The child process inherits the parent environment by default; we only set
+/// targeted overrides for PATH sanitization and the socket directory.
+fn apply_browser_env(cmd: &mut Command, session_name: &str) {
     // Set socket directory for the agent-browser daemon
     let tmpdir = socket_safe_tmpdir();
     let socket_dir = format!("{tmpdir}/agent-browser-{session_name}/");
-    env.insert("AGENT_BROWSER_SOCKET_DIR".to_owned(), socket_dir);
+    cmd.env("AGENT_BROWSER_SOCKET_DIR", socket_dir);
 
-    env
+    // Ensure /usr/bin is in PATH (systemd/container deployments may have minimal PATH)
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    if !current_path.contains("/usr/bin") {
+        if current_path.is_empty() {
+            cmd.env("PATH", "/usr/bin:/usr/local/bin");
+        } else {
+            cmd.env("PATH", format!("{current_path}:/usr/bin"));
+        }
+    }
 }
 
 /// Execute an agent-browser CLI command and return the parsed JSON output.
@@ -394,7 +403,6 @@ fn run_browser_command_raw(
 ) -> Result<serde_json::Value, ToolError> {
     let browser_bin = find_agent_browser()?;
     let cmd_args = build_cmd_args(session_name, cdp_url, command, args);
-    let env = build_browser_env(session_name);
 
     // Split the binary path to handle the "npx agent-browser" case
     let parts: Vec<&str> = browser_bin.split_whitespace().collect();
@@ -404,13 +412,14 @@ fn run_browser_command_raw(
         (parts[0], &[])
     };
 
-    let mut child = Command::new(program)
-        .args(prefix_args)
+    let mut cmd = Command::new(program);
+    cmd.args(prefix_args)
         .args(&cmd_args)
-        .envs(&env)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    apply_browser_env(&mut cmd, session_name);
+
+    let mut child = cmd.spawn()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "browser".to_owned(),
             reason: format!("failed to spawn agent-browser: {e}"),
@@ -640,32 +649,19 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
         .ok()
         .and_then(|v| v.parse().ok());
 
-    // Attempt 1: full features
-    let body = build_browserbase_session_body(
-        &config.project_id,
-        enable_proxies,
-        enable_advanced_stealth,
-        enable_keep_alive,
-        timeout_ms,
-    );
-    let resp = client
-        .post(url)
-        .header("X-BB-API-Key", &config.api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "browser".to_owned(),
-            reason: format!("Browserbase API request failed: {e}"),
-        })?;
+    // Fallback sequence: full features → no keepAlive → no proxies either
+    let attempts = [
+        (enable_proxies, enable_keep_alive),
+        (enable_proxies, false),
+        (false, false),
+    ];
 
-    if resp.status().as_u16() == 402 {
-        // Attempt 2: without keepAlive
+    for &(proxies, keep_alive) in &attempts {
         let body = build_browserbase_session_body(
             &config.project_id,
-            enable_proxies,
+            proxies,
             enable_advanced_stealth,
-            false,
+            keep_alive,
             timeout_ms,
         );
         let resp = client
@@ -679,51 +675,23 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
                 reason: format!("Browserbase API request failed: {e}"),
             })?;
 
-        if resp.status().as_u16() == 402 {
-            // Attempt 3: without proxies either
-            let body = build_browserbase_session_body(
-                &config.project_id,
-                false,
-                enable_advanced_stealth,
-                false,
-                timeout_ms,
-            );
-            let resp = client
-                .post(url)
-                .header("X-BB-API-Key", &config.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: "browser".to_owned(),
-                    reason: format!("Browserbase API request failed: {e}"),
-                })?;
-
+        if resp.status().as_u16() != 402 {
             return parse_browserbase_response(
                 resp,
                 session_id,
-                false,
+                proxies,
                 enable_advanced_stealth,
-                false,
+                keep_alive,
             );
         }
-
-        return parse_browserbase_response(
-            resp,
-            session_id,
-            enable_proxies,
-            enable_advanced_stealth,
-            false,
-        );
     }
 
-    parse_browserbase_response(
-        resp,
-        session_id,
-        enable_proxies,
-        enable_advanced_stealth,
-        enable_keep_alive,
-    )
+    // All attempts returned 402
+    Err(ToolError::ExecutionFailed {
+        tool: "browser".to_owned(),
+        reason: "Browserbase returned 402 (payment required) for all feature combinations"
+            .to_owned(),
+    })
 }
 
 /// Parse a successful Browserbase session creation response.
@@ -833,11 +801,7 @@ impl ToolHandler for BrowserNavigate {
 
         let sid = &context.session_id;
 
-        // Cleanup stale sessions before potentially creating a new one
-        self.manager.cleanup_stale_sessions();
-
-        let session_name = self.manager.get_or_create_session(sid)?;
-        let (_, cdp_url) = self.manager.get_session_cmd_info(sid).unwrap_or_default();
+        let (session_name, cdp_url) = self.manager.get_or_create_session(sid)?;
 
         let args = BTreeMap::from([("url".to_owned(), url.clone())]);
         let result = run_browser_command_raw(
@@ -907,16 +871,7 @@ pub struct BrowserSnapshot {
 impl ToolHandler for BrowserSnapshot {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let full = call
             .arguments
@@ -980,16 +935,7 @@ impl ToolHandler for BrowserClick {
             })?;
 
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let normalized = normalize_ref(element_ref);
         let args = BTreeMap::from([("ref".to_owned(), normalized.clone())]);
@@ -1038,16 +984,7 @@ impl ToolHandler for BrowserType {
             })?;
 
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let normalized = normalize_ref(element_ref);
         let args = BTreeMap::from([
@@ -1102,16 +1039,7 @@ impl ToolHandler for BrowserScroll {
         }
 
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let args = BTreeMap::from([("direction".to_owned(), direction.clone())]);
 
@@ -1143,16 +1071,7 @@ pub struct BrowserBack {
 impl ToolHandler for BrowserBack {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let result = run_browser_command_raw(
             &session_name,
@@ -1196,16 +1115,7 @@ impl ToolHandler for BrowserPress {
             })?;
 
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let args = BTreeMap::from([("key".to_owned(), key.clone())]);
 
@@ -1260,16 +1170,7 @@ pub struct BrowserConsole {
 impl ToolHandler for BrowserConsole {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let clear = call
             .arguments
@@ -1277,14 +1178,9 @@ impl ToolHandler for BrowserConsole {
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        let mut console_args = BTreeMap::new();
+        let mut args = BTreeMap::new();
         if clear {
-            console_args.insert("clear".to_owned(), "true".to_owned());
-        }
-
-        let mut error_args = BTreeMap::new();
-        if clear {
-            error_args.insert("clear".to_owned(), "true".to_owned());
+            args.insert("clear".to_owned(), "true".to_owned());
         }
 
         // Fetch console messages (default to empty on failure)
@@ -1292,7 +1188,7 @@ impl ToolHandler for BrowserConsole {
             &session_name,
             cdp_url.as_deref(),
             "console",
-            &console_args,
+            &args,
             Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
         )
         .unwrap_or_else(|_| json!({}));
@@ -1302,7 +1198,7 @@ impl ToolHandler for BrowserConsole {
             &session_name,
             cdp_url.as_deref(),
             "errors",
-            &error_args,
+            &args,
             Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS),
         )
         .unwrap_or_else(|_| json!({}));
@@ -1366,16 +1262,7 @@ pub struct BrowserGetImages {
 impl ToolHandler for BrowserGetImages {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let js_code = r#"JSON.stringify([...document.images].map(img => ({src: img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight})).filter(img => img.src && !img.src.startsWith('data:')))"#;
 
@@ -1427,16 +1314,7 @@ impl ToolHandler for BrowserVision {
             })?;
 
         let sid = &context.session_id;
-
-        let (session_name, cdp_url) =
-            self.manager.get_session_cmd_info(sid).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: "No active browser session. Call browser_navigate first.".to_owned(),
-                }
-            })?;
-
-        self.manager.touch_session(sid);
+        let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
 
         let annotate = call
             .arguments
