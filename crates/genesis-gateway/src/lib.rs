@@ -64,7 +64,16 @@ impl RateLimiter {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // Recover from poisoned mutex — another thread panicked while
+                // holding the lock. Clear the stale state and continue.
+                let mut guard = poisoned.into_inner();
+                guard.clear();
+                guard
+            }
+        };
 
         // Purge stale entries (windows older than 120s)
         map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < 120);
@@ -342,12 +351,57 @@ pub struct McpServerStatus {
     pub connected: bool,
 }
 
+/// Build CORS layer from gateway config.
+///
+/// - If `cors_origins` contains `"*"`, all origins are allowed.
+/// - If `cors_origins` is non-empty, only those origins are allowed.
+/// - Default (empty or no gateway config): localhost origins only.
+fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLayer {
+    use axum::http::{HeaderValue, Method};
+
+    let origins: &[String] = gateway
+        .map(|g| g.cors_origins.as_slice())
+        .unwrap_or(&[]);
+
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    if origins.iter().any(|o| o == "*") {
+        base.allow_origin(Any)
+    } else if origins.is_empty() {
+        // Default: allow common localhost origins for development
+        let localhost_origins = [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:8080",
+        ];
+        let values: Vec<HeaderValue> = localhost_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        base.allow_origin(values)
+    } else {
+        let values: Vec<HeaderValue> = origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        base.allow_origin(values)
+    }
+}
+
 /// Build the axum Router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors_layer(state.loaded.config.gateway.as_ref());
 
     // Protected routes (require API key when configured/required)
     let protected = Router::new()

@@ -350,6 +350,11 @@ pub struct GatewayConfig {
     /// `message_received`, `tool_called`, `response_sent`, `error`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhooks: Vec<WebhookConfig>,
+    /// Allowed CORS origins. When empty/unset, only localhost origins are
+    /// permitted. Set to `["*"]` to allow all origins (not recommended
+    /// for production).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cors_origins: Vec<String>,
 }
 
 /// Configuration for a single webhook endpoint.
@@ -1020,6 +1025,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
                     webhooks: Vec::new(),
+                    cors_origins: Vec::new(),
                 })
                 .idle_timeout_minutes = Some(v);
         }
@@ -1041,6 +1047,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
                     webhooks: Vec::new(),
+                    cors_origins: Vec::new(),
                 })
                 .daily_reset_hour = Some(v);
         }
@@ -1056,6 +1063,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                     daily_reset_hour: None,
                     rate_limit_rpm: None,
                     webhooks: Vec::new(),
+                    cors_origins: Vec::new(),
                 })
                 .rate_limit_rpm = Some(v);
         }

@@ -15,7 +15,7 @@ fn http_client() -> &'static reqwest::blocking::Client {
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .user_agent("genesis-agent/0.1")
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
     })
 }
 
@@ -39,6 +39,12 @@ impl ToolHandler for WebRequestTool {
 
         let body = call.arguments.get("body");
         let headers_json = call.arguments.get("headers");
+
+        // SSRF protection: validate URL before making request
+        crate::url_safety::validate_url(url).map_err(|reason| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason,
+        })?;
 
         let client = http_client();
 
@@ -172,7 +178,7 @@ mod tests {
         let call = ToolCall {
             name: "web_request".to_owned(),
             arguments: BTreeMap::from([
-                ("url".to_owned(), "http://localhost:1".to_owned()),
+                ("url".to_owned(), "https://example.com".to_owned()),
                 ("method".to_owned(), "TRACE".to_owned()),
             ]),
         };
@@ -192,11 +198,61 @@ mod tests {
         let call = ToolCall {
             name: "web_request".to_owned(),
             arguments: BTreeMap::from([
-                ("url".to_owned(), "http://127.0.0.1:1".to_owned()),
+                // Use a public IP with a closed port (not a private IP)
+                ("url".to_owned(), "http://203.0.113.1:1".to_owned()),
                 ("method".to_owned(), "GET".to_owned()),
             ]),
         };
 
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn web_request_blocks_localhost() {
+        let tool = WebRequestTool;
+        let call = ToolCall {
+            name: "web_request".to_owned(),
+            arguments: BTreeMap::from([("url".to_owned(), "http://localhost:8080".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("blocked"));
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_request_blocks_private_ips() {
+        let tool = WebRequestTool;
+        for url in [
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://192.168.1.1",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8080",
+        ] {
+            let call = ToolCall {
+                name: "web_request".to_owned(),
+                arguments: BTreeMap::from([("url".to_owned(), url.to_owned())]),
+            };
+            let err = tool.run(&call, &ctx()).unwrap_err();
+            assert!(
+                matches!(err, ToolError::ExecutionFailed { .. }),
+                "expected {url} to be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn web_request_blocks_non_http_schemes() {
+        let tool = WebRequestTool;
+        let call = ToolCall {
+            name: "web_request".to_owned(),
+            arguments: BTreeMap::from([("url".to_owned(), "file:///etc/passwd".to_owned())]),
+        };
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }

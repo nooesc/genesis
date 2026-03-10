@@ -437,6 +437,7 @@ mod tests {
             daily_reset_hour: None,
             rate_limit_rpm: None,
             webhooks: Vec::new(),
+            cors_origins: Vec::new(),
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
     }
@@ -449,6 +450,7 @@ mod tests {
             daily_reset_hour: None,
             rate_limit_rpm: None,
             webhooks: Vec::new(),
+            cors_origins: Vec::new(),
         };
         assert!(!check_session_expiry("nonexistent", &store, Some(&config)));
     }
@@ -469,6 +471,7 @@ mod tests {
             daily_reset_hour: None,
             rate_limit_rpm: None,
             webhooks: Vec::new(),
+            cors_origins: Vec::new(),
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         // Session should be deleted
@@ -486,6 +489,7 @@ mod tests {
             daily_reset_hour: None,
             rate_limit_rpm: None,
             webhooks: Vec::new(),
+            cors_origins: Vec::new(),
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
         // Session should still exist
@@ -509,6 +513,7 @@ mod tests {
             daily_reset_hour: Some(0),
             rate_limit_rpm: None,
             webhooks: Vec::new(),
+            cors_origins: Vec::new(),
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         assert!(store.get_session("s1").unwrap().is_none());

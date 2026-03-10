@@ -16,7 +16,7 @@ fn http_client() -> &'static reqwest::blocking::Client {
             .user_agent("Mozilla/5.0 (compatible; genesis-agent/0.1)")
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
     })
 }
 
@@ -33,6 +33,12 @@ impl ToolHandler for BrowseTool {
                 tool: call.name.clone(),
                 argument: "url",
             })?;
+
+        // SSRF protection: validate URL before making request
+        crate::url_safety::validate_url(url).map_err(|reason| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason,
+        })?;
 
         let client = http_client();
         let response = client.get(url).send().map_err(|e| ToolError::ExecutionFailed {
@@ -249,11 +255,34 @@ mod tests {
         let tool = BrowseTool;
         let call = ToolCall {
             name: "browse".to_owned(),
-            arguments: BTreeMap::from([("url".to_owned(), "http://127.0.0.1:1".to_owned())]),
+            // Use a public IP with a closed port (not a private IP)
+            arguments: BTreeMap::from([("url".to_owned(), "http://203.0.113.1:1".to_owned())]),
         };
 
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn blocks_private_ips() {
+        let tool = BrowseTool;
+        for url in [
+            "http://localhost",
+            "http://127.0.0.1",
+            "http://10.0.0.1",
+            "http://169.254.169.254",
+            "file:///etc/passwd",
+        ] {
+            let call = ToolCall {
+                name: "browse".to_owned(),
+                arguments: BTreeMap::from([("url".to_owned(), url.to_owned())]),
+            };
+            let err = tool.run(&call, &ctx()).unwrap_err();
+            assert!(
+                matches!(err, ToolError::ExecutionFailed { .. }),
+                "expected {url} to be blocked"
+            );
+        }
     }
 
     #[test]
