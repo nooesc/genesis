@@ -259,4 +259,40 @@ mod tests {
         let json = serde_json::to_string(&CredentialSource::CodexMigration).unwrap();
         assert_eq!(json, "\"codex-migration\"");
     }
+
+    #[test]
+    fn auth_mode_serializes_as_kebab_case() {
+        let json = serde_json::to_string(&AuthMode::Chatgpt).unwrap();
+        assert_eq!(json, "\"chatgpt\"");
+        let parsed: AuthMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, AuthMode::Chatgpt);
+    }
+
+    #[test]
+    fn legacy_auth_json_deserializes_with_enums() {
+        // Verify that auth.json written by older versions (with string fields)
+        // deserializes correctly into the new enum types.
+        let legacy_json = r#"{
+            "version": 1,
+            "active_provider": "openai-codex",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "providers": {
+                "openai-codex": {
+                    "type": "codex",
+                    "tokens": {
+                        "access_token": "at",
+                        "refresh_token": "rt"
+                    },
+                    "last_refresh": "2026-01-01T00:00:00Z",
+                    "auth_mode": "chatgpt",
+                    "source": "device-code"
+                }
+            }
+        }"#;
+        let store: AuthStore = serde_json::from_str(legacy_json).expect("should parse legacy format");
+        let codex = get_codex_state(&store).unwrap();
+        assert_eq!(codex.auth_mode, AuthMode::Chatgpt);
+        assert_eq!(codex.source, CredentialSource::DeviceCode);
+        assert_eq!(codex.tokens.access_token, "at");
+    }
 }
