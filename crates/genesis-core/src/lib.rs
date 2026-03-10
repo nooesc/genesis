@@ -5,6 +5,7 @@ pub mod compress;
 pub mod context_security;
 pub mod dataset;
 pub mod cost;
+pub mod delivery;
 pub mod eval;
 pub mod execution;
 pub mod guardrails;
