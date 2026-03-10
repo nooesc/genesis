@@ -333,7 +333,12 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let pub_key_hex = hex::encode(verifying_key.as_bytes());
 
-        let timestamp = "1234567890";
+        // Use a recent timestamp so the freshness check passes
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
         let body = b"{\"type\":1}";
 
         // Sign timestamp + body
@@ -347,7 +352,7 @@ mod tests {
 
         assert!(verify_discord_signature(
             &pub_key_hex,
-            timestamp,
+            &timestamp,
             body,
             &sig_hex
         ));
