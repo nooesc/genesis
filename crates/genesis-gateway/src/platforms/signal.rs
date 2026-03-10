@@ -7,7 +7,9 @@
 //! 1. Run signal-cli in daemon/HTTP mode (`signal-cli daemon --http`)
 //! 2. Set `SIGNAL_ACCOUNT` to your registered phone number (e.g. `+15551234567`)
 //! 3. Optionally set `SIGNAL_HTTP_URL` (default: `http://127.0.0.1:8080`)
-//! 4. Optionally set `SIGNAL_GROUP_ALLOWED_USERS` to a comma-separated list of
+//! 4. Optionally set `SIGNAL_WEBHOOK_SECRET` — when set, incoming webhook
+//!    requests must include an `X-Signal-Secret` header matching this value
+//! 5. Optionally set `SIGNAL_GROUP_ALLOWED_USERS` to a comma-separated list of
 //!    phone numbers allowed to interact in group chats
 //!
 //! ## Endpoints
@@ -18,15 +20,16 @@
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::Json;
+use axum::http::{HeaderMap, StatusCode};
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_storage::SessionStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use crate::verify::verify_secret_token;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -42,6 +45,13 @@ fn signal_http_url() -> String {
 /// The registered Signal account (phone number) this agent uses.
 fn signal_account() -> Option<String> {
     std::env::var("SIGNAL_ACCOUNT").ok()
+}
+
+/// Optional shared secret for webhook endpoint authentication.
+/// When set, incoming requests must include an `X-Signal-Secret` header
+/// matching this value; otherwise the request is rejected with 401.
+fn webhook_secret() -> Option<String> {
+    std::env::var("SIGNAL_WEBHOOK_SECRET").ok()
 }
 
 /// Comma-separated list of phone numbers allowed to interact in group chats.
@@ -155,10 +165,6 @@ struct JsonRpcError {
     message: String,
 }
 
-/// Wrapper for the `/v1/receive` REST endpoint response.
-#[derive(Debug, Deserialize)]
-pub struct ReceiveResponse(pub Vec<SignalEnvelope>);
-
 /// The max length of a single Signal message. Signal supports up to 8000
 /// bytes but we keep a safe margin for multi-byte characters.
 const MAX_SIGNAL_MESSAGE_LEN: usize = 6000;
@@ -171,10 +177,33 @@ const MAX_SIGNAL_MESSAGE_LEN: usize = 6000;
 ///
 /// Receives a `SignalEnvelope` JSON body, validates the sender, processes
 /// the message through the agent, and replies via signal-cli's JSON-RPC API.
+///
+/// When `SIGNAL_WEBHOOK_SECRET` is set, the request must include an
+/// `X-Signal-Secret` header with a matching value.
 pub async fn webhook_handler(
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
-    Json(envelope): Json<SignalEnvelope>,
+    body: Bytes,
 ) -> StatusCode {
+    // Authenticate the webhook request when a shared secret is configured.
+    if let Some(expected) = webhook_secret() {
+        let provided = headers
+            .get("x-signal-secret")
+            .and_then(|v| v.to_str().ok());
+        if !verify_secret_token(&expected, provided) {
+            warn!("signal webhook secret verification failed");
+            return StatusCode::UNAUTHORIZED;
+        }
+    }
+
+    let envelope: SignalEnvelope = match serde_json::from_slice(body.as_ref()) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "failed to parse signal webhook body");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let account = match signal_account() {
         Some(a) => a,
         None => {
@@ -292,6 +321,10 @@ async fn process_envelope(
     let is_group = group_id.is_some();
 
     // Group authorization check.
+    // When `SIGNAL_GROUP_ALLOWED_USERS` is unset (or empty), all senders are
+    // allowed to interact in group chats — the group is effectively open.
+    // Set the env var to a comma-separated list of phone numbers to restrict
+    // access.
     if is_group {
         let allowed = group_allowed_users();
         if !allowed.is_empty() && !allowed.iter().any(|a| a == &source) {
@@ -573,7 +606,7 @@ async fn send_message(
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0",
             method: "send",
-            id: uuid_v4(),
+            id: request_id(),
             params,
         };
 
@@ -603,7 +636,7 @@ async fn send_group_message(
         let rpc = JsonRpcRequest {
             jsonrpc: "2.0",
             method: "send",
-            id: uuid_v4(),
+            id: request_id(),
             params,
         };
 
@@ -634,7 +667,7 @@ async fn send_typing_indicator(
     let rpc = JsonRpcRequest {
         jsonrpc: "2.0",
         method: "startTyping",
-        id: uuid_v4(),
+        id: request_id(),
         params,
     };
 
@@ -662,7 +695,7 @@ async fn send_typing_stop(
     let rpc = JsonRpcRequest {
         jsonrpc: "2.0",
         method: "stopTyping",
-        id: uuid_v4(),
+        id: request_id(),
         params,
     };
 
@@ -709,8 +742,9 @@ async fn send_rpc(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Split a message into chunks respecting a max length.
+/// Split a message into chunks respecting a max byte length.
 /// Tries to split on newlines first, then word boundaries.
+/// Uses char-boundary-safe indexing to avoid panics on multi-byte UTF-8.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_owned()];
@@ -725,10 +759,15 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        let split_at = remaining[..max_len]
+        // Walk back to a char boundary so we never slice inside a multi-byte
+        // character. `floor_char_boundary` returns the largest byte index
+        // <= max_len that is on a char boundary.
+        let safe_end = remaining.floor_char_boundary(max_len);
+
+        let split_at = remaining[..safe_end]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..safe_end].rfind(' '))
+            .unwrap_or(safe_end);
 
         chunks.push(remaining[..split_at].to_owned());
         remaining = remaining[split_at..].trim_start();
@@ -737,8 +776,8 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-/// Generate a simple UUID v4 string for JSON-RPC request IDs.
-fn uuid_v4() -> String {
+/// Generate a unique request ID for JSON-RPC correlation.
+fn request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -885,6 +924,23 @@ mod tests {
     }
 
     #[test]
+    fn split_message_multibyte_utf8_does_not_panic() {
+        // Each emoji is 4 bytes. Build a string that forces a split in the
+        // middle of a multi-byte character when using naive byte indexing.
+        let emoji = "\u{1F600}"; // 4 bytes
+        let text = emoji.repeat(30); // 120 bytes total
+        // max_len=50 would land inside an emoji at byte 50 if not handled.
+        let chunks = split_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 50);
+            // Verify the chunk is valid UTF-8 (String guarantees this, but
+            // confirm no panic occurred during construction).
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
     fn describe_attachments_empty_when_none() {
         let dm = SignalDataMessage {
             timestamp: None,
@@ -1000,9 +1056,9 @@ mod tests {
     }
 
     #[test]
-    fn uuid_v4_generates_unique_ids() {
-        let id1 = uuid_v4();
-        let id2 = uuid_v4();
+    fn request_id_generates_unique_ids() {
+        let id1 = request_id();
+        let id2 = request_id();
         // They should be non-empty and probably different (time-based).
         assert!(!id1.is_empty());
         assert!(!id2.is_empty());
