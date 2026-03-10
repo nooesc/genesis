@@ -351,6 +351,20 @@ pub struct McpServerStatus {
     pub connected: bool,
 }
 
+/// Default localhost origins allowed for development when no CORS origins are configured.
+const LOCALHOST_ORIGINS: &[&str] = &[
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",
+];
+
+fn parse_origin_values(origins: &[&str]) -> Vec<axum::http::HeaderValue> {
+    origins.iter().filter_map(|o| o.parse().ok()).collect()
+}
+
 /// Build CORS layer from gateway config.
 ///
 /// - If `cors_origins` contains `"*"`, all origins are allowed.
@@ -376,20 +390,7 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
     if origins.iter().any(|o| o == "*") {
         base.allow_origin(Any)
     } else if origins.is_empty() {
-        // Default: allow common localhost origins for development
-        let localhost_origins = [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8080",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-            "http://127.0.0.1:8080",
-        ];
-        let values: Vec<HeaderValue> = localhost_origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
-        base.allow_origin(values)
+        base.allow_origin(parse_origin_values(LOCALHOST_ORIGINS))
     } else {
         let values: Vec<HeaderValue> = origins
             .iter()
@@ -403,11 +404,7 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
             .collect();
         if values.is_empty() {
             error!("all configured CORS origins are invalid, falling back to localhost-only");
-            let fallback: Vec<HeaderValue> = ["http://localhost:3000"]
-                .iter()
-                .filter_map(|o| o.parse().ok())
-                .collect();
-            base.allow_origin(fallback)
+            base.allow_origin(parse_origin_values(LOCALHOST_ORIGINS))
         } else {
             base.allow_origin(values)
         }
