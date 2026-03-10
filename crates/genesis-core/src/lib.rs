@@ -30,6 +30,7 @@ pub mod templates;
 pub mod toolset;
 pub mod workflow;
 pub mod trajectory;
+pub mod sandbox;
 
 use std::path::Path;
 use std::sync::Arc;
