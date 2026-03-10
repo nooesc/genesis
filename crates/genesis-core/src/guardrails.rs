@@ -155,38 +155,98 @@ static PII_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     ]
 });
 
-/// Run input guardrails on a user prompt.
-pub fn check_input(config: &GuardrailConfig, input: &str) -> GuardrailResult {
-    let mut violations = Vec::new();
-    let mut content = input.to_owned();
-    let mut blocked = false;
+/// A compiled regex paired with the original pattern string.
+struct CompiledPattern {
+    source: String,
+    regex: Regex,
+}
 
-    // Check forbidden input patterns
-    for pattern_str in &config.forbidden_input_patterns {
-        if let Ok(re) = Regex::new(pattern_str) {
-            if re.is_match(input) {
+/// A compiled custom rule with the regex pre-compiled.
+struct CompiledCustomRule {
+    name: String,
+    regex: Regex,
+    applies_to: AppliesTo,
+    action: ViolationAction,
+    message: String,
+}
+
+/// Pre-compiled guardrails for efficient repeated checking.
+///
+/// All regex patterns from the [`GuardrailConfig`] are compiled once when
+/// this struct is constructed, avoiding the cost of recompiling on every
+/// call to [`check_input`] / [`check_output`].
+pub struct CompiledGuardrails {
+    config: GuardrailConfig,
+    forbidden_input: Vec<CompiledPattern>,
+    forbidden_output: Vec<CompiledPattern>,
+    custom_rules: Vec<CompiledCustomRule>,
+}
+
+impl CompiledGuardrails {
+    /// Compile all regex patterns from the given configuration.
+    ///
+    /// Invalid patterns are silently skipped (matching the previous behaviour).
+    pub fn new(config: &GuardrailConfig) -> Self {
+        let forbidden_input = config
+            .forbidden_input_patterns
+            .iter()
+            .filter_map(|p| Regex::new(p).ok().map(|r| CompiledPattern { source: p.clone(), regex: r }))
+            .collect();
+        let forbidden_output = config
+            .forbidden_output_patterns
+            .iter()
+            .filter_map(|p| Regex::new(p).ok().map(|r| CompiledPattern { source: p.clone(), regex: r }))
+            .collect();
+        let custom_rules = config
+            .custom_rules
+            .iter()
+            .filter_map(|rule| {
+                Regex::new(&rule.pattern).ok().map(|r| CompiledCustomRule {
+                    name: rule.name.clone(),
+                    regex: r,
+                    applies_to: rule.applies_to.clone(),
+                    action: rule.action.clone(),
+                    message: rule.message.clone(),
+                })
+            })
+            .collect();
+        Self {
+            config: config.clone(),
+            forbidden_input,
+            forbidden_output,
+            custom_rules,
+        }
+    }
+
+    /// Run input guardrails on a user prompt.
+    pub fn check_input(&self, input: &str) -> GuardrailResult {
+        let mut violations = Vec::new();
+        let mut content = input.to_owned();
+        let mut blocked = false;
+
+        // Check forbidden input patterns (pre-compiled)
+        for cp in &self.forbidden_input {
+            if cp.regex.is_match(input) {
                 blocked = true;
                 violations.push(Violation {
                     rule: "forbidden_input_pattern".to_owned(),
-                    message: format!("Input matches forbidden pattern: {pattern_str}"),
+                    message: format!("Input matches forbidden pattern: {}", cp.source),
                     action: ViolationAction::Block,
                 });
             }
         }
-    }
 
-    // Check PII in input
-    if config.detect_pii {
-        apply_pii_checks(config, input, "input", &mut content, &mut violations, &mut blocked);
-    }
-
-    // Check custom rules for input
-    for rule in &config.custom_rules {
-        if rule.applies_to == AppliesTo::Output {
-            continue;
+        // Check PII in input
+        if self.config.detect_pii {
+            apply_pii_checks(&self.config, input, "input", &mut content, &mut violations, &mut blocked);
         }
-        if let Ok(re) = Regex::new(&rule.pattern) {
-            if re.is_match(input) {
+
+        // Check custom rules for input (pre-compiled)
+        for rule in &self.custom_rules {
+            if rule.applies_to == AppliesTo::Output {
+                continue;
+            }
+            if rule.regex.is_match(input) {
                 if rule.action == ViolationAction::Block {
                     blocked = true;
                 }
@@ -201,74 +261,70 @@ pub fn check_input(config: &GuardrailConfig, input: &str) -> GuardrailResult {
                 });
             }
         }
+
+        GuardrailResult {
+            passed: !blocked,
+            content,
+            violations,
+        }
     }
 
-    GuardrailResult {
-        passed: !blocked,
-        content,
-        violations,
-    }
-}
+    /// Run output guardrails on an agent response.
+    pub fn check_output(&self, output: &str) -> GuardrailResult {
+        let mut violations = Vec::new();
+        let mut content = output.to_owned();
+        let mut blocked = false;
 
-/// Run output guardrails on an agent response.
-pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
-    let mut violations = Vec::new();
-    let mut content = output.to_owned();
-    let mut blocked = false;
+        // Check max response length
+        if self.config.max_response_length > 0 && output.len() > self.config.max_response_length {
+            violations.push(Violation {
+                rule: "max_response_length".to_owned(),
+                message: format!(
+                    "Response exceeds max length ({} > {})",
+                    output.len(),
+                    self.config.max_response_length
+                ),
+                action: ViolationAction::Redact,
+            });
+            content = output[..self.config.max_response_length].to_owned();
+            content.push_str("\n[Response truncated by guardrail]");
+        }
 
-    // Check max response length
-    if config.max_response_length > 0 && output.len() > config.max_response_length {
-        violations.push(Violation {
-            rule: "max_response_length".to_owned(),
-            message: format!(
-                "Response exceeds max length ({} > {})",
-                output.len(),
-                config.max_response_length
-            ),
-            action: ViolationAction::Redact,
-        });
-        content = output[..config.max_response_length].to_owned();
-        content.push_str("\n[Response truncated by guardrail]");
-    }
-
-    // Check forbidden output patterns
-    for pattern_str in &config.forbidden_output_patterns {
-        if let Ok(re) = Regex::new(pattern_str) {
-            if re.is_match(output) {
+        // Check forbidden output patterns (pre-compiled)
+        for cp in &self.forbidden_output {
+            if cp.regex.is_match(output) {
                 blocked = true;
                 violations.push(Violation {
                     rule: "forbidden_output_pattern".to_owned(),
-                    message: format!("Output matches forbidden pattern: {pattern_str}"),
+                    message: format!("Output matches forbidden pattern: {}", cp.source),
                     action: ViolationAction::Block,
                 });
             }
         }
-    }
 
-    // Check PII in output
-    if config.detect_pii {
-        apply_pii_checks(config, output, "output", &mut content, &mut violations, &mut blocked);
-    }
-
-    // Check JSON output requirement
-    if config.require_json_output
-        && serde_json::from_str::<serde_json::Value>(&content).is_err()
-    {
-        blocked = true;
-        violations.push(Violation {
-            rule: "require_json_output".to_owned(),
-            message: "Output is not valid JSON".to_owned(),
-            action: ViolationAction::Block,
-        });
-    }
-
-    // Check custom rules for output
-    for rule in &config.custom_rules {
-        if rule.applies_to == AppliesTo::Input {
-            continue;
+        // Check PII in output
+        if self.config.detect_pii {
+            apply_pii_checks(&self.config, output, "output", &mut content, &mut violations, &mut blocked);
         }
-        if let Ok(re) = Regex::new(&rule.pattern) {
-            if re.is_match(output) {
+
+        // Check JSON output requirement
+        if self.config.require_json_output
+            && serde_json::from_str::<serde_json::Value>(&content).is_err()
+        {
+            blocked = true;
+            violations.push(Violation {
+                rule: "require_json_output".to_owned(),
+                message: "Output is not valid JSON".to_owned(),
+                action: ViolationAction::Block,
+            });
+        }
+
+        // Check custom rules for output (pre-compiled)
+        for rule in &self.custom_rules {
+            if rule.applies_to == AppliesTo::Input {
+                continue;
+            }
+            if rule.regex.is_match(output) {
                 if rule.action == ViolationAction::Block {
                     blocked = true;
                 }
@@ -283,13 +339,29 @@ pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
                 });
             }
         }
-    }
 
-    GuardrailResult {
-        passed: !blocked,
-        content,
-        violations,
+        GuardrailResult {
+            passed: !blocked,
+            content,
+            violations,
+        }
     }
+}
+
+/// Run input guardrails on a user prompt.
+///
+/// For repeated calls with the same config, prefer [`CompiledGuardrails`]
+/// to avoid recompiling regex patterns each time.
+pub fn check_input(config: &GuardrailConfig, input: &str) -> GuardrailResult {
+    CompiledGuardrails::new(config).check_input(input)
+}
+
+/// Run output guardrails on an agent response.
+///
+/// For repeated calls with the same config, prefer [`CompiledGuardrails`]
+/// to avoid recompiling regex patterns each time.
+pub fn check_output(config: &GuardrailConfig, output: &str) -> GuardrailResult {
+    CompiledGuardrails::new(config).check_output(output)
 }
 
 /// Apply PII checks to text, mutating violations/content/blocked as needed.

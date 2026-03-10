@@ -275,6 +275,8 @@ pub struct AgentLoop {
     response_cache: Option<genesis_storage::ResponseCacheStore>,
     cache_hits: u32,
     cache_misses: u32,
+    /// Pre-compiled guardrails (avoids recompiling regexes on every check).
+    compiled_guardrails: Option<crate::guardrails::CompiledGuardrails>,
 }
 
 /// Number of consecutive failures for the same tool before injecting a
@@ -316,6 +318,11 @@ impl AgentLoop {
             TrajectoryRecorder::disabled()
         };
 
+        let compiled_guardrails = config
+            .guardrails
+            .as_ref()
+            .map(crate::guardrails::CompiledGuardrails::new);
+
         Self {
             client,
             tool_client: None,
@@ -336,6 +343,7 @@ impl AgentLoop {
             response_cache: None,
             cache_hits: 0,
             cache_misses: 0,
+            compiled_guardrails,
         }
     }
 
@@ -608,8 +616,8 @@ impl AgentLoop {
         );
 
         // Run input guardrails if configured
-        let user_message = if let Some(ref gc) = self.config.guardrails {
-            let result = crate::guardrails::check_input(gc, user_message);
+        let user_message = if let Some(ref cg) = self.compiled_guardrails {
+            let result = cg.check_input(user_message);
             if !result.passed {
                 let blocked_reasons: Vec<&str> = result.violations.iter()
                     .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
@@ -799,7 +807,7 @@ impl AgentLoop {
             if let (Some(ref key), Some(ref cache), Some(ref cache_cfg)) =
                 (&cache_key, &self.response_cache, &self.config.cache)
             {
-                if cache_cfg.enabled && !response.id.starts_with("cache-") {
+                if cache_cfg.enabled && !response.id.starts_with("cache-") && !response.choices.is_empty() {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
                     let tc_json = choice
@@ -844,7 +852,13 @@ impl AgentLoop {
                 );
             }
 
-            let choice = &response.choices[0];
+            let choice = response.choices.first().ok_or_else(|| {
+                self.report_error(
+                    &hook_session,
+                    "empty_response",
+                    AgentError::Provider(ProviderError::EmptyChoices),
+                )
+            })?;
             let assistant_msg = &choice.message;
 
             // Check if the assistant wants to call tools
@@ -978,8 +992,8 @@ impl AgentLoop {
                 .to_owned();
 
             // Run output guardrails if configured
-            if let Some(ref gc) = self.config.guardrails {
-                let result = crate::guardrails::check_output(gc, &response_text);
+            if let Some(ref cg) = self.compiled_guardrails {
+                let result = cg.check_output(&response_text);
                 if !result.passed {
                     let blocked_reasons: Vec<&str> = result.violations.iter()
                         .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
@@ -1049,8 +1063,8 @@ impl AgentLoop {
         );
 
         // Run input guardrails if configured (streaming path)
-        let user_message = if let Some(ref gc) = self.config.guardrails {
-            let result = crate::guardrails::check_input(gc, user_message);
+        let user_message = if let Some(ref cg) = self.compiled_guardrails {
+            let result = cg.check_input(user_message);
             if !result.passed {
                 let blocked_reasons: Vec<&str> = result.violations.iter()
                     .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
@@ -1410,7 +1424,13 @@ impl AgentLoop {
                         }
                     }
 
-                    let choice = &response.choices[0];
+                    let choice = response.choices.first().ok_or_else(|| {
+                        self.report_error(
+                            &hook_session,
+                            "empty_response",
+                            AgentError::Provider(ProviderError::EmptyChoices),
+                        )
+                    })?;
                     let assistant_msg = &choice.message;
 
                     if let Some(tool_calls) = &assistant_msg.tool_calls {
@@ -1525,8 +1545,8 @@ impl AgentLoop {
                         .to_owned();
 
                     // Run output guardrails if configured (streaming path)
-                    if let Some(ref gc) = self.config.guardrails {
-                        let gr = crate::guardrails::check_output(gc, &response_text);
+                    if let Some(ref cg) = self.compiled_guardrails {
+                        let gr = cg.check_output(&response_text);
                         if !gr.passed {
                             let blocked_reasons: Vec<&str> = gr.violations.iter()
                                 .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
