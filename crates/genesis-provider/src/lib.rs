@@ -38,7 +38,7 @@ pub async fn client_from_config(
             Ok(auth_path) => {
                 match genesis_auth::codex::resolve_credentials(&auth_path).await {
                     Ok(creds) => {
-                        tracing::debug!(source = %creds.source, "resolved OAuth credentials for openai-codex");
+                        tracing::debug!(source = ?creds.source, "resolved OAuth credentials for openai-codex");
                         let provider = ResolvedProvider {
                             base_url: base_url.map(str::to_owned).unwrap_or(creds.base_url),
                             api_key: creds.api_key,

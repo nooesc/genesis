@@ -1693,7 +1693,7 @@ impl AgentLoop {
     }
 
     /// Record token usage from an LLM turn and check the budget.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn record_usage(&mut self, turn: usize, input_tokens: u32, output_tokens: u32) -> Result<(), AgentError> {
         let model = self.client.model().to_owned();
         self.record_usage_with_model(&model, turn, input_tokens, output_tokens)

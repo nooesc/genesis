@@ -679,7 +679,6 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
- "fd-lock",
  "open",
  "reqwest",
  "serde",

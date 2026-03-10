@@ -24,9 +24,19 @@ struct CachedEntry {
 }
 
 static CREDENTIALS_CACHE: OnceLock<RwLock<HashMap<PathBuf, CachedEntry>>> = OnceLock::new();
+static REFRESH_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 fn cache() -> &'static RwLock<HashMap<PathBuf, CachedEntry>> {
     CREDENTIALS_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn refresh_client() -> &'static reqwest::Client {
+    REFRESH_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS))
+            .build()
+            .expect("failed to build HTTP client for token refresh")
+    })
 }
 
 /// Read the Codex base URL, allowing override via `GENESIS_CODEX_BASE_URL` env var.
@@ -43,7 +53,7 @@ pub struct ResolvedCredentials {
     pub provider: String,
     pub base_url: String,
     pub api_key: String,
-    pub source: String,
+    pub source: store::CredentialSource,
 }
 
 /// Result from the device code request step.
@@ -357,19 +367,16 @@ async fn resolve_credentials_inner(
     // lock-read-recheck-refresh-write-unlock protocol.
     if jwt::is_expiring(access_token, TOKEN_REFRESH_SKEW_SECS) {
         tracing::debug!("Codex access token expiring, attempting refresh");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS))
-            .build()
-            .map_err(AuthError::Http)?;
-        match refresh_access_token(&client, &codex.tokens.refresh_token).await {
+        match refresh_access_token(refresh_client(), &codex.tokens.refresh_token).await {
             Ok(new_tokens) => {
                 let api_key = new_tokens.access_token.clone();
-                store::save_codex_tokens(auth_store_path, new_tokens, codex.source.clone())?;
+                let source = codex.source.clone();
+                store::save_codex_tokens(auth_store_path, new_tokens, source.clone())?;
                 return Ok(ResolvedCredentials {
                     provider: CODEX_PROVIDER_ID.to_owned(),
                     base_url,
                     api_key,
-                    source: "auth-store".to_owned(),
+                    source,
                 });
             }
             Err(e) => {
@@ -382,7 +389,7 @@ async fn resolve_credentials_inner(
         provider: CODEX_PROVIDER_ID.to_owned(),
         base_url,
         api_key: access_token.clone(),
-        source: "auth-store".to_owned(),
+        source: codex.source.clone(),
     })
 }
 
@@ -428,7 +435,7 @@ pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthEr
         provider: CODEX_PROVIDER_ID.to_owned(),
         base_url: codex_base_url(),
         api_key,
-        source: "device-code".to_owned(),
+        source: store::CredentialSource::DeviceCode,
     })
 }
 
@@ -561,6 +568,6 @@ mod tests {
         let creds2 = resolve_credentials(&path).await.unwrap();
         assert_eq!(creds2.api_key, fake_jwt);
         assert_eq!(creds2.provider, CODEX_PROVIDER_ID);
-        assert_eq!(creds2.source, "auth-store");
+        assert_eq!(creds2.source, store::CredentialSource::Test);
     }
 }

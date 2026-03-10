@@ -3,12 +3,13 @@ use base64::Engine;
 /// Decode JWT payload claims without signature verification.
 /// Used only to check `exp` (expiry) timestamps for token refresh decisions.
 pub fn decode_claims(token: &str) -> Option<serde_json::Value> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
+    let mut iter = token.splitn(4, '.');
+    let _header = iter.next()?;
+    let payload = iter.next()?;
+    let _sig = iter.next()?;
+    if iter.next().is_some() {
+        return None; // more than 3 parts
     }
-
-    let payload = parts[1];
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .or_else(|_| {

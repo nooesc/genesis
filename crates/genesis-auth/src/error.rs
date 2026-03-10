@@ -26,12 +26,6 @@ pub enum AuthError {
     #[error("auth store JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("file lock timeout after {seconds}s — another genesis process may be refreshing tokens")]
-    LockTimeout { seconds: u64 },
-
     #[error("HTTP request error: {0}")]
     Http(#[from] reqwest::Error),
-
-    #[error("provider not found: {id}")]
-    ProviderNotFound { id: String },
 }

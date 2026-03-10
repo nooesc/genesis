@@ -1610,7 +1610,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Login => run_login(cli.config).await,
-        Command::Logout => run_logout(cli.config),
+        Command::Logout => run_logout(),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
@@ -5322,13 +5322,9 @@ async fn run_login(
     ))
 }
 
-fn run_logout(
-    config_path: Option<PathBuf>,
-) -> Result<String, CliError> {
+fn run_logout() -> Result<String, CliError> {
     let auth_path = genesis_auth::default_auth_path()?;
     let removed = genesis_auth::store::clear_active_provider(&auth_path)?;
-
-    let _ = config_path;
 
     match removed {
         Some(provider_id) => Ok(format!(
