@@ -40,7 +40,7 @@ pub async fn client_from_config(
                     Ok(creds) => {
                         tracing::debug!(source = %creds.source, "resolved OAuth credentials for openai-codex");
                         let provider = ResolvedProvider {
-                            base_url: creds.base_url,
+                            base_url: base_url.map(str::to_owned).unwrap_or(creds.base_url),
                             api_key: creds.api_key,
                             model: model.to_owned(),
                             backend: "openai-codex".to_owned(),
@@ -74,6 +74,22 @@ mod tests {
     async fn client_from_config_builds_without_api_key() {
         let client = client_from_config("openai", "gpt-4", None, None).await;
         assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_from_config_codex_falls_back_when_not_logged_in() {
+        // openai-codex with no auth store should fall through to env-var resolution
+        // without panicking or returning an error
+        let client = client_from_config("openai-codex", "o3-pro", None, None).await;
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn client_from_config_non_codex_skips_oauth() {
+        // Non-codex backends should never attempt OAuth resolution
+        let client = client_from_config("openai", "gpt-4", None, None).await;
+        assert!(client.is_ok());
+        assert_eq!(client.unwrap().backend(), "openai");
     }
 
     #[tokio::test]
