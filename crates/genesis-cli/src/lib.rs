@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -297,6 +297,16 @@ pub enum Command {
     Completions {
         #[arg(help = "Shell to generate completions for (bash, zsh, fish, elvish, powershell)")]
         shell: clap_complete::Shell,
+    },
+
+    #[command(about = "Uninstall Genesis — remove binary, data, and config files")]
+    Uninstall {
+        #[arg(long, help = "Also remove the data directory (database, trajectories, etc.)")]
+        remove_data: bool,
+        #[arg(long, help = "Also remove the config directory (config.yaml, auth, etc.)")]
+        remove_config: bool,
+        #[arg(long, help = "Remove everything without prompting for confirmation")]
+        force: bool,
     },
 }
 
@@ -1615,6 +1625,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
             Ok(String::new())
+        }
+        Command::Uninstall { remove_data, remove_config, force } => {
+            run_uninstall(cli.config.as_deref(), remove_data, remove_config, force)
         }
     }
 }
@@ -5743,6 +5756,127 @@ async fn run_update() -> Result<String, CliError> {
     steps.push(format!("[ok] Updated to: {}", version_out.trim()));
 
     Ok(steps.join("\n"))
+}
+
+fn run_uninstall(
+    config_override: Option<&Path>,
+    remove_data: bool,
+    remove_config: bool,
+    force: bool,
+) -> Result<String, CliError> {
+    use std::io::IsTerminal;
+
+    let exe_path = std::env::current_exe().map_err(CliError::Io)?;
+
+    // Try loading the full config (respects storage.data_dir and GENESIS_DATA_DIR).
+    // Fall back to platform-default paths if the config file is already gone or unreadable.
+    let (config_dir, data_dir) = match load(config_override) {
+        Ok(loaded) => {
+            let cd = loaded.paths.config_path.parent().map(|p| p.to_path_buf());
+            (cd, loaded.paths.data_dir)
+        }
+        Err(_) => {
+            let paths = genesis_config::AppPaths::resolve(config_override)?;
+            let cd = paths.config_path.parent().map(|p| p.to_path_buf());
+            (cd, paths.data_dir)
+        }
+    };
+
+    // Build the plan of what will be removed
+    let mut plan: Vec<String> = Vec::new();
+
+    if exe_path.exists() {
+        plan.push(format!("  Binary:  {}", exe_path.display()));
+    }
+    if remove_data && data_dir.exists() {
+        plan.push(format!("  Data:    {}", data_dir.display()));
+    }
+    if remove_config {
+        if let Some(ref cd) = config_dir {
+            if cd.exists() {
+                plan.push(format!("  Config:  {}", cd.display()));
+            }
+        }
+    }
+
+    if plan.is_empty() {
+        return Ok("Nothing to remove — Genesis does not appear to be installed.".to_owned());
+    }
+
+    let mut output = Vec::new();
+    output.push("The following will be removed:".to_owned());
+    output.extend(plan.iter().cloned());
+
+    // Prompt for confirmation unless --force is set
+    if !force {
+        if !io::stdin().is_terminal() {
+            return Err(CliError::Other(
+                "uninstall requires --force when stdin is not a terminal".into(),
+            ));
+        }
+
+        eprintln!();
+        for line in &output {
+            eprintln!("{line}");
+        }
+        eprintln!();
+        eprint!("Proceed with uninstall? [y/N] ");
+        let _ = io::stderr().flush();
+
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).map_err(CliError::Io)?;
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            return Ok("Uninstall cancelled.".to_owned());
+        }
+    }
+
+    // Perform removals
+    let mut results = Vec::new();
+
+    // Remove data directory first (if requested), since it's the most expendable
+    if remove_data && data_dir.exists() {
+        fs::remove_dir_all(&data_dir).map_err(|e| {
+            CliError::Other(format!(
+                "failed to remove data directory {}: {e}",
+                data_dir.display()
+            ))
+        })?;
+        results.push(format!("[ok] Removed data directory: {}", data_dir.display()));
+    }
+
+    // Remove config directory (if requested)
+    if remove_config {
+        if let Some(ref cd) = config_dir {
+            if cd.exists() {
+                fs::remove_dir_all(cd).map_err(|e| {
+                    CliError::Other(format!(
+                        "failed to remove config directory {}: {e}",
+                        cd.display()
+                    ))
+                })?;
+                results.push(format!("[ok] Removed config directory: {}", cd.display()));
+            }
+        }
+    }
+
+    // Remove the binary last so the process can finish writing output
+    if exe_path.exists() {
+        fs::remove_file(&exe_path).map_err(|e| {
+            CliError::Other(format!(
+                "failed to remove binary {}: {e}",
+                exe_path.display()
+            ))
+        })?;
+        results.push(format!("[ok] Removed binary: {}", exe_path.display()));
+    }
+
+    if results.is_empty() {
+        Ok("Nothing was removed.".to_owned())
+    } else {
+        results.push(String::new());
+        results.push("Genesis has been uninstalled.".to_owned());
+        Ok(results.join("\n"))
+    }
 }
 
 /// Bridge between the MCP server and the Genesis tool registry.
@@ -12274,6 +12408,64 @@ storage:
         match cli.command {
             Command::Pairing(PairingCommand::ClearPending { platform }) => {
                 assert_eq!(platform.as_deref(), Some("slack"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall_command_defaults() {
+        let cli = Cli::try_parse_from(["genesis", "uninstall"])
+            .expect("uninstall command should parse");
+        match cli.command {
+            Command::Uninstall { remove_data, remove_config, force } => {
+                assert!(!remove_data);
+                assert!(!remove_config);
+                assert!(!force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall_command_with_all_flags() {
+        let cli = Cli::try_parse_from([
+            "genesis", "uninstall", "--remove-data", "--remove-config", "--force",
+        ])
+        .expect("uninstall command with flags should parse");
+        match cli.command {
+            Command::Uninstall { remove_data, remove_config, force } => {
+                assert!(remove_data);
+                assert!(remove_config);
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall_command_with_remove_data_only() {
+        let cli = Cli::try_parse_from(["genesis", "uninstall", "--remove-data"])
+            .expect("uninstall --remove-data should parse");
+        match cli.command {
+            Command::Uninstall { remove_data, remove_config, force } => {
+                assert!(remove_data);
+                assert!(!remove_config);
+                assert!(!force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_uninstall_command_with_remove_config_only() {
+        let cli = Cli::try_parse_from(["genesis", "uninstall", "--remove-config"])
+            .expect("uninstall --remove-config should parse");
+        match cli.command {
+            Command::Uninstall { remove_data, remove_config, force } => {
+                assert!(!remove_data);
+                assert!(remove_config);
+                assert!(!force);
             }
             other => panic!("unexpected command: {other:?}"),
         }
