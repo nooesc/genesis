@@ -285,6 +285,26 @@ pub enum Command {
     Personality(PersonalityCommand),
     #[command(subcommand, about = "Run and manage multi-step workflows")]
     Workflow(WorkflowCommand),
+    /// Sign in to an LLM provider (e.g. OpenAI Codex via ChatGPT)
+    #[command(about = "Sign in to an LLM provider via OAuth device code flow")]
+    Login {
+        /// Use device code flow directly (skip provider selection)
+        #[arg(long)]
+        device_auth: bool,
+
+        /// Provider to authenticate with (e.g. "openai-codex")
+        #[arg(long)]
+        provider: Option<String>,
+    },
+
+    /// Sign out and clear stored authentication credentials
+    #[command(about = "Sign out and clear stored OAuth credentials")]
+    Logout {
+        /// Provider to log out from (default: active provider)
+        #[arg(long)]
+        provider: Option<String>,
+    },
+
     #[command(about = "Generate shell completions for bash, zsh, fish, elvish, or powershell")]
     Completions {
         #[arg(help = "Shell to generate completions for (bash, zsh, fish, elvish, powershell)")]
@@ -849,6 +869,8 @@ pub enum CliError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Execution(#[from] SessionExecutionError),
+    #[error("{0}")]
+    Auth(#[from] genesis_auth::AuthError),
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("session `{0}` was not found")]
@@ -1465,7 +1487,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             model,
             base_url,
             api_key_env,
-        } => run_init(cli.config, backend, model, base_url, api_key_env),
+        } => run_init(cli.config, backend, model, base_url, api_key_env).await,
         Command::Bootstrap(BootstrapCommand::Config) => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
@@ -1599,6 +1621,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(output)
             }
         }
+        Command::Login { device_auth, provider } => {
+            run_login(cli.config, device_auth, provider).await
+        }
+        Command::Logout { provider } => run_logout(cli.config, provider),
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
@@ -5225,7 +5251,113 @@ fn parse_compression_format(raw: Option<&str>) -> Result<CompressionFormat, CliE
     }
 }
 
-fn run_init(
+async fn run_login(
+    config_path: Option<PathBuf>,
+    _device_auth: bool,
+    _provider: Option<String>,
+) -> Result<String, CliError> {
+    use genesis_config::{update_provider_in_file, AppPaths};
+
+    let auth_path = genesis_auth::default_auth_path()?;
+    let paths = AppPaths::resolve(config_path.as_deref())?;
+
+    // Check for existing valid credentials
+    if let Ok(existing_store) = genesis_auth::store::read_store(&auth_path) {
+        if genesis_auth::store::get_codex_state(&existing_store).is_some() {
+            eprintln!("  Existing Codex credentials found in auth store.");
+            eprint!("  Use existing credentials? [Y/n]: ");
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+            let input = input.trim().to_lowercase();
+
+            if input.is_empty() || input == "y" || input == "yes" {
+                let codex_config = genesis_auth::provider::lookup("openai-codex")
+                    .expect("openai-codex provider must exist");
+                update_provider_in_file(
+                    &paths.config_path,
+                    Some("openai-codex"),
+                    None,
+                    Some(Some(codex_config.inference_base_url)),
+                    None,
+                )?;
+                return Ok(format!(
+                    "\n  Login successful!\n  Config updated: {} (backend=openai-codex)",
+                    paths.config_path.display()
+                ));
+            }
+        }
+    }
+
+    // Check for Codex CLI migration
+    if let Some(cli_tokens) = genesis_auth::codex::import_codex_cli_tokens() {
+        eprintln!("  Found existing Codex CLI credentials (~/.codex/auth.json)");
+        eprintln!("  Genesis will create its own independent session.");
+        eprint!("  Import these credentials? [y/N]: ");
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+        let input = input.trim().to_lowercase();
+
+        if input == "y" || input == "yes" {
+            genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, "codex-migration")?;
+            let codex_config = genesis_auth::provider::lookup("openai-codex")
+                .expect("openai-codex provider must exist");
+            update_provider_in_file(
+                &paths.config_path,
+                Some("openai-codex"),
+                None,
+                Some(Some(codex_config.inference_base_url)),
+                None,
+            )?;
+            return Ok(format!(
+                "\n  Credentials imported!\n  Config updated: {} (backend=openai-codex)\n\n  Note: Genesis maintains its own session — won't affect Codex CLI.",
+                paths.config_path.display()
+            ));
+        }
+    }
+
+    // Run device code flow
+    eprintln!();
+    eprintln!("  Signing in to OpenAI Codex...");
+    eprintln!("  (Genesis creates its own session — won't affect Codex CLI or VS Code)");
+
+    let creds = genesis_auth::codex::login(&auth_path).await?;
+
+    update_provider_in_file(
+        &paths.config_path,
+        Some("openai-codex"),
+        None,
+        Some(Some(&creds.base_url)),
+        None,
+    )?;
+
+    Ok(format!(
+        "\n  Login successful!\n  Auth state: {}\n  Config updated: {} (backend=openai-codex)",
+        auth_path.display(),
+        paths.config_path.display()
+    ))
+}
+
+fn run_logout(
+    config_path: Option<PathBuf>,
+    _provider: Option<String>,
+) -> Result<String, CliError> {
+    let auth_path = genesis_auth::default_auth_path()?;
+    let removed = genesis_auth::store::clear_active_provider(&auth_path)?;
+
+    let _ = config_path; // reserved for future per-provider logout
+
+    match removed {
+        Some(provider_id) => Ok(format!(
+            "  Logged out from '{provider_id}'.\n  Credentials cleared from {}",
+            auth_path.display()
+        )),
+        None => Ok("  No active authentication session to clear.".to_owned()),
+    }
+}
+
+async fn run_init(
     config_path: Option<PathBuf>,
     backend: Option<String>,
     model: Option<String>,
@@ -5242,7 +5374,7 @@ fn run_init(
         && io::stdin().is_terminal();
 
     if is_interactive {
-        return run_init_wizard(config_path);
+        return run_init_wizard(config_path).await;
     }
 
     run_init_non_interactive(config_path, backend, model, base_url, api_key_env)
@@ -5250,7 +5382,7 @@ fn run_init(
 
 /// Interactive setup wizard — prompts the user to choose a provider, model,
 /// and verify their API key. Invoked when `genesis init` is run with no flags.
-fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliError> {
+async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliError> {
     use genesis_config::{render_example_yaml, update_provider_in_file, AppPaths};
 
     eprintln!();
@@ -5264,6 +5396,7 @@ fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliError> {
         ("anthropic", "Anthropic (Claude)", "ANTHROPIC_API_KEY"),
         ("google", "Google (Gemini)", "GEMINI_API_KEY"),
         ("openrouter", "OpenRouter (200+ models)", "OPENROUTER_API_KEY"),
+        ("openai-codex", "Sign in with ChatGPT (OAuth)", ""),
         ("local", "Local / Self-hosted (vLLM, Ollama, etc.)", ""),
         ("compatible", "Custom OpenAI-compatible endpoint", ""),
     ];
@@ -5278,6 +5411,26 @@ fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliError> {
     let provider_idx = prompt_choice("  Provider", providers.len())?;
     let (backend, _provider_label, default_key_env) = providers[provider_idx];
     eprintln!();
+
+    // If user chose OAuth, delegate to login flow
+    if backend == "openai-codex" {
+        eprintln!("  Starting OAuth login flow...");
+        eprintln!();
+
+        // Ensure config and storage exist first
+        let paths = AppPaths::resolve(config_path.as_deref())?;
+        if !paths.config_path.exists() {
+            if let Some(parent) = paths.config_path.parent() {
+                std::fs::create_dir_all(parent).map_err(CliError::Io)?;
+            }
+            let yaml = render_example_yaml(config_path.as_deref())?;
+            std::fs::write(&paths.config_path, &yaml).map_err(CliError::Io)?;
+        }
+        std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
+        let _ = bootstrap(&paths.database_path)?;
+
+        return run_login(config_path, true, Some("openai-codex".to_owned())).await;
+    }
 
     // Step 2: Choose model
     let models = known_models();
@@ -6491,6 +6644,11 @@ fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
         ("openai", "gpt-4.1-nano", "Fastest, simplest tasks"),
         ("openai", "o3", "Advanced reasoning"),
         ("openai", "o4-mini", "Fast reasoning"),
+        // OpenAI Codex (ChatGPT subscription)
+        ("openai-codex", "o3-pro", "Most capable reasoning"),
+        ("openai-codex", "o3", "Advanced reasoning"),
+        ("openai-codex", "gpt-4.1", "Flagship GPT model"),
+        ("openai-codex", "o4-mini", "Fast reasoning"),
         // Google
         ("google", "gemini-2.5-pro", "Best for complex tasks"),
         ("google", "gemini-2.5-flash", "Fast and versatile"),

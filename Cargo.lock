@@ -700,6 +700,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "futures-util",
+ "genesis-auth",
  "genesis-config",
  "genesis-core",
  "genesis-gateway",
