@@ -781,7 +781,10 @@ impl AgentLoop {
                     finish_reason: Some("stop".to_owned()),
                 };
                 let resp = genesis_provider::ChatCompletionResponse {
-                    id: format!("cache-{}", &cache_key.as_ref().unwrap()[..8]),
+                    id: cache_key
+                        .as_deref()
+                        .map(|k| format!("cache-{}", &k[..k.len().min(8)]))
+                        .unwrap_or_else(|| "cache-unknown".to_owned()),
                     choices: vec![choice],
                     usage: Some(genesis_provider::ChatUsage {
                         prompt_tokens: hit.input_tokens,

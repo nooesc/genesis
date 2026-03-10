@@ -362,27 +362,55 @@ async fn resolve_credentials_inner(
     let access_token = &codex.tokens.access_token;
     let base_url = codex_base_url();
 
-    // TODO: Add fd-lock file locking around token refresh to prevent concurrent
-    // processes from racing on the same auth store. See design doc for the
-    // lock-read-recheck-refresh-write-unlock protocol.
     if jwt::is_expiring(access_token, TOKEN_REFRESH_SKEW_SECS) {
         tracing::debug!("Codex access token expiring, attempting refresh");
-        match refresh_access_token(refresh_client(), &codex.tokens.refresh_token).await {
-            Ok(new_tokens) => {
-                let api_key = new_tokens.access_token.clone();
-                let source = codex.source.clone();
-                store::save_codex_tokens(auth_store_path, new_tokens, source.clone())?;
+
+        // File-lock the auth store to prevent concurrent refresh races.
+        // Protocol: lock → re-read → recheck expiry → refresh → write → unlock
+        let lock_path = auth_store_path.with_extension("lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)?;
+
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.write()?;
+
+        // Re-read the store under the lock — another process may have already
+        // refreshed the token while we were waiting for the lock.
+        let fresh_store = store::read_store(auth_store_path)?;
+        if let Some(fresh_codex) = store::get_codex_state(&fresh_store) {
+            if !jwt::is_expiring(&fresh_codex.tokens.access_token, TOKEN_REFRESH_SKEW_SECS) {
+                // Another process already refreshed — use their token.
+                tracing::debug!("Token already refreshed by another process");
                 return Ok(ResolvedCredentials {
                     provider: CODEX_PROVIDER_ID.to_owned(),
                     base_url,
-                    api_key,
-                    source,
+                    api_key: fresh_codex.tokens.access_token.clone(),
+                    source: fresh_codex.source.clone(),
                 });
             }
-            Err(e) => {
-                tracing::warn!("Token refresh failed, using existing token: {e}");
+
+            // Still expired — do the refresh ourselves.
+            match refresh_access_token(refresh_client(), &fresh_codex.tokens.refresh_token).await {
+                Ok(new_tokens) => {
+                    let api_key = new_tokens.access_token.clone();
+                    let source = fresh_codex.source.clone();
+                    store::save_codex_tokens(auth_store_path, new_tokens, source.clone())?;
+                    return Ok(ResolvedCredentials {
+                        provider: CODEX_PROVIDER_ID.to_owned(),
+                        base_url,
+                        api_key,
+                        source,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Token refresh failed, using existing token: {e}");
+                }
             }
         }
+        // _guard dropped here → lock released
     }
 
     Ok(ResolvedCredentials {
