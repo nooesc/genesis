@@ -1343,6 +1343,173 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Always,
             builtins::homeassistant::HaCallServiceTool,
         );
+
+    // ── Browser automation tools ──────────────────────────────────────
+    let browser_mgr = std::sync::Arc::new(builtins::browser::BrowserManager::new());
+
+    registry
+        .register(
+            ToolDefinition {
+                name: "browser_navigate".to_owned(),
+                description: "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or browse (faster, cheaper). Use browser tools when you need to interact with a page (click, fill forms, dynamic content).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "The URL to navigate to (e.g., 'https://example.com')" }
+                    },
+                    "required": ["url"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserNavigate { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_snapshot".to_owned(),
+                description: "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "full": { "type": "boolean", "description": "If true, returns complete page content. If false (default), returns compact view.", "default": false }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserSnapshot { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_click".to_owned(),
+                description: "Click on an element identified by its ref ID from the snapshot (e.g., '@e5'). Requires browser_navigate and browser_snapshot first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "ref": { "type": "string", "description": "The element reference from the snapshot (e.g., '@e5', '@e12')" }
+                    },
+                    "required": ["ref"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserClick { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_type".to_owned(),
+                description: "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "ref": { "type": "string", "description": "The element reference from the snapshot (e.g., '@e3')" },
+                        "text": { "type": "string", "description": "The text to type into the field" }
+                    },
+                    "required": ["ref", "text"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserType { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_scroll".to_owned(),
+                description: "Scroll the page in a direction. Use this to reveal more content that may be below or above the current viewport. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "direction": { "type": "string", "enum": ["up", "down"], "description": "Direction to scroll" }
+                    },
+                    "required": ["direction"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserScroll { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_back".to_owned(),
+                description: "Navigate back to the previous page in browser history. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserBack { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_press".to_owned(),
+                description: "Press a keyboard key. Useful for submitting forms (Enter), navigating (Tab), or keyboard shortcuts. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Key to press (e.g., 'Enter', 'Tab', 'Escape', 'ArrowDown')" }
+                    },
+                    "required": ["key"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserPress { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_close".to_owned(),
+                description: "Close the browser session and release resources. Call when done with browser tasks.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserClose { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_get_images".to_owned(),
+                description: "Get a list of all images on the current page with their URLs and alt text. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserGetImages { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_vision".to_owned(),
+                description: "Take a screenshot and analyze it with vision AI. Useful for CAPTCHAs, visual verification, complex layouts, or when text snapshot doesn't capture visual information. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "What you want to know about the page visually. Be specific." },
+                        "annotate": { "type": "boolean", "default": false, "description": "If true, overlay numbered labels on interactive elements." }
+                    },
+                    "required": ["question"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserVision { manager: browser_mgr.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "browser_console".to_owned(),
+                description: "Get browser console output and JavaScript errors from the current page. Returns console.log/warn/error/info messages and uncaught JS exceptions. Requires browser_navigate first.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "clear": { "type": "boolean", "default": false, "description": "If true, clear the message buffers after reading" }
+                    },
+                    "required": []
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::browser::BrowserConsole { manager: browser_mgr },
+        );
+
     registry
 }
 
@@ -1423,7 +1590,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 61);
+        assert_eq!(definitions.len(), 72);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -1445,6 +1612,17 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
         assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
         assert!(definitions.iter().any(|tool| tool.name == "user_model"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_navigate"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_snapshot"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_click"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_type"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_scroll"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_back"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_press"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_close"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_get_images"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_vision"));
+        assert!(definitions.iter().any(|tool| tool.name == "browser_console"));
     }
 
     #[test]
