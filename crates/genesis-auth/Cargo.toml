@@ -1,23 +1,21 @@
 [package]
-name = "genesis-provider"
+name = "genesis-auth"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
-async-stream.workspace = true
-futures-util.workspace = true
-genesis-auth = { path = "../genesis-auth" }
-genesis-types = { path = "../genesis-types" }
+base64.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+open.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-regex.workspace = true
 tracing.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

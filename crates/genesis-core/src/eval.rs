@@ -312,8 +312,10 @@ pub fn evaluate_response(
     let passed_checks = checks.iter().filter(|c| c.passed).count();
     let score = if total_checks > 0 {
         passed_checks as f64 / total_checks as f64
+    } else if all_passed {
+        1.0
     } else {
-        if all_passed { 1.0 } else { 0.0 }
+        0.0
     };
 
     (all_passed, score, checks)

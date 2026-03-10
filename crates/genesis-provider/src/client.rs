@@ -259,7 +259,7 @@ impl ChatClient {
                     error = %error,
                     "chat completion response decode failed"
                 );
-                return Err(error.into());
+                return Err(error);
             }
         };
 
@@ -325,7 +325,7 @@ impl ChatClient {
                     error = %error,
                     "anthropic response decode failed"
                 );
-                return Err(error.into());
+                return Err(error);
             }
         };
 
@@ -391,7 +391,7 @@ impl ChatClient {
                     error = %error,
                     "gemini response decode failed"
                 );
-                return Err(error.into());
+                return Err(error);
             }
         };
 
@@ -570,12 +570,9 @@ impl ChatClient {
                         continue;
                     }
 
-                    match anthropic_types::anthropic_event_to_chunk(&event_type, &data, &mut msg_id)? {
-                        Some(parsed) => {
-                            chunk_count += 1;
-                            yield parsed;
-                        }
-                        None => {}
+                    if let Some(parsed) = anthropic_types::anthropic_event_to_chunk(&event_type, &data, &mut msg_id)? {
+                        chunk_count += 1;
+                        yield parsed;
                     }
 
                     if event_type == "message_stop" {
@@ -651,7 +648,7 @@ impl ChatClient {
                         _ => continue,
                     };
 
-                    let gemini_resp: gemini_types::GeminiResponse = serde_json::from_str(&data)?;
+                    let gemini_resp: gemini_types::GeminiResponse = serde_json::from_str(data)?;
                     if let Some(parsed) = gemini_types::from_gemini_stream_chunk(gemini_resp, &model) {
                         chunk_count += 1;
                         yield parsed;
@@ -793,7 +790,7 @@ fn backoff_delay(attempt: u32) -> Duration {
 }
 
 async fn read_response_body_bytes(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, ProviderError> {
     let mut bytes = Vec::new();

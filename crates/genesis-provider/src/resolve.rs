@@ -4,6 +4,7 @@ const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+use genesis_auth::provider::CODEX_INFERENCE_URL;
 
 /// Resolved provider endpoint ready to use for API calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,7 @@ fn default_base_url(backend: &str) -> &str {
         "openai" => OPENAI_BASE_URL,
         "anthropic" => ANTHROPIC_BASE_URL,
         "gemini" | "google" => GEMINI_BASE_URL,
+        "openai-codex" => CODEX_INFERENCE_URL,
         _ => OPENAI_BASE_URL,
     }
 }
@@ -178,4 +180,14 @@ mod tests {
         assert_eq!(resolved.model, "claude-sonnet-4-20250514");
         assert_eq!(resolved.backend, "anthropic");
     }
+
+    #[test]
+    fn resolves_openai_codex_base_url() {
+        let env = BTreeMap::new();
+        let resolved = resolve("openai-codex", "o3-pro", None, None, &env);
+        assert_eq!(resolved.base_url, CODEX_INFERENCE_URL);
+        assert_eq!(resolved.backend, "openai-codex");
+        assert_eq!(resolved.model, "o3-pro");
+    }
+
 }

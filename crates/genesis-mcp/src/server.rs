@@ -216,9 +216,11 @@ where
         )));
     }
 
-    String::from_utf8(line).map_err(|error| {
-        crate::McpError::Protocol(format!("incoming frame was not valid UTF-8: {error}"))
-    })
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| {
+            crate::McpError::Protocol(format!("incoming frame was not valid UTF-8: {error}"))
+        })
 }
 
 /// Handle a single JSON-RPC request and return a response.

@@ -246,7 +246,7 @@ pub(crate) fn to_gemini_request(req: &ChatCompletionRequest) -> GeminiRequest {
                 };
 
                 // Coalesce consecutive tool results into one user message
-                let should_append = contents.last().map_or(false, |c| {
+                let should_append = contents.last().is_some_and(|c| {
                     c.role.as_deref() == Some("user")
                         && c.parts
                             .iter()

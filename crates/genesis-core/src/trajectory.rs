@@ -356,7 +356,7 @@ impl TrajectoryRecorder {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.trajectory)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -384,8 +384,8 @@ impl TrajectoryRecorder {
             action_type,
             content: truncate_field(content),
             tool_name: tool_name.map(|s| s.to_owned()),
-            tool_arguments: tool_arguments.map(|s| truncate_field(s)),
-            tool_result: tool_result.map(|s| truncate_field(s)),
+            tool_arguments: tool_arguments.map(truncate_field),
+            tool_result: tool_result.map(truncate_field),
             tokens,
         });
     }

@@ -289,6 +289,14 @@ fn build_doctor_report(
     })
 }
 
+fn mask_api_key(key: &str) -> String {
+    if key.len() > 8 {
+        format!("{}...", &key[..8])
+    } else {
+        "****".to_owned()
+    }
+}
+
 /// Check whether the configured API key resolves to a non-empty value.
 fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
@@ -300,6 +308,38 @@ fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
         &env,
     );
 
+    // Check OAuth auth store for openai-codex backend
+    if resolved.api_key.is_empty()
+        && loaded.config.provider.backend.eq_ignore_ascii_case("openai-codex")
+    {
+        if let Ok(auth_path) = genesis_auth::default_auth_path() {
+            if let Ok(store) = genesis_auth::store::read_store(&auth_path) {
+                if let Some(codex) = genesis_auth::store::get_codex_state(&store) {
+                    let masked = mask_api_key(&codex.tokens.access_token);
+
+                    let expiry_info =
+                        if genesis_auth::jwt::is_expiring(&codex.tokens.access_token, 0) {
+                            " (token expired — will refresh on next call)"
+                        } else {
+                            ""
+                        };
+
+                    return DoctorCheck {
+                        name: "api_key".to_owned(),
+                        status: CheckStatus::Pass,
+                        detail: format!("openai-codex: OAuth ({masked}){expiry_info}"),
+                    };
+                }
+            }
+        }
+
+        return DoctorCheck {
+            name: "api_key".to_owned(),
+            status: CheckStatus::Warn,
+            detail: "openai-codex configured but not logged in — run `genesis login`".to_owned(),
+        };
+    }
+
     if resolved.api_key.is_empty() {
         DoctorCheck {
             name: "api_key".to_owned(),
@@ -310,12 +350,7 @@ fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
             ),
         }
     } else {
-        // Show masked key (first 8 chars + ...)
-        let masked = if resolved.api_key.len() > 8 {
-            format!("{}...", &resolved.api_key[..8])
-        } else {
-            "****".to_owned()
-        };
+        let masked = mask_api_key(&resolved.api_key);
         DoctorCheck {
             name: "api_key".to_owned(),
             status: CheckStatus::Pass,
@@ -747,8 +782,7 @@ impl ToolRuntime {
             .get("layers")
             .and_then(|v| v.parse().ok())
             .unwrap_or(1)
-            .max(1)
-            .min(3);
+            .clamp(1, 3);
 
         // Parse model list or use defaults
         let models: Vec<&str> = call

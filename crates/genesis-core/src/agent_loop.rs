@@ -1569,7 +1569,7 @@ impl AgentLoop {
     /// accumulated since the last nudge.
     fn maybe_inject_memory_nudge(&mut self, tool_calls_made: usize) {
         if let Some(interval) = self.config.memory_nudge_interval {
-            if interval > 0 && tool_calls_made > 0 && tool_calls_made % interval == 0 {
+            if interval > 0 && tool_calls_made > 0 && tool_calls_made.is_multiple_of(interval) {
                 debug!(
                     tool_calls_made,
                     interval, "injecting memory consolidation nudge"
@@ -1693,8 +1693,10 @@ impl AgentLoop {
     }
 
     /// Record token usage from an LLM turn and check the budget.
+    #[cfg(test)]
     fn record_usage(&mut self, turn: usize, input_tokens: u32, output_tokens: u32) -> Result<(), AgentError> {
-        self.record_usage_with_model(self.client.model(), turn, input_tokens, output_tokens)
+        let model = self.client.model().to_owned();
+        self.record_usage_with_model(&model, turn, input_tokens, output_tokens)
     }
 
     fn record_usage_with_model(

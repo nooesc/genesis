@@ -84,7 +84,7 @@ pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
     // Strip provider prefix (e.g., "openai/gpt-4.1-mini" -> "gpt-4.1-mini")
     let model_name = model
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or(model);
 
     // Exact match

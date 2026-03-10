@@ -17,7 +17,7 @@ use genesis_mcp::McpManager;
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
 use crate::prompt::{SystemPromptBuilder, load_context_file};
 use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
-use crate::{build_default_tool_runtime, build_execution_context_from_loaded};
+use crate::{build_default_tool_runtime, build_execution_context_from_loaded, ToolRuntime};
 
 pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
@@ -365,7 +365,7 @@ impl<'a> SessionExecutionService<'a> {
                     .map(|d| d.name)
                     .collect()
             } else {
-                filter.allow.iter().cloned().collect()
+                filter.allow.to_vec()
             };
             let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
                 all_tools.into_iter().collect()
@@ -442,7 +442,8 @@ impl<'a> SessionExecutionService<'a> {
             model,
             self.loaded.config.provider.base_url.as_deref(),
             self.loaded.config.provider.api_key_env.as_deref(),
-        )?;
+        )
+        .await?;
         debug!(
             provider_backend = %backend,
             model = %model,
@@ -450,7 +451,7 @@ impl<'a> SessionExecutionService<'a> {
         );
 
         let hook_runner = crate::hooks::HookRunner::default();
-        let hooks = crate::audit::AuditHooks::shared(db_path);
+        let hooks: Arc<dyn crate::agent_loop::AgentHooks> = crate::audit::AuditHooks::shared(db_path);
 
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
@@ -488,7 +489,8 @@ impl<'a> SessionExecutionService<'a> {
                 &tp.model,
                 tp.base_url.as_deref(),
                 tp.api_key_env.as_deref(),
-            )?;
+            )
+            .await?;
             agent.set_tool_client(tool_client);
             debug!(
                 tool_provider_backend = %tp.backend,
@@ -506,7 +508,8 @@ impl<'a> SessionExecutionService<'a> {
                     &fp.model,
                     fp.base_url.as_deref(),
                     fp.api_key_env.as_deref(),
-                )?;
+                )
+                .await?;
                 fallbacks.push(fb_client);
             }
             agent.set_fallback_clients(fallbacks);
@@ -934,7 +937,9 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                     model,
                     loaded.config.provider.base_url.as_deref(),
                     loaded.config.provider.api_key_env.as_deref(),
-                ) {
+                )
+                .await
+                {
                     Ok(c) => c,
                     Err(e) => {
                         error!(error = %e, "failed to create chat client for subagent");

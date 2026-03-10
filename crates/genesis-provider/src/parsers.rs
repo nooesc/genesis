@@ -471,7 +471,7 @@ impl ToolCallParser for KimiK2Parser {
                 .next()
                 .unwrap_or("")
                 .split('.')
-                .last()
+                .next_back()
                 .unwrap_or("")
                 .to_owned();
 

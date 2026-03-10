@@ -3890,6 +3890,7 @@ impl ResponseCacheStore {
     /// Store a response in the cache.
     ///
     /// `ttl_seconds` controls how long the entry stays valid.
+    #[allow(clippy::too_many_arguments)]
     pub fn set(
         &self,
         cache_key: &str,

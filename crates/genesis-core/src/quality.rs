@@ -141,7 +141,7 @@ fn score_signal_to_noise(trajectory: &Trajectory, issues: &mut Vec<String>) -> f
     let mut truncated_steps = 0usize;
 
     for step in &trajectory.steps {
-        if step.content.is_empty() && step.tool_result.as_ref().map_or(true, |r| r.is_empty()) {
+        if step.content.is_empty() && step.tool_result.as_ref().is_none_or(|r| r.is_empty()) {
             empty_steps += 1;
         }
         if let Some(result) = &step.tool_result {
@@ -240,7 +240,7 @@ fn score_efficiency(trajectory: &Trajectory, issues: &mut Vec<String>) -> f64 {
             s.action_type == ActionType::ToolResult
                 && s.tool_result
                     .as_ref()
-                    .map_or(false, |r| r.starts_with("Error:") || r.starts_with("error:"))
+                    .is_some_and(|r| r.starts_with("Error:") || r.starts_with("error:"))
         })
         .count();
 
