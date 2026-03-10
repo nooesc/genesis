@@ -4580,8 +4580,12 @@ impl SandboxStore {
         let connection = open(&self.database_path)?;
         connection
             .execute(
-                "INSERT OR REPLACE INTO sandboxes (id, backend, task_id, snapshot_data, created_at, last_active)
-                 VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))",
+                "INSERT INTO sandboxes (id, backend, task_id, snapshot_data, created_at, last_active)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))
+                 ON CONFLICT(backend, task_id) DO UPDATE SET
+                     id = excluded.id,
+                     snapshot_data = excluded.snapshot_data,
+                     last_active = datetime('now')",
                 params![id, backend, task_id, snapshot_data],
             )
             .map_err(|source| StorageError::Sqlite {
