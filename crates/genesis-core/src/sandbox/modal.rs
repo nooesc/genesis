@@ -196,6 +196,7 @@ impl SandboxBackend for ModalSandbox {
             backend_type: self.backend_type().to_owned(),
             task_id: config.task_id.clone(),
             snapshot_data: None,
+            persistent: config.persistent,
             created_at: now,
             last_active: now,
             cache_instant: std::time::Instant::now(),

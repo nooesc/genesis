@@ -149,14 +149,25 @@ impl SandboxBackend for DaytonaSandbox {
 
         if list_resp.status().is_success() {
             let list: DaytonaSandboxListResponse = list_resp.json().await?;
-            // Use the first item whose state is stopped or archived
-            if let Some(existing) =
-                list.items.iter().find(|s| s.state == "stopped" || s.state == "archived")
+            // Reuse an existing sandbox — prefer running, then stopped/archived
+            if let Some(existing) = list
+                .items
+                .iter()
+                .find(|s| s.state == "running")
+                .or_else(|| {
+                    list.items
+                        .iter()
+                        .find(|s| s.state == "stopped" || s.state == "archived")
+                })
             {
-                let start_url = format!("{}/sandbox/{}/start", self.base_url, existing.id);
-                let start_resp = self.client.post(&start_url).send().await?;
-                if !start_resp.status().is_success() {
-                    return Err(self.map_error_response(start_resp).await);
+                // Only start if not already running
+                if existing.state != "running" {
+                    let start_url =
+                        format!("{}/sandbox/{}/start", self.base_url, existing.id);
+                    let start_resp = self.client.post(&start_url).send().await?;
+                    if !start_resp.status().is_success() {
+                        return Err(self.map_error_response(start_resp).await);
+                    }
                 }
 
                 let now = SystemTime::now();
@@ -165,6 +176,7 @@ impl SandboxBackend for DaytonaSandbox {
                     backend_type: self.backend_type().to_owned(),
                     task_id: task_id.clone(),
                     snapshot_data: None,
+                    persistent: config.persistent,
                     created_at: now,
                     last_active: now,
                     cache_instant: std::time::Instant::now(),
@@ -208,6 +220,7 @@ impl SandboxBackend for DaytonaSandbox {
             backend_type: self.backend_type().to_owned(),
             task_id: task_id.clone(),
             snapshot_data: None,
+            persistent: config.persistent,
             created_at: now,
             last_active: now,
             cache_instant: std::time::Instant::now(),

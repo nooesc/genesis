@@ -47,6 +47,8 @@ pub struct SandboxInstance {
     pub backend_type: String,
     pub task_id: String,
     pub snapshot_data: Option<String>,
+    /// Whether the sandbox should be preserved (stopped, not deleted) on cleanup.
+    pub persistent: bool,
     pub created_at: SystemTime,
     pub last_active: SystemTime,
     /// For idle timeout tracking in cache only — not persisted.

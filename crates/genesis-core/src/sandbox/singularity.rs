@@ -187,16 +187,27 @@ impl SandboxBackend for SingularitySandbox {
             ))
         })?;
 
-        // Resolve overlay directory for persistent sandboxes
+        // Resolve overlay directory for persistent sandboxes.
+        // If resuming from a snapshot, reuse the previous overlay path.
         let overlay_dir: Option<String> = if config.persistent {
-            let dir = self.scratch_dir.join("overlays").join(&instance_id);
+            let dir = config
+                .snapshot_data
+                .as_deref()
+                .and_then(|snap| serde_json::from_str::<serde_json::Value>(snap).ok())
+                .and_then(|v| v["overlay_path"].as_str().map(|s| s.to_owned()))
+                .unwrap_or_else(|| {
+                    self.scratch_dir
+                        .join("overlays")
+                        .join(&instance_id)
+                        .to_string_lossy()
+                        .into_owned()
+                });
             std::fs::create_dir_all(&dir).map_err(|e| {
                 SandboxError::Other(format!(
-                    "failed to create overlay dir {}: {e}",
-                    dir.display()
+                    "failed to create overlay dir {dir}: {e}",
                 ))
             })?;
-            Some(dir.to_string_lossy().into_owned())
+            Some(dir)
         } else {
             None
         };
@@ -275,6 +286,7 @@ impl SandboxBackend for SingularitySandbox {
             backend_type: self.backend_type().to_string(),
             task_id: config.task_id.clone(),
             snapshot_data,
+            persistent: config.persistent,
             created_at: now,
             last_active: now,
             cache_instant: std::time::Instant::now(),

@@ -9,6 +9,7 @@ Commands: create, exec, snapshot, terminate
 Communication: JSON on stdin → JSON on stdout
 """
 import json
+import shlex
 import sys
 
 import modal
@@ -56,7 +57,7 @@ def cmd_exec(args: dict) -> dict:
 
     sandbox = modal.Sandbox.from_id(sandbox_id)
     process = sandbox.exec(
-        "bash", "-c", f"cd {cwd} && {command}",
+        "bash", "-c", f"cd {shlex.quote(cwd)} && {command}",
         timeout=timeout,
     )
     try:

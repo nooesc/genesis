@@ -177,7 +177,7 @@ impl SandboxManager {
         info!(count = idle_instances.len(), "cleaning up idle sandbox instances");
 
         for instance in idle_instances {
-            self.snapshot_and_cleanup(&*backend, &instance, false, "idle cleanup").await;
+            self.snapshot_and_cleanup(&*backend, &instance, instance.persistent, "idle cleanup").await;
         }
     }
 }
@@ -212,6 +212,7 @@ mod tests {
                 backend_type: "mock".to_owned(),
                 task_id: config.task_id.clone(),
                 snapshot_data: config.working_dir.clone(), // reuse field for test snapshot passthrough
+                persistent: config.persistent,
                 created_at: SystemTime::now(),
                 last_active: SystemTime::now(),
                 cache_instant: Instant::now(),
