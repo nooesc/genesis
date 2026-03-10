@@ -413,7 +413,7 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
             })
             .collect();
         if values.is_empty() {
-            error!("all configured CORS origins are invalid, falling back to localhost-only");
+            error!("all configured CORS origins are invalid, falling back to default localhost origins ({LOCALHOST_ORIGINS:?})");
             base.allow_origin(parse_origin_values(LOCALHOST_ORIGINS))
         } else {
             base.allow_origin(values)

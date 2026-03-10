@@ -761,13 +761,14 @@ impl ToolRuntime {
 
         // Builtin tools use blocking I/O (reqwest::blocking, std::fs, etc.)
         // so run them off the Tokio worker threads.
+        let tool_name = call.name.clone();
         let registry = self.registry.clone();
         let context = self.context.clone();
         let call = call.clone();
         tokio::task::spawn_blocking(move || registry.execute(&call, &context))
             .await
             .map_err(|e| ToolError::ExecutionFailed {
-                tool: "unknown".to_owned(),
+                tool: tool_name,
                 reason: format!("tool task panicked: {e}"),
             })?
     }

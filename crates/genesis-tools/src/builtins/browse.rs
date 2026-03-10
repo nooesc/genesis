@@ -134,9 +134,12 @@ fn extract_text_from_html(html: &str, selector: Option<&str>) -> String {
 fn remove_tag_blocks_multi(html: &str, tags: &[&str]) -> String {
     let mut current = html.to_owned();
     let mut lower = html.to_lowercase();
-    for tag in tags {
+    let last = tags.len().saturating_sub(1);
+    for (i, tag) in tags.iter().enumerate() {
         let result = remove_tag_blocks_with_lower(&current, &lower, tag);
-        lower = result.to_lowercase();
+        if i < last {
+            lower = result.to_lowercase();
+        }
         current = result;
     }
     current
