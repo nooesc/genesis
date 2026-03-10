@@ -36,6 +36,7 @@ pub fn is_remote_session() -> bool {
 }
 
 /// Try to import tokens from the Codex CLI auth store (~/.codex/auth.json).
+/// Uses `CODEX_HOME` env var or defaults to `~/.codex`.
 pub fn import_codex_cli_tokens() -> Option<CodexTokens> {
     let codex_home = std::env::var("CODEX_HOME")
         .ok()
@@ -48,7 +49,12 @@ pub fn import_codex_cli_tokens() -> Option<CodexTokens> {
     if codex_home.is_empty() {
         return None;
     }
-    let auth_path = PathBuf::from(&codex_home).join("auth.json");
+    import_codex_cli_tokens_from(&PathBuf::from(&codex_home))
+}
+
+/// Try to import tokens from a specific Codex CLI directory.
+pub fn import_codex_cli_tokens_from(codex_dir: &Path) -> Option<CodexTokens> {
+    let auth_path = codex_dir.join("auth.json");
     let contents = std::fs::read_to_string(&auth_path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let tokens = parsed.get("tokens")?;
@@ -374,8 +380,7 @@ mod tests {
     #[test]
     fn import_codex_cli_tokens_reads_valid_file() {
         let dir = tempdir().unwrap();
-        let codex_dir = dir.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
+        let codex_dir = dir.path();
         let auth_json = serde_json::json!({
             "tokens": {
                 "access_token": "codex-at",
@@ -388,25 +393,21 @@ mod tests {
         )
         .unwrap();
 
-        // Temporarily set CODEX_HOME
-        let _guard = TempEnvVar::set("CODEX_HOME", codex_dir.to_str().unwrap());
-        let tokens = import_codex_cli_tokens().unwrap();
+        let tokens = import_codex_cli_tokens_from(codex_dir).unwrap();
         assert_eq!(tokens.access_token, "codex-at");
         assert_eq!(tokens.refresh_token, "codex-rt");
     }
 
     #[test]
     fn import_codex_cli_tokens_returns_none_for_missing_file() {
-        let _guard = TempEnvVar::set("CODEX_HOME", "/nonexistent/path");
-        let result = import_codex_cli_tokens();
+        let result = import_codex_cli_tokens_from(Path::new("/nonexistent/path"));
         assert!(result.is_none());
     }
 
     #[test]
     fn import_codex_cli_tokens_returns_none_for_empty_tokens() {
         let dir = tempdir().unwrap();
-        let codex_dir = dir.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
+        let codex_dir = dir.path();
         let auth_json = serde_json::json!({
             "tokens": { "access_token": "", "refresh_token": "rt" }
         });
@@ -415,8 +416,7 @@ mod tests {
             serde_json::to_string(&auth_json).unwrap(),
         )
         .unwrap();
-        let _guard = TempEnvVar::set("CODEX_HOME", codex_dir.to_str().unwrap());
-        let result = import_codex_cli_tokens();
+        let result = import_codex_cli_tokens_from(codex_dir);
         assert!(result.is_none());
     }
 
@@ -456,31 +456,5 @@ mod tests {
         assert_eq!(creds.provider, CODEX_PROVIDER_ID);
         assert_eq!(creds.api_key, fake_jwt);
         assert_eq!(creds.base_url, CODEX_INFERENCE_URL);
-    }
-
-    /// Helper to temporarily set an env var and restore it when dropped.
-    struct TempEnvVar {
-        key: String,
-        prev: Option<String>,
-    }
-
-    impl TempEnvVar {
-        fn set(key: &str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key: key.to_owned(),
-                prev,
-            }
-        }
-    }
-
-    impl Drop for TempEnvVar {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(&self.key, v),
-                None => std::env::remove_var(&self.key),
-            }
-        }
     }
 }
