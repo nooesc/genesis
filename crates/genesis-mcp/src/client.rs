@@ -272,12 +272,16 @@ impl McpClient {
         &self.tools
     }
 
-    /// Convert MCP tools to Genesis ToolDefinitions, prefixed with `mcp_{server_name}_`.
+    /// Convert MCP tools to Genesis ToolDefinitions, prefixed with `mcp_{server_name}__`.
+    ///
+    /// Uses a double-underscore separator between the server name and tool name
+    /// so that server names containing underscores (e.g. `my_server`) can be
+    /// unambiguously parsed back from the prefixed form.
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .iter()
             .map(|t| ToolDefinition {
-                name: format!("mcp_{}_{}", self.name, t.name),
+                name: format!("mcp_{}__{}", self.name, t.name),
                 description: t
                     .description
                     .clone()
@@ -452,14 +456,14 @@ mod tests {
         let defs: Vec<ToolDefinition> = tools
             .iter()
             .map(|t| ToolDefinition {
-                name: format!("mcp_{server_name}_{}", t.name),
+                name: format!("mcp_{server_name}__{}", t.name),
                 description: t.description.clone().unwrap_or_default(),
                 parameters: t.input_schema.clone(),
             })
             .collect();
 
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "mcp_filesystem_read_file");
+        assert_eq!(defs[0].name, "mcp_filesystem__read_file");
         assert_eq!(defs[0].description, "Read a file");
         assert!(defs[0].parameters.is_some());
     }
