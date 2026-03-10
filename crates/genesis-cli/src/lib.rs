@@ -1,3 +1,5 @@
+mod clipboard;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
@@ -45,6 +47,7 @@ impl SlashCompleter {
                 "/memories", "/compress", "/tools", "/skills", "/model",
                 "/personality", "/system", "/cache", "/stats", "/tag",
                 "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/eval", "/clear",
+                "/paste",
             ],
         }
     }
@@ -147,6 +150,8 @@ pub enum Command {
         last: bool,
         #[arg(long, help = "Run in an isolated git worktree (requires git repo)")]
         worktree: bool,
+        #[arg(long, help = "Attach the clipboard image to the first message")]
+        clipboard: bool,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -891,8 +896,8 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system, last, worktree } => {
-            run_chat(cli.config, session_id, resume, prompt, system, last, worktree).await
+        Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard } => {
+            run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard).await
         }
         Command::Doctor { bootstrap_storage, verify } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
@@ -2582,6 +2587,7 @@ async fn build_session_service<'a>(
     Ok(service)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_chat(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
@@ -2590,6 +2596,7 @@ async fn run_chat(
     system_override: Option<String>,
     last: bool,
     worktree: bool,
+    clipboard: bool,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -2656,10 +2663,27 @@ async fn run_chat(
     let model = &loaded.config.provider.model;
     let mut session_id = session_id;
 
+    // Extract clipboard image if --clipboard was passed
+    let mut pending_clipboard_images: Vec<genesis_provider::ImageUrl> = Vec::new();
+    if clipboard {
+        match extract_clipboard_as_image_url(&loaded.config.storage.data_dir) {
+            Ok(img) => {
+                println!("     [clipboard image attached]");
+                pending_clipboard_images.push(img);
+            }
+            Err(e) => {
+                println!("     [clipboard: {e}]");
+            }
+        }
+    } else if clipboard::has_clipboard_image().unwrap_or(false) {
+        println!("     [clipboard image detected — use /paste to attach it]");
+    }
+
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
         println!("you> {initial}");
-        run_streaming_turn(&service, &session_id, &initial, model).await?;
+        let images = std::mem::take(&mut pending_clipboard_images);
+        run_streaming_turn(&service, &session_id, &initial, model, images).await?;
     }
 
     while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
@@ -2693,7 +2717,7 @@ async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, model).await?;
+                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new()).await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -3114,13 +3138,26 @@ async fn run_chat(
             continue;
         }
 
+        // Handle /paste — attach clipboard image to the next message
+        if trimmed == "/paste" {
+            match extract_clipboard_as_image_url(&loaded.config.storage.data_dir) {
+                Ok(img) => {
+                    pending_clipboard_images.push(img);
+                    println!("     [clipboard image attached — send a message to include it]");
+                }
+                Err(e) => println!("     [clipboard: {e}]"),
+            }
+            continue;
+        }
+
         // Handle in-chat slash commands
         if let Some(handled) = handle_chat_command(trimmed, &session_id, &store) {
             println!("{handled}");
             continue;
         }
 
-        run_streaming_turn(&service, &session_id, trimmed, model).await?;
+        let images = std::mem::take(&mut pending_clipboard_images);
+        run_streaming_turn(&service, &session_id, trimmed, model, images).await?;
     }
 
     // Save readline history for next session
@@ -3166,7 +3203,7 @@ async fn run_oneshot(
 
     if stream && !json {
         // Streaming mode — print output as it arrives
-        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model).await?;
+        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images).await?;
         return Ok(String::new());
     }
 
@@ -7370,6 +7407,39 @@ fn resolve_image_inputs(inputs: &[String]) -> Result<Vec<genesis_provider::Image
     Ok(images)
 }
 
+/// Extract the clipboard image, save it to a temp file under `data_dir`, and
+/// return an [`ImageUrl`] with the base64-encoded data URI.
+fn extract_clipboard_as_image_url(
+    data_dir: &Path,
+) -> Result<genesis_provider::ImageUrl, clipboard::ClipboardError> {
+    use base64::Engine;
+
+    let clip_dir = data_dir.join("clipboard");
+    std::fs::create_dir_all(&clip_dir).map_err(|e| {
+        clipboard::ClipboardError::ExtractionFailed(format!(
+            "failed to create clipboard dir: {e}"
+        ))
+    })?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let dest = clip_dir.join(format!("clip-{timestamp}.png"));
+
+    clipboard::save_clipboard_image(&dest)?;
+
+    let data = std::fs::read(&dest).map_err(clipboard::ClipboardError::Io)?;
+    // Clean up the temp file — we only need the base64 data
+    let _ = std::fs::remove_file(&dest);
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(genesis_provider::ImageUrl {
+        url: format!("data:image/png;base64,{encoded}"),
+        detail: None,
+    })
+}
+
 fn default_session_id() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7485,6 +7555,7 @@ async fn run_streaming_turn(
     session_id: &str,
     prompt: &str,
     model: &str,
+    images: Vec<genesis_provider::ImageUrl>,
 ) -> Result<(), CliError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -7496,7 +7567,7 @@ async fn run_streaming_turn(
             delivery_platform: DeliveryPlatform::Cli,
             prompt,
             title: None,
-            images: Vec::new(),
+            images,
         },
         |event| match event {
             StreamEvent::Chunk(chunk) => {
@@ -9329,6 +9400,26 @@ storage:
             .expect("chat should parse");
         match cli.command {
             Command::Chat { worktree, .. } => assert!(!worktree),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_clipboard_flag() {
+        let cli = Cli::try_parse_from(["genesis", "chat", "--clipboard"])
+            .expect("chat --clipboard should parse");
+        match cli.command {
+            Command::Chat { clipboard, .. } => assert!(clipboard),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chat_clipboard_defaults_to_false() {
+        let cli = Cli::try_parse_from(["genesis", "chat"])
+            .expect("chat should parse without --clipboard");
+        match cli.command {
+            Command::Chat { clipboard, .. } => assert!(!clipboard),
             other => panic!("unexpected command: {other:?}"),
         }
     }
