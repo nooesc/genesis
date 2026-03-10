@@ -808,6 +808,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "futures-util",
+ "genesis-auth",
  "genesis-types",
  "regex",
  "reqwest",

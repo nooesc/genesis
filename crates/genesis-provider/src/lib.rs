@@ -16,7 +16,7 @@ pub use api_types::{
 };
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
-pub use resolve::{resolve, ResolvedProvider};
+pub use resolve::{resolve, try_resolve_oauth, ResolvedProvider};
 
 use std::collections::BTreeMap;
 

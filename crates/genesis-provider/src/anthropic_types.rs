@@ -289,7 +289,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
 
                 // If the last message is already a user message with tool_result blocks,
                 // append to it (Anthropic requires all tool results for a turn in one message).
-                let should_append = messages.last().map_or(false, |m| m.role == "user");
+                let should_append = messages.last().is_some_and(|m| m.role == "user");
                 if should_append {
                     if let Some(last) = messages.last_mut() {
                         if let AnthropicMessageContent::Blocks(ref mut blocks) = last.content {
