@@ -1417,6 +1417,7 @@ mod tests {
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
                 personality: None,
+                embedding: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1574,6 +1575,7 @@ mod tests {
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
                 personality: Some("default".to_owned()),
+                embedding: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

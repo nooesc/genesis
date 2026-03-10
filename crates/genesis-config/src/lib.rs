@@ -43,6 +43,11 @@ pub struct GenesisConfig {
     /// Adjusts the agent's conversational tone without changing capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personality: Option<String>,
+    /// Optional embedding provider for vector/semantic memory search.
+    /// When configured, memories are embedded on storage and searched
+    /// via cosine similarity in addition to FTS5 keyword matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 /// Configuration for a single MCP server.
@@ -287,6 +292,43 @@ pub enum TerminalConfig {
     },
 }
 
+/// Embedding provider configuration for vector/semantic memory search.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmbeddingConfig {
+    /// Provider backend for embeddings (e.g. "openai", "openrouter").
+    #[serde(default = "default_embedding_backend")]
+    pub backend: String,
+    /// Embedding model name (e.g. "text-embedding-3-small").
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    /// Base URL override for the embedding API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Env var name holding the API key. Falls back to standard provider env vars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Number of dimensions in the embedding vector. Must match the model.
+    /// Default: 1536 (text-embedding-3-small).
+    #[serde(default = "default_embedding_dimensions")]
+    pub dimensions: usize,
+}
+
+fn default_embedding_backend() -> String { "openai".to_owned() }
+fn default_embedding_model() -> String { "text-embedding-3-small".to_owned() }
+fn default_embedding_dimensions() -> usize { 1536 }
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_embedding_backend(),
+            model: default_embedding_model(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: default_embedding_dimensions(),
+        }
+    }
+}
+
 /// Gateway-specific settings for session lifecycle policies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GatewayConfig {
@@ -370,6 +412,8 @@ struct FileConfig {
     toolsets: Option<HashMap<String, HashMap<String, f64>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding: Option<EmbeddingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -513,6 +557,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         gateway: None,
         toolsets: HashMap::new(),
         personality: None,
+        embedding: None,
     })
 }
 
@@ -742,6 +787,7 @@ pub fn load_from_map(
             gateway: file_config.gateway,
             toolsets: file_config.toolsets.unwrap_or_default(),
             personality: file_config.personality,
+            embedding: file_config.embedding,
         },
         paths: AppPaths {
             config_path: paths.config_path,

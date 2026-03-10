@@ -26,7 +26,7 @@ use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
-use genesis_storage::{MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
+use genesis_storage::{EmbeddingStore, MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -377,7 +377,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Memory endpoints
         .route("/memories", get(list_memories_handler))
         .route("/memories/search", get(search_memories_handler))
+        .route("/memories/embed", post(embed_memories_handler))
         .route("/memories/{id}", delete(delete_memory_handler))
+        .route("/memories/{id}/embed", post(embed_single_memory_handler))
         // Schedule management
         .route("/schedules", get(list_schedules_handler).post(create_schedule_handler))
         .route("/schedules/{id}", get(get_schedule_handler).delete(delete_schedule_handler))
@@ -1370,6 +1372,10 @@ struct SearchMemoriesQuery {
     q: String,
     #[serde(default = "default_memory_search_limit")]
     limit: usize,
+    /// Search mode: "keyword" (default), "vector", or "hybrid".
+    /// Vector and hybrid modes require an embedding provider to be configured.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn default_memory_search_limit() -> usize {
@@ -1396,15 +1402,58 @@ async fn search_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
-    let memories = store
-        .search(&params.q, params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    let db_path = &state.loaded.config.storage.database_path;
+    let memory_store = MemoryStore::new(db_path);
+    let embedding_store = EmbeddingStore::new(db_path);
 
-    let count = memories.len();
+    let mode = genesis_core::embedding::SearchMode::from_str_opt(params.mode.as_deref());
+
+    // Build embedding provider if configured and needed
+    let provider = if mode != genesis_core::embedding::SearchMode::Keyword {
+        match &state.loaded.config.embedding {
+            Some(config) => {
+                let p = genesis_core::embedding::EmbeddingProvider::from_config(config)
+                    .map_err(|e| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, format!("embedding provider error: {e}"))
+                    })?;
+                Some(p)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let results = genesis_core::embedding::hybrid_search(
+        &params.q,
+        params.limit,
+        mode,
+        &memory_store,
+        &embedding_store,
+        provider.as_ref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search error: {e}")))?;
+
+    let count = results.len();
+    let mode_str = match mode {
+        genesis_core::embedding::SearchMode::Keyword => "keyword",
+        genesis_core::embedding::SearchMode::Vector => "vector",
+        genesis_core::embedding::SearchMode::Hybrid => "hybrid",
+    };
+
     Ok(Json(serde_json::json!({
-        "memories": memories,
+        "memories": results.iter().map(|r| serde_json::json!({
+            "id": r.memory.id,
+            "session_id": r.memory.session_id,
+            "kind": r.memory.kind,
+            "content": r.memory.content,
+            "created_at": r.memory.created_at,
+            "score": r.score,
+            "source": r.source,
+        })).collect::<Vec<_>>(),
         "count": count,
+        "mode": mode_str,
     })))
 }
 
@@ -1412,16 +1461,150 @@ async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
+    let db_path = &state.loaded.config.storage.database_path;
+    let store = MemoryStore::new(db_path);
     let deleted = store
         .delete(&id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
 
     if deleted {
+        // Also clean up any associated embedding (best-effort)
+        let _ = EmbeddingStore::new(db_path).delete(&id);
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
         Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
     }
+}
+
+/// Embed all un-embedded memories. Requires an embedding provider to be configured.
+async fn embed_memories_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state
+        .loaded
+        .config
+        .embedding
+        .as_ref()
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "no embedding provider configured; add an [embedding] section to config".to_owned(),
+            )
+        })?;
+
+    let provider =
+        genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("embedding provider error: {e}"),
+            )
+        })?;
+
+    let db_path = &state.loaded.config.storage.database_path;
+    let memory_store = MemoryStore::new(db_path);
+    let embedding_store = EmbeddingStore::new(db_path);
+
+    let memories = memory_store
+        .list(10000)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let mut embedded = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
+
+    for memory in &memories {
+        if embedding_store
+            .has_embedding(&memory.id)
+            .unwrap_or(false)
+        {
+            skipped += 1;
+            continue;
+        }
+
+        match genesis_core::embedding::embed_and_store(
+            &memory.id,
+            &memory.content,
+            &embedding_store,
+            &provider,
+            provider.model(),
+        )
+        .await
+        {
+            Ok(()) => embedded += 1,
+            Err(e) => {
+                tracing::warn!(memory_id = %memory.id, error = %e, "failed to embed memory");
+                errors += 1;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "embedded": embedded,
+        "skipped": skipped,
+        "errors": errors,
+        "total": memories.len(),
+    })))
+}
+
+/// Embed a single memory by ID.
+async fn embed_single_memory_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state
+        .loaded
+        .config
+        .embedding
+        .as_ref()
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "no embedding provider configured".to_owned(),
+            )
+        })?;
+
+    let provider =
+        genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("embedding provider error: {e}"),
+            )
+        })?;
+
+    let db_path = &state.loaded.config.storage.database_path;
+    let memory_store = MemoryStore::new(db_path);
+    let embedding_store = EmbeddingStore::new(db_path);
+
+    // Find the memory
+    let memories = memory_store
+        .list(10000)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+
+    let memory = memories
+        .iter()
+        .find(|m| m.id == id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
+
+    genesis_core::embedding::embed_and_store(
+        &memory.id,
+        &memory.content,
+        &embedding_store,
+        &provider,
+        provider.model(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("embedding error: {e}"),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "embedded": true,
+        "memory_id": id,
+        "model": provider.model(),
+    })))
 }
 
 // ── Schedule management ──────────────────────────────────────────────
@@ -3842,6 +4025,7 @@ mod tests {
             gateway: None,
             toolsets: std::collections::HashMap::new(),
             personality: None,
+            embedding: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,
