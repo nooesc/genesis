@@ -68,6 +68,8 @@ pub struct SandboxConfig {
     pub disk_mb: u32,
     pub persistent: bool,
     pub working_dir: Option<String>,
+    /// Snapshot data from a previous session, used to resume a sandbox.
+    pub snapshot_data: Option<String>,
     pub backend_specific: BackendSpecific,
 }
 

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use super::{BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance};
+use super::{ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance};
 
 // ---------------------------------------------------------------------------
 // Helper functions
@@ -178,13 +178,6 @@ impl SandboxBackend for DaytonaSandbox {
         let memory_gib = mb_to_gib(config.memory_mb);
         let disk_gib = cap_disk_gib(mb_to_gib(config.disk_mb));
         let cpu = config.cpu.ceil() as u32;
-
-        // Allow the BackendSpecific variant to override auto_stop_interval (0 = never).
-        let _api_url_override = if let BackendSpecific::Daytona { api_url, .. } = &config.backend_specific {
-            api_url.clone()
-        } else {
-            None
-        };
 
         let mut labels = HashMap::new();
         labels.insert("genesis_task_id".to_owned(), task_id.clone());

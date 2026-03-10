@@ -112,7 +112,6 @@ impl SingularitySandbox {
 
 /// Build the argument list for `apptainer instance start`.
 pub fn build_start_args(
-    _binary: &str,
     image: &str,
     instance_id: &str,
     persistent: bool,
@@ -243,7 +242,6 @@ impl SandboxBackend for SingularitySandbox {
         };
 
         let args = build_start_args(
-            &self.binary,
             &image_path,
             &instance_id,
             config.persistent,
@@ -419,7 +417,6 @@ mod tests {
     #[test]
     fn test_build_start_args_ephemeral() {
         let args = build_start_args(
-            "apptainer",
             "docker://ubuntu:22.04",
             "genesis_abc123456789",
             false,
@@ -441,7 +438,6 @@ mod tests {
     #[test]
     fn test_build_start_args_persistent() {
         let args = build_start_args(
-            "apptainer",
             "docker://ubuntu:22.04",
             "genesis_abc123456789",
             true,
@@ -462,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_build_start_args_fractional_cpu() {
-        let args = build_start_args("apptainer", "img", "id", false, None, 0.5, 0);
+        let args = build_start_args("img", "id", false, None, 0.5, 0);
         let cpu_pos = args.iter().position(|a| a == "--cpus").expect("--cpus missing");
         assert_eq!(args[cpu_pos + 1], "0.5");
     }

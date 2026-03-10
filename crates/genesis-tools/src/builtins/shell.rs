@@ -249,6 +249,34 @@ impl ToolHandler for ShellExecTool {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+        // Use lifecycle-managed sandbox execution when available
+        if let Some(ref executor) = context.sandbox_manager {
+            let (output, exit_code) = executor
+                .execute_in_sandbox(
+                    command,
+                    working_dir.map(|s| s.as_str()),
+                    timeout_secs,
+                )
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e,
+                })?;
+
+            let content = if output.is_empty() {
+                format!("(no output, exit code {exit_code})")
+            } else {
+                crate::truncate_output(&output)
+            };
+
+            return Ok(ToolOutput {
+                content,
+                metadata: BTreeMap::from([
+                    ("tool".to_owned(), call.name.clone()),
+                    ("exit_code".to_owned(), exit_code.to_string()),
+                ]),
+            });
+        }
+
         let mut cmd = build_command(command, working_dir, &context.terminal_backend);
 
         let mut child = cmd

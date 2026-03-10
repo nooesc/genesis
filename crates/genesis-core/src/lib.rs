@@ -909,9 +909,9 @@ impl ToolRuntime {
         self.context.terminal_backend = Some(backend);
     }
 
-    /// Set the sandbox manager for lifecycle-managed backends.
-    pub fn set_sandbox_manager(&mut self, manager: std::sync::Arc<dyn std::any::Any + Send + Sync>) {
-        self.context.sandbox_manager = Some(manager);
+    /// Set the sandbox executor for lifecycle-managed backends.
+    pub fn set_sandbox_manager(&mut self, executor: Arc<dyn genesis_tools::SandboxExecutor>) {
+        self.context.sandbox_manager = Some(executor);
     }
 
     /// Create a new ToolRuntime with a different session ID.

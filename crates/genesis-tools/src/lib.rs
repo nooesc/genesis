@@ -61,7 +61,7 @@ pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ToolContext {
     pub session_id: String,
     pub profile: String,
@@ -75,11 +75,25 @@ pub struct ToolContext {
     /// tool call's `working_dir` argument. Used by worktree isolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_working_dir: Option<String>,
-    /// Sandbox manager for lifecycle-managed backends (Singularity, Modal, Daytona).
-    /// Uses `Arc<dyn Any>` to avoid genesis-tools depending on genesis-core.
-    /// Actual type is `Arc<genesis_core::sandbox::manager::SandboxManager>`.
+    /// Sandbox executor for lifecycle-managed backends (Singularity, Modal, Daytona).
+    /// When set, the shell tool delegates command execution to this instead of
+    /// spawning CLI processes directly.
     #[serde(skip)]
-    pub sandbox_manager: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+    pub sandbox_manager: Option<Arc<dyn SandboxExecutor>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("session_id", &self.session_id)
+            .field("profile", &self.profile)
+            .field("data_dir", &self.data_dir)
+            .field("allow_destructive_tools", &self.allow_destructive_tools)
+            .field("terminal_backend", &self.terminal_backend)
+            .field("default_working_dir", &self.default_working_dir)
+            .field("sandbox_manager", &self.sandbox_manager.as_ref().map(|_| ".."))
+            .finish()
+    }
 }
 
 impl PartialEq for ToolContext {
@@ -92,6 +106,20 @@ impl PartialEq for ToolContext {
             && self.default_working_dir == other.default_working_dir
         // sandbox_manager intentionally excluded from equality comparison
     }
+}
+
+/// Trait for lifecycle-managed sandbox command execution.
+///
+/// Implemented in genesis-core to bridge the async `SandboxManager` into the
+/// sync `ToolHandler` interface. When present in `ToolContext`, the shell tool
+/// delegates to this instead of spawning CLI processes directly.
+pub trait SandboxExecutor: Send + Sync {
+    fn execute_in_sandbox(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<(String, i32), String>;
 }
 
 /// Configurable terminal backend for shell command execution.

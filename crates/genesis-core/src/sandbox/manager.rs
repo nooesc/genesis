@@ -58,7 +58,7 @@ impl SandboxManager {
                     "resuming sandbox from stored snapshot"
                 );
                 // Step 4: Restore snapshot data into config so the backend can resume.
-                effective_config.working_dir = row.snapshot_data;
+                effective_config.snapshot_data = row.snapshot_data;
             }
 
             // Step 4: Create the sandbox (fresh or from snapshot).
@@ -107,6 +107,40 @@ impl SandboxManager {
         Ok(result)
     }
 
+    /// Snapshot a sandbox instance and then clean it up, logging any errors.
+    async fn snapshot_and_cleanup(
+        &self,
+        backend: &dyn SandboxBackend,
+        instance: &SandboxInstance,
+        persistent: bool,
+        context: &str,
+    ) {
+        match backend.snapshot(instance).await {
+            Ok(Some(snap)) => {
+                if let Err(e) = self.store.upsert(
+                    &instance.id,
+                    backend.backend_type(),
+                    &instance.task_id,
+                    Some(&snap),
+                ) {
+                    error!(id = %instance.id, error = %e, "failed to persist snapshot on {context}");
+                }
+            }
+            Ok(None) => {
+                debug!(id = %instance.id, "no snapshot data on {context}");
+            }
+            Err(e) => {
+                error!(id = %instance.id, error = %e, "snapshot failed on {context}");
+            }
+        }
+
+        if let Err(e) = backend.cleanup(instance, persistent).await {
+            error!(id = %instance.id, error = %e, "cleanup failed on {context}");
+        } else {
+            debug!(id = %instance.id, "sandbox cleaned up on {context}");
+        }
+    }
+
     pub async fn shutdown(&self, backend: Arc<dyn SandboxBackend>) {
         let instances: Vec<SandboxInstance> = {
             let mut cache = self.cache.lock().await;
@@ -116,31 +150,7 @@ impl SandboxManager {
         info!(count = instances.len(), "shutting down all sandbox instances");
 
         for instance in instances {
-            // Attempt snapshot before cleanup.
-            match backend.snapshot(&instance).await {
-                Ok(Some(snap)) => {
-                    if let Err(e) = self.store.upsert(
-                        &instance.id,
-                        backend.backend_type(),
-                        &instance.task_id,
-                        Some(&snap),
-                    ) {
-                        error!(id = %instance.id, error = %e, "failed to persist snapshot on shutdown");
-                    }
-                }
-                Ok(None) => {
-                    debug!(id = %instance.id, "backend returned no snapshot data");
-                }
-                Err(e) => {
-                    error!(id = %instance.id, error = %e, "snapshot failed on shutdown");
-                }
-            }
-
-            if let Err(e) = backend.cleanup(&instance, true).await {
-                error!(id = %instance.id, error = %e, "cleanup failed on shutdown");
-            } else {
-                debug!(id = %instance.id, "sandbox cleaned up on shutdown");
-            }
+            self.snapshot_and_cleanup(&*backend, &instance, true, "shutdown").await;
         }
     }
 
@@ -167,30 +177,7 @@ impl SandboxManager {
         info!(count = idle_instances.len(), "cleaning up idle sandbox instances");
 
         for instance in idle_instances {
-            match backend.snapshot(&instance).await {
-                Ok(Some(snap)) => {
-                    if let Err(e) = self.store.upsert(
-                        &instance.id,
-                        backend.backend_type(),
-                        &instance.task_id,
-                        Some(&snap),
-                    ) {
-                        error!(id = %instance.id, error = %e, "failed to persist snapshot on idle cleanup");
-                    }
-                }
-                Ok(None) => {
-                    debug!(id = %instance.id, "no snapshot data on idle cleanup");
-                }
-                Err(e) => {
-                    error!(id = %instance.id, error = %e, "snapshot failed on idle cleanup");
-                }
-            }
-
-            if let Err(e) = backend.cleanup(&instance, false).await {
-                error!(id = %instance.id, error = %e, "cleanup failed on idle cleanup");
-            } else {
-                debug!(id = %instance.id, "idle sandbox cleaned up");
-            }
+            self.snapshot_and_cleanup(&*backend, &instance, false, "idle cleanup").await;
         }
     }
 }
@@ -274,6 +261,7 @@ mod tests {
             disk_mb: 51200,
             persistent: false,
             working_dir: None,
+            snapshot_data: None,
             backend_specific: BackendSpecific::Singularity { bind: None },
         }
     }

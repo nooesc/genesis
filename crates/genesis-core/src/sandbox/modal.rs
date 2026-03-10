@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, warn};
+
 use super::{
     BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance,
 };
@@ -82,11 +84,12 @@ impl ModalSandbox {
 
     /// Write the embedded sidecar script to `{data_dir}/modal_sandbox.py` if
     /// it doesn't exist or its content differs from the embedded version.
-    fn ensure_script(&self) -> Result<PathBuf, SandboxError> {
+    async fn ensure_script(&self) -> Result<PathBuf, SandboxError> {
         let script_path = self.data_dir.join("modal_sandbox.py");
 
         let needs_write = if script_path.exists() {
-            std::fs::read_to_string(&script_path)
+            tokio::fs::read_to_string(&script_path)
+                .await
                 .map(|existing| existing != MODAL_SIDECAR_SCRIPT)
                 .unwrap_or(true)
         } else {
@@ -94,10 +97,10 @@ impl ModalSandbox {
         };
 
         if needs_write {
-            std::fs::create_dir_all(&self.data_dir).map_err(|e| {
+            tokio::fs::create_dir_all(&self.data_dir).await.map_err(|e| {
                 SandboxError::Other(format!("failed to create data dir: {e}"))
             })?;
-            std::fs::write(&script_path, MODAL_SIDECAR_SCRIPT).map_err(|e| {
+            tokio::fs::write(&script_path, MODAL_SIDECAR_SCRIPT).await.map_err(|e| {
                 SandboxError::Other(format!("failed to write sidecar script: {e}"))
             })?;
         }
@@ -112,7 +115,7 @@ impl ModalSandbox {
         command: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, SandboxError> {
-        let script_path = self.ensure_script()?;
+        let script_path = self.ensure_script().await?;
         let script_path_str = script_path.to_string_lossy().into_owned();
 
         let mut child = tokio::process::Command::new("uv")
@@ -246,7 +249,11 @@ impl SandboxBackend for ModalSandbox {
     ) -> Result<(), SandboxError> {
         // If persistent, snapshot before terminating so state can be resumed.
         if persistent {
-            let _ = self.snapshot(instance).await;
+            match self.snapshot(instance).await {
+                Ok(Some(_)) => debug!(id = %instance.id, "modal snapshot saved before cleanup"),
+                Ok(None) => debug!(id = %instance.id, "no modal snapshot data before cleanup"),
+                Err(e) => warn!(id = %instance.id, error = %e, "modal snapshot failed before cleanup"),
+            }
         }
 
         let args = serde_json::json!({ "sandbox_id": instance.id });
