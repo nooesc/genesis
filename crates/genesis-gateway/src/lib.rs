@@ -393,9 +393,24 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
     } else {
         let values: Vec<HeaderValue> = origins
             .iter()
-            .filter_map(|o| o.parse().ok())
+            .filter_map(|o| match o.parse::<HeaderValue>() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    error!(origin = %o, error = %e, "invalid CORS origin in config, skipping");
+                    None
+                }
+            })
             .collect();
-        base.allow_origin(values)
+        if values.is_empty() {
+            error!("all configured CORS origins are invalid, falling back to localhost-only");
+            let fallback: Vec<HeaderValue> = ["http://localhost:3000"]
+                .iter()
+                .filter_map(|o| o.parse().ok())
+                .collect();
+            base.allow_origin(fallback)
+        } else {
+            base.allow_origin(values)
+        }
     }
 }
 

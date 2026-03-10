@@ -43,7 +43,15 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     }
 
     // For hostnames, resolve and check all resulting IPs.
-    // This prevents DNS rebinding where a hostname resolves to a private IP.
+    //
+    // NOTE: This is a best-effort check — there is an inherent TOCTOU gap
+    // between this DNS lookup and the one reqwest performs when sending the
+    // request. A sophisticated attacker could use DNS rebinding to return a
+    // public IP here and a private IP during the actual connection. Full
+    // mitigation requires network-level controls (e.g. firewall rules blocking
+    // outbound to private ranges) or a custom reqwest DNS resolver. This check
+    // still blocks the vast majority of SSRF attempts (direct IPs, well-known
+    // hostnames, static DNS entries).
     let addr = format!("{}:{}", host, parsed.port().unwrap_or(80));
     if let Ok(addrs) = addr.to_socket_addrs() {
         for socket_addr in addrs {

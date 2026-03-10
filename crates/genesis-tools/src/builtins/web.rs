@@ -15,7 +15,15 @@ fn http_client() -> &'static reqwest::blocking::Client {
             .timeout(Duration::from_secs(TIMEOUT_SECS))
             .user_agent("genesis-agent/0.1")
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+            .unwrap_or_else(|e| {
+                // Fallback: build a minimal client that still has the timeout.
+                // This path only triggers on TLS backend init failure.
+                eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
+                reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(TIMEOUT_SECS))
+                    .build()
+                    .expect("minimal HTTP client build must succeed")
+            })
     })
 }
 

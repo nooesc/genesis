@@ -16,7 +16,13 @@ fn http_client() -> &'static reqwest::blocking::Client {
             .user_agent("Mozilla/5.0 (compatible; genesis-agent/0.1)")
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+            .unwrap_or_else(|e| {
+                eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
+                reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(TIMEOUT_SECS))
+                    .build()
+                    .expect("minimal HTTP client build must succeed")
+            })
     })
 }
 
