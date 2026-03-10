@@ -504,6 +504,14 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 sticker_set TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                memory_id TEXT PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
             ",
         )
         .map_err(|source| StorageError::Sqlite {
@@ -3106,6 +3114,36 @@ impl MemoryStore {
             })
     }
 
+    /// Get a single memory by ID. Returns `None` if not found.
+    pub fn get(&self, id: &str) -> Result<Option<StoredMemory>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at
+                 FROM memories WHERE id = ?1",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let result = stmt
+            .query_row(params![id], |row| {
+                Ok(StoredMemory {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(result)
+    }
+
     /// Full-text search across stored memories.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3167,6 +3205,139 @@ impl MemoryStore {
             })?;
         Ok(rows > 0)
     }
+}
+
+/// Embedding persistence layer for vector/semantic memory search.
+pub struct EmbeddingStore {
+    database_path: PathBuf,
+}
+
+impl EmbeddingStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Returns the database path for this store.
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    /// Store an embedding for a memory. Replaces any existing embedding for this memory_id.
+    pub fn store(
+        &self,
+        memory_id: &str,
+        embedding: &[f32],
+        model: &str,
+    ) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        let blob = embedding_to_blob(embedding);
+        connection
+            .execute(
+                "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+                 ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding,
+                    model = excluded.model, dimensions = excluded.dimensions,
+                    created_at = excluded.created_at",
+                params![memory_id, blob, model, embedding.len() as i64],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Retrieve all embeddings for cosine similarity search.
+    /// Returns (memory_id, embedding) pairs.
+    pub fn all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare("SELECT memory_id, embedding FROM memory_embeddings")
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                let memory_id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((memory_id, blob_to_embedding(&blob)))
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Delete an embedding by memory ID.
+    pub fn delete(&self, memory_id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let rows = connection
+            .execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+                params![memory_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(rows > 0)
+    }
+
+    /// Check if an embedding exists for a given memory ID.
+    pub fn has_embedding(&self, memory_id: &str) -> Result<bool, StorageError> {
+        let connection = open(&self.database_path)?;
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id = ?1",
+                params![memory_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(count > 0)
+    }
+
+    /// Count total stored embeddings.
+    pub fn count(&self) -> Result<usize, StorageError> {
+        let connection = open(&self.database_path)?;
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memory_embeddings",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(count as usize)
+    }
+}
+
+/// Serialize an f32 slice to a little-endian byte blob for SQLite storage.
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(embedding.len() * 4);
+    for &val in embedding {
+        blob.extend_from_slice(&val.to_le_bytes());
+    }
+    blob
+}
+
+/// Deserialize a little-endian byte blob back to an f32 vector.
+fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
@@ -5821,5 +5992,177 @@ mod tests {
                 [],
             )
             .expect("sticker_cache table should exist");
+    }
+}
+
+#[cfg(test)]
+mod memory_store_tests {
+    use super::{bootstrap, MemoryStore, SessionStore};
+    use tempfile::tempdir;
+
+    fn setup(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'hello world', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'preference', 'likes rust', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        db_path
+    }
+
+    #[test]
+    fn get_returns_existing_memory() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let memory = store.get("mem1").unwrap();
+        assert!(memory.is_some());
+        let memory = memory.unwrap();
+        assert_eq!(memory.id, "mem1");
+        assert_eq!(memory.kind, "fact");
+        assert_eq!(memory.content, "hello world");
+    }
+
+    #[test]
+    fn get_returns_none_for_nonexistent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let memory = store.get("nonexistent").unwrap();
+        assert!(memory.is_none());
+    }
+}
+
+#[cfg(test)]
+mod embedding_store_tests {
+    use super::{bootstrap, EmbeddingStore, SessionStore};
+    use tempfile::tempdir;
+
+    fn setup(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let store = SessionStore::new(&db_path);
+        store.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'hello world', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'preference', 'likes rust', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        db_path
+    }
+
+    #[test]
+    fn store_and_retrieve_embedding() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        let embedding = vec![0.1_f32, 0.2, 0.3, 0.4, 0.5];
+        store.store("mem1", &embedding, "text-embedding-3-small").unwrap();
+
+        assert!(store.has_embedding("mem1").unwrap());
+        assert!(!store.has_embedding("mem2").unwrap());
+        assert_eq!(store.count().unwrap(), 1);
+
+        let all = store.all_embeddings().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "mem1");
+        for (i, &val) in embedding.iter().enumerate() {
+            assert!((all[0].1[i] - val).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn upsert_replaces_existing_embedding() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0, 2.0], "model-v1").unwrap();
+        store.store("mem1", &[3.0, 4.0, 5.0], "model-v2").unwrap();
+
+        assert_eq!(store.count().unwrap(), 1);
+        let all = store.all_embeddings().unwrap();
+        assert_eq!(all[0].1.len(), 3);
+        assert!((all[0].1[0] - 3.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn delete_removes_embedding() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0], "test").unwrap();
+        assert!(store.delete("mem1").unwrap());
+        assert!(!store.has_embedding("mem1").unwrap());
+        assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_nonexistent_returns_false() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        assert!(!store.delete("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn multiple_embeddings() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0, 0.0], "test").unwrap();
+        store.store("mem2", &[0.0, 1.0], "test").unwrap();
+
+        assert_eq!(store.count().unwrap(), 2);
+        let all = store.all_embeddings().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn blob_serialization_roundtrip() {
+        let original = vec![0.0_f32, 1.0, -1.0, f32::MIN, f32::MAX, std::f32::consts::PI];
+        let blob = super::embedding_to_blob(&original);
+        let restored = super::blob_to_embedding(&blob);
+        assert_eq!(original.len(), restored.len());
+        for (a, b) in original.iter().zip(restored.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "bitwise equality for {a}");
+        }
+    }
+
+    #[test]
+    fn database_path_accessor() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        let store = EmbeddingStore::new(&db_path);
+        assert_eq!(store.database_path(), db_path);
     }
 }

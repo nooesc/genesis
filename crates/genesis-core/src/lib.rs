@@ -4,6 +4,7 @@ pub mod audit;
 pub mod compress;
 pub mod context_security;
 pub mod dataset;
+pub mod embedding;
 pub mod cost;
 pub mod delivery;
 pub mod eval;
@@ -967,6 +968,7 @@ mod tests {
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
                 personality: None,
+                embedding: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
