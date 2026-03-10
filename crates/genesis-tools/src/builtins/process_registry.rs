@@ -137,8 +137,8 @@ struct ProcessEntry {
     start_instant: Instant,
     /// Current status.
     status: ProcessStatus,
-    /// Rolling output buffer (combined stdout + stderr).
-    output: RollingBuffer,
+    /// Rolling output buffer (combined stdout + stderr), shared with reader threads.
+    output: Arc<Mutex<RollingBuffer>>,
     /// Child stdin handle for write/submit.
     stdin: Option<std::process::ChildStdin>,
     /// When the process finished (for TTL expiry of finished records).
@@ -169,8 +169,8 @@ impl ProcessEntry {
 
 /// Tracks background reader threads for a process so we can join them.
 struct ReaderHandles {
-    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stdout: Option<std::thread::JoinHandle<()>>,
+    stderr: Option<std::thread::JoinHandle<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,38 +266,47 @@ impl ProcessRegistry {
         let session_id = Self::generate_id();
         let stdin = child.stdin.take();
 
+        // Create shared output buffer for live streaming.
+        let output_buf = Arc::new(Mutex::new(RollingBuffer::new(MAX_OUTPUT_BUFFER)));
+
         // Take stdout/stderr for background reader threads.
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
+        let stdout_buf = Arc::clone(&output_buf);
         let stdout_handle = std::thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(mut pipe) = stdout_pipe {
                 let mut chunk = [0u8; 4096];
                 loop {
                     match pipe.read(&mut chunk) {
                         Ok(0) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Ok(n) => {
+                            if let Ok(mut buf) = stdout_buf.lock() {
+                                buf.push(&chunk[..n]);
+                            }
+                        }
                         Err(_) => break,
                     }
                 }
             }
-            buf
         });
 
+        let stderr_buf = Arc::clone(&output_buf);
         let stderr_handle = std::thread::spawn(move || {
-            let mut buf = Vec::new();
             if let Some(mut pipe) = stderr_pipe {
                 let mut chunk = [0u8; 4096];
                 loop {
                     match pipe.read(&mut chunk) {
                         Ok(0) => break,
-                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Ok(n) => {
+                            if let Ok(mut buf) = stderr_buf.lock() {
+                                buf.push(&chunk[..n]);
+                            }
+                        }
                         Err(_) => break,
                     }
                 }
             }
-            buf
         });
 
         let cwd = working_dir.unwrap_or(".").to_owned();
@@ -310,7 +319,7 @@ impl ProcessRegistry {
             start_time: SystemTime::now(),
             start_instant: Instant::now(),
             status: ProcessStatus::Running,
-            output: RollingBuffer::new(MAX_OUTPUT_BUFFER),
+            output: output_buf,
             stdin,
             finished_at: None,
         };
@@ -328,10 +337,10 @@ impl ProcessRegistry {
         Ok(session_id)
     }
 
-    /// Collect any available output from reader threads for a specific process.
-    /// This is called before accessing the output buffer to ensure it's up to date.
+    /// Check process status and join reader threads when done.
+    /// Output is streamed live into the shared buffer, so no data transfer is needed here.
     fn collect_output(inner: &mut RegistryInner, id: &str) {
-        // Check if process has exited and readers are done.
+        // Check if process has exited.
         let child_done = if let Some(child) = inner.children.get_mut(id) {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -346,28 +355,19 @@ impl ProcessRegistry {
         };
 
         if let Some(exit_code) = child_done {
-            // Process has exited. Join readers to get final output.
+            // Process has exited. Join reader threads to ensure all output is flushed.
             if let Some(mut handles) = inner.readers.remove(id) {
-                let mut combined = Vec::new();
                 if let Some(h) = handles.stdout.take() {
-                    if let Ok(data) = h.join() {
-                        combined.extend_from_slice(&data);
-                    }
+                    let _ = h.join();
                 }
                 if let Some(h) = handles.stderr.take() {
-                    if let Ok(data) = h.join() {
-                        if !combined.is_empty() && !data.is_empty() {
-                            combined.push(b'\n');
-                        }
-                        combined.extend_from_slice(&data);
-                    }
+                    let _ = h.join();
                 }
-                if let Some(entry) = inner.entries.get_mut(id) {
-                    entry.output.push(&combined);
-                    if entry.status == ProcessStatus::Running {
-                        entry.status = ProcessStatus::Exited(exit_code);
-                        entry.finished_at = Some(Instant::now());
-                    }
+            }
+            if let Some(entry) = inner.entries.get_mut(id) {
+                if entry.status == ProcessStatus::Running {
+                    entry.status = ProcessStatus::Exited(exit_code);
+                    entry.finished_at = Some(Instant::now());
                 }
             }
             inner.children.remove(id);
@@ -376,21 +376,22 @@ impl ProcessRegistry {
 
     /// Strip shell startup noise from the beginning of output.
     fn strip_noise(output: &str) -> String {
-        let mut lines: Vec<&str> = output.lines().collect();
-        // Remove noise lines from the front.
-        while let Some(first) = lines.first() {
-            let trimmed = first.trim();
-            if trimmed.is_empty()
-                || NOISE_PATTERNS
-                    .iter()
-                    .any(|p| trimmed.starts_with(p))
-            {
-                lines.remove(0);
-            } else {
-                break;
-            }
-        }
-        let mut result = lines.join("\n");
+        // Skip leading noise/empty lines using an iterator (O(n) — no shifting).
+        let skip_count = output
+            .lines()
+            .take_while(|line| {
+                let trimmed = line.trim();
+                trimmed.is_empty()
+                    || NOISE_PATTERNS.iter().any(|p| trimmed.starts_with(p))
+            })
+            .count();
+
+        let mut result: String = output
+            .lines()
+            .skip(skip_count)
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Preserve trailing newline if the original had one.
         if output.ends_with('\n') && !result.ends_with('\n') {
             result.push('\n');
@@ -450,10 +451,11 @@ impl ProcessRegistry {
 
         for entry in inner.entries.values() {
             let elapsed = format!("{:.1}s", entry.elapsed_secs());
-            let output_size = if entry.output.len() > 1024 {
-                format!("{}KB", entry.output.len() / 1024)
+            let output_len = entry.output.lock().map(|b| b.len()).unwrap_or(0);
+            let output_size = if output_len > 1024 {
+                format!("{}KB", output_len / 1024)
             } else {
-                format!("{}B", entry.output.len())
+                format!("{}B", output_len)
             };
             let cmd_display = if entry.command.len() > 50 {
                 format!("{}...", &entry.command[..47])
@@ -505,10 +507,15 @@ impl ProcessRegistry {
                 reason: format!("no process with id `{id}`"),
             })?;
 
-        let preview = Self::strip_noise(&entry.output.tail(POLL_PREVIEW_BYTES));
+        let (preview, total_bytes) = {
+            let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
+                tool: "process".to_owned(),
+                reason: format!("output lock error: {e}"),
+            })?;
+            (Self::strip_noise(&buf.tail(POLL_PREVIEW_BYTES)), buf.len())
+        };
         let status = entry.status.to_string();
         let elapsed = format!("{:.1}s", entry.elapsed_secs());
-        let total_bytes = entry.output.len();
 
         let mut content = format!(
             "Process: {}\nCommand: {}\nPID: {}\nWorking Dir: {}\nStatus: {status}\nElapsed: {elapsed}\nOutput ({total_bytes} bytes total, last {POLL_PREVIEW_BYTES}):\n",
@@ -553,8 +560,13 @@ impl ProcessRegistry {
                 reason: format!("no process with id `{id}`"),
             })?;
 
-        let page = Self::strip_noise(&entry.output.page(offset, limit));
-        let total_bytes = entry.output.len();
+        let (page, total_bytes) = {
+            let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
+                tool: "process".to_owned(),
+                reason: format!("output lock error: {e}"),
+            })?;
+            (Self::strip_noise(&buf.page(offset, limit)), buf.len())
+        };
         let has_more = offset + limit < total_bytes;
 
         let mut content = format!(
@@ -610,10 +622,15 @@ impl ProcessRegistry {
                         })?;
 
                 if entry.is_finished() {
-                    let preview = Self::strip_noise(&entry.output.tail(POLL_PREVIEW_BYTES));
+                    let (preview, total_bytes) = {
+                        let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
+                            tool: "process".to_owned(),
+                            reason: format!("output lock error: {e}"),
+                        })?;
+                        (Self::strip_noise(&buf.tail(POLL_PREVIEW_BYTES)), buf.len())
+                    };
                     let status = entry.status.to_string();
                     let elapsed = format!("{:.1}s", entry.elapsed_secs());
-                    let total_bytes = entry.output.len();
 
                     let mut content = format!(
                         "Process {} finished.\nStatus: {status}\nElapsed: {elapsed}\nOutput ({total_bytes} bytes, last {POLL_PREVIEW_BYTES}):\n",
@@ -680,12 +697,28 @@ impl ProcessRegistry {
             });
         }
 
-        // Send SIGTERM via the child handle.
-        if let Some(child) = inner.children.get_mut(id) {
-            child.kill().map_err(|e| ToolError::ExecutionFailed {
-                tool: "process".to_owned(),
-                reason: format!("failed to kill process `{id}`: {e}"),
-            })?;
+        // Send termination signal.
+        let pid = entry.pid;
+        #[cfg(unix)]
+        {
+            // Use SIGTERM for graceful shutdown on Unix.
+            let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(ToolError::ExecutionFailed {
+                    tool: "process".to_owned(),
+                    reason: format!("failed to send SIGTERM to process `{id}` (pid {pid}): {err}"),
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Some(child) = inner.children.get_mut(id) {
+                child.kill().map_err(|e| ToolError::ExecutionFailed {
+                    tool: "process".to_owned(),
+                    reason: format!("failed to kill process `{id}`: {e}"),
+                })?;
+            }
         }
 
         // Update status.
@@ -695,7 +728,7 @@ impl ProcessRegistry {
         }
 
         Ok(ToolOutput {
-            content: format!("Sent kill signal to process {id}"),
+            content: format!("Sent SIGTERM to process {id}"),
             metadata: BTreeMap::from([
                 ("tool".to_owned(), "process".to_owned()),
                 ("action".to_owned(), "kill".to_owned()),
@@ -1103,7 +1136,7 @@ mod tests {
         };
         let call = make_call("kill", &[("id", &id)]);
         let output = tool.run(&call, &ctx()).expect("should succeed");
-        assert!(output.content.contains("kill signal"));
+        assert!(output.content.contains("SIGTERM"));
     }
 
     #[test]
