@@ -87,7 +87,7 @@ fn is_piped_download_to_shell(command: &str) -> bool {
 }
 
 /// Build the appropriate Command based on the configured terminal backend.
-fn build_command(
+pub fn build_command(
     command: &str,
     working_dir: Option<&String>,
     backend: &Option<crate::TerminalBackend>,

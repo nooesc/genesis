@@ -14,6 +14,7 @@ pub mod memory;
 pub mod mixture;
 pub mod patch;
 pub mod process;
+pub mod process_registry;
 pub mod reason;
 pub mod schedule;
 pub mod search;

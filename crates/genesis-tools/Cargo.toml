@@ -19,4 +19,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]

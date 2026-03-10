@@ -294,6 +294,10 @@ impl ToolRegistry {
 
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
+
+    // Shared process registry for background shell commands.
+    let process_registry = builtins::process_registry::ProcessRegistry::new();
+
     registry
         .register(
             ToolDefinition {
@@ -328,20 +332,41 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "shell_exec".to_owned(),
-                description: "Executes a shell command and returns its stdout/stderr output."
+                description: "Executes a shell command and returns its stdout/stderr output. Set background=true to run the command as a background process and get a session ID for later monitoring via the `process` tool."
                     .to_owned(),
                 parameters: Some(json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "The shell command to execute." },
                         "working_dir": { "type": "string", "description": "Optional working directory for the command." },
-                        "timeout": { "type": "string", "description": "Timeout in seconds (default: 120). The command is killed if it exceeds this." }
+                        "timeout": { "type": "string", "description": "Timeout in seconds (default: 120). The command is killed if it exceeds this. Only applies to foreground execution." },
+                        "background": { "type": "string", "description": "Set to 'true' to run the command in the background. Returns a session ID immediately instead of waiting for completion." }
                     },
                     "required": ["command"]
                 })),
             },
             ApprovalPolicy::Destructive,
-            builtins::shell::ShellExecTool,
+            builtins::process_registry::BackgroundShellExecTool { registry: process_registry.clone() },
+        )
+        .register(
+            ToolDefinition {
+                name: "process".to_owned(),
+                description: "Manage background processes. Actions: list (show all tracked processes), poll (check status and get output preview), log (full output with pagination), wait (block until completion), kill (terminate process), write (send raw data to stdin), submit (send data + newline to stdin).".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "description": "Action to perform: list, poll, log, wait, kill, write, submit." },
+                        "id": { "type": "string", "description": "Process session ID (e.g. proc_xxxxxxxxxxxx). Required for all actions except list." },
+                        "timeout": { "type": "string", "description": "Timeout in seconds for wait action (default: 60)." },
+                        "offset": { "type": "string", "description": "Byte offset for log pagination (default: 0)." },
+                        "limit": { "type": "string", "description": "Max bytes to return for log pagination (default: 16384)." },
+                        "data": { "type": "string", "description": "Data to send for write/submit actions." }
+                    },
+                    "required": ["action"]
+                })),
+            },
+            ApprovalPolicy::Destructive,
+            builtins::process_registry::ProcessTool { registry: process_registry },
         )
         .register(
             ToolDefinition {
@@ -1590,10 +1615,11 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 72);
+        assert_eq!(definitions.len(), 73);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
+        assert!(definitions.iter().any(|tool| tool.name == "process"));
         assert!(definitions.iter().any(|tool| tool.name == "text_to_speech"));
         assert!(definitions.iter().any(|tool| tool.name == "read_file"));
         assert!(definitions.iter().any(|tool| tool.name == "write_file"));
