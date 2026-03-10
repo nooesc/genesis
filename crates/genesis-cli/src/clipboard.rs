@@ -60,8 +60,8 @@ pub fn detect_platform() -> Result<DisplayPlatform, ClipboardError> {
 
 /// Check whether a CLI tool exists on `$PATH`.
 fn tool_exists(name: &str) -> bool {
-    Command::new("which")
-        .arg(name)
+    Command::new("sh")
+        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -90,7 +90,10 @@ fn macos_pngpaste(dest: &Path) -> Result<(), ClipboardError> {
 ///
 /// Uses Objective-C bridge to read the pasteboard and write PNG data to a file.
 fn macos_osascript(dest: &Path) -> Result<(), ClipboardError> {
-    let dest_str = dest.display();
+    let dest_str = dest.display().to_string();
+    // Escape backslashes and double quotes so the path is safe inside an
+    // AppleScript string literal.
+    let escaped = dest_str.replace('\\', "\\\\").replace('"', "\\\"");
     // AppleScript that checks the pasteboard for image data and writes it out.
     let script = format!(
         r#"use framework "AppKit"
@@ -99,8 +102,11 @@ set imgData to pb's dataForType:(current application's NSPasteboardTypePNG)
 if imgData is missing value then
     error "no image"
 end if
-set filePath to "{dest_str}"
-imgData's writeToFile:filePath atomically:true"#
+set filePath to "{escaped}"
+set writeResult to (imgData's writeToFile:filePath atomically:true) as boolean
+if not writeResult then
+    error "write failed"
+end if"#
     );
     let output = Command::new("osascript")
         .arg("-l")
@@ -110,6 +116,12 @@ imgData's writeToFile:filePath atomically:true"#
         .output()
         .map_err(|e| ClipboardError::ExtractionFailed(format!("osascript: {e}")))?;
     if output.status.success() {
+        // Belt-and-suspenders: verify the file was actually created.
+        if !dest.exists() {
+            return Err(ClipboardError::ExtractionFailed(
+                "osascript: writeToFile returned success but output file is missing".to_owned(),
+            ));
+        }
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -218,9 +230,15 @@ pub fn save_clipboard_image(dest: &Path) -> Result<(), ClipboardError> {
         DisplayPlatform::MacOs => {
             // Try pngpaste first, fall back to osascript
             if tool_exists("pngpaste") {
-                let result = macos_pngpaste(dest);
-                if result.is_ok() {
-                    return result;
+                match macos_pngpaste(dest) {
+                    Ok(()) => return Ok(()),
+                    Err(ClipboardError::NoImage) => {
+                        // No image — fall through to osascript which may
+                        // support additional pasteboard types.
+                    }
+                    Err(e) => {
+                        tracing::warn!("pngpaste failed, falling back to osascript: {e}");
+                    }
                 }
             }
             macos_osascript(dest)
@@ -291,8 +309,8 @@ mod tests {
 
     #[test]
     fn tool_exists_finds_common_tools() {
-        // `which` itself should always exist on macOS/Linux
-        assert!(tool_exists("which"));
+        // `sh` should always exist on macOS/Linux
+        assert!(tool_exists("sh"));
         // A nonsense name should not exist
         assert!(!tool_exists("__nonexistent_tool_xyz__"));
     }
