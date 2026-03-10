@@ -150,6 +150,10 @@ pub struct DeliveryResult {
     pub success: bool,
     /// Error message if delivery failed.
     pub error: Option<String>,
+    /// When a platform send fails, whether the local fallback save succeeded.
+    /// `None` means no fallback was attempted (either the send succeeded or
+    /// this was already a local delivery).
+    pub fallback_local: Option<bool>,
 }
 
 /// Summary of a full delivery operation across all targets.
@@ -339,6 +343,7 @@ impl DeliveryRouter {
                     destination: dest,
                     success: true,
                     error: None,
+                    fallback_local: None,
                 }
             }
             Err(e) => {
@@ -351,6 +356,7 @@ impl DeliveryRouter {
                     destination: dest,
                     success: false,
                     error: Some(e.to_string()),
+                    fallback_local: None,
                 }
             }
         }
@@ -392,6 +398,7 @@ impl DeliveryRouter {
                     destination: dest.clone(),
                     success: true,
                     error: None,
+                    fallback_local: None,
                 }
             }
             Err(e) => {
@@ -403,18 +410,31 @@ impl DeliveryRouter {
                 );
 
                 // Graceful fallback: try saving locally
-                if let Err(local_err) = save_local_output(&self.config.output_dir, job_id, output) {
-                    tracing::error!(
-                        job_id = job_id,
-                        error = %local_err,
-                        "fallback local save also failed"
-                    );
-                }
+                let fallback_ok =
+                    match save_local_output(&self.config.output_dir, job_id, output) {
+                        Ok(path) => {
+                            tracing::info!(
+                                job_id = job_id,
+                                path = %path.display(),
+                                "fallback local save succeeded"
+                            );
+                            true
+                        }
+                        Err(local_err) => {
+                            tracing::error!(
+                                job_id = job_id,
+                                error = %local_err,
+                                "fallback local save also failed"
+                            );
+                            false
+                        }
+                    };
 
                 DeliveryResult {
                     destination: dest.clone(),
                     success: false,
                     error: Some(e),
+                    fallback_local: Some(fallback_ok),
                 }
             }
         }
@@ -448,12 +468,32 @@ fn is_known_platform(name: &str) -> bool {
     )
 }
 
+/// Sanitize a job ID for safe use as a filesystem path component.
+///
+/// Strips path separators (`/`, `\`) and `..` components to prevent path
+/// traversal attacks. If the sanitized result is empty, falls back to
+/// `"_unnamed_"`.
+fn sanitize_job_id(job_id: &str) -> String {
+    let sanitized: String = job_id
+        .replace(['/', '\\'], "_")
+        .replace("..", "_");
+    let sanitized = sanitized.trim_matches(|c: char| c == '_' || c == '.' || c.is_whitespace());
+    if sanitized.is_empty() {
+        "_unnamed_".to_owned()
+    } else {
+        sanitized.to_owned()
+    }
+}
+
 /// Save schedule output to a local file with metadata headers.
 ///
 /// Files are saved to `{output_dir}/{job_id}/{timestamp}.md` with a YAML
 /// front-matter-style header containing the job ID and timestamp.
+///
+/// The `job_id` is sanitized to prevent path traversal.
 fn save_local_output(output_dir: &Path, job_id: &str, content: &str) -> std::io::Result<PathBuf> {
-    let job_dir = output_dir.join(job_id);
+    let safe_id = sanitize_job_id(job_id);
+    let job_dir = output_dir.join(&safe_id);
     std::fs::create_dir_all(&job_dir)?;
 
     let now = chrono::Local::now();
@@ -473,6 +513,8 @@ fn save_local_output(output_dir: &Path, job_id: &str, content: &str) -> std::io:
 /// Truncate a message to `max_len`, appending a truncation notice.
 ///
 /// Tries to break at the last newline before the limit for cleaner output.
+/// Uses `str::floor_char_boundary` to avoid panicking on multi-byte UTF-8
+/// codepoints.
 fn truncate_message(text: &str, max_len: usize) -> String {
     let suffix = "\n\n[Output truncated. Full output saved locally.]";
     let available = max_len.saturating_sub(suffix.len());
@@ -481,10 +523,12 @@ fn truncate_message(text: &str, max_len: usize) -> String {
         return suffix.to_owned();
     }
 
+    // Clamp to a valid char boundary so we never slice inside a multi-byte
+    // codepoint.
+    let safe_end = text.floor_char_boundary(available.min(text.len()));
+
     // Find a clean break point (last newline within available range)
-    let break_point = text[..available.min(text.len())]
-        .rfind('\n')
-        .unwrap_or(available.min(text.len()));
+    let break_point = text[..safe_end].rfind('\n').unwrap_or(safe_end);
 
     let mut result = text[..break_point].to_owned();
     result.push_str(suffix);
@@ -848,6 +892,7 @@ mod tests {
                     },
                     success: true,
                     error: None,
+                    fallback_local: None,
                 },
                 DeliveryResult {
                     destination: ResolvedDestination {
@@ -856,6 +901,7 @@ mod tests {
                     },
                     success: false,
                     error: Some("connection refused".to_owned()),
+                    fallback_local: Some(true),
                 },
                 DeliveryResult {
                     destination: ResolvedDestination {
@@ -864,6 +910,7 @@ mod tests {
                     },
                     success: true,
                     error: None,
+                    fallback_local: None,
                 },
             ],
         };
@@ -883,6 +930,7 @@ mod tests {
                 },
                 success: true,
                 error: None,
+                fallback_local: None,
             }],
         };
         assert!(report.all_succeeded());
@@ -1038,6 +1086,8 @@ mod tests {
             .await;
         assert_eq!(report.failure_count(), 1);
         assert!(report.results[0].error.is_some());
+        // Fallback should have been attempted and succeeded
+        assert_eq!(report.results[0].fallback_local, Some(true));
 
         // Fallback local save should have happened
         assert!(dir.path().join("job-fail").is_dir());
@@ -1074,6 +1124,92 @@ mod tests {
         assert_eq!(report.success_count(), 2); // telegram + local
         assert_eq!(report.failure_count(), 1); // discord
         assert!(!report.all_succeeded());
+    }
+
+    // ─── Platform failure fallback_local field ──────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_platform_success_has_no_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = DeliveryConfig {
+            output_dir: dir.path().to_path_buf(),
+            ..DeliveryConfig::default()
+        };
+        let router = DeliveryRouter::new(config);
+        let sender = MockSender::new();
+
+        let dests = vec![ResolvedDestination {
+            platform: "telegram".to_owned(),
+            chat_id: Some("1".to_owned()),
+        }];
+
+        let report = router
+            .dispatch("ok-job", "some output", &dests, &sender)
+            .await;
+        assert_eq!(report.success_count(), 1);
+        // No fallback was attempted on success
+        assert_eq!(report.results[0].fallback_local, None);
+    }
+
+    // ─── UTF-8 safe truncation ─────────────────────────────────────────
+
+    #[test]
+    fn truncate_message_handles_multibyte_utf8() {
+        // 'é' is 2 bytes, '你' is 3 bytes, '🎉' is 4 bytes
+        let text = "aé你🎉bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        // Try truncating at various points that could land inside multi-byte chars
+        for limit in 1..text.len() + 10 {
+            // This must not panic
+            let result = truncate_message(text, limit);
+            // Verify it's valid UTF-8 (String guarantees this, but let's be explicit)
+            assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn truncate_message_boundary_inside_multibyte_codepoint() {
+        // Create a string where truncation boundary falls inside a multi-byte char.
+        // '🎉' is 4 bytes at positions 0..4.
+        let text = "🎉abcdef";
+        let suffix = "\n\n[Output truncated. Full output saved locally.]";
+        // available = 2 (inside the 4-byte emoji), should not panic
+        let max_len = suffix.len() + 2;
+        let result = truncate_message(text, max_len);
+        assert!(result.contains("[Output truncated"));
+    }
+
+    // ─── Path traversal sanitization ───────────────────────────────────
+
+    #[test]
+    fn sanitize_job_id_strips_traversal() {
+        assert_eq!(sanitize_job_id("../../etc/passwd"), "etc_passwd");
+        assert_eq!(sanitize_job_id("../secret"), "secret");
+        assert_eq!(sanitize_job_id("job/with/slashes"), "job_with_slashes");
+        assert_eq!(sanitize_job_id("normal-job-123"), "normal-job-123");
+    }
+
+    #[test]
+    fn sanitize_job_id_handles_empty_and_dots() {
+        assert_eq!(sanitize_job_id(""), "_unnamed_");
+        assert_eq!(sanitize_job_id(".."), "_unnamed_");
+        assert_eq!(sanitize_job_id("..."), "_unnamed_");
+        assert_eq!(sanitize_job_id("_"), "_unnamed_");
+    }
+
+    #[test]
+    fn sanitize_job_id_handles_backslash_traversal() {
+        assert_eq!(sanitize_job_id("..\\..\\Windows\\System32"), "Windows_System32");
+    }
+
+    #[test]
+    fn save_local_output_rejects_path_traversal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _ = save_local_output(dir.path(), "../../etc/passwd", "pwned")
+            .expect("should save with sanitized path");
+        // Must NOT create files outside the output directory
+        assert!(!dir.path().join("../../etc/passwd").exists());
+        // Should create the sanitized directory instead
+        assert!(dir.path().join("etc_passwd").is_dir());
     }
 
     // ─── is_known_platform ──────────────────────────────────────────────
