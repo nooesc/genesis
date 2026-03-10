@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+dirs.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 genesis-auth = { path = "../genesis-auth" }

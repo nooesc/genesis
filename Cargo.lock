@@ -736,6 +736,7 @@ name = "genesis-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs",
  "futures-util",
  "genesis-auth",
  "genesis-config",
