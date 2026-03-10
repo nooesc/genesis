@@ -258,11 +258,25 @@ fn normalize_ref(r: &str) -> String {
 }
 
 /// Generate a unique session name from a session_id.
-/// Format: `genesis_{session_id}_{8 hex chars from uuid}`
+/// Format: `genesis_{sanitized_id}_{8 hex chars from uuid}`
+///
+/// The session_id is sanitized to prevent path traversal: only alphanumeric
+/// characters, dashes, and underscores are kept, and the id is capped at 32
+/// characters.
 fn generate_session_name(session_id: &str) -> String {
+    let safe_id: String = session_id
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .take(32)
+        .collect();
+    let safe_id = if safe_id.is_empty() {
+        "default".to_owned()
+    } else {
+        safe_id
+    };
     let uuid_hex = uuid::Uuid::new_v4().to_string().replace('-', "");
     let short = &uuid_hex[..8];
-    format!("genesis_{session_id}_{short}")
+    format!("genesis_{safe_id}_{short}")
 }
 
 /// Truncate text to a maximum character count, splitting at a char boundary.
@@ -315,38 +329,34 @@ fn create_local_session(session_id: &str) -> SessionInfo {
 // ---------------------------------------------------------------------------
 
 /// Find the `agent-browser` binary, falling back to npx.
+/// The result is cached in a `OnceLock` so the `which` subprocess only runs once.
 fn find_agent_browser() -> Result<String, ToolError> {
-    // Try direct binary first
-    let which_result = Command::new("which")
-        .arg("agent-browser")
-        .output();
+    static CACHED: OnceLock<Result<String, String>> = OnceLock::new();
 
-    if let Ok(output) = which_result {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !path.is_empty() {
-                return Ok(path);
+    let result = CACHED.get_or_init(|| {
+        // Try direct binary first
+        if let Ok(output) = Command::new("which").arg("agent-browser").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if !path.is_empty() {
+                    return Ok(path);
+                }
             }
         }
-    }
 
-    // Try npx fallback
-    let npx_result = Command::new("which")
-        .arg("npx")
-        .output();
-
-    if let Ok(output) = npx_result {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if !path.is_empty() {
-                return Ok(format!("{path} agent-browser"));
+        // Try npx fallback
+        if let Ok(output) = Command::new("which").arg("npx").output() {
+            if output.status.success() {
+                return Ok("npx agent-browser".to_owned());
             }
         }
-    }
 
-    Err(ToolError::ExecutionFailed {
+        Err("agent-browser CLI not found. Install with: npm install -g agent-browser && agent-browser install".to_owned())
+    });
+
+    result.clone().map_err(|reason| ToolError::ExecutionFailed {
         tool: "browser".to_owned(),
-        reason: "agent-browser not found. Install with: npm install -g agent-browser".to_owned(),
+        reason,
     })
 }
 
@@ -394,7 +404,7 @@ fn run_browser_command_raw(
         (parts[0], &[])
     };
 
-    let child = Command::new(program)
+    let mut child = Command::new(program)
         .args(prefix_args)
         .args(&cmd_args)
         .envs(&env)
@@ -406,54 +416,66 @@ fn run_browser_command_raw(
             reason: format!("failed to spawn agent-browser: {e}"),
         })?;
 
-    // Use a separate thread for wait_with_output to allow timeout handling
+    // Take pipes before the poll loop so we can read them in parallel threads
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            use std::io::Read;
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            use std::io::Read;
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Poll with timeout — child can be killed on deadline
     let deadline = Instant::now() + timeout;
-
-    // We need to handle timeout by polling try_wait, then kill if exceeded.
-    // But the spec says to use a separate thread with wait_with_output for
-    // clean pipe handling. So we move the child into a thread:
-    let handle = std::thread::spawn(move || child.wait_with_output());
-
-    // Wait for the thread to finish, checking for timeout
-    loop {
-        if handle.is_finished() {
-            break;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ToolError::ExecutionFailed {
+                        tool: format!("browser_{command}"),
+                        reason: format!(
+                            "command timed out after {}s",
+                            timeout.as_secs()
+                        ),
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(ToolError::ExecutionFailed {
+                    tool: format!("browser_{command}"),
+                    reason: format!("failed to wait for process: {e}"),
+                });
+            }
         }
-        if Instant::now() >= deadline {
-            // Thread still running = process still running. We can't kill from
-            // here since child was moved. The thread will eventually complete
-            // but we return a timeout error.
-            return Err(ToolError::ExecutionFailed {
-                tool: "browser".to_owned(),
-                reason: format!(
-                    "browser command '{}' timed out after {}s",
-                    command,
-                    timeout.as_secs()
-                ),
-            });
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    };
 
-    let output = handle
-        .join()
-        .map_err(|_| ToolError::ExecutionFailed {
-            tool: "browser".to_owned(),
-            reason: "browser command thread panicked".to_owned(),
-        })?
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "browser".to_owned(),
-            reason: format!("browser command failed: {e}"),
-        })?;
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
 
-    if !output.status.success() {
+    if !status.success() {
         let msg = if stderr.is_empty() {
             format!(
                 "agent-browser exited with status {}: {}",
-                output.status, stdout
+                status, stdout
             )
         } else {
             format!("agent-browser failed: {stderr}")
@@ -604,8 +626,28 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
     let client = browserbase_http_client();
     let url = "https://api.browserbase.com/v1/sessions";
 
-    // Attempt 1: full features (proxies + keepAlive)
-    let body = build_browserbase_session_body(&config.project_id, true, true, true, None);
+    // Read feature flags from environment (with sensible defaults)
+    let enable_proxies = std::env::var("BROWSERBASE_PROXIES")
+        .map(|v| v.to_lowercase() != "false")
+        .unwrap_or(true);
+    let enable_advanced_stealth = std::env::var("BROWSERBASE_ADVANCED_STEALTH")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false); // opt-in, requires Scale plan
+    let enable_keep_alive = std::env::var("BROWSERBASE_KEEP_ALIVE")
+        .map(|v| v.to_lowercase() != "false")
+        .unwrap_or(true);
+    let timeout_ms: Option<u64> = std::env::var("BROWSERBASE_SESSION_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
+    // Attempt 1: full features
+    let body = build_browserbase_session_body(
+        &config.project_id,
+        enable_proxies,
+        enable_advanced_stealth,
+        enable_keep_alive,
+        timeout_ms,
+    );
     let resp = client
         .post(url)
         .header("X-BB-API-Key", &config.api_key)
@@ -619,7 +661,13 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
 
     if resp.status().as_u16() == 402 {
         // Attempt 2: without keepAlive
-        let body = build_browserbase_session_body(&config.project_id, true, true, false, None);
+        let body = build_browserbase_session_body(
+            &config.project_id,
+            enable_proxies,
+            enable_advanced_stealth,
+            false,
+            timeout_ms,
+        );
         let resp = client
             .post(url)
             .header("X-BB-API-Key", &config.api_key)
@@ -633,8 +681,13 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
 
         if resp.status().as_u16() == 402 {
             // Attempt 3: without proxies either
-            let body =
-                build_browserbase_session_body(&config.project_id, false, true, false, None);
+            let body = build_browserbase_session_body(
+                &config.project_id,
+                false,
+                enable_advanced_stealth,
+                false,
+                timeout_ms,
+            );
             let resp = client
                 .post(url)
                 .header("X-BB-API-Key", &config.api_key)
@@ -646,13 +699,31 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
                     reason: format!("Browserbase API request failed: {e}"),
                 })?;
 
-            return parse_browserbase_response(resp, session_id, false, false);
+            return parse_browserbase_response(
+                resp,
+                session_id,
+                false,
+                enable_advanced_stealth,
+                false,
+            );
         }
 
-        return parse_browserbase_response(resp, session_id, true, false);
+        return parse_browserbase_response(
+            resp,
+            session_id,
+            enable_proxies,
+            enable_advanced_stealth,
+            false,
+        );
     }
 
-    parse_browserbase_response(resp, session_id, true, true)
+    parse_browserbase_response(
+        resp,
+        session_id,
+        enable_proxies,
+        enable_advanced_stealth,
+        enable_keep_alive,
+    )
 }
 
 /// Parse a successful Browserbase session creation response.
@@ -660,6 +731,7 @@ fn parse_browserbase_response(
     resp: reqwest::blocking::Response,
     session_id: &str,
     proxies: bool,
+    advanced_stealth: bool,
     keep_alive: bool,
 ) -> Result<SessionInfo, ToolError> {
     if !resp.status().is_success() {
@@ -696,7 +768,7 @@ fn parse_browserbase_response(
     features.insert("cloud".to_owned(), true);
     features.insert("proxies".to_owned(), proxies);
     features.insert("keepAlive".to_owned(), keep_alive);
-    features.insert("advancedStealth".to_owned(), true);
+    features.insert("advancedStealth".to_owned(), advanced_stealth);
 
     Ok(SessionInfo {
         session_name: generate_session_name(session_id),
@@ -718,7 +790,10 @@ fn close_browserbase_session(bb_session_id: &str) -> Result<(), ToolError> {
         .post(&url)
         .header("X-BB-API-Key", &config.api_key)
         .header("Content-Type", "application/json")
-        .json(&json!({"status": "REQUEST_RELEASE"}))
+        .json(&json!({
+            "projectId": config.project_id,
+            "status": "REQUEST_RELEASE",
+        }))
         .send()
         .map_err(|e| ToolError::ExecutionFailed {
             tool: "browser".to_owned(),
@@ -772,6 +847,8 @@ impl ToolHandler for BrowserNavigate {
             &args,
             Duration::from_secs(60),
         )?;
+
+        self.manager.touch_session(sid);
 
         let title = result
             .pointer("/data/title")
