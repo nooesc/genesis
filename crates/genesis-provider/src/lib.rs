@@ -7,6 +7,7 @@ pub mod model_metadata;
 pub mod parsers;
 pub mod pricing;
 mod resolve;
+pub(crate) mod responses_types;
 
 pub use api_types::{
     ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
