@@ -67,6 +67,19 @@ pub async fn client_from_config(
     ChatClient::new(&provider)
 }
 
+/// Clear cached Codex credentials and build a fresh client.
+///
+/// Called when a 401 response suggests the token may have expired.
+/// Clears the in-memory cache so `resolve_credentials` will re-read
+/// from disk and refresh if needed.
+pub async fn refresh_codex_client(
+    model: &str,
+    base_url: Option<&str>,
+) -> Result<ChatClient, ProviderError> {
+    genesis_auth::codex::clear_credentials_cache().await;
+    client_from_config("openai-codex", model, base_url, None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
