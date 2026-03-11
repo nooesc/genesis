@@ -1242,7 +1242,7 @@ impl AgentLoop {
                             turn_output_tokens = turn_output_tokens.saturating_add(usage.completion_tokens);
                         }
 
-                        streamed_tool_calls.extend(update.tool_calls);
+                        merge_streamed_tool_calls(&mut streamed_tool_calls, update.tool_calls);
                     }
 
                     total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
@@ -1964,6 +1964,33 @@ fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
         tool_calls,
         finish_reason,
         usage: chunk.usage,
+    }
+}
+
+/// Merge streaming tool call deltas into the accumulated tool calls list.
+///
+/// In SSE streaming (both Chat Completions and Responses API), tool calls
+/// arrive as incremental chunks:
+///   1. First chunk: `id` + `name` + empty `arguments` → new entry
+///   2. Subsequent chunks: empty `id` + empty `name` + argument fragment → append
+///
+/// This function appends argument fragments to the last matching tool call
+/// instead of creating separate ghost entries with empty names.
+fn merge_streamed_tool_calls(
+    accumulated: &mut Vec<ToolCallEntry>,
+    deltas: Vec<ToolCallEntry>,
+) {
+    for delta in deltas {
+        if !delta.id.is_empty() && !delta.function.name.is_empty() {
+            // New tool call — push as a new entry
+            accumulated.push(delta);
+        } else if !delta.function.arguments.is_empty() {
+            // Argument fragment — append to the last tool call
+            if let Some(last) = accumulated.last_mut() {
+                last.function.arguments.push_str(&delta.function.arguments);
+            }
+        }
+        // Ignore entries with empty id, empty name, AND empty arguments
     }
 }
 
