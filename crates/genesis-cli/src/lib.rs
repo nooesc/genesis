@@ -6977,6 +6977,7 @@ fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> O
                         )),
                         None,
                         None,
+                        None,
                     );
                     Some(format!(
                         "Compressed: removed {deleted} old messages, kept {keep} recent."
@@ -9248,6 +9249,7 @@ storage:
                 tool_calls_json: None,
                 mirror: false,
                 mirror_source: None,
+                provider_metadata: None,
                 created_at: "2026-03-08 12:00:00".to_owned(),
             },
             genesis_storage::StoredMessage {
@@ -9259,6 +9261,7 @@ storage:
                 tool_calls_json: None,
                 mirror: false,
                 mirror_source: None,
+                provider_metadata: None,
                 created_at: "2026-03-08 12:00:01".to_owned(),
             },
         ];
@@ -9362,6 +9365,7 @@ storage:
             tool_calls_json: None,
             mirror: false,
             mirror_source: None,
+            provider_metadata: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }];
 
@@ -9382,6 +9386,7 @@ storage:
             tool_calls_json: None,
             mirror: false,
             mirror_source: None,
+            provider_metadata: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }];
 
@@ -10743,11 +10748,11 @@ storage:
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
         store.create_session("s-undo", "cli", None).expect("create");
-        store.append_message("s-undo", "system", Some("You are Eve."), None, None).unwrap();
-        store.append_message("s-undo", "user", Some("Hello"), None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Hi!"), None, None).unwrap();
-        store.append_message("s-undo", "user", Some("How are you?"), None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Great!"), None, None).unwrap();
+        store.append_message("s-undo", "system", Some("You are Eve."), None, None, None).unwrap();
+        store.append_message("s-undo", "user", Some("Hello"), None, None, None).unwrap();
+        store.append_message("s-undo", "assistant", Some("Hi!"), None, None, None).unwrap();
+        store.append_message("s-undo", "user", Some("How are you?"), None, None, None).unwrap();
+        store.append_message("s-undo", "assistant", Some("Great!"), None, None, None).unwrap();
 
         let result = handle_chat_command("/undo", "s-undo", &store);
         assert!(result.is_some());
@@ -10767,11 +10772,11 @@ storage:
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
         store.create_session("s-undo2", "cli", None).expect("create");
-        store.append_message("s-undo2", "user", Some("search for X"), None, None).unwrap();
+        store.append_message("s-undo2", "user", Some("search for X"), None, None, None).unwrap();
         // assistant with tool call, tool result, then final assistant response
-        store.append_message("s-undo2", "assistant", None, Some(r#"[{"id":"t1","type":"function","function":{"name":"web_search","arguments":"{}"}}]"#), None).unwrap();
-        store.append_message("s-undo2", "tool", Some("result"), None, None).unwrap();
-        store.append_message("s-undo2", "assistant", Some("Here's what I found"), None, None).unwrap();
+        store.append_message("s-undo2", "assistant", None, Some(r#"[{"id":"t1","type":"function","function":{"name":"web_search","arguments":"{}"}}]"#), None, None).unwrap();
+        store.append_message("s-undo2", "tool", Some("result"), None, None, None).unwrap();
+        store.append_message("s-undo2", "assistant", Some("Here's what I found"), None, None, None).unwrap();
 
         let result = handle_chat_command("/undo", "s-undo2", &store);
         let output = result.unwrap();

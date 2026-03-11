@@ -187,7 +187,7 @@ mod tests {
             .create_session("slack-general", "slack", Some("General Chat"))
             .expect("create session");
         store
-            .append_message("slack-general", "user", Some("hi"), None, None)
+            .append_message("slack-general", "user", Some("hi"), None, None, None)
             .expect("append msg");
 
         append_delivery_mirror(

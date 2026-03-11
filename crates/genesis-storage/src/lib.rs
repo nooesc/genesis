@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -29,10 +29,10 @@ mod session_store_tests {
             .create_session("session-1", "cli", None)
             .expect("session should be created");
         store
-            .append_message("session-1", "user", Some("hello eve"), None, None)
+            .append_message("session-1", "user", Some("hello eve"), None, None, None)
             .expect("first message should be stored");
         store
-            .append_message("session-1", "assistant", Some("hello operator"), None, None)
+            .append_message("session-1", "assistant", Some("hello operator"), None, None, None)
             .expect("second message should be stored");
 
         let messages = store
@@ -61,10 +61,10 @@ mod session_store_tests {
             .create_session("session-beta", "slack", None)
             .expect("second session should be created");
         store
-            .append_message("session-alpha", "user", Some("rust migration checklist"), None, None)
+            .append_message("session-alpha", "user", Some("rust migration checklist"), None, None, None)
             .expect("first message should be stored");
         store
-            .append_message("session-beta", "user", Some("provider client work"), None, None)
+            .append_message("session-beta", "user", Some("provider client work"), None, None, None)
             .expect("second message should be stored");
 
         let matches = store
@@ -168,7 +168,7 @@ mod session_store_tests {
 
         let store = SessionStore::new(&database_path);
         store.create_session("recent", "cli", None).expect("create");
-        store.append_message("recent", "user", Some("hello"), None, None).expect("msg");
+        store.append_message("recent", "user", Some("hello"), None, None, None).expect("msg");
 
         let deleted = store.purge_older_than(30).unwrap();
         assert_eq!(deleted, 0);
@@ -218,13 +218,13 @@ mod session_store_tests {
             .expect("session should be created");
 
         store
-            .append_message("session-mixed", "user", Some("hello"), None, None)
+            .append_message("session-mixed", "user", Some("hello"), None, None, None)
             .expect("regular message should be stored");
         store
             .append_mirror_message("session-mixed", "scheduled reminder", "schedule")
             .expect("mirror message should be stored");
         store
-            .append_message("session-mixed", "assistant", Some("got it"), None, None)
+            .append_message("session-mixed", "assistant", Some("got it"), None, None, None)
             .expect("regular reply should be stored");
 
         let messages = store
@@ -527,6 +527,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v6(&connection, database_path)?;
     migrate_to_v7(&connection, database_path)?;
     migrate_to_v8(&connection, database_path)?;
+    migrate_to_v9(&connection, database_path)?;
 
     connection
         .execute(
@@ -708,6 +709,30 @@ fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), St
                 sticker_set TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    Ok(())
+}
+
+/// Migrate v8 → v9: add provider_metadata column to messages table.
+fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    // Check if column already exists (idempotent).
+    let has_column: bool = connection
+        .prepare("SELECT provider_metadata FROM messages LIMIT 0")
+        .is_ok();
+
+    if has_column {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            "ALTER TABLE messages ADD COLUMN provider_metadata TEXT",
+            [],
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -905,6 +930,9 @@ pub struct StoredMessage {
     /// Source label for mirrored messages (e.g. "cli", "telegram", "api").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_source: Option<String>,
+    /// Provider-specific metadata (e.g. codex reasoning blobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<String>,
     pub created_at: String,
 }
 
@@ -1006,14 +1034,15 @@ impl SessionStore {
         content: Option<&str>,
         tool_call_id: Option<&str>,
         tool_calls_json: Option<&str>,
+        provider_metadata: Option<&str>,
     ) -> Result<i64, StorageError> {
         let connection = open(&self.database_path)?;
 
         connection
             .execute(
-                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![session_id, role, content, tool_call_id, tool_calls_json],
+                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json, provider_metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![session_id, role, content, tool_call_id, tool_calls_json, provider_metadata],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
@@ -1443,7 +1472,7 @@ impl SessionStore {
 
         let mut stmt = connection
             .prepare(
-                "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, mirror, mirror_source, created_at
+                "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, mirror, mirror_source, provider_metadata, created_at
                  FROM messages
                  WHERE session_id = ?1
                  ORDER BY id ASC",
@@ -1464,7 +1493,8 @@ impl SessionStore {
                     tool_calls_json: row.get(5)?,
                     mirror: row.get::<_, i64>(6)? != 0,
                     mirror_source: row.get(7)?,
-                    created_at: row.get(8)?,
+                    provider_metadata: row.get(8)?,
+                    created_at: row.get(9)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -1923,7 +1953,7 @@ impl SessionStore {
         self.create_session(session_id, "import", title)?;
 
         for (role, content) in &messages {
-            self.append_message(session_id, role, Some(content), None, None)?;
+            self.append_message(session_id, role, Some(content), None, None, None)?;
         }
 
         Ok(session_id.to_owned())
@@ -4605,8 +4635,8 @@ mod sticker_cache_tests {
 mod tests {
     use super::{
         bootstrap, discover_legacy_source, inspect, latest_import_run, migrate_to_v6,
-        migrate_to_v7, migrate_to_v8, open, record_import_run, ImportStatus, LegacyImportSource,
-        SessionStore, SCHEMA_VERSION,
+        migrate_to_v7, migrate_to_v8, migrate_to_v9, open, record_import_run, ImportStatus,
+        LegacyImportSource, SessionStore, SCHEMA_VERSION,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -4702,16 +4732,16 @@ mod tests {
             .expect("create should work");
 
         store
-            .append_message("s-2", "user", Some("Hello Eve"), None, None)
+            .append_message("s-2", "user", Some("Hello Eve"), None, None, None)
             .expect("append user should work");
         store
-            .append_message("s-2", "assistant", Some("Hi there!"), None, None)
+            .append_message("s-2", "assistant", Some("Hi there!"), None, None, None)
             .expect("append assistant should work");
         store
-            .append_message("s-2", "assistant", None, None, Some(r#"[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\":\"test\"}"}}]"#))
+            .append_message("s-2", "assistant", None, None, Some(r#"[{"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"message\":\"test\"}"}}]"#), None)
             .expect("append tool_calls should work");
         store
-            .append_message("s-2", "tool", Some("test"), Some("call_1"), None)
+            .append_message("s-2", "tool", Some("test"), Some("call_1"), None, None)
             .expect("append tool result should work");
 
         let messages = store
@@ -4739,10 +4769,10 @@ mod tests {
             .expect("create should work");
 
         store
-            .append_message("s-3", "user", Some("Tell me about quantum computing"), None, None)
+            .append_message("s-3", "user", Some("Tell me about quantum computing"), None, None, None)
             .expect("append should work");
         store
-            .append_message("s-4", "user", Some("What is the weather today"), None, None)
+            .append_message("s-4", "user", Some("What is the weather today"), None, None, None)
             .expect("append should work");
 
         let results = store
@@ -5350,9 +5380,9 @@ mod tests {
     fn fork_session_copies_messages_and_sets_parent() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-orig", "cli", Some("Original")).unwrap();
-        store.append_message("s-orig", "system", Some("sys"), None, None).unwrap();
-        store.append_message("s-orig", "user", Some("hello"), None, None).unwrap();
-        store.append_message("s-orig", "assistant", Some("hi"), None, None).unwrap();
+        store.append_message("s-orig", "system", Some("sys"), None, None, None).unwrap();
+        store.append_message("s-orig", "user", Some("hello"), None, None, None).unwrap();
+        store.append_message("s-orig", "assistant", Some("hi"), None, None, None).unwrap();
 
         let forked_id = store.fork_session("s-orig", "s-fork").unwrap();
         assert_eq!(forked_id, "s-fork");
@@ -5375,7 +5405,7 @@ mod tests {
     fn fork_session_without_title() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-notitle", "api", None).unwrap();
-        store.append_message("s-notitle", "user", Some("test"), None, None).unwrap();
+        store.append_message("s-notitle", "user", Some("test"), None, None, None).unwrap();
 
         store.fork_session("s-notitle", "s-fork2").unwrap();
 
@@ -5397,11 +5427,11 @@ mod tests {
     fn delete_last_n_messages_removes_most_recent() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-del", "cli", None).unwrap();
-        store.append_message("s-del", "system", Some("sys"), None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg1"), None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp1"), None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg2"), None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp2"), None, None).unwrap();
+        store.append_message("s-del", "system", Some("sys"), None, None, None).unwrap();
+        store.append_message("s-del", "user", Some("msg1"), None, None, None).unwrap();
+        store.append_message("s-del", "assistant", Some("resp1"), None, None, None).unwrap();
+        store.append_message("s-del", "user", Some("msg2"), None, None, None).unwrap();
+        store.append_message("s-del", "assistant", Some("resp2"), None, None, None).unwrap();
 
         let deleted = store.delete_last_n_messages("s-del", 2).unwrap();
         assert_eq!(deleted, 2);
@@ -5418,7 +5448,7 @@ mod tests {
     fn delete_last_n_messages_zero_is_noop() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-noop", "cli", None).unwrap();
-        store.append_message("s-noop", "user", Some("hello"), None, None).unwrap();
+        store.append_message("s-noop", "user", Some("hello"), None, None, None).unwrap();
 
         let deleted = store.delete_last_n_messages("s-noop", 0).unwrap();
         assert_eq!(deleted, 0);
@@ -5429,7 +5459,7 @@ mod tests {
     fn delete_last_n_messages_more_than_exists() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-over", "cli", None).unwrap();
-        store.append_message("s-over", "user", Some("hello"), None, None).unwrap();
+        store.append_message("s-over", "user", Some("hello"), None, None, None).unwrap();
 
         let deleted = store.delete_last_n_messages("s-over", 100).unwrap();
         assert_eq!(deleted, 1);
@@ -5992,6 +6022,62 @@ mod tests {
                 [],
             )
             .expect("sticker_cache table should exist");
+    }
+
+    #[test]
+    fn v9_migration_adds_provider_metadata_column() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("s-meta", "cli", None).expect("create");
+        store
+            .append_message(
+                "s-meta",
+                "assistant",
+                Some("hello"),
+                None,
+                None,
+                Some(r#"{"codex_reasoning_items":[]}"#),
+            )
+            .expect("append with metadata");
+
+        let messages = store.load_messages("s-meta").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].provider_metadata.as_deref(),
+            Some(r#"{"codex_reasoning_items":[]}"#)
+        );
+    }
+
+    #[test]
+    fn migrate_to_v9_is_idempotent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        // Bootstrap creates all tables including messages, then calls migrate_to_v9 once.
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        // Running migrate_to_v9 again should be idempotent (column already exists).
+        let connection = open(&database_path).expect("open should work");
+        migrate_to_v9(&connection, &database_path).expect("second v9 migration should succeed");
+    }
+
+    #[test]
+    fn provider_metadata_defaults_to_none_in_messages() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("s-no-meta", "cli", None).expect("create");
+        store
+            .append_message("s-no-meta", "user", Some("hello"), None, None, None)
+            .expect("append");
+
+        let messages = store.load_messages("s-no-meta").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].provider_metadata.is_none());
     }
 }
 

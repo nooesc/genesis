@@ -1007,12 +1007,19 @@ pub fn persist_new_messages(
             .map(serde_json::to_string)
             .transpose()?;
 
+        let provider_metadata_json = message
+            .provider_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
         store.append_message(
             session_id,
             &message.role,
             message.content_text(),
             message.tool_call_id.as_deref(),
             tool_calls_json.as_deref(),
+            provider_metadata_json.as_deref(),
         )?;
     }
 
@@ -1040,7 +1047,11 @@ pub fn restore_chat_history(
                 tool_calls,
                 tool_call_id: message.tool_call_id,
                 name: None,
-                provider_metadata: None,
+                provider_metadata: message
+                    .provider_metadata
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?,
             })
         })
         .collect()
@@ -1084,6 +1095,7 @@ fn maybe_inject_skill_nudge(
             session_id,
             "system",
             Some(SKILL_CREATION_NUDGE),
+            None,
             None,
             None,
         ) {
@@ -1197,6 +1209,7 @@ mod tests {
             ),
             mirror: false,
             mirror_source: None,
+            provider_metadata: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }])
         .expect("history should restore");
@@ -1279,7 +1292,7 @@ mod tests {
             .create_session("session-1", "cli", None)
             .expect("session should be created");
         store
-            .append_message("session-1", "user", Some("prior context"), None, None)
+            .append_message("session-1", "user", Some("prior context"), None, None, None)
             .expect("prior message should persist");
 
         let loaded = test_loaded_config(data_dir, database_path.clone());
