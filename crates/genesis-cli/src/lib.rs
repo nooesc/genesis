@@ -5511,10 +5511,42 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
     let (backend, _provider_label, default_key_env) = providers[provider_idx];
     eprintln!();
 
-    // If user chose OAuth, delegate to login flow
+    // If user chose OAuth, detect model then delegate to login flow
     if backend == "openai-codex" {
         eprintln!("  Starting OAuth login flow...");
         eprintln!();
+
+        // Detect codex model from user's config
+        let codex_model = detect_codex_model();
+        let chosen_model = if let Some(model) = codex_model {
+            eprintln!("  Detected Codex model: {}", model);
+            eprintln!();
+            model
+        } else {
+            // Fall back to known models picker
+            let models = known_models();
+            let backend_models: Vec<_> = models
+                .iter()
+                .filter(|(p, _, _)| p.eq_ignore_ascii_case("openai-codex"))
+                .collect();
+            if backend_models.is_empty() {
+                prompt_line("  Model")?
+            } else {
+                eprintln!("  Choose a model:");
+                eprintln!();
+                for (i, (_, model_id, desc)) in backend_models.iter().enumerate() {
+                    eprintln!("    {}. {} — {}", i + 1, model_id, desc);
+                }
+                eprintln!("    {}. Enter a custom model name", backend_models.len() + 1);
+                eprintln!();
+                let model_idx = prompt_choice("  Model", backend_models.len() + 1)?;
+                if model_idx < backend_models.len() {
+                    backend_models[model_idx].1.to_owned()
+                } else {
+                    prompt_line("  Custom model")?
+                }
+            }
+        };
 
         // Ensure config and storage exist first
         let paths = AppPaths::resolve(config_path.as_deref())?;
@@ -5527,6 +5559,15 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         }
         std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
         let _ = bootstrap(&paths.database_path)?;
+
+        // Write the model to config
+        update_provider_in_file(
+            &paths.config_path,
+            Some("openai-codex"),
+            Some(&chosen_model),
+            None,
+            None,
+        )?;
 
         return run_login(config_path).await;
     }
@@ -6868,6 +6909,7 @@ fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
         ("openai", "o3", "Advanced reasoning"),
         ("openai", "o4-mini", "Fast reasoning"),
         // OpenAI Codex (ChatGPT subscription)
+        ("openai-codex", "gpt-5.4", "Latest GPT-5.4"),
         ("openai-codex", "o3-pro", "Most capable reasoning"),
         ("openai-codex", "o3", "Advanced reasoning"),
         ("openai-codex", "gpt-4.1", "Flagship GPT model"),
@@ -6882,6 +6924,47 @@ fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
         ("openrouter", "deepseek/deepseek-r1", "DeepSeek R1 reasoning"),
         ("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick"),
     ]
+}
+
+/// Detect the user's preferred Codex model from `~/.codex/config.toml` or
+/// `~/.codex/models_cache.json`.
+fn detect_codex_model() -> Option<String> {
+    let home = dirs::home_dir()?;
+
+    // Try config.toml first
+    let config_path = home.join(".codex").join("config.toml");
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        if let Ok(table) = content.parse::<toml::Table>() {
+            if let Some(model) = table.get("model").and_then(|v| v.as_str()) {
+                return Some(model.to_owned());
+            }
+        }
+    }
+
+    // Try models_cache.json
+    let cache_path = home.join(".codex").join("models_cache.json");
+    if let Ok(content) = std::fs::read_to_string(&cache_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            // The cache is typically an array of model objects
+            if let Some(models) = value.as_array() {
+                if let Some(first) = models.first() {
+                    if let Some(id) = first
+                        .get("id")
+                        .or_else(|| first.get("model"))
+                        .and_then(|v| v.as_str())
+                    {
+                        return Some(id.to_owned());
+                    }
+                    // If it's just a string
+                    if let Some(s) = first.as_str() {
+                        return Some(s.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Handle in-chat slash commands. Returns Some(output) if handled.

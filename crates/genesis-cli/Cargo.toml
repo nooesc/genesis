@@ -20,9 +20,11 @@ genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-tools = { path = "../genesis-tools" }
 genesis-types = { path = "../genesis-types" }
+dirs.workspace = true
 rand.workspace = true
 rustyline.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 sha2.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
