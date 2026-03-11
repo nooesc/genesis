@@ -1040,6 +1040,7 @@ pub fn restore_chat_history(
                 tool_calls,
                 tool_call_id: message.tool_call_id,
                 name: None,
+                provider_metadata: None,
             })
         })
         .collect()
@@ -1236,6 +1237,7 @@ mod tests {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }];
 
         persist_new_messages(&store, "session-1", &messages)

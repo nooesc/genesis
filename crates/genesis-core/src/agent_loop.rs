@@ -777,6 +777,7 @@ impl AgentLoop {
                         tool_calls,
                         tool_call_id: None,
                         name: None,
+                        provider_metadata: None,
                     },
                     finish_reason: Some("stop".to_owned()),
                 };

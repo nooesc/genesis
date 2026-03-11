@@ -454,6 +454,7 @@ fn parts_to_chat_message(parts: &[GeminiPart]) -> ChatMessage {
         },
         tool_call_id: None,
         name: None,
+        provider_metadata: None,
     }
 }
 
