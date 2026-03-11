@@ -444,7 +444,13 @@ impl ChatClient {
         use crate::responses_types;
 
         let body = responses_types::to_responses_request(&request);
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = match self.send_with_retry(&self.endpoint, &body, &request.model).await {
+            Err(ProviderError::ApiError { status: 401, .. }) => {
+                warn!("codex responses API returned 401, retrying with fresh credentials");
+                self.retry_with_fresh_codex_credentials(&body).await?
+            }
+            other => other?,
+        };
 
         let resp_bytes =
             read_response_body_bytes(response, MAX_NON_STREAMING_RESPONSE_BYTES).await?;
@@ -754,7 +760,13 @@ impl ChatClient {
         let mut body = responses_types::to_responses_request(&request);
         body["stream"] = serde_json::json!(true);
 
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = match self.send_with_retry(&self.endpoint, &body, &request.model).await {
+            Err(ProviderError::ApiError { status: 401, .. }) => {
+                warn!("codex responses API streaming returned 401, retrying with fresh credentials");
+                self.retry_with_fresh_codex_credentials(&body).await?
+            }
+            other => other?,
+        };
 
         info!(
             endpoint = self.endpoint.as_str(),
@@ -834,6 +846,59 @@ impl ChatClient {
     /// Returns the backend identifier (e.g., "openai", "anthropic").
     pub fn backend(&self) -> &str {
         &self.backend
+    }
+
+    /// Attempt a single retry with fresh credentials (codex 401 recovery).
+    ///
+    /// Clears the credential cache, re-resolves credentials, and sends the
+    /// request with a fresh auth header.  Only applicable to the `openai-codex`
+    /// backend; callers should gate on that before invoking.
+    async fn retry_with_fresh_codex_credentials(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, ProviderError> {
+        genesis_auth::codex::clear_credentials_cache().await;
+        let auth_path = genesis_auth::default_auth_path().map_err(|e| {
+            ProviderError::ApiError {
+                status: 401,
+                body: format!("auth path unavailable: {e}"),
+            }
+        })?;
+        let creds =
+            genesis_auth::codex::resolve_credentials(&auth_path)
+                .await
+                .map_err(|e| ProviderError::ApiError {
+                    status: 401,
+                    body: format!("credential re-resolve failed: {e}"),
+                })?;
+        let auth_value = format!("Bearer {}", creds.api_key);
+        let header = reqwest::header::HeaderValue::from_str(&auth_value).map_err(|_| {
+            ProviderError::MissingApiKey {
+                env_var: "invalid refreshed codex token".to_owned(),
+            }
+        })?;
+
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .header(reqwest::header::AUTHORIZATION, header)
+            .json(body)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            let status = response.status().as_u16();
+            let resp_body =
+                read_text_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|e| format!("unreadable: {e}"));
+            Err(ProviderError::ApiError {
+                status,
+                body: resp_body,
+            })
+        }
     }
 }
 

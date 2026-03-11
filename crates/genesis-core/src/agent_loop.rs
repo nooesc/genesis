@@ -873,11 +873,14 @@ impl AgentLoop {
                         self.trajectory.record_assistant_message(text);
                     }
 
-                    // Append the assistant message (with tool_calls) to history
-                    self.messages.push(ChatMessage::assistant_with_tool_calls(
+                    // Append the assistant message (with tool_calls) to history,
+                    // preserving provider_metadata (e.g. reasoning blobs) for multi-turn continuity.
+                    let mut msg = ChatMessage::assistant_with_tool_calls(
                         assistant_msg.content.clone(),
                         tool_calls.clone(),
-                    ));
+                    );
+                    msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                    self.messages.push(msg);
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
@@ -1013,14 +1016,19 @@ impl AgentLoop {
             }
 
             self.trajectory.record_assistant_message(&response_text);
-            self.messages.push(ChatMessage::assistant(&response_text));
+            let mut msg = ChatMessage::assistant(&response_text);
+            msg.provider_metadata = assistant_msg.provider_metadata.clone();
+            self.messages.push(msg);
 
             self.save_trajectory();
             let result = AgentResult {
                 response: response_text,
                 turns_used,
                 tool_calls_made,
-                finished_naturally: choice.finish_reason.as_deref() != Some("length"),
+                finished_naturally: !matches!(
+                    choice.finish_reason.as_deref(),
+                    Some("length") | Some("incomplete")
+                ),
                 total_input_tokens,
                 total_output_tokens,
                 estimated_cost: Some(self.cost.total_cost),
@@ -1226,7 +1234,7 @@ impl AgentLoop {
                         }
 
                         if let Some(reason) = update.finish_reason {
-                            finished_naturally = reason != "length";
+                            finished_naturally = !matches!(reason.as_str(), "length" | "incomplete");
                         }
 
                         if let Some(usage) = update.usage {
@@ -1273,6 +1281,7 @@ impl AgentLoop {
                             self.trajectory.record_assistant_message(&response_text);
                         }
 
+                        // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
                         self.messages.push(ChatMessage::assistant_with_tool_calls(
                             if response_text.is_empty() {
                                 None
@@ -1377,6 +1386,7 @@ impl AgentLoop {
                     }
 
                     self.trajectory.record_assistant_message(&response_text);
+                    // TODO: propagate provider_metadata for streaming reasoning continuity
                     self.messages.push(ChatMessage::assistant(&response_text));
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
@@ -1443,10 +1453,12 @@ impl AgentLoop {
                                 self.trajectory.record_assistant_message(text);
                             }
 
-                            self.messages.push(ChatMessage::assistant_with_tool_calls(
+                            let mut msg = ChatMessage::assistant_with_tool_calls(
                                 assistant_msg.content.clone(),
                                 tool_calls.clone(),
-                            ));
+                            );
+                            msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                            self.messages.push(msg);
 
                             // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
@@ -1566,7 +1578,9 @@ impl AgentLoop {
                     }
 
                     self.trajectory.record_assistant_message(&response_text);
-                    self.messages.push(ChatMessage::assistant(&response_text));
+                    let mut msg = ChatMessage::assistant(&response_text);
+                    msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                    self.messages.push(msg);
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1574,7 +1588,10 @@ impl AgentLoop {
                         response: response_text,
                         turns_used,
                         tool_calls_made,
-                        finished_naturally: choice.finish_reason.as_deref() != Some("length"),
+                        finished_naturally: !matches!(
+                            choice.finish_reason.as_deref(),
+                            Some("length") | Some("incomplete")
+                        ),
                         total_input_tokens,
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
