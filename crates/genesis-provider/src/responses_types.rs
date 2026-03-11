@@ -5,10 +5,6 @@
 //! translates between those internal types and the Responses API wire format
 //! used by the codex endpoint (`/responses`).
 
-// Functions are pub(crate) and will be called from client.rs once the
-// complete_responses / complete_stream_responses paths are wired in.
-#![allow(dead_code)]
-
 use serde_json::{json, Value};
 
 use crate::api_types::{

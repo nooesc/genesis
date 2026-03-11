@@ -78,6 +78,8 @@ impl ChatClient {
             .timeout(Duration::from_secs(300)) // 5 min for long completions
             .build()?;
 
+        let is_codex = provider.backend.trim().eq_ignore_ascii_case("openai-codex");
+
         let base = provider.base_url.trim_end_matches('/');
         let endpoint = if is_anthropic {
             format!("{}/messages", base)
@@ -85,6 +87,8 @@ impl ChatClient {
             // For Gemini, store base URL — full endpoint constructed per-request
             // because it includes the model name and API key.
             base.to_owned()
+        } else if is_codex {
+            format!("{}/responses", base)
         } else {
             format!("{}/chat/completions", base)
         };
@@ -239,6 +243,10 @@ impl ChatClient {
 
         if matches!(self.backend.as_str(), "gemini" | "google") {
             return self.complete_gemini(request, started_at).await;
+        }
+
+        if self.backend.eq_ignore_ascii_case("openai-codex") {
+            return self.complete_responses(request, started_at).await;
         }
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
@@ -427,6 +435,53 @@ impl ChatClient {
         Ok(completion)
     }
 
+    /// OpenAI Responses API completion path (codex backend).
+    async fn complete_responses(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        use crate::responses_types;
+
+        let body = responses_types::to_responses_request(&request);
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+
+        let resp_bytes =
+            read_response_body_bytes(response, MAX_NON_STREAMING_RESPONSE_BYTES).await?;
+        let resp_body: serde_json::Value = serde_json::from_slice(&resp_bytes)?;
+
+        let completion = responses_types::from_responses_response(&resp_body)?;
+
+        if completion.choices.is_empty() {
+            warn!(
+                endpoint = self.endpoint.as_str(),
+                model = request.model.as_str(),
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "codex responses API returned no output"
+            );
+            return Err(ProviderError::EmptyChoices);
+        }
+
+        let (prompt_tokens, completion_tokens, total_tokens) = completion
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+            .unwrap_or((0, 0, 0));
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            token_counts_available = completion.usage.is_some(),
+            "codex responses API request succeeded"
+        );
+
+        Ok(completion)
+    }
+
     pub async fn complete_stream(
         &self,
         mut request: ChatCompletionRequest,
@@ -443,6 +498,10 @@ impl ChatClient {
 
         if matches!(self.backend.as_str(), "gemini" | "google") {
             return self.complete_stream_gemini(request, started_at).await;
+        }
+
+        if self.backend.eq_ignore_ascii_case("openai-codex") {
+            return self.complete_stream_responses(request, started_at).await;
         }
 
         request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
@@ -678,6 +737,84 @@ impl ChatClient {
                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
                 chunk_count,
                 "gemini streaming finished"
+            );
+        };
+
+        Ok(Box::pin(stream))
+    }
+
+    /// OpenAI Responses API streaming path (codex backend).
+    async fn complete_stream_responses(
+        &self,
+        request: ChatCompletionRequest,
+        started_at: Instant,
+    ) -> Result<ChatCompletionChunkStream, ProviderError> {
+        use crate::responses_types;
+
+        let mut body = responses_types::to_responses_request(&request);
+        body["stream"] = serde_json::json!(true);
+
+        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+
+        info!(
+            endpoint = self.endpoint.as_str(),
+            model = request.model.as_str(),
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "codex responses API streaming request accepted"
+        );
+
+        let endpoint = self.endpoint.clone();
+        let model = request.model.clone();
+        let byte_stream = response.bytes_stream();
+        let stream = async_stream::try_stream! {
+            futures_util::pin_mut!(byte_stream);
+            let mut buffer = String::new();
+            let stream_started_at = Instant::now();
+            let mut chunk_count = 0usize;
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = chunk?;
+                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
+                    error.to_string()
+                ))?;
+                buffer.push_str(text);
+
+                while let Some(event_text) = take_next_sse_event(&mut buffer) {
+                    // Parse SSE event type and data (same format as Anthropic: event: type\ndata: json)
+                    let (event_type, data) = parse_anthropic_sse(&event_text);
+                    if data.is_empty() || event_type.is_empty() {
+                        continue;
+                    }
+
+                    let data_value: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    if let Some(parsed) = responses_types::parse_responses_sse_event(&event_type, &data_value)? {
+                        chunk_count += 1;
+                        yield parsed;
+                    }
+
+                    if event_type == "response.completed" {
+                        info!(
+                            endpoint = endpoint.as_str(),
+                            model = model.as_str(),
+                            elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                            chunk_count,
+                            "codex responses API streaming finished"
+                        );
+                        return;
+                    }
+                }
+            }
+
+            info!(
+                endpoint = endpoint.as_str(),
+                model = model.as_str(),
+                elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
+                chunk_count,
+                "codex responses API stream closed"
             );
         };
 
@@ -1090,6 +1227,23 @@ mod tests {
         let client = ChatClient::new(&provider).expect("should build google client");
         assert_eq!(client.backend(), "google");
         assert_eq!(client.api_key.as_deref(), Some("AIza-google"));
+    }
+
+    #[test]
+    fn codex_client_uses_responses_endpoint() {
+        let provider = ResolvedProvider {
+            base_url: "https://chatgpt.com/backend-api/codex".to_owned(),
+            api_key: "token-test".to_owned(),
+            model: "gpt-5.4".to_owned(),
+            backend: "openai-codex".to_owned(),
+        };
+
+        let client = ChatClient::new(&provider).expect("should build codex client");
+        assert_eq!(
+            client.endpoint(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(client.backend(), "openai-codex");
     }
 
     #[test]
