@@ -639,6 +639,7 @@ mod tests {
                     "properties": {"text": {"type": "string"}},
                     "required": ["text"]
                 })),
+                strict: Some(true),
             },
         }];
 

@@ -729,6 +729,7 @@ mod tests {
                         "properties": {"text": {"type": "string"}},
                         "required": ["text"]
                     })),
+                    strict: Some(true),
                 },
             },
             ChatTool {
@@ -737,6 +738,7 @@ mod tests {
                     name: "search".to_owned(),
                     description: "Searches".to_owned(),
                     parameters: None,
+                    strict: Some(true),
                 },
             },
         ];

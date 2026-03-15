@@ -382,6 +382,8 @@ pub struct ChatToolFunction {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 /// OpenAI Chat Completions API response.
@@ -480,12 +482,33 @@ impl ChatCompletionRequest {
 
 impl From<&genesis_types::ToolDefinition> for ChatTool {
     fn from(def: &genesis_types::ToolDefinition) -> Self {
+        // OpenAI strict mode requires:
+        // 1. A non-null `parameters` object (even for zero-argument tools)
+        // 2. `additionalProperties: false` on the top-level parameters object
+        let parameters = match def.parameters.clone() {
+            Some(mut schema) => {
+                // Inject `additionalProperties: false` if not already present
+                if let Some(obj) = schema.as_object_mut() {
+                    obj.entry("additionalProperties")
+                        .or_insert(serde_json::Value::Bool(false));
+                }
+                Some(schema)
+            }
+            None => Some(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+                "required": []
+            })),
+        };
+
         Self {
             tool_type: "function".to_owned(),
             function: ChatToolFunction {
                 name: def.name.clone(),
                 description: def.description.clone(),
-                parameters: def.parameters.clone(),
+                parameters,
+                strict: Some(true),
             },
         }
     }
@@ -739,6 +762,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_definition_none_params_gets_empty_strict_schema() {
+        let def = genesis_types::ToolDefinition {
+            name: "no_args_tool".to_owned(),
+            description: "A tool with no parameters".to_owned(),
+            parameters: None,
+        };
+        let chat_tool = ChatTool::from(&def);
+        let json = serde_json::to_value(&chat_tool).expect("should serialize");
+
+        // strict mode must be set
+        assert_eq!(json["function"]["strict"], true);
+
+        // parameters must not be null — OpenAI strict mode requires a valid schema
+        let params = &json["function"]["parameters"];
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["properties"], serde_json::json!({}));
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(params["required"], serde_json::json!([]));
+    }
+
+    #[test]
     fn tool_definition_with_parameters_serializes_to_wire_format() {
         let def = genesis_types::ToolDefinition {
             name: "shell_exec".to_owned(),
@@ -758,6 +802,27 @@ mod tests {
         assert_eq!(params["type"], "object");
         assert_eq!(params["properties"]["command"]["type"], "string");
         assert_eq!(params["required"][0], "command");
+        // strict mode requires additionalProperties: false
+        assert_eq!(params["additionalProperties"], false);
+    }
+
+    #[test]
+    fn tool_definition_preserves_existing_additional_properties() {
+        // If a tool explicitly sets additionalProperties: true, we should not override it
+        let def = genesis_types::ToolDefinition {
+            name: "flexible_tool".to_owned(),
+            description: "A tool that allows extra properties".to_owned(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })),
+        };
+        let chat_tool = ChatTool::from(&def);
+        let json = serde_json::to_value(&chat_tool).expect("should serialize");
+
+        // The existing value should be preserved (not overwritten)
+        assert_eq!(json["function"]["parameters"]["additionalProperties"], true);
     }
 
     #[test]
@@ -897,5 +962,17 @@ mod tests {
             .with_tool_choice(ToolChoice::Required);
         let json = serde_json::to_value(&request).expect("serialize");
         assert_eq!(json["tool_choice"], "required");
+    }
+
+    #[test]
+    fn chat_tool_serialization_includes_strict() {
+        let def = genesis_types::ToolDefinition {
+            name: "test_tool".to_owned(),
+            description: "A test tool".to_owned(),
+            parameters: Some(serde_json::json!({"type": "object", "properties": {}})),
+        };
+        let tool = ChatTool::from(&def);
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["function"]["strict"], true);
     }
 }
