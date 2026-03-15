@@ -213,7 +213,11 @@ impl AppState {
             api_key,
             api_key_required,
             mcp,
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent("genesis-gateway/0.1")
+                .build()
+                .unwrap_or_default(),
             rate_limiter: rate_limit_rpm.map(RateLimiter::new),
             trusted_proxies,
             loaded,
