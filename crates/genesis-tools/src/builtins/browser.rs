@@ -1388,7 +1388,7 @@ impl ToolHandler for BrowserVision {
 
         // Get vision model config
         let api_base = std::env::var("OPENAI_API_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+            .unwrap_or_else(|_| genesis_provider::OPENAI_BASE_URL.to_owned());
         let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: "OPENAI_API_KEY environment variable not set".to_owned(),

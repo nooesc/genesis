@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -12,8 +13,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, info, info_span, warn};
-
-use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
 use crate::hooks::{HookEvent, HookResult, HookRunner};

@@ -50,7 +50,7 @@ impl ToolHandler for VisionTool {
             .get("api_base")
             .cloned()
             .or_else(|| std::env::var("OPENAI_API_BASE").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+            .unwrap_or_else(|| genesis_provider::OPENAI_BASE_URL.to_owned());
 
         let api_key = call
             .arguments
