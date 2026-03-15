@@ -538,6 +538,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        .route("/.well-known/agent.json", get(agent_card_handler))
         .merge(rate_limited)
         .layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
@@ -729,6 +730,38 @@ async fn mcp_status_handler(
             total_prompts: 0,
         }),
     }
+}
+
+/// A2A Agent Card — describes this agent's capabilities for discovery.
+/// See: <https://github.com/a2aproject/A2A>
+async fn agent_card_handler() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "name": "Eve",
+        "description": "Genesis AI agent — a high-performance Rust-based agent harness with 60+ tools, multi-provider LLM support, and cross-platform integration.",
+        "url": "https://github.com/nooesc/genesis",
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "streaming": true,
+            "tools": true,
+            "multimodal": true,
+            "webhooks": ["telegram", "discord", "slack", "whatsapp", "homeassistant", "signal"],
+            "mcp": true
+        },
+        "defaultInputModes": ["text"],
+        "defaultOutputModes": ["text"],
+        "skills": [
+            {
+                "id": "chat",
+                "name": "General Chat",
+                "description": "Multi-turn conversation with tool use"
+            },
+            {
+                "id": "coding",
+                "name": "Code Assistant",
+                "description": "Code generation, review, debugging, and refactoring"
+            }
+        ]
+    }))
 }
 
 /// Prometheus-compatible metrics endpoint.
