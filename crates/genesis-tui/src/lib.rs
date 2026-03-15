@@ -6,6 +6,7 @@
 //! scroll regions.
 
 pub mod custom_terminal;
+pub mod events;
 pub mod frame_requester;
 pub mod insert_history;
 pub mod terminal;
