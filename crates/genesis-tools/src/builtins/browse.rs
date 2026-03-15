@@ -81,11 +81,24 @@ impl ToolHandler for BrowseTool {
             text
         };
 
-        let mut content = format!("URL: {url}\nHTTP {status}\n\n{truncated}");
-        // Collapse excessive blank lines for cleaner output
-        while content.contains("\n\n\n") {
-            content = content.replace("\n\n\n", "\n\n");
-        }
+        let content = {
+            let raw = format!("URL: {url}\nHTTP {status}\n\n{truncated}");
+            // Collapse 3+ consecutive newlines to 2 in a single pass
+            let mut result = String::with_capacity(raw.len());
+            let mut newline_count = 0u32;
+            for ch in raw.chars() {
+                if ch == '\n' {
+                    newline_count += 1;
+                    if newline_count <= 2 {
+                        result.push(ch);
+                    }
+                } else {
+                    newline_count = 0;
+                    result.push(ch);
+                }
+            }
+            result
+        };
 
         Ok(ToolOutput {
             content,

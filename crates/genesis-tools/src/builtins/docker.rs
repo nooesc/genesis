@@ -48,20 +48,7 @@ impl ToolHandler for DockerExecTool {
         let stderr = truncate_output_bytes(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
-        let mut content = String::new();
-        if !stdout.is_empty() {
-            content.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !content.is_empty() {
-                content.push('\n');
-            }
-            content.push_str("[stderr]\n");
-            content.push_str(&stderr);
-        }
-        if content.is_empty() {
-            content = format!("(no output, exit code {exit_code})");
-        }
+        let content = super::combine_command_output(&stdout, &stderr, exit_code);
 
         Ok(ToolOutput {
             content,

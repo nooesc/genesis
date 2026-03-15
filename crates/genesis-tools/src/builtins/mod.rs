@@ -34,3 +34,24 @@ pub mod user_model;
 pub mod vision;
 pub mod web;
 pub mod web_search;
+
+/// Combine stdout and stderr from a command execution into a single string.
+/// If both are empty, returns a message with the exit code.
+pub(crate) fn combine_command_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
+    let mut content = String::new();
+    if !stdout.is_empty() {
+        content.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str("[stderr]\n");
+        content.push_str(stderr);
+    }
+    if content.is_empty() {
+        format!("(no output, exit code {exit_code})")
+    } else {
+        content
+    }
+}
