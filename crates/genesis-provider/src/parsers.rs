@@ -36,7 +36,7 @@ pub trait ToolCallParser: Send + Sync {
 fn gen_call_id() -> String {
     let mut buf = [0u8; 32];
     Uuid::new_v4().simple().encode_lower(&mut buf);
-    format!("call_{}", std::str::from_utf8(&buf[..8]).unwrap())
+    format!("call_{}", std::str::from_utf8(&buf[..8]).expect("encode_lower writes valid ASCII"))
 }
 
 /// Build a [`ToolCallEntry`] from name and arguments JSON string.

@@ -221,16 +221,16 @@ static KNOWN_METADATA: LazyLock<HashMap<&'static str, ModelMetadata>> =
 /// Look up metadata for a specific model name.
 /// Falls back to a fuzzy match if the exact name isn't found
 /// (e.g. "gpt-4.1" matches "gpt-4.1" even when passed as "gpt-4.1-2025xxxx").
-pub fn lookup(model: &str) -> Option<&'static ModelMetadata> {
+pub fn lookup(model: &str) -> Option<ModelMetadata> {
     // Exact match first
     if let Some(m) = KNOWN_METADATA.get(model) {
-        return Some(m);
+        return Some(m.clone());
     }
 
     // Try prefix match (for versioned model names like "claude-sonnet-4-20250514-v2")
     for (name, meta) in KNOWN_METADATA.iter() {
         if model.starts_with(name) {
-            return Some(meta);
+            return Some(meta.clone());
         }
     }
 
