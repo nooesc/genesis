@@ -88,7 +88,8 @@ impl App {
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::CommitHistory => {
-                // TODO(Task 15): push cells to scrollback
+                // Scrollback insertion is handled in `run_tui` (which owns the
+                // terminal). See `commit_history_to_scrollback` in lib.rs.
             }
             AppEvent::UpdateStatus(_state) => {
                 // TODO(Task 21): update status bar widget

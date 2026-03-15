@@ -222,6 +222,12 @@ pub async fn run_tui(
             // ── Internal app events ─────────────────────────────────
             app_event = app_rx.recv() => {
                 if let Some(event) = app_event {
+                    // CommitHistory needs the terminal, which App doesn't own,
+                    // so we handle the scrollback insertion here before
+                    // delegating the rest to App.
+                    if matches!(&event, AppEvent::CommitHistory) {
+                        commit_history_to_scrollback(&mut term, &mut app.chat);
+                    }
                     app.handle_app_event(event);
                 }
             }
@@ -270,6 +276,40 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();
     term.swap_buffers();
+    let _ = term.flush();
+}
+
+/// Push newly committed history cells into terminal scrollback.
+///
+/// Drains the pending scrollback queue from the [`ChatWidget`], converts each
+/// cell to styled [`Line`]s, then uses [`insert_history::insert_history_lines`]
+/// to write them above the viewport via DECSTBM scroll-region insertion.
+fn commit_history_to_scrollback(
+    term: &mut custom_terminal::CustomTerminal,
+    chat: &mut widgets::chat_widget::ChatWidget,
+) {
+    let cells = chat.drain_pending_scrollback();
+    if cells.is_empty() {
+        return;
+    }
+
+    let width = term.viewport_area().width;
+    let viewport_top = term.viewport_area().y;
+
+    let mut all_lines = Vec::new();
+    for cell in &cells {
+        all_lines.extend(cell.to_scrollback_lines(width));
+    }
+
+    if all_lines.is_empty() {
+        return;
+    }
+
+    let rendered = insert_history::lines_to_rendered(&all_lines);
+    let backend = term.backend_mut();
+    if let Ok(inserted) = insert_history::insert_history_lines(backend, viewport_top, &rendered) {
+        term.note_history_rows_inserted(inserted);
+    }
     let _ = term.flush();
 }
 

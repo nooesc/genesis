@@ -46,6 +46,11 @@ pub struct ActiveCell {
 pub struct ChatWidget {
     /// Cells that have been committed (frozen) from previous turns.
     committed_cells: Vec<HistoryCell>,
+    /// Cells waiting to be pushed into terminal scrollback.
+    ///
+    /// Populated by [`complete_turn`] and drained by [`drain_pending_scrollback`]
+    /// in the `run_tui` event loop (which has access to the terminal).
+    pending_scrollback: Vec<HistoryCell>,
     /// The current in-flight turn, if one is running.
     pub active_cell: Option<ActiveCell>,
     /// The text input widget.
@@ -57,6 +62,7 @@ impl ChatWidget {
     pub fn new() -> Self {
         Self {
             committed_cells: Vec::new(),
+            pending_scrollback: Vec::new(),
             active_cell: None,
             input: InputWidget::new(),
         }
@@ -65,9 +71,13 @@ impl ChatWidget {
     // ── Turn management ───────────────────────────────────────────────────
 
     /// Add a user message to committed cells immediately.
+    ///
+    /// The cell is also queued for scrollback insertion so it will be pushed
+    /// to the terminal history when the next `CommitHistory` event fires.
     pub fn add_user_message(&mut self, text: String) {
-        self.committed_cells
-            .push(HistoryCell::User(UserCell::new(text)));
+        let cell = HistoryCell::User(UserCell::new(text));
+        self.committed_cells.push(cell.clone());
+        self.pending_scrollback.push(cell);
     }
 
     /// Start a new agent turn — creates an empty [`ActiveCell`].
@@ -158,7 +168,16 @@ impl ChatWidget {
         }
 
         self.committed_cells.extend(new_cells.clone());
+        self.pending_scrollback.extend(new_cells.clone());
         new_cells
+    }
+
+    /// Drain cells that are waiting to be pushed into terminal scrollback.
+    ///
+    /// Returns the pending cells and clears the internal queue. Called from
+    /// `run_tui` where both `App` and `CustomTerminal` are accessible.
+    pub fn drain_pending_scrollback(&mut self) -> Vec<HistoryCell> {
+        std::mem::take(&mut self.pending_scrollback)
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
@@ -379,5 +398,64 @@ mod tests {
         let cells = cw.complete_turn();
         assert_eq!(cells.len(), 1);
         assert!(matches!(cells[0], HistoryCell::Tool(_)));
+    }
+
+    #[test]
+    fn user_message_queued_for_scrollback() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hello".to_string());
+
+        let pending = cw.drain_pending_scrollback();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(pending[0], HistoryCell::User(_)));
+    }
+
+    #[test]
+    fn complete_turn_queues_for_scrollback() {
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        cw.append_text("response");
+        let _returned = cw.complete_turn();
+
+        let pending = cw.drain_pending_scrollback();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(pending[0], HistoryCell::Agent(_)));
+    }
+
+    #[test]
+    fn drain_pending_scrollback_clears_queue() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hi".to_string());
+        cw.start_turn();
+        cw.append_text("response");
+        cw.complete_turn();
+
+        // First drain returns user + agent cells.
+        let pending = cw.drain_pending_scrollback();
+        assert_eq!(pending.len(), 2);
+
+        // Second drain returns nothing.
+        let pending2 = cw.drain_pending_scrollback();
+        assert!(pending2.is_empty());
+    }
+
+    #[test]
+    fn full_turn_scrollback_includes_user_and_agent() {
+        let mut cw = ChatWidget::new();
+
+        // User submits, then agent responds with text + tool call.
+        cw.add_user_message("do something".to_string());
+        cw.start_turn();
+        cw.append_text("Sure, running a tool.");
+        cw.tool_call_start("c1".into(), "shell".into(), "ls".into());
+        cw.tool_call_end("c1", true, std::time::Duration::from_millis(200));
+        cw.complete_turn();
+
+        let pending = cw.drain_pending_scrollback();
+        // User + Agent + Tool = 3 cells
+        assert_eq!(pending.len(), 3);
+        assert!(matches!(pending[0], HistoryCell::User(_)));
+        assert!(matches!(pending[1], HistoryCell::Agent(_)));
+        assert!(matches!(pending[2], HistoryCell::Tool(_)));
     }
 }
