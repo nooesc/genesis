@@ -271,6 +271,106 @@ mod session_store_tests {
             .expect("lookup should succeed");
         assert!(missing.is_none());
     }
+
+    #[test]
+    fn truncate_messages_keeps_only_recent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-trunc", "cli", None)
+            .expect("session should be created");
+
+        for i in 1..=5 {
+            store
+                .append_message(
+                    "session-trunc",
+                    "user",
+                    Some(&format!("message {i}")),
+                    None,
+                    None,
+                )
+                .expect("message should be stored");
+        }
+
+        let deleted = store
+            .truncate_messages("session-trunc", 2)
+            .expect("truncate should succeed");
+        assert_eq!(deleted, 3);
+
+        let messages = store
+            .load_messages("session-trunc")
+            .expect("messages should load");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("message 4"));
+        assert_eq!(messages[1].content.as_deref(), Some("message 5"));
+    }
+
+    #[test]
+    fn truncate_messages_noop_when_fewer_than_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-few", "cli", None)
+            .expect("session should be created");
+
+        for i in 1..=3 {
+            store
+                .append_message(
+                    "session-few",
+                    "user",
+                    Some(&format!("message {i}")),
+                    None,
+                    None,
+                )
+                .expect("message should be stored");
+        }
+
+        let deleted = store
+            .truncate_messages("session-few", 10)
+            .expect("truncate should succeed");
+        assert_eq!(deleted, 0);
+
+        let messages = store
+            .load_messages("session-few")
+            .expect("messages should load");
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn search_messages_finds_matching_content() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-search", "cli", Some("Search Test"))
+            .expect("session should be created");
+
+        store
+            .append_message("session-search", "user", Some("hello world"), None, None)
+            .expect("first message should be stored");
+        store
+            .append_message("session-search", "assistant", Some("goodbye moon"), None, None)
+            .expect("second message should be stored");
+        store
+            .append_message("session-search", "user", Some("hello again"), None, None)
+            .expect("third message should be stored");
+
+        let results = store
+            .search_messages("hello", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.session_id == "session-search"));
+        assert!(results.iter().all(|r| r.content.contains("hello")));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
