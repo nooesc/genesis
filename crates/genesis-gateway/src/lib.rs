@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -734,11 +734,19 @@ async fn mcp_status_handler(
 
 /// A2A Agent Card — describes this agent's capabilities for discovery.
 /// See: <https://github.com/a2aproject/A2A>
-async fn agent_card_handler() -> impl IntoResponse {
+async fn agent_card_handler(headers: HeaderMap) -> impl IntoResponse {
+    // Derive the A2A service URL from the Host header per the A2A spec
+    // (the `url` field must point to the A2A endpoint, not the source repo).
+    let url = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|host| format!("https://{host}/.well-known/agent.json"))
+        .unwrap_or_else(|| "https://localhost/.well-known/agent.json".to_string());
+
     Json(serde_json::json!({
         "name": "Eve",
         "description": "Genesis AI agent — a high-performance Rust-based agent harness with 60+ tools, multi-provider LLM support, and cross-platform integration.",
-        "url": "https://github.com/nooesc/genesis",
+        "url": url,
         "version": env!("CARGO_PKG_VERSION"),
         "capabilities": {
             "streaming": true,
@@ -747,8 +755,8 @@ async fn agent_card_handler() -> impl IntoResponse {
             "webhooks": ["telegram", "discord", "slack", "whatsapp", "homeassistant", "signal"],
             "mcp": true
         },
-        "defaultInputModes": ["text"],
-        "defaultOutputModes": ["text"],
+        "defaultInputModes": ["text/plain", "image/png", "image/jpeg"],
+        "defaultOutputModes": ["text/plain", "application/json"],
         "skills": [
             {
                 "id": "chat",
