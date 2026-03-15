@@ -2,6 +2,8 @@
 
 use crate::events::{AgentEvent, AppEvent, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
+use crate::widgets::chat_widget::ChatWidget;
+use crate::widgets::input_widget::InputAction;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
@@ -16,6 +18,8 @@ pub struct App {
     pub frame_requester: FrameRequester,
     pub turn_running: bool,
     pub should_exit: bool,
+    /// Composed chat area: history cells + active streaming cell + input.
+    pub chat: ChatWidget,
 }
 
 impl App {
@@ -23,8 +27,9 @@ impl App {
     pub fn handle_tui_event(&mut self, event: TuiEvent) {
         match event {
             TuiEvent::Key(key) => self.handle_key(key),
-            TuiEvent::Paste(_text) => {
-                // TODO(Task 11): insert into InputWidget
+            TuiEvent::Paste(text) => {
+                self.chat.input.handle_paste(&text);
+                self.frame_requester.schedule_frame();
             }
             TuiEvent::Resize { .. } => self.frame_requester.schedule_frame(),
             TuiEvent::Draw | TuiEvent::FocusGained | TuiEvent::FocusLost => {}
@@ -36,18 +41,32 @@ impl App {
         match event {
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
+                self.chat.start_turn();
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Thinking));
             }
-            AgentEvent::TextDelta(_text) => {
-                // TODO(Task 12): append to active cell in ChatWidget
+            AgentEvent::TextDelta(text) => {
+                self.chat.append_text(&text);
             }
-            AgentEvent::ToolCallStart { tool_name, .. } => {
+            AgentEvent::ToolCallStart {
+                call_id,
+                tool_name,
+                args_summary,
+            } => {
+                self.chat
+                    .tool_call_start(call_id, tool_name.clone(), args_summary);
                 let _ = self
                     .app_tx
                     .send(AppEvent::UpdateStatus(StatusState::ToolRunning { tool_name }));
             }
-            AgentEvent::ToolCallEnd { .. } => {}
+            AgentEvent::ToolCallEnd {
+                call_id,
+                success,
+                duration,
+            } => {
+                self.chat.tool_call_end(&call_id, success, duration);
+            }
             AgentEvent::TurnComplete { .. } => {
+                self.chat.complete_turn();
                 self.turn_running = false;
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
@@ -87,19 +106,47 @@ impl App {
 
     /// Route a single key event to the appropriate handler.
     fn handle_key(&mut self, key: KeyEvent) {
+        // For Ctrl+C and Ctrl+D we check the app-level concern first, then
+        // also delegate to the input widget so it can handle its own
+        // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
         match (key.code, key.modifiers) {
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                self.should_exit = true;
-            }
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if self.turn_running {
                     let _ = self.submission_tx.send(Submission::Interrupt);
+                } else {
+                    // Pass to input widget — InputAction::Interrupt is a no-op
+                    // when nothing is running.
+                    let _ = self.chat.input.handle_key(key);
                 }
             }
             _ => {
-                // TODO(Task 11): route to InputWidget
+                let action = self.chat.input.handle_key(key);
+                match action {
+                    InputAction::Submit(text) => self.submit_text(text),
+                    InputAction::Exit => self.should_exit = true,
+                    InputAction::Interrupt => {
+                        if self.turn_running {
+                            let _ = self.submission_tx.send(Submission::Interrupt);
+                        }
+                    }
+                    InputAction::None => {}
+                }
             }
         }
+        self.frame_requester.schedule_frame();
+    }
+
+    /// Submit a user message: record it in the chat widget and send to agent.
+    fn submit_text(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.chat.input.push_history(text.clone());
+        self.chat.add_user_message(text.clone());
+        let _ = self.submission_tx.send(Submission::UserMessage {
+            text,
+            images: vec![],
+        });
     }
 }
 
@@ -123,6 +170,7 @@ mod tests {
             frame_requester,
             turn_running: false,
             should_exit: false,
+            chat: ChatWidget::new(),
         };
         (app, submission_rx, app_rx)
     }
@@ -227,5 +275,64 @@ mod tests {
             }
             other => panic!("expected UpdateStatus(ToolRunning), got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn enter_submits_message_to_agent() {
+        let (mut app, mut sub_rx, _app_rx) = make_app();
+        // Type "hello" then press Enter.
+        for c in "hello".chars() {
+            app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        match sub_rx.try_recv() {
+            Ok(Submission::UserMessage { text, .. }) => {
+                assert_eq!(text, "hello");
+            }
+            other => panic!("expected UserMessage, got {:?}", other),
+        }
+        // Input should be cleared.
+        assert_eq!(app.chat.input.text(), "");
+        // User message committed to chat.
+        assert_eq!(app.chat.committed_cells().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn paste_inserts_into_input() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.handle_tui_event(TuiEvent::Paste("pasted text".into()));
+        assert_eq!(app.chat.input.text(), "pasted text");
+    }
+
+    #[tokio::test]
+    async fn text_delta_appends_to_active_cell() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.handle_agent_event(AgentEvent::TurnStarted);
+        app.handle_agent_event(AgentEvent::TextDelta("Hello".into()));
+        app.handle_agent_event(AgentEvent::TextDelta(" world".into()));
+        let active = app.chat.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn turn_complete_freezes_active_cell() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.handle_agent_event(AgentEvent::TurnStarted);
+        app.handle_agent_event(AgentEvent::TextDelta("Response text".into()));
+        app.handle_agent_event(AgentEvent::TurnComplete {
+            response: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            turns_used: 1,
+            tool_calls_made: 0,
+        });
+        assert!(app.chat.active_cell.is_none());
+        assert!(!app.chat.committed_cells().is_empty());
     }
 }

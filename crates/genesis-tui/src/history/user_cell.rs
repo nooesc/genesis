@@ -71,7 +71,7 @@ impl UserCell {
 /// Simple word-wrap: split `text` into lines that fit within `max_width` columns.
 /// Splits on space boundaries; individual words wider than `max_width` are kept as-is.
 /// Returns at least one (possibly empty) element.
-pub(super) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
+pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }

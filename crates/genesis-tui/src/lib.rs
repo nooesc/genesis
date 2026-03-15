@@ -130,6 +130,7 @@ pub async fn run_tui(
         frame_requester,
         turn_running: false,
         should_exit: false,
+        chat: crate::widgets::chat_widget::ChatWidget::new(),
     };
 
     let mut crossterm_events = EventStream::new();
