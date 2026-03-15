@@ -18,7 +18,10 @@ impl ToolHandler for SessionSearchTool {
             })?;
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         let sessions = store
@@ -84,7 +87,10 @@ impl ToolHandler for SessionHistoryTool {
             .unwrap_or(20);
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         let messages = store

@@ -41,7 +41,10 @@ impl ToolHandler for SpawnSubagentTool {
             .unwrap_or_else(|| "subagent".to_owned());
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
 
         let subagent_id = generate_subagent_id(&context.session_id);
         let child_session_id = generate_child_session_id(&context.session_id);
