@@ -195,60 +195,8 @@ fn load_recent_sessions_section(db_path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genesis_config::{
-        AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
-    };
-    use std::path::PathBuf;
+    use crate::tests::test_loaded_config;
     use tempfile::tempdir;
-
-    fn test_loaded_config(data_dir: PathBuf, database_path: PathBuf) -> LoadedConfig {
-        LoadedConfig {
-            config: GenesisConfig {
-                schema_version: 1,
-                profile: "operator".to_owned(),
-                provider: ProviderConfig {
-                    backend: "openai".to_owned(),
-                    model: "gpt-4.1-mini".to_owned(),
-                    base_url: Some("http://localhost:8000/v1".to_owned()),
-                    api_key_env: None,
-                    extra_body: None,
-                    tool_call_parser: None,
-                },
-                tool_provider: None,
-                fallback_providers: Vec::new(),
-                mcp_servers: std::collections::HashMap::new(),
-                storage: StorageConfig {
-                    data_dir: data_dir.clone(),
-                    database_path: database_path.clone(),
-                },
-                runtime: RuntimeConfig {
-                    max_concurrency: 4,
-                    allow_destructive_tools: false,
-                    max_turns: 20,
-                    max_context_messages: None,
-                    budget_limit: None,
-                    terminal: None,
-                    thinking_budget: None,
-                    max_context_tokens: None,
-                    max_iterations: None,
-                    context_security: genesis_config::ContextSecurityPolicy::default(),
-                    reasoning_effort: None,
-                    cache: None,
-                    tool_filter: None,
-                    guardrails: None,
-                },
-                gateway: None,
-                toolsets: std::collections::HashMap::new(),
-                personality: None,
-                embedding: None,
-            },
-            paths: AppPaths {
-                config_path: PathBuf::from("/tmp/genesis/config.yaml"),
-                data_dir,
-                database_path,
-            },
-        }
-    }
 
     #[test]
     fn nudge_prompt_includes_reflection_instructions() {
