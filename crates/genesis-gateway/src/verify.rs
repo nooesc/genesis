@@ -22,16 +22,6 @@ pub fn verify_secret_token(secret: &str, provided: Option<&str>) -> bool {
     }
 }
 
-/// Verify a Home Assistant webhook secret token.
-pub fn verify_homeassistant_signature(secret: &str, provided: Option<&str>) -> bool {
-    verify_secret_token(secret, provided)
-}
-
-/// Verify a Telegram webhook secret token.
-pub fn verify_telegram_webhook_secret(secret: &str, provided: Option<&str>) -> bool {
-    verify_secret_token(secret, provided)
-}
-
 /// Verify whether a timestamp is inside the replay tolerance window.
 fn timestamp_within_window(timestamp: &str, tolerance_secs: i64) -> bool {
     let ts = match timestamp.parse::<i64>() {
@@ -250,9 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn telegram_signature_token_matches_expected() {
-        assert!(verify_telegram_webhook_secret("secret", Some("secret")));
-        assert!(!verify_telegram_webhook_secret("secret", Some("wrong")));
+    fn secret_token_matches_expected() {
+        assert!(verify_secret_token("secret", Some("secret")));
+        assert!(!verify_secret_token("secret", Some("wrong")));
     }
 
     #[test]
