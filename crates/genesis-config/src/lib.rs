@@ -1018,11 +1018,13 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 file_config.gateway.get_or_insert_with(GatewayConfig::default).daily_reset_hour
             );
             // Extra validation: hour must be 0..=23.
-            if file_config.gateway.as_ref().expect("just set above").daily_reset_hour.expect("just set above") >= 24 {
-                return Err(ConfigError::InvalidEnvValue {
-                    name: "gateway.daily_reset_hour",
-                    value: value.to_owned(),
-                });
+            if let Some(gw) = file_config.gateway.as_ref() {
+                if gw.daily_reset_hour.is_some_and(|h| h >= 24) {
+                    return Err(ConfigError::InvalidEnvValue {
+                        name: "gateway.daily_reset_hour",
+                        value: value.to_owned(),
+                    });
+                }
             }
         }
         "gateway.rate_limit_rpm" => parse_and_set!(

@@ -141,7 +141,7 @@ pub async fn interactions_handler(
                 response_type: RESPONSE_PONG,
                 data: None,
             })
-            .unwrap(),
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         ));
     }
 
@@ -171,7 +171,7 @@ pub async fn interactions_handler(
                         content: "Please provide a message.".to_owned(),
                     }),
                 })
-                .unwrap(),
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             ));
         }
 
@@ -204,7 +204,7 @@ pub async fn interactions_handler(
                         response_type: RESPONSE_CHANNEL_MESSAGE,
                         data: Some(InteractionResponseData { content: reply }),
                     })
-                    .unwrap(),
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
                 ));
             }
             Ok(super::PairingCheck::AtCapacity) => {
@@ -215,7 +215,7 @@ pub async fn interactions_handler(
                             content: super::pairing_capacity_reply().to_owned(),
                         }),
                     })
-                    .unwrap(),
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
                 ));
             }
             Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
@@ -238,7 +238,7 @@ pub async fn interactions_handler(
                     response_type: RESPONSE_CHANNEL_MESSAGE,
                     data: Some(InteractionResponseData { content: reply }),
                 })
-                .unwrap(),
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
             ));
         }
 
@@ -311,7 +311,7 @@ pub async fn interactions_handler(
                 response_type: RESPONSE_DEFERRED_CHANNEL_MESSAGE,
                 data: None,
             })
-            .unwrap(),
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         ));
     }
 
