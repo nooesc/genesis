@@ -630,7 +630,10 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &agent_result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &agent_result),
+                );
                 self.hooks.on_turn_end(&hook_session, &agent_result);
                 return Ok(agent_result);
             }
@@ -651,7 +654,13 @@ impl AgentLoop {
         // Fire turn-start hook
         self.hooks.on_turn_start(&hook_session, &user_message);
 
-        let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
+        let tool_defs: Vec<ChatTool> = self
+            .tools
+            .definitions_async()
+            .await
+            .iter()
+            .map(ChatTool::from)
+            .collect();
 
         let mut turns_used = 0;
         let mut tool_calls_made = 0;
@@ -673,14 +682,20 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &result),
+                );
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
 
             turns_used += 1;
             if turns_used > self.config.max_turns {
-                warn!(max_turns = self.config.max_turns, "agent loop reached turn limit");
+                warn!(
+                    max_turns = self.config.max_turns,
+                    "agent loop reached turn limit"
+                );
                 self.save_trajectory();
                 let result = AgentResult {
                     response: format!(
@@ -696,7 +711,10 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &result),
+                );
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
@@ -704,7 +722,10 @@ impl AgentLoop {
             // Check iteration budget (lifetime cap across all user turns)
             if let Some(limit) = self.config.max_iterations {
                 if self.iterations_used >= limit {
-                    warn!(iterations = self.iterations_used, limit, "iteration budget exhausted");
+                    warn!(
+                        iterations = self.iterations_used,
+                        limit, "iteration budget exhausted"
+                    );
                     self.save_trajectory();
                     let result = AgentResult {
                         response: format!(
@@ -719,14 +740,22 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(
+                        HookEvent::PostTurn,
+                        self.turn_result_context(&hook_session, &result),
+                    );
                     self.hooks.on_turn_end(&hook_session, &result);
                     return Ok(result);
                 }
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "blocking", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
+            debug!(
+                turn = turns_used,
+                mode = "blocking",
+                prompt_version = crate::prompt::PROMPT_VERSION,
+                "starting agent turn iteration"
+            );
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -752,9 +781,13 @@ impl AgentLoop {
                     .and_then(|cache| cache.get(key).ok().flatten())
             });
 
-            self.hooks.on_llm_request(&hook_session, self.active_client().model(), turns_used);
+            self.hooks
+                .on_llm_request(&hook_session, self.active_client().model(), turns_used);
             let (mut response, active_model) = if let Some(hit) = cached {
-                debug!(cache_key = cache_key.as_deref().unwrap_or(""), "response cache hit");
+                debug!(
+                    cache_key = cache_key.as_deref().unwrap_or(""),
+                    "response cache hit"
+                );
                 self.cache_hits += 1;
 
                 // Reconstruct a ChatCompletionResponse from the cached data
@@ -793,7 +826,9 @@ impl AgentLoop {
                 }
                 match self.complete_with_failover(request).await {
                     Ok(result) => result,
-                    Err(err) => return Err(self.report_error(&hook_session, "llm_request", err.into())),
+                    Err(err) => {
+                        return Err(self.report_error(&hook_session, "llm_request", err.into()))
+                    }
                 }
             };
 
@@ -804,7 +839,10 @@ impl AgentLoop {
             if let (Some(ref key), Some(ref cache), Some(ref cache_cfg)) =
                 (&cache_key, &self.response_cache, &self.config.cache)
             {
-                if cache_cfg.enabled && !response.id.starts_with("cache-") && !response.choices.is_empty() {
+                if cache_cfg.enabled
+                    && !response.id.starts_with("cache-")
+                    && !response.choices.is_empty()
+                {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
                     let tc_json = choice
@@ -879,7 +917,8 @@ impl AgentLoop {
                     for tc in tool_calls {
                         self.trajectory
                             .record_tool_call(&tc.function.name, &tc.function.arguments);
-                        self.hooks.on_tool_call_start(&hook_session, &tc.function.name);
+                        self.hooks
+                            .on_tool_call_start(&hook_session, &tc.function.name);
                         self.fire_shell_hooks(
                             HookEvent::PreToolCall,
                             serde_json::json!({
@@ -903,11 +942,7 @@ impl AgentLoop {
                     {
                         Ok(results) => results,
                         Err(err) => {
-                            return Err(self.report_error(
-                                &hook_session,
-                                "tool_execution",
-                                err,
-                            ))
+                            return Err(self.report_error(&hook_session, "tool_execution", err))
                         }
                     };
                     let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
@@ -949,8 +984,7 @@ impl AgentLoop {
                         if requires_input {
                             clarification = Some(result.clone());
                         }
-                        self.messages
-                            .push(ChatMessage::tool_result(&tc.id, result));
+                        self.messages.push(ChatMessage::tool_result(&tc.id, result));
                     }
 
                     // Inject stuck-loop nudge if any tool failed too many times
@@ -969,7 +1003,10 @@ impl AgentLoop {
                             estimated_cost: Some(self.cost.total_cost),
                             pending_clarification: Some(question),
                         };
-                        self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                        self.fire_shell_hooks(
+                            HookEvent::PostTurn,
+                            self.turn_result_context(&hook_session, &result),
+                        );
                         self.hooks.on_turn_end(&hook_session, &result);
                         return Ok(result);
                     }
@@ -983,10 +1020,7 @@ impl AgentLoop {
             }
 
             // No tool calls - this is the final text response
-            let mut response_text = assistant_msg
-                .content_text()
-                .unwrap_or("")
-                .to_owned();
+            let mut response_text = assistant_msg.content_text().unwrap_or("").to_owned();
 
             // Run output guardrails if configured
             if let Some(ref cg) = self.compiled_guardrails {
@@ -1015,8 +1049,14 @@ impl AgentLoop {
                 estimated_cost: Some(self.cost.total_cost),
                 pending_clarification: None,
             };
-            self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
-            self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
+            self.fire_shell_hooks(
+                HookEvent::PostTurn,
+                self.turn_result_context(&hook_session, &result),
+            );
+            self.fire_shell_hooks(
+                HookEvent::OnComplete,
+                self.turn_result_context(&hook_session, &result),
+            );
             self.hooks.on_turn_end(&hook_session, &result);
             return Ok(result);
         }
@@ -1072,7 +1112,10 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &agent_result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &agent_result),
+                );
                 self.hooks.on_turn_end(&hook_session, &agent_result);
                 return Ok(agent_result);
             }
@@ -1093,7 +1136,13 @@ impl AgentLoop {
         // Fire turn-start hook (streaming)
         self.hooks.on_turn_start(&hook_session, &user_message);
 
-        let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
+        let tool_defs: Vec<ChatTool> = self
+            .tools
+            .definitions_async()
+            .await
+            .iter()
+            .map(ChatTool::from)
+            .collect();
 
         let mut turns_used = 0;
         let mut tool_calls_made = 0;
@@ -1114,14 +1163,20 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &result),
+                );
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
 
             turns_used += 1;
             if turns_used > self.config.max_turns {
-                warn!(max_turns = self.config.max_turns, "agent loop reached turn limit (streaming)");
+                warn!(
+                    max_turns = self.config.max_turns,
+                    "agent loop reached turn limit (streaming)"
+                );
                 let msg = format!(
                     "I've reached the maximum of {} turns for this request. \
                      The work so far has been saved. You can continue by sending another message.",
@@ -1139,7 +1194,10 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                self.fire_shell_hooks(
+                    HookEvent::PostTurn,
+                    self.turn_result_context(&hook_session, &result),
+                );
                 self.hooks.on_turn_end(&hook_session, &result);
                 return Ok(result);
             }
@@ -1147,7 +1205,10 @@ impl AgentLoop {
             // Check iteration budget (lifetime cap across all user turns)
             if let Some(limit) = self.config.max_iterations {
                 if self.iterations_used >= limit {
-                    warn!(iterations = self.iterations_used, limit, "iteration budget exhausted (streaming)");
+                    warn!(
+                        iterations = self.iterations_used,
+                        limit, "iteration budget exhausted (streaming)"
+                    );
                     let msg = format!(
                         "Iteration budget exhausted ({limit} iterations). \
                          The work so far has been saved."
@@ -1164,14 +1225,22 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(
+                        HookEvent::PostTurn,
+                        self.turn_result_context(&hook_session, &result),
+                    );
                     self.hooks.on_turn_end(&hook_session, &result);
                     return Ok(result);
                 }
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "streaming", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
+            debug!(
+                turn = turns_used,
+                mode = "streaming",
+                prompt_version = crate::prompt::PROMPT_VERSION,
+                "starting agent turn iteration"
+            );
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -1182,7 +1251,8 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
-            self.hooks.on_llm_request(&hook_session, self.active_client().model(), turns_used);
+            self.hooks
+                .on_llm_request(&hook_session, self.active_client().model(), turns_used);
             let stream_result = self.complete_stream_with_failover(request.clone()).await;
             match stream_result {
                 Ok((mut stream, active_model)) => {
@@ -1215,8 +1285,10 @@ impl AgentLoop {
                         }
 
                         if let Some(usage) = update.usage {
-                            turn_input_tokens = turn_input_tokens.saturating_add(usage.prompt_tokens);
-                            turn_output_tokens = turn_output_tokens.saturating_add(usage.completion_tokens);
+                            turn_input_tokens =
+                                turn_input_tokens.saturating_add(usage.prompt_tokens);
+                            turn_output_tokens =
+                                turn_output_tokens.saturating_add(usage.completion_tokens);
                         }
 
                         streamed_tool_calls.extend(update.tool_calls);
@@ -1225,14 +1297,12 @@ impl AgentLoop {
                     total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
                     total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
                     self.last_prompt_tokens = turn_input_tokens;
-                    if let Err(err) =
-                        self.record_usage_with_model(
-                            &active_model,
-                            turns_used,
-                            turn_input_tokens,
-                            turn_output_tokens,
-                        )
-                    {
+                    if let Err(err) = self.record_usage_with_model(
+                        &active_model,
+                        turns_used,
+                        turn_input_tokens,
+                        turn_output_tokens,
+                    ) {
                         return Err(self.report_error(&hook_session, "usage_record", err));
                     }
                     self.hooks.on_llm_response(
@@ -1269,7 +1339,9 @@ impl AgentLoop {
 
                         // Emit start events and record tool calls.
                         for tc in &streamed_tool_calls {
-                            on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                            on_event(StreamEvent::ToolCallStart {
+                                name: &tc.function.name,
+                            });
                             self.trajectory
                                 .record_tool_call(&tc.function.name, &tc.function.arguments);
                             self.fire_shell_hooks(
@@ -1297,11 +1369,7 @@ impl AgentLoop {
                         {
                             Ok(results) => results,
                             Err(err) => {
-                                return Err(self.report_error(
-                                    &hook_session,
-                                    "tool_execution",
-                                    err,
-                                ))
+                                return Err(self.report_error(&hook_session, "tool_execution", err))
                             }
                         };
 
@@ -1310,11 +1378,16 @@ impl AgentLoop {
                             streamed_tool_calls.iter().zip(results)
                         {
                             let result = sanitize::sanitize_credentials(&result);
-                            on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                            on_event(StreamEvent::ToolCallEnd {
+                                name: &tc.function.name,
+                            });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
                             if result.starts_with("Error:") {
-                                let count = self.tool_failure_counts.entry(tc.function.name.clone()).or_insert(0);
+                                let count = self
+                                    .tool_failure_counts
+                                    .entry(tc.function.name.clone())
+                                    .or_insert(0);
                                 *count += 1;
                             } else {
                                 self.tool_failure_counts.remove(&tc.function.name);
@@ -1352,7 +1425,10 @@ impl AgentLoop {
                                 estimated_cost: Some(self.cost.total_cost),
                                 pending_clarification: Some(question),
                             };
-                            self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                            self.fire_shell_hooks(
+                                HookEvent::PostTurn,
+                                self.turn_result_context(&hook_session, &result),
+                            );
                             self.hooks.on_turn_end(&hook_session, &result);
                             return Ok(result);
                         }
@@ -1376,14 +1452,24 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
-                    self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(
+                        HookEvent::PostTurn,
+                        self.turn_result_context(&hook_session, &result),
+                    );
+                    self.fire_shell_hooks(
+                        HookEvent::OnComplete,
+                        self.turn_result_context(&hook_session, &result),
+                    );
                     self.hooks.on_turn_end(&hook_session, &result);
                     return Ok(result);
                 }
                 Err(_) => {
-                    warn!(turn = turns_used, "streaming provider request failed; falling back to blocking completion");
-                    let (mut response, fb_model) = match self.complete_with_failover(request).await {
+                    warn!(
+                        turn = turns_used,
+                        "streaming provider request failed; falling back to blocking completion"
+                    );
+                    let (mut response, fb_model) = match self.complete_with_failover(request).await
+                    {
                         Ok(result) => result,
                         Err(err) => {
                             return Err(self.report_error(
@@ -1398,8 +1484,7 @@ impl AgentLoop {
                     self.apply_tool_call_parser(&mut response, &fb_model);
 
                     if let Some(usage) = &response.usage {
-                        total_input_tokens =
-                            total_input_tokens.saturating_add(usage.prompt_tokens);
+                        total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
                         self.last_prompt_tokens = usage.prompt_tokens;
@@ -1435,7 +1520,9 @@ impl AgentLoop {
 
                             // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
-                                on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                                on_event(StreamEvent::ToolCallStart {
+                                    name: &tc.function.name,
+                                });
                                 self.trajectory
                                     .record_tool_call(&tc.function.name, &tc.function.arguments);
                                 self.fire_shell_hooks(
@@ -1472,15 +1559,18 @@ impl AgentLoop {
                             };
 
                             let mut clarification = None;
-                            for (tc, (result, requires_input)) in
-                                tool_calls.iter().zip(results)
-                            {
+                            for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
                                 let result = sanitize::sanitize_credentials(&result);
-                                on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                                on_event(StreamEvent::ToolCallEnd {
+                                    name: &tc.function.name,
+                                });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
                                 if result.starts_with("Error:") {
-                                    let count = self.tool_failure_counts.entry(tc.function.name.clone()).or_insert(0);
+                                    let count = self
+                                        .tool_failure_counts
+                                        .entry(tc.function.name.clone())
+                                        .or_insert(0);
                                     *count += 1;
                                 } else {
                                     self.tool_failure_counts.remove(&tc.function.name);
@@ -1498,7 +1588,9 @@ impl AgentLoop {
                                     }),
                                 );
                                 if requires_input {
-                                    on_event(StreamEvent::ClarificationNeeded { question: &result });
+                                    on_event(StreamEvent::ClarificationNeeded {
+                                        question: &result,
+                                    });
                                     clarification = Some(result.clone());
                                 }
                                 self.messages.push(ChatMessage::tool_result(&tc.id, result));
@@ -1518,7 +1610,10 @@ impl AgentLoop {
                                     estimated_cost: Some(self.cost.total_cost),
                                     pending_clarification: Some(question),
                                 };
-                                self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
+                                self.fire_shell_hooks(
+                                    HookEvent::PostTurn,
+                                    self.turn_result_context(&hook_session, &result),
+                                );
                                 self.hooks.on_turn_end(&hook_session, &result);
                                 return Ok(result);
                             }
@@ -1528,10 +1623,7 @@ impl AgentLoop {
                         }
                     }
 
-                    let mut response_text = assistant_msg
-                        .content_text()
-                        .unwrap_or("")
-                        .to_owned();
+                    let mut response_text = assistant_msg.content_text().unwrap_or("").to_owned();
 
                     // Run output guardrails if configured (streaming path)
                     if let Some(ref cg) = self.compiled_guardrails {
@@ -1561,8 +1653,14 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(HookEvent::PostTurn, self.turn_result_context(&hook_session, &result));
-                    self.fire_shell_hooks(HookEvent::OnComplete, self.turn_result_context(&hook_session, &result));
+                    self.fire_shell_hooks(
+                        HookEvent::PostTurn,
+                        self.turn_result_context(&hook_session, &result),
+                    );
+                    self.fire_shell_hooks(
+                        HookEvent::OnComplete,
+                        self.turn_result_context(&hook_session, &result),
+                    );
                     self.hooks.on_turn_end(&hook_session, &result);
                     return Ok(result);
                 }
@@ -1579,8 +1677,7 @@ impl AgentLoop {
                     tool_calls_made,
                     interval, "injecting memory consolidation nudge"
                 );
-                self.messages
-                    .push(ChatMessage::system(MEMORY_NUDGE));
+                self.messages.push(ChatMessage::system(MEMORY_NUDGE));
             }
         }
     }
@@ -1700,7 +1797,12 @@ impl AgentLoop {
 
     /// Record token usage from an LLM turn and check the budget.
     #[cfg(test)]
-    fn record_usage(&mut self, turn: usize, input_tokens: u32, output_tokens: u32) -> Result<(), AgentError> {
+    fn record_usage(
+        &mut self,
+        turn: usize,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Result<(), AgentError> {
         let model = self.client.model().to_owned();
         self.record_usage_with_model(&model, turn, input_tokens, output_tokens)
     }
@@ -1712,12 +1814,8 @@ impl AgentLoop {
         input_tokens: u32,
         output_tokens: u32,
     ) -> Result<(), AgentError> {
-        self.cost.record_turn(
-            model,
-            turn,
-            input_tokens,
-            output_tokens,
-        );
+        self.cost
+            .record_turn(model, turn, input_tokens, output_tokens);
 
         match self.cost.check_budget() {
             BudgetStatus::Exceeded { used, limit } => {
@@ -1765,9 +1863,8 @@ impl AgentLoop {
                         MessageContent::Parts(parts) => {
                             // Skip masking if any part is non-text (e.g. images)
                             // to avoid silently discarding non-text content.
-                            let all_text = parts
-                                .iter()
-                                .all(|p| matches!(p, ContentPart::Text { .. }));
+                            let all_text =
+                                parts.iter().all(|p| matches!(p, ContentPart::Text { .. }));
                             if !all_text {
                                 continue;
                             }
@@ -1782,8 +1879,7 @@ impl AgentLoop {
                     };
                     if text_len > MIN_CONTENT_LEN {
                         msg.content = Some(MessageContent::Text(
-                            "[Tool output masked — see preceding tool call for context]"
-                                .to_owned(),
+                            "[Tool output masked — see preceding tool call for context]".to_owned(),
                         ));
                         masked_count += 1;
                     }
@@ -1792,7 +1888,10 @@ impl AgentLoop {
         }
 
         if masked_count > 0 {
-            info!(masked_count, "masked old tool outputs to reduce context tokens");
+            info!(
+                masked_count,
+                "masked old tool outputs to reduce context tokens"
+            );
         }
     }
 
@@ -1809,10 +1908,7 @@ impl AgentLoop {
     /// concise summary. This summary is inserted as a system message right
     /// after the main system prompt so the agent retains awareness of context.
     async fn prune_context(&mut self) {
-        let has_system = self
-            .messages
-            .first()
-            .is_some_and(|m| m.role == "system");
+        let has_system = self.messages.first().is_some_and(|m| m.role == "system");
         let drop_start = if has_system { 1 } else { 0 };
         let non_system_count = self.messages.len() - drop_start;
 
@@ -1828,13 +1924,16 @@ impl AgentLoop {
         self.mask_old_tool_outputs();
 
         // Extract the messages we're about to drop and summarize them.
-        let to_drop: Vec<ChatMessage> =
-            self.messages[drop_start..drop_start + drop_count].to_vec();
+        let to_drop: Vec<ChatMessage> = self.messages[drop_start..drop_start + drop_count].to_vec();
 
         info!(
             drop_count,
             remaining = non_system_count - drop_count,
-            trigger = if self.token_compression_needed() { "tokens" } else { "messages" },
+            trigger = if self.token_compression_needed() {
+                "tokens"
+            } else {
+                "messages"
+            },
             "pruning conversation context"
         );
 
@@ -1846,9 +1945,7 @@ impl AgentLoop {
 
         // Inject the summary right after the system prompt (or at position 0).
         if let Some(text) = summary {
-            let summary_msg = ChatMessage::system(format!(
-                "[Prior conversation summary]\n{text}"
-            ));
+            let summary_msg = ChatMessage::system(format!("[Prior conversation summary]\n{text}"));
             self.messages.insert(drop_start, summary_msg);
         }
 
@@ -2028,8 +2125,7 @@ async fn execute_tool_calls_parallel(
             Err(_) => {
                 warn!(
                     tool_name = tool_calls[0].function.name.as_str(),
-                    timeout_secs,
-                    "tool call timed out"
+                    timeout_secs, "tool call timed out"
                 );
                 (
                     format!(
@@ -2066,8 +2162,7 @@ async fn execute_tool_calls_parallel(
                     Err(_) => {
                         warn!(
                             tool_name = tool_name.as_str(),
-                            timeout_secs,
-                            "tool call timed out"
+                            timeout_secs, "tool call timed out"
                         );
                         Ok((
                             format!("Error: tool `{tool_name}` timed out after {timeout_secs}s"),
@@ -2144,45 +2239,43 @@ async fn execute_single_tool(
                 .unwrap_or(false);
             Ok((output.content, requires_input))
         }
-        Err(err) => {
-            match &err {
-                ToolError::ToolNotFound(name) => {
-                    warn!(
-                        elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        tool_name = name.as_str(),
-                        "tool not found, suggesting alternatives"
-                    );
-                    let suggestions = suggest_similar_tools(name, tools);
-                    let msg = if suggestions.is_empty() {
-                        format!("Error: tool `{name}` not found. Use only tools listed in the system prompt.")
-                    } else {
-                        format!(
-                            "Error: tool `{name}` not found. Did you mean: {}?",
-                            suggestions.join(", ")
-                        )
-                    };
-                    Ok((msg, false))
-                }
-                _ => {
-                    warn!(
-                        elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        error = %err,
-                        "tool call returned recoverable error content"
-                    );
-                    Ok((format!("Error: {err}"), false))
-                }
+        Err(err) => match &err {
+            ToolError::ToolNotFound(name) => {
+                warn!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    tool_name = name.as_str(),
+                    "tool not found, suggesting alternatives"
+                );
+                let suggestions = suggest_similar_tools(name, tools);
+                let msg = if suggestions.is_empty() {
+                    format!("Error: tool `{name}` not found. Use only tools listed in the system prompt.")
+                } else {
+                    format!(
+                        "Error: tool `{name}` not found. Did you mean: {}?",
+                        suggestions.join(", ")
+                    )
+                };
+                Ok((msg, false))
             }
-        }
+            _ => {
+                warn!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %err,
+                    "tool call returned recoverable error content"
+                );
+                Ok((format!("Error: {err}"), false))
+            }
+        },
     }
 }
 
 fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentError> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| AgentError::ArgumentParse(format!("{raw}: {e}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| AgentError::ArgumentParse(format!("{raw}: {e}")))?;
 
-    let obj = value.as_object().ok_or_else(|| {
-        AgentError::ArgumentParse(format!("expected JSON object, got: {raw}"))
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| AgentError::ArgumentParse(format!("expected JSON object, got: {raw}")))?;
 
     Ok(obj
         .iter()
@@ -2358,16 +2451,15 @@ mod tests {
 
     #[test]
     fn parse_tool_arguments_handles_simple_object() {
-        let args = parse_tool_arguments(r#"{"message":"hello","count":"3"}"#)
-            .expect("should parse");
+        let args =
+            parse_tool_arguments(r#"{"message":"hello","count":"3"}"#).expect("should parse");
         assert_eq!(args.get("message").unwrap(), "hello");
         assert_eq!(args.get("count").unwrap(), "3");
     }
 
     #[test]
     fn parse_tool_arguments_stringifies_non_string_values() {
-        let args = parse_tool_arguments(r#"{"flag":true,"num":42}"#)
-            .expect("should parse");
+        let args = parse_tool_arguments(r#"{"flag":true,"num":42}"#).expect("should parse");
         assert_eq!(args.get("flag").unwrap(), "true");
         assert_eq!(args.get("num").unwrap(), "42");
     }
@@ -2446,7 +2538,10 @@ mod tests {
         assert_eq!(agent.messages().len(), initial_len + 1);
         let last = agent.messages().last().unwrap();
         assert_eq!(last.role, "system");
-        assert!(last.content_text().unwrap().contains("Memory consolidation"));
+        assert!(last
+            .content_text()
+            .unwrap()
+            .contains("Memory consolidation"));
 
         // At 16: no nudge
         agent.maybe_inject_memory_nudge(16);
@@ -2464,7 +2559,11 @@ mod tests {
         let initial_len = agent.messages().len();
 
         agent.maybe_inject_memory_nudge(15);
-        assert_eq!(agent.messages().len(), initial_len, "no nudge when disabled");
+        assert_eq!(
+            agent.messages().len(),
+            initial_len,
+            "no nudge when disabled"
+        );
     }
 
     #[test]
@@ -2486,12 +2585,20 @@ mod tests {
         // Simulate 2 failures — not enough to trigger
         agent.tool_failure_counts.insert("web_search".to_owned(), 2);
         agent.maybe_inject_stuck_nudge();
-        assert_eq!(agent.messages().len(), initial_len, "no nudge below threshold");
+        assert_eq!(
+            agent.messages().len(),
+            initial_len,
+            "no nudge below threshold"
+        );
 
         // Simulate 3 failures — should trigger
         agent.tool_failure_counts.insert("web_search".to_owned(), 3);
         agent.maybe_inject_stuck_nudge();
-        assert_eq!(agent.messages().len(), initial_len + 1, "nudge injected at threshold");
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 1,
+            "nudge injected at threshold"
+        );
         let last = agent.messages().last().unwrap();
         assert!(last.content_text().unwrap().contains("Stuck loop"));
         assert!(last.content_text().unwrap().contains("web_search"));
@@ -2540,7 +2647,8 @@ mod tests {
                     arguments: "{}".to_owned(),
                 },
             },
-        ).await;
+        )
+        .await;
 
         // ToolNotFound is now a recoverable error with a helpful message
         let (msg, _) = result.expect("should be recoverable");
@@ -2562,7 +2670,8 @@ mod tests {
                     arguments: "{}".to_owned(),
                 },
             },
-        ).await;
+        )
+        .await;
 
         let (msg, _) = result.expect("should be recoverable");
         assert!(msg.contains("Did you mean"));
@@ -2613,19 +2722,20 @@ mod tests {
             },
         ];
 
-        let results = execute_tool_calls_parallel(
-            &agent.tools,
-            &agent.subagent_spawner,
-            &tool_calls,
-            4,
-            120,
-        )
-        .await
-        .expect("parallel execution should succeed");
+        let results =
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+                .await
+                .expect("parallel execution should succeed");
 
         assert_eq!(results.len(), 2);
-        assert!(results[0].0.contains("first"), "first result should contain 'first'");
-        assert!(results[1].0.contains("second"), "second result should contain 'second'");
+        assert!(
+            results[0].0.contains("first"),
+            "first result should contain 'first'"
+        );
+        assert!(
+            results[1].0.contains("second"),
+            "second result should contain 'second'"
+        );
     }
 
     #[tokio::test]
@@ -2640,15 +2750,10 @@ mod tests {
             },
         }];
 
-        let results = execute_tool_calls_parallel(
-            &agent.tools,
-            &agent.subagent_spawner,
-            &tool_calls,
-            4,
-            120,
-        )
-        .await
-        .expect("single-item parallel should succeed");
+        let results =
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+                .await
+                .expect("single-item parallel should succeed");
 
         assert_eq!(results.len(), 1);
         assert!(results[0].0.contains("solo"));
@@ -2676,14 +2781,9 @@ mod tests {
             },
         ];
 
-        let result = execute_tool_calls_parallel(
-            &agent.tools,
-            &agent.subagent_spawner,
-            &tool_calls,
-            4,
-            120,
-        )
-        .await;
+        let result =
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+                .await;
 
         // ToolNotFound is now recoverable, so the parallel execution should succeed
         let results = result.expect("should recover from ToolNotFound");
@@ -2747,18 +2847,9 @@ mod tests {
         // Should keep system + 3 most recent (no summary injected on failure)
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[0].role, "system");
-        assert_eq!(
-            agent.messages()[1].content_text(),
-            Some("msg2")
-        );
-        assert_eq!(
-            agent.messages()[2].content_text(),
-            Some("reply2")
-        );
-        assert_eq!(
-            agent.messages()[3].content_text(),
-            Some("msg3")
-        );
+        assert_eq!(agent.messages()[1].content_text(), Some("msg2"));
+        assert_eq!(agent.messages()[2].content_text(), Some("reply2"));
+        assert_eq!(agent.messages()[3].content_text(), Some("msg3"));
     }
 
     #[tokio::test]
@@ -2857,7 +2948,10 @@ mod tests {
 
         // After user message, should use primary
         agent.messages.push(ChatMessage::user("hello"));
-        assert_eq!(agent.active_client().endpoint(), "http://localhost:8000/v1/chat/completions");
+        assert_eq!(
+            agent.active_client().endpoint(),
+            "http://localhost:8000/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -2874,8 +2968,13 @@ mod tests {
         agent.set_tool_client(tool_client);
 
         // After tool result, should use tool client
-        agent.messages.push(ChatMessage::tool_result("call-1", "result"));
-        assert_eq!(agent.active_client().endpoint(), "http://localhost:9999/v1/chat/completions");
+        agent
+            .messages
+            .push(ChatMessage::tool_result("call-1", "result"));
+        assert_eq!(
+            agent.active_client().endpoint(),
+            "http://localhost:9999/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -2883,14 +2982,21 @@ mod tests {
         let mut agent = test_agent();
 
         // No tool client set — should always use primary
-        agent.messages.push(ChatMessage::tool_result("call-1", "result"));
-        assert_eq!(agent.active_client().endpoint(), "http://localhost:8000/v1/chat/completions");
+        agent
+            .messages
+            .push(ChatMessage::tool_result("call-1", "result"));
+        assert_eq!(
+            agent.active_client().endpoint(),
+            "http://localhost:8000/v1/chat/completions"
+        );
     }
 
     #[test]
     fn record_usage_tracks_cost() {
         let mut agent = test_agent();
-        agent.record_usage(1, 1000, 500).expect("should succeed without budget");
+        agent
+            .record_usage(1, 1000, 500)
+            .expect("should succeed without budget");
         assert_eq!(agent.cost().total_input_tokens, 1000);
         assert_eq!(agent.cost().total_output_tokens, 500);
         assert_eq!(agent.cost().turns.len(), 1);
@@ -3012,9 +3118,10 @@ mod tests {
                 success: bool,
                 duration_ms: u64,
             ) {
-                self.events.lock().unwrap().push(format!(
-                    "tool_end:{tool_name}:{success}:{duration_ms}ms"
-                ));
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("tool_end:{tool_name}:{success}:{duration_ms}ms"));
             }
         }
 
@@ -3172,7 +3279,10 @@ mod tests {
             ],
         );
 
-        let result = agent.run_turn("use a tool").await.expect("turn should succeed");
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
         assert_eq!(result.response, "final");
 
         let pre = agent
@@ -3352,7 +3462,10 @@ mod tests {
             HookRunner::default(),
         );
 
-        let result = agent.run_turn("use a tool").await.expect("should return result, not error");
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("should return result, not error");
         // After 1 iteration (tool call), the loop tries to iterate again but
         // iteration budget is exhausted, so it returns gracefully.
         assert!(!result.finished_naturally);
@@ -3407,7 +3520,9 @@ mod tests {
                 },
             }],
         ));
-        agent.messages.push(ChatMessage::tool_result("tc1", &long_output));
+        agent
+            .messages
+            .push(ChatMessage::tool_result("tc1", &long_output));
         agent.messages.push(ChatMessage::assistant("got it"));
         agent.messages.push(ChatMessage::user("more"));
         agent.messages.push(ChatMessage::assistant_with_tool_calls(
@@ -3421,7 +3536,9 @@ mod tests {
                 },
             }],
         ));
-        agent.messages.push(ChatMessage::tool_result("tc2", short_output));
+        agent
+            .messages
+            .push(ChatMessage::tool_result("tc2", short_output));
         agent.messages.push(ChatMessage::assistant("ok"));
 
         // Protected region (last 8 messages)
@@ -3437,7 +3554,9 @@ mod tests {
                 },
             }],
         ));
-        agent.messages.push(ChatMessage::tool_result("tc3", &long_output));
+        agent
+            .messages
+            .push(ChatMessage::tool_result("tc3", &long_output));
         agent.messages.push(ChatMessage::assistant("noted"));
         agent.messages.push(ChatMessage::user("last one"));
         agent.messages.push(ChatMessage::assistant_with_tool_calls(
@@ -3451,7 +3570,9 @@ mod tests {
                 },
             }],
         ));
-        agent.messages.push(ChatMessage::tool_result("tc4", &long_output));
+        agent
+            .messages
+            .push(ChatMessage::tool_result("tc4", &long_output));
         agent.messages.push(ChatMessage::assistant("done"));
 
         assert_eq!(agent.messages().len(), 17); // 1 system + 16
@@ -3465,10 +3586,7 @@ mod tests {
         );
 
         // Message [7] (tool, short, old) → NOT masked (below threshold)
-        assert_eq!(
-            agent.messages()[7].content_text().unwrap(),
-            short_output,
-        );
+        assert_eq!(agent.messages()[7].content_text().unwrap(), short_output,);
 
         // Message [11] (tool, long, recent/protected) → NOT masked
         assert_eq!(

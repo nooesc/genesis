@@ -18,8 +18,7 @@ async fn main() {
 }
 
 fn init_tracing() {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let use_json = std::env::var("GENESIS_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

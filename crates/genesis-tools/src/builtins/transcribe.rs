@@ -28,13 +28,13 @@ pub struct TranscribeTool;
 
 impl ToolHandler for TranscribeTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let file_path = call
-            .arguments
-            .get("file_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "file_path",
-            })?;
+        let file_path =
+            call.arguments
+                .get("file_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "file_path",
+                })?;
 
         let model = call
             .arguments

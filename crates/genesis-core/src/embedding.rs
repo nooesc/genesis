@@ -116,12 +116,7 @@ impl EmbeddingProvider {
             dimensions: self.dimensions,
         };
 
-        let response = self
-            .http
-            .post(&self.endpoint)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.http.post(&self.endpoint).json(&request).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -350,7 +345,11 @@ fn reciprocal_rank_fusion(
         })
         .collect();
 
-    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     merged.truncate(limit);
     merged
 }
@@ -426,10 +425,7 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![0.7071068, 0.7071068];
         let sim = cosine_similarity(&a, &b);
-        assert!(
-            (sim - 0.7071068).abs() < 1e-4,
-            "expected ~0.707, got {sim}"
-        );
+        assert!((sim - 0.7071068).abs() < 1e-4, "expected ~0.707, got {sim}");
     }
 
     #[test]
@@ -445,7 +441,10 @@ mod tests {
 
         let c = vec![0.5, 0.4, 0.3, 0.2, 0.1];
         let sim2 = cosine_similarity(&a, &c);
-        assert!(sim2 > 0.0, "similar vectors should have positive similarity");
+        assert!(
+            sim2 > 0.0,
+            "similar vectors should have positive similarity"
+        );
         assert!(sim2 < 1.0, "different vectors should have similarity < 1.0");
     }
 
@@ -456,14 +455,8 @@ mod tests {
             SearchMode::from_str_opt(Some("keyword")),
             SearchMode::Keyword
         );
-        assert_eq!(
-            SearchMode::from_str_opt(Some("vector")),
-            SearchMode::Vector
-        );
-        assert_eq!(
-            SearchMode::from_str_opt(Some("hybrid")),
-            SearchMode::Hybrid
-        );
+        assert_eq!(SearchMode::from_str_opt(Some("vector")), SearchMode::Vector);
+        assert_eq!(SearchMode::from_str_opt(Some("hybrid")), SearchMode::Hybrid);
         assert_eq!(
             SearchMode::from_str_opt(Some("unknown")),
             SearchMode::Keyword
@@ -549,9 +542,7 @@ mod tests {
 
         // Create a session and memory for FK constraints
         let session_store = genesis_storage::SessionStore::new(&db_path);
-        session_store
-            .create_session("s1", "test", None)
-            .unwrap();
+        session_store.create_session("s1", "test", None).unwrap();
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
@@ -596,9 +587,7 @@ mod tests {
         genesis_storage::bootstrap(&db_path).expect("bootstrap");
 
         let session_store = genesis_storage::SessionStore::new(&db_path);
-        session_store
-            .create_session("s1", "test", None)
-            .unwrap();
+        session_store.create_session("s1", "test", None).unwrap();
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
@@ -626,9 +615,7 @@ mod tests {
         genesis_storage::bootstrap(&db_path).expect("bootstrap");
 
         let session_store = genesis_storage::SessionStore::new(&db_path);
-        session_store
-            .create_session("s1", "test", None)
-            .unwrap();
+        session_store.create_session("s1", "test", None).unwrap();
 
         // Insert a memory and index it
         let conn = rusqlite::Connection::open(&db_path).unwrap();

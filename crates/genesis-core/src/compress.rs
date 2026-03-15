@@ -1,4 +1,4 @@
-use crate::trajectory::{ActionType, Trajectory, TrajectoryStep, TrajectoryOutcome};
+use crate::trajectory::{ActionType, Trajectory, TrajectoryOutcome, TrajectoryStep};
 use serde::{Deserialize, Serialize};
 
 /// Maximum length for tool result content in Light compression.
@@ -222,10 +222,7 @@ pub fn to_chatml(compressed: &CompressedTrajectory) -> String {
             CompressedRole::Assistant => "assistant",
             CompressedRole::ActionSummary => "assistant",
         };
-        output.push_str(&format!(
-            "<|im_start|>{role}\n{}<|im_end|>\n",
-            turn.content
-        ));
+        output.push_str(&format!("<|im_start|>{role}\n{}<|im_end|>\n", turn.content));
     }
     output
 }
@@ -242,16 +239,10 @@ fn compress_light(steps: &[TrajectoryStep]) -> Vec<CompressedTurn> {
         .filter(|s| s.action_type != ActionType::SystemMessage)
         .map(|step| {
             let (role, content, tools_used) = match step.action_type {
-                ActionType::UserMessage => (
-                    CompressedRole::User,
-                    step.content.clone(),
-                    vec![],
-                ),
-                ActionType::AssistantMessage => (
-                    CompressedRole::Assistant,
-                    step.content.clone(),
-                    vec![],
-                ),
+                ActionType::UserMessage => (CompressedRole::User, step.content.clone(), vec![]),
+                ActionType::AssistantMessage => {
+                    (CompressedRole::Assistant, step.content.clone(), vec![])
+                }
                 ActionType::ToolCall => {
                     let tool_name = step.tool_name.clone().unwrap_or_default();
                     let args = step.tool_arguments.as_deref().unwrap_or("{}");
@@ -444,7 +435,9 @@ fn turn_role_label(role: &CompressedRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trajectory::{ActionType, TokenUsage, Trajectory, TrajectoryOutcome, TrajectoryStep};
+    use crate::trajectory::{
+        ActionType, TokenUsage, Trajectory, TrajectoryOutcome, TrajectoryStep,
+    };
 
     /// Build a sample trajectory with a realistic agent conversation:
     ///   User -> ToolCall -> ToolResult -> ToolCall -> ToolResult -> Assistant
@@ -653,7 +646,9 @@ mod tests {
         assert!(compressed.turns[1]
             .content
             .contains("Summary of 3 middle turns"));
-        assert!(compressed.turns[1].content.contains("Tools used: shell_exec, read_file"));
+        assert!(compressed.turns[1]
+            .content
+            .contains("Tools used: shell_exec, read_file"));
         assert!(compressed.turns[1]
             .tools_used
             .contains(&"shell_exec".to_owned()));
@@ -787,8 +782,12 @@ mod tests {
         assert!(compressed.turns[1].content.contains("shell_exec"));
         assert!(compressed.turns[1].content.contains("read_file"));
         assert_eq!(compressed.turns[1].tools_used.len(), 2);
-        assert!(compressed.turns[1].tools_used.contains(&"shell_exec".to_owned()));
-        assert!(compressed.turns[1].tools_used.contains(&"read_file".to_owned()));
+        assert!(compressed.turns[1]
+            .tools_used
+            .contains(&"shell_exec".to_owned()));
+        assert!(compressed.turns[1]
+            .tools_used
+            .contains(&"read_file".to_owned()));
 
         assert_eq!(compressed.turns[2].role, CompressedRole::Assistant);
         assert_eq!(compressed.turns[3].role, CompressedRole::User);
@@ -857,7 +856,10 @@ mod tests {
         let compressed = compress(&traj, CompressionLevel::Medium);
         assert_eq!(compressed.turns.len(), 1);
         let action = &compressed.turns[0];
-        assert!(action.content.contains("..."), "long args should be truncated");
+        assert!(
+            action.content.contains("..."),
+            "long args should be truncated"
+        );
         // The truncated args should be shorter than the original.
         assert!(action.content.len() < long_args.len());
     }
@@ -922,7 +924,11 @@ mod tests {
             steps: vec![
                 step(0, ActionType::UserMessage, "Hello"),
                 step(1, ActionType::AssistantMessage, "First thought..."),
-                step(2, ActionType::AssistantMessage, "Actually, the answer is 42."),
+                step(
+                    2,
+                    ActionType::AssistantMessage,
+                    "Actually, the answer is 42.",
+                ),
                 step(3, ActionType::UserMessage, "Are you sure?"),
                 step(4, ActionType::AssistantMessage, "Yes, I'm sure."),
             ],
@@ -1142,8 +1148,7 @@ mod tests {
         let compressed = compress(&traj, CompressionLevel::Medium);
 
         let json = serde_json::to_string_pretty(&compressed).expect("should serialize");
-        let parsed: CompressedTrajectory =
-            serde_json::from_str(&json).expect("should deserialize");
+        let parsed: CompressedTrajectory = serde_json::from_str(&json).expect("should deserialize");
 
         assert_eq!(parsed.session_id, compressed.session_id);
         assert_eq!(parsed.model, compressed.model);

@@ -155,7 +155,9 @@ pub async fn execute_workflow<F, Fut>(
 ) -> Result<WorkflowResult, WorkflowError>
 where
     F: FnMut(String, Option<usize>) -> Fut,
-    Fut: std::future::Future<Output = Result<(String, u32, u32), Box<dyn std::error::Error + Send + Sync>>>,
+    Fut: std::future::Future<
+        Output = Result<(String, u32, u32), Box<dyn std::error::Error + Send + Sync>>,
+    >,
 {
     let issues = validate_workflow(workflow);
     if !issues.is_empty() {
@@ -170,12 +172,13 @@ where
     for step in &workflow.steps {
         let rendered = render_prompt(&step.prompt, input, &step_outputs);
 
-        let (output, in_tok, out_tok) = runner(rendered, step.max_turns)
-            .await
-            .map_err(|e| WorkflowError::StepFailed {
-                step: step.name.clone(),
-                source: e,
-            })?;
+        let (output, in_tok, out_tok) =
+            runner(rendered, step.max_turns)
+                .await
+                .map_err(|e| WorkflowError::StepFailed {
+                    step: step.name.clone(),
+                    source: e,
+                })?;
 
         total_input_tokens = total_input_tokens.saturating_add(in_tok);
         total_output_tokens = total_output_tokens.saturating_add(out_tok);
@@ -193,7 +196,8 @@ where
         }
     }
 
-    let final_output = step_results.last()
+    let final_output = step_results
+        .last()
         .map(|r| r.output.clone())
         .unwrap_or_default();
 
@@ -225,7 +229,10 @@ mod tests {
             "the user",
             &outputs,
         );
-        assert_eq!(result, "Based on research: Found 3 results\nNow summarize for: the user");
+        assert_eq!(
+            result,
+            "Based on research: Found 3 results\nNow summarize for: the user"
+        );
     }
 
     #[test]
@@ -340,21 +347,23 @@ steps:
             ],
         };
         let issues = validate_workflow(&workflow);
-        assert!(issues.is_empty(), "Expected no issues but got: {:?}", issues);
+        assert!(
+            issues.is_empty(),
+            "Expected no issues but got: {:?}",
+            issues
+        );
     }
 
     #[test]
     fn workflow_result_serializes() {
         let result = WorkflowResult {
             workflow_name: "test".into(),
-            step_results: vec![
-                StepResult {
-                    step_name: "a".into(),
-                    output: "result a".into(),
-                    input_tokens: 100,
-                    output_tokens: 50,
-                },
-            ],
+            step_results: vec![StepResult {
+                step_name: "a".into(),
+                output: "result a".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+            }],
             final_output: "result a".into(),
             total_input_tokens: 100,
             total_output_tokens: 50,
@@ -390,12 +399,17 @@ steps:
         let result = execute_workflow(&workflow, "hello", |prompt, _max_turns| async move {
             // Simulate an agent that echoes the prompt
             Ok((format!("output_of({prompt})"), 10, 5))
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         assert_eq!(result.workflow_name, "pipeline");
         assert_eq!(result.step_results.len(), 2);
         assert_eq!(result.step_results[0].output, "output_of(Process: hello)");
-        assert_eq!(result.step_results[1].output, "output_of(Refine: output_of(Process: hello))");
+        assert_eq!(
+            result.step_results[1].output,
+            "output_of(Refine: output_of(Process: hello))"
+        );
         assert_eq!(result.total_input_tokens, 20);
         assert_eq!(result.total_output_tokens, 10);
     }
@@ -425,7 +439,9 @@ steps:
 
         let result = execute_workflow(&workflow, "test", |_prompt, _| async move {
             Ok(("done".into(), 5, 3))
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         assert_eq!(result.step_results.len(), 1);
         assert_eq!(result.final_output, "done");
@@ -436,20 +452,19 @@ steps:
         let workflow = WorkflowDefinition {
             name: "failing".into(),
             description: "".into(),
-            steps: vec![
-                WorkflowStep {
-                    name: "fail".into(),
-                    prompt: "boom".into(),
-                    model: None,
-                    max_turns: None,
-                    terminal: false,
-                },
-            ],
+            steps: vec![WorkflowStep {
+                name: "fail".into(),
+                prompt: "boom".into(),
+                model: None,
+                max_turns: None,
+                terminal: false,
+            }],
         };
 
         let result = execute_workflow(&workflow, "x", |_prompt, _| async move {
             Err("agent error".into())
-        }).await;
+        })
+        .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -466,7 +481,8 @@ steps:
 
         let result = execute_workflow(&workflow, "x", |_prompt, _| async move {
             Ok(("nope".into(), 0, 0))
-        }).await;
+        })
+        .await;
 
         assert!(matches!(result, Err(WorkflowError::Validation(_))));
     }

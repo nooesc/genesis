@@ -229,27 +229,27 @@ fn platform_hint(platform: &str) -> Option<&'static str> {
         "telegram" => Some(
             "You are responding via Telegram. Keep messages concise (under 4096 chars). \
              Use Telegram-compatible markdown: *bold*, _italic_, `code`, ```pre```. \
-             Avoid complex formatting. Users may be on mobile."
+             Avoid complex formatting. Users may be on mobile.",
         ),
         "discord" => Some(
             "You are responding via Discord. Keep messages under 2000 characters. \
              Use Discord markdown: **bold**, *italic*, `code`, ```lang\\ncode```. \
-             Use embeds sparingly. Be conversational."
+             Use embeds sparingly. Be conversational.",
         ),
         "slack" => Some(
             "You are responding via Slack. Use Slack mrkdwn: *bold*, _italic_, `code`, \
              ```code blocks```. You can use bullet lists and numbered lists. \
-             Thread context may be limited."
+             Thread context may be limited.",
         ),
         "whatsapp" => Some(
             "You are responding via WhatsApp. Keep messages short and mobile-friendly. \
              Use WhatsApp formatting: *bold*, _italic_, ~strikethrough~, ```monospace```. \
-             Avoid long code blocks."
+             Avoid long code blocks.",
         ),
         "homeassistant" => Some(
             "You are responding to a Home Assistant automation. Be precise and actionable. \
              Focus on the specific request without pleasantries. Your response may be \
-             used programmatically by automations."
+             used programmatically by automations.",
         ),
         _ => None,
     }
@@ -265,10 +265,18 @@ pub fn build_system_prompt_complete(
     context_section: Option<&str>,
 ) -> String {
     let mut builder = SystemPromptBuilder::new(profile, tools);
-    if let Some(id) = custom_identity { builder = builder.identity(id); }
-    if let Some(s) = skills_section { builder = builder.skills(s); }
-    if let Some(u) = user_model_section { builder = builder.user_model(u); }
-    if let Some(c) = context_section { builder = builder.context(c); }
+    if let Some(id) = custom_identity {
+        builder = builder.identity(id);
+    }
+    if let Some(s) = skills_section {
+        builder = builder.skills(s);
+    }
+    if let Some(u) = user_model_section {
+        builder = builder.user_model(u);
+    }
+    if let Some(c) = context_section {
+        builder = builder.context(c);
+    }
     builder.build()
 }
 
@@ -445,7 +453,9 @@ mod tests {
         custom_identity: Option<&str>,
     ) -> String {
         let mut builder = SystemPromptBuilder::new(profile, tools);
-        if let Some(id) = custom_identity { builder = builder.identity(id); }
+        if let Some(id) = custom_identity {
+            builder = builder.identity(id);
+        }
         builder.build()
     }
 
@@ -456,8 +466,12 @@ mod tests {
         skills_section: Option<&str>,
     ) -> String {
         let mut builder = SystemPromptBuilder::new(profile, tools);
-        if let Some(id) = custom_identity { builder = builder.identity(id); }
-        if let Some(s) = skills_section { builder = builder.skills(s); }
+        if let Some(id) = custom_identity {
+            builder = builder.identity(id);
+        }
+        if let Some(s) = skills_section {
+            builder = builder.skills(s);
+        }
         builder.build()
     }
 
@@ -469,9 +483,15 @@ mod tests {
         user_model_section: Option<&str>,
     ) -> String {
         let mut builder = SystemPromptBuilder::new(profile, tools);
-        if let Some(id) = custom_identity { builder = builder.identity(id); }
-        if let Some(s) = skills_section { builder = builder.skills(s); }
-        if let Some(u) = user_model_section { builder = builder.user_model(u); }
+        if let Some(id) = custom_identity {
+            builder = builder.identity(id);
+        }
+        if let Some(s) = skills_section {
+            builder = builder.skills(s);
+        }
+        if let Some(u) = user_model_section {
+            builder = builder.user_model(u);
+        }
         builder.build()
     }
 
@@ -485,11 +505,21 @@ mod tests {
         memories_section: Option<&str>,
     ) -> String {
         let mut builder = SystemPromptBuilder::new(profile, tools);
-        if let Some(id) = custom_identity { builder = builder.identity(id); }
-        if let Some(s) = skills_section { builder = builder.skills(s); }
-        if let Some(u) = user_model_section { builder = builder.user_model(u); }
-        if let Some(c) = context_section { builder = builder.context(c); }
-        if let Some(m) = memories_section { builder = builder.memories(m); }
+        if let Some(id) = custom_identity {
+            builder = builder.identity(id);
+        }
+        if let Some(s) = skills_section {
+            builder = builder.skills(s);
+        }
+        if let Some(u) = user_model_section {
+            builder = builder.user_model(u);
+        }
+        if let Some(c) = context_section {
+            builder = builder.context(c);
+        }
+        if let Some(m) = memories_section {
+            builder = builder.memories(m);
+        }
         builder.build()
     }
 
@@ -529,11 +559,7 @@ mod tests {
 
     #[test]
     fn custom_identity_replaces_default() {
-        let prompt = build_system_prompt(
-            "default",
-            &[],
-            Some("You are a custom agent."),
-        );
+        let prompt = build_system_prompt("default", &[], Some("You are a custom agent."));
         assert!(prompt.contains("You are a custom agent."));
         assert!(!prompt.contains("Eve"));
     }
@@ -560,7 +586,8 @@ mod tests {
 
     #[test]
     fn prompt_with_user_model_includes_observations() {
-        let user_model = "- **prefers_rust**: User strongly prefers Rust (confidence: 80%, 4 observations)";
+        let user_model =
+            "- **prefers_rust**: User strongly prefers Rust (confidence: 80%, 4 observations)";
         let prompt = build_system_prompt_full("default", &[], None, None, Some(user_model));
         assert!(prompt.contains("What you know about the user"));
         assert!(prompt.contains("prefers_rust"));
@@ -591,8 +618,7 @@ mod tests {
     #[test]
     fn load_context_file_finds_genesis_md() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("genesis.md"), "Use Rust for everything.")
-            .expect("write");
+        std::fs::write(dir.path().join("genesis.md"), "Use Rust for everything.").expect("write");
         let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn);
         assert_eq!(context.as_deref(), Some("Use Rust for everything."));
     }
@@ -615,14 +641,18 @@ mod tests {
     #[test]
     fn load_context_file_returns_none_when_no_files() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none());
+        assert!(
+            load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none()
+        );
     }
 
     #[test]
     fn load_context_file_skips_empty_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("genesis.md"), "   \n  ").expect("write");
-        assert!(load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none());
+        assert!(
+            load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).is_none()
+        );
     }
 
     #[test]
@@ -643,7 +673,8 @@ mod tests {
 
     #[test]
     fn scan_detects_private_key() {
-        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----";
+        let content =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----";
         let warnings = scan_context_security(content);
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("RSA private key"));
@@ -673,8 +704,17 @@ mod tests {
 
     #[test]
     fn prompt_with_memories_includes_recalled_section() {
-        let memories = "- [project_goal] Build Genesis in Rust\n- [user_preference] Prefers concise responses";
-        let prompt = build_system_prompt_with_memories("default", &[], None, None, None, None, Some(memories));
+        let memories =
+            "- [project_goal] Build Genesis in Rust\n- [user_preference] Prefers concise responses";
+        let prompt = build_system_prompt_with_memories(
+            "default",
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some(memories),
+        );
         assert!(prompt.contains("## Recalled Memories"));
         assert!(prompt.contains("project_goal"));
         assert!(prompt.contains("automatically recalled"));
@@ -682,7 +722,8 @@ mod tests {
 
     #[test]
     fn prompt_without_memories_omits_section() {
-        let prompt = build_system_prompt_with_memories("default", &[], None, None, None, None, None);
+        let prompt =
+            build_system_prompt_with_memories("default", &[], None, None, None, None, None);
         assert!(!prompt.contains("Recalled Memories"));
     }
 
@@ -713,7 +754,8 @@ mod tests {
             "Use API key sk-proj-abc123 for auth.",
         )
         .expect("write");
-        let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn).expect("should load");
+        let context = load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Warn)
+            .expect("should load");
         assert!(context.contains("SECURITY WARNINGS"));
         assert!(context.contains("sk-proj-abc123")); // original content preserved
     }
@@ -726,11 +768,9 @@ mod tests {
             "Use API key sk-proj-abc123 for auth.",
         )
         .expect("write");
-        let context = load_context_file(
-            dir.path(),
-            &genesis_config::ContextSecurityPolicy::BlockAll,
-        )
-        .expect("should load blocked message");
+        let context =
+            load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::BlockAll)
+                .expect("should load blocked message");
         assert!(context.contains("[BLOCKED]"));
         assert!(!context.contains("sk-proj-abc123")); // original content NOT included
     }
@@ -743,11 +783,9 @@ mod tests {
             "Use API key sk-proj-abc123 for auth.",
         )
         .expect("write");
-        let context = load_context_file(
-            dir.path(),
-            &genesis_config::ContextSecurityPolicy::Disabled,
-        )
-        .expect("should load");
+        let context =
+            load_context_file(dir.path(), &genesis_config::ContextSecurityPolicy::Disabled)
+                .expect("should load");
         assert!(!context.contains("SECURITY WARNINGS"));
         assert!(!context.contains("[BLOCKED]"));
         assert!(context.contains("sk-proj-abc123")); // content loaded as-is

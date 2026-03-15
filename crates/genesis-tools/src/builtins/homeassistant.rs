@@ -34,8 +34,8 @@ fn is_blocked_domain(domain: &str) -> bool {
 }
 
 fn ha_config() -> (String, String) {
-    let url = std::env::var("HASS_URL")
-        .unwrap_or_else(|_| "http://homeassistant.local:8123".to_owned());
+    let url =
+        std::env::var("HASS_URL").unwrap_or_else(|_| "http://homeassistant.local:8123".to_owned());
     let token = std::env::var("HASS_TOKEN").unwrap_or_default();
     (url.trim_end_matches('/').to_owned(), token)
 }
@@ -128,10 +128,12 @@ impl ToolHandler for HaListEntitiesTool {
             reason: e,
         })?;
 
-        let all_states = states.as_array().ok_or_else(|| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: "unexpected HA response format".to_owned(),
-        })?;
+        let all_states = states
+            .as_array()
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: "unexpected HA response format".to_owned(),
+            })?;
 
         let filtered: Vec<serde_json::Value> = all_states
             .iter()
@@ -201,13 +203,12 @@ impl ToolHandler for HaGetStateTool {
             });
         }
 
-        let data =
-            ha_get(&format!("/api/states/{entity_id}")).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e,
-                }
-            })?;
+        let data = ha_get(&format!("/api/states/{entity_id}")).map_err(|e| {
+            ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: e,
+            }
+        })?;
 
         let result = serde_json::json!({
             "entity_id": data["entity_id"],
@@ -237,10 +238,12 @@ impl ToolHandler for HaListServicesTool {
             reason: e,
         })?;
 
-        let all_services = services.as_array().ok_or_else(|| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: "unexpected HA response format".to_owned(),
-        })?;
+        let all_services = services
+            .as_array()
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: "unexpected HA response format".to_owned(),
+            })?;
 
         let domains: Vec<serde_json::Value> = all_services
             .iter()
@@ -315,13 +318,13 @@ impl ToolHandler for HaCallServiceTool {
                 argument: "domain",
             })?;
 
-        let service =
-            call.arguments
-                .get("service")
-                .ok_or_else(|| ToolError::MissingArgument {
-                    tool: call.name.clone(),
-                    argument: "service",
-                })?;
+        let service = call
+            .arguments
+            .get("service")
+            .ok_or_else(|| ToolError::MissingArgument {
+                tool: call.name.clone(),
+                argument: "service",
+            })?;
 
         if is_blocked_domain(domain) {
             return Err(ToolError::ExecutionFailed {
@@ -346,9 +349,8 @@ impl ToolHandler for HaCallServiceTool {
 
         // Build payload from optional `data` JSON string + entity_id
         let mut payload = if let Some(data_str) = call.arguments.get("data") {
-            serde_json::from_str::<serde_json::Value>(data_str).unwrap_or_else(|_| {
-                serde_json::json!({})
-            })
+            serde_json::from_str::<serde_json::Value>(data_str)
+                .unwrap_or_else(|_| serde_json::json!({}))
         } else {
             serde_json::json!({})
         };
@@ -357,14 +359,13 @@ impl ToolHandler for HaCallServiceTool {
             payload["entity_id"] = serde_json::Value::String(eid.clone());
         }
 
-        let result = ha_post(
-            &format!("/api/services/{domain}/{service}"),
-            &payload,
-        )
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: e,
-        })?;
+        let result =
+            ha_post(&format!("/api/services/{domain}/{service}"), &payload).map_err(|e| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e,
+                }
+            })?;
 
         // Parse affected entities from response
         let affected: Vec<serde_json::Value> = result

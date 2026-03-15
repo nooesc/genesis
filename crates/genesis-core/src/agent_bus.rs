@@ -124,12 +124,7 @@ impl AgentBus {
 
     /// List active channels.
     pub async fn channels(&self) -> Vec<String> {
-        self.channels
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect()
+        self.channels.read().await.keys().cloned().collect()
     }
 
     /// Get recent messages from a channel (from persistence).
@@ -320,7 +315,8 @@ impl AgentBusStore {
                     id: row.get(0)?,
                     channel: row.get(1)?,
                     sender: row.get(2)?,
-                    kind: serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(MessageKind::Text),
+                    kind: serde_json::from_value(serde_json::Value::String(kind_str))
+                        .unwrap_or(MessageKind::Text),
                     payload: row.get(4)?,
                     metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
                     timestamp: row.get(6)?,
@@ -359,11 +355,7 @@ impl AgentBusStore {
 #[cfg(test)]
 impl AgentBusStore {
     /// Get all messages from a sender.
-    pub fn sender_messages(
-        &self,
-        sender: &str,
-        limit: usize,
-    ) -> Result<Vec<AgentMessage>, String> {
+    pub fn sender_messages(&self, sender: &str, limit: usize) -> Result<Vec<AgentMessage>, String> {
         let conn = rusqlite::Connection::open(&self.database_path)
             .map_err(|e| format!("Failed to open database: {e}"))?;
         let mut stmt = conn
@@ -384,7 +376,8 @@ impl AgentBusStore {
                     id: row.get(0)?,
                     channel: row.get(1)?,
                     sender: row.get(2)?,
-                    kind: serde_json::from_value(serde_json::Value::String(kind_str)).unwrap_or(MessageKind::Text),
+                    kind: serde_json::from_value(serde_json::Value::String(kind_str))
+                        .unwrap_or(MessageKind::Text),
                     payload: row.get(4)?,
                     metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
                     timestamp: row.get(6)?,
@@ -668,7 +661,8 @@ mod tests {
     #[test]
     fn message_kind_serde_from_string() {
         let parse = |s: &str| -> MessageKind {
-            serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap_or(MessageKind::Text)
+            serde_json::from_value(serde_json::Value::String(s.to_owned()))
+                .unwrap_or(MessageKind::Text)
         };
         assert_eq!(parse("text"), MessageKind::Text);
         assert_eq!(parse("json"), MessageKind::Json);

@@ -5,7 +5,9 @@
 //! model observations, and creating skills from repeated patterns.
 
 use genesis_config::LoadedConfig;
-use genesis_storage::{bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore};
+use genesis_storage::{
+    bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore,
+};
 
 use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTurnInput};
 
@@ -231,7 +233,9 @@ mod tests {
 
         // Create session for FK constraint, then store a memory
         let session_store = SessionStore::new(&db_path);
-        session_store.create_session("test-s", "cli", None).expect("session");
+        session_store
+            .create_session("test-s", "cli", None)
+            .expect("session");
 
         let connection = rusqlite::Connection::open(&db_path).expect("open");
         connection
@@ -335,10 +339,18 @@ mod tests {
 
         let usage_store = SkillUsageStore::new(&db_path);
         // 1 success, 3 failures = 75% failure rate
-        usage_store.record_usage("flaky", None, "success", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
+        usage_store
+            .record_usage("flaky", None, "success", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
 
         let loaded = test_loaded_config(data_dir, db_path);
         let prompt = build_nudge_prompt(&loaded);

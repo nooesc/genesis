@@ -1,7 +1,7 @@
-pub mod manager;
-pub mod singularity;
-pub mod modal;
 pub mod daytona;
+pub mod manager;
+pub mod modal;
+pub mod singularity;
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -77,9 +77,17 @@ pub struct SandboxConfig {
 
 #[derive(Debug, Clone)]
 pub enum BackendSpecific {
-    Singularity { bind: Option<Vec<String>> },
-    Modal { gpu: Option<String>, app: Option<String> },
-    Daytona { target: Option<String>, api_url: Option<String> },
+    Singularity {
+        bind: Option<Vec<String>>,
+    },
+    Modal {
+        gpu: Option<String>,
+        app: Option<String>,
+    },
+    Daytona {
+        target: Option<String>,
+        api_url: Option<String>,
+    },
 }
 
 #[async_trait]
@@ -100,7 +108,11 @@ pub trait SandboxBackend: Send + Sync {
     async fn snapshot(&self, instance: &SandboxInstance) -> Result<Option<String>, SandboxError>;
 
     /// Stop and clean up the sandbox.
-    async fn cleanup(&self, instance: &SandboxInstance, persistent: bool) -> Result<(), SandboxError>;
+    async fn cleanup(
+        &self,
+        instance: &SandboxInstance,
+        persistent: bool,
+    ) -> Result<(), SandboxError>;
 
     /// Backend name for logging/storage.
     fn backend_type(&self) -> &'static str;

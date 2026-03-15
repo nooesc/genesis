@@ -192,5 +192,4 @@ mod tests {
         assert_eq!(resolved.backend, "openai-codex");
         assert_eq!(resolved.model, "o3-pro");
     }
-
 }

@@ -13,9 +13,21 @@ use thiserror::Error;
 
 /// Directories that are typically noise and should be skipped by file traversal tools.
 pub const NOISE_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "__pycache__", ".venv", "venv",
-    ".tox", "dist", "build", ".hg", ".svn", ".mypy_cache",
-    ".pytest_cache", ".next", ".nuxt",
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    "dist",
+    "build",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    ".nuxt",
 ];
 
 /// Maximum output size for tool results (64 KiB).
@@ -98,7 +110,10 @@ impl std::fmt::Debug for ToolContext {
             .field("allow_destructive_tools", &self.allow_destructive_tools)
             .field("terminal_backend", &self.terminal_backend)
             .field("default_working_dir", &self.default_working_dir)
-            .field("sandbox_manager", &self.sandbox_manager.as_ref().map(|_| ".."))
+            .field(
+                "sandbox_manager",
+                &self.sandbox_manager.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -261,7 +276,10 @@ pub enum ToolError {
     #[error("tool not found: {0}")]
     ToolNotFound(String),
     #[error("missing required argument `{argument}` for tool `{tool}`")]
-    MissingArgument { tool: String, argument: &'static str },
+    MissingArgument {
+        tool: String,
+        argument: &'static str,
+    },
     #[error("tool `{tool}` requires approval: {reason}")]
     ApprovalDenied { tool: String, reason: String },
     #[error("tool `{tool}` execution failed: {reason}")]
@@ -320,11 +338,7 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn execute(
-        &self,
-        call: &ToolCall,
-        context: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
+    pub fn execute(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let registration = self
             .tools
             .get(&call.name)
@@ -1624,14 +1638,14 @@ struct EchoTool;
 
 impl ToolHandler for EchoTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let content = call
-            .arguments
-            .get("message")
-            .cloned()
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "message",
-            })?;
+        let content =
+            call.arguments
+                .get("message")
+                .cloned()
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "message",
+                })?;
 
         Ok(ToolOutput {
             content,
@@ -1698,11 +1712,7 @@ mod tests {
     struct DangerousTool;
 
     impl ToolHandler for DangerousTool {
-        fn run(
-            &self,
-            _call: &ToolCall,
-            _context: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
+        fn run(&self, _call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput {
                 content: "danger acknowledged".to_owned(),
                 metadata: BTreeMap::new(),
@@ -1735,24 +1745,40 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_create"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_view_file"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_store_file"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_list_files"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_delete_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_view_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_store_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_list_files"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_delete_file"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
         assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
         assert!(definitions.iter().any(|tool| tool.name == "user_model"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_navigate"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_snapshot"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_navigate"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_snapshot"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_click"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_type"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_scroll"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_back"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_press"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_close"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_get_images"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_get_images"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_vision"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_console"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_console"));
     }
 
     #[test]

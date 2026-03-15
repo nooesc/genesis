@@ -8,10 +8,10 @@ use serde_json::json;
 use tracing::{debug, info};
 
 use crate::protocol::{
-    InitializeParams, InitializeResult, ClientCapabilities, Implementation,
-    McpPromptDef, McpResourceDef, McpToolDef, PromptGetParams, PromptGetResult,
-    PromptsListResult, ResourceReadParams, ResourceReadResult, ResourcesListResult,
-    ToolCallParams, ToolCallResult, ToolsListResult,
+    ClientCapabilities, Implementation, InitializeParams, InitializeResult, McpPromptDef,
+    McpResourceDef, McpToolDef, PromptGetParams, PromptGetResult, PromptsListResult,
+    ResourceReadParams, ResourceReadResult, ResourcesListResult, ToolCallParams, ToolCallResult,
+    ToolsListResult,
 };
 use crate::transport::{HttpTransport, McpTransport, StdioTransport};
 use crate::McpError;
@@ -51,9 +51,12 @@ impl McpServerConfig {
 
     pub fn connect_timeout(&self) -> Duration {
         match self {
-            Self::Stdio { connect_timeout, .. } | Self::Http { connect_timeout, .. } => {
-                *connect_timeout
+            Self::Stdio {
+                connect_timeout, ..
             }
+            | Self::Http {
+                connect_timeout, ..
+            } => *connect_timeout,
         }
     }
 
@@ -92,9 +95,7 @@ impl McpClient {
                 );
                 Box::new(StdioTransport::spawn(command, args, env).await?)
             }
-            McpServerConfig::Http {
-                url, headers, ..
-            } => {
+            McpServerConfig::Http { url, headers, .. } => {
                 info!(
                     server = name.as_str(),
                     url = url.as_str(),

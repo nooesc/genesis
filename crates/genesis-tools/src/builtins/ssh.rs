@@ -86,7 +86,13 @@ mod tests {
             arguments: BTreeMap::from([("command".to_owned(), "ls".to_owned())]),
         };
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "host", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "host",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -97,6 +103,12 @@ mod tests {
             arguments: BTreeMap::from([("host".to_owned(), "example.com".to_owned())]),
         };
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "command", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "command",
+                ..
+            }
+        ));
     }
 }

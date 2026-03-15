@@ -286,7 +286,11 @@ mod tests {
     #[test]
     fn all_models_have_positive_context_length() {
         for (_, meta) in known_metadata() {
-            assert!(meta.context_length > 0, "{} has zero context length", meta.model);
+            assert!(
+                meta.context_length > 0,
+                "{} has zero context length",
+                meta.model
+            );
         }
     }
 

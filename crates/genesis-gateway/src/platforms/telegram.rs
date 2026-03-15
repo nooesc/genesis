@@ -194,7 +194,11 @@ async fn telegram_fetch_file(
 
 /// Download a file from Telegram by file_id, then transcribe via Whisper API.
 /// Returns the transcribed text, or an error description.
-async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_id: &str) -> Result<String, String> {
+async fn transcribe_telegram_audio(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<String, String> {
     let (audio_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Transcribe via Whisper API.

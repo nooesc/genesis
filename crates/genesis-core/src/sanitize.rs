@@ -316,7 +316,8 @@ mod tests {
 
     #[test]
     fn redacts_bearer_token() {
-        let input = r#"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.very-long-token-here"#;
+        let input =
+            r#"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.very-long-token-here"#;
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:bearer-token]"));
         assert!(!result.contains("eyJhb"));
@@ -324,7 +325,8 @@ mod tests {
 
     #[test]
     fn redacts_pem_private_key() {
-        let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n";
+        let input =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n";
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:private-key]"));
         assert!(!result.contains("MIIEowI"));
@@ -350,8 +352,12 @@ mod tests {
         assert!(contains_credentials(
             "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"
         ));
-        assert!(contains_credentials("key: sk-proj-1234567890abcdefghijklmno"));
-        assert!(contains_credentials("Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.token"));
+        assert!(contains_credentials(
+            "key: sk-proj-1234567890abcdefghijklmno"
+        ));
+        assert!(contains_credentials(
+            "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.token"
+        ));
         assert!(!contains_credentials("normal text with no secrets"));
         assert!(!contains_credentials("sk-short"));
     }
@@ -375,7 +381,8 @@ mod tests {
 
     #[test]
     fn redacts_github_fine_grained_pat() {
-        let input = "token: github_pat_11ABCDEFG0AbCdEfGhIjKl_MNOPQRSTUVWXYZ1234567890abcdefghijklmnopqr";
+        let input =
+            "token: github_pat_11ABCDEFG0AbCdEfGhIjKl_MNOPQRSTUVWXYZ1234567890abcdefghijklmnopqr";
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:github-pat]"));
     }

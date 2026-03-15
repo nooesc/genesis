@@ -39,10 +39,13 @@ impl ToolHandler for BrowseTool {
         })?;
 
         let client = http_client();
-        let response = client.get(url).send().map_err(|e| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: format!("failed to fetch URL: {e}"),
-        })?;
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to fetch URL: {e}"),
+            })?;
 
         let status = response.status().as_u16();
         let content_type = response
@@ -58,19 +61,19 @@ impl ToolHandler for BrowseTool {
         })?;
 
         // Extract readable text based on content type
-        let text = if content_type.contains("text/html") || content_type.contains("application/xhtml") {
-            let selector = call.arguments.get("selector").map(|s| s.as_str());
-            extract_text_from_html(&body, selector)
-        } else if content_type.contains("text/") || content_type.contains("application/json") {
-            // Plain text or JSON — return as-is
-            body
-        } else {
-            format!("(binary content: {content_type}, {} bytes)", body.len())
-        };
+        let text =
+            if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+                let selector = call.arguments.get("selector").map(|s| s.as_str());
+                extract_text_from_html(&body, selector)
+            } else if content_type.contains("text/") || content_type.contains("application/json") {
+                // Plain text or JSON — return as-is
+                body
+            } else {
+                format!("(binary content: {content_type}, {} bytes)", body.len())
+            };
 
         // Truncate at char boundary
-        let truncated =
-            crate::truncate_at(&text, MAX_RESPONSE_BYTES, "\n... (content truncated)");
+        let truncated = crate::truncate_at(&text, MAX_RESPONSE_BYTES, "\n... (content truncated)");
 
         let content = {
             let raw = format!("URL: {url}\nHTTP {status}\n\n{truncated}");
@@ -115,7 +118,10 @@ fn extract_text_from_html(html: &str, selector: Option<&str>) -> String {
 
     // Remove script, style, and navigation blocks entirely.
     // Pre-compute lowercase once and pass it through to avoid re-lowercasing on each call.
-    let cleaned = remove_tag_blocks_multi(&working_html, &["script", "style", "nav", "header", "footer"]);
+    let cleaned = remove_tag_blocks_multi(
+        &working_html,
+        &["script", "style", "nav", "header", "footer"],
+    );
 
     // Strip all remaining HTML tags
     let text = strip_tags(&cleaned);

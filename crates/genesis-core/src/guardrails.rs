@@ -190,12 +190,22 @@ impl CompiledGuardrails {
         let forbidden_input = config
             .forbidden_input_patterns
             .iter()
-            .filter_map(|p| Regex::new(p).ok().map(|r| CompiledPattern { source: p.clone(), regex: r }))
+            .filter_map(|p| {
+                Regex::new(p).ok().map(|r| CompiledPattern {
+                    source: p.clone(),
+                    regex: r,
+                })
+            })
             .collect();
         let forbidden_output = config
             .forbidden_output_patterns
             .iter()
-            .filter_map(|p| Regex::new(p).ok().map(|r| CompiledPattern { source: p.clone(), regex: r }))
+            .filter_map(|p| {
+                Regex::new(p).ok().map(|r| CompiledPattern {
+                    source: p.clone(),
+                    regex: r,
+                })
+            })
             .collect();
         let custom_rules = config
             .custom_rules
@@ -238,7 +248,14 @@ impl CompiledGuardrails {
 
         // Check PII in input
         if self.config.detect_pii {
-            apply_pii_checks(&self.config, input, "input", &mut content, &mut violations, &mut blocked);
+            apply_pii_checks(
+                &self.config,
+                input,
+                "input",
+                &mut content,
+                &mut violations,
+                &mut blocked,
+            );
         }
 
         // Check custom rules for input (pre-compiled)
@@ -308,7 +325,14 @@ impl CompiledGuardrails {
 
         // Check PII in output
         if self.config.detect_pii {
-            apply_pii_checks(&self.config, output, "output", &mut content, &mut violations, &mut blocked);
+            apply_pii_checks(
+                &self.config,
+                output,
+                "output",
+                &mut content,
+                &mut violations,
+                &mut blocked,
+            );
         }
 
         // Check JSON output requirement
@@ -425,30 +449,37 @@ impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
             "warn" => ViolationAction::Warn,
             other => {
                 if other != "redact" {
-                    tracing::warn!(pii_action = other, "unrecognized pii_action in guardrails config, defaulting to redact");
+                    tracing::warn!(
+                        pii_action = other,
+                        "unrecognized pii_action in guardrails config, defaulting to redact"
+                    );
                 }
                 ViolationAction::Redact
             }
         };
-        let custom_rules = cfg.custom_rules.iter().map(|r| {
-            let applies_to = match r.applies_to.as_str() {
-                "input" => AppliesTo::Input,
-                "output" => AppliesTo::Output,
-                _ => AppliesTo::Both,
-            };
-            let action = match r.action.as_str() {
-                "block" => ViolationAction::Block,
-                "warn" => ViolationAction::Warn,
-                _ => ViolationAction::Redact,
-            };
-            CustomRule {
-                name: r.name.clone(),
-                pattern: r.pattern.clone(),
-                applies_to,
-                action,
-                message: r.message.clone(),
-            }
-        }).collect();
+        let custom_rules = cfg
+            .custom_rules
+            .iter()
+            .map(|r| {
+                let applies_to = match r.applies_to.as_str() {
+                    "input" => AppliesTo::Input,
+                    "output" => AppliesTo::Output,
+                    _ => AppliesTo::Both,
+                };
+                let action = match r.action.as_str() {
+                    "block" => ViolationAction::Block,
+                    "warn" => ViolationAction::Warn,
+                    _ => ViolationAction::Redact,
+                };
+                CustomRule {
+                    name: r.name.clone(),
+                    pattern: r.pattern.clone(),
+                    applies_to,
+                    action,
+                    message: r.message.clone(),
+                }
+            })
+            .collect();
         Self {
             detect_pii: cfg.detect_pii,
             pii_action,
@@ -532,7 +563,10 @@ mod tests {
         };
         let result = check_input(&config, "Email: test@test.com");
         assert!(!result.passed);
-        assert!(result.violations.iter().any(|v| v.action == ViolationAction::Block));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.action == ViolationAction::Block));
     }
 
     #[test]
@@ -544,7 +578,10 @@ mod tests {
         };
         let result = check_input(&config, "Email: test@test.com");
         assert!(result.passed);
-        assert!(result.violations.iter().any(|v| v.action == ViolationAction::Warn));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.action == ViolationAction::Warn));
         // Content should not be modified
         assert!(result.content.contains("test@test.com"));
     }
@@ -596,7 +633,10 @@ mod tests {
         // Invalid JSON fails
         let result = check_output(&config, "This is not JSON");
         assert!(!result.passed);
-        assert!(result.violations.iter().any(|v| v.rule == "require_json_output"));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.rule == "require_json_output"));
     }
 
     #[test]
@@ -613,7 +653,10 @@ mod tests {
         };
         let result = check_input(&config, "Please run sudo rm -rf /");
         assert!(!result.passed);
-        assert_eq!(result.violations[0].message, "sudo commands are not allowed");
+        assert_eq!(
+            result.violations[0].message,
+            "sudo commands are not allowed"
+        );
 
         // Should not trigger on output
         let result = check_output(&config, "The command needs sudo");

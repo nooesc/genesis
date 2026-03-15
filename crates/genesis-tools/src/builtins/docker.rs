@@ -8,13 +8,13 @@ pub struct DockerExecTool;
 
 impl ToolHandler for DockerExecTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let container = call
-            .arguments
-            .get("container")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "container",
-            })?;
+        let container =
+            call.arguments
+                .get("container")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "container",
+                })?;
 
         let command = call
             .arguments
@@ -77,7 +77,13 @@ mod tests {
             arguments: BTreeMap::from([("command".to_owned(), "ls".to_owned())]),
         };
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "container", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "container",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -88,6 +94,12 @@ mod tests {
             arguments: BTreeMap::from([("container".to_owned(), "my-app".to_owned())]),
         };
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "command", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "command",
+                ..
+            }
+        ));
     }
 }

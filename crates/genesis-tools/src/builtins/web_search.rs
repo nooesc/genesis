@@ -125,7 +125,10 @@ fn search_ddg(query: &str, count: usize) -> Result<String, String> {
         if !abstract_text.is_empty() {
             let source = body["AbstractSource"].as_str().unwrap_or("");
             let url = body["AbstractURL"].as_str().unwrap_or("");
-            results.push(format!("1. {} ({})\n   {}\n   {}", source, url, url, abstract_text));
+            results.push(format!(
+                "1. {} ({})\n   {}\n   {}",
+                source, url, url, abstract_text
+            ));
         }
     }
 

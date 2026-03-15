@@ -84,8 +84,10 @@ impl BrowserManager {
     ) -> Result<(String, Option<String>), ToolError> {
         // Fast path: session already exists
         {
-            let sessions =
-                self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| ToolError::ExecutionFailed {
                     tool: "browser".to_string(),
                     reason: "browser session lock poisoned".to_string(),
                 })?;
@@ -102,8 +104,10 @@ impl BrowserManager {
         };
 
         // Re-acquire and insert, handling TOCTOU race
-        let mut sessions =
-            self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| ToolError::ExecutionFailed {
                 tool: "browser".to_string(),
                 reason: "browser session lock poisoned".to_string(),
             })?;
@@ -143,8 +147,10 @@ impl BrowserManager {
         tool_name: &str,
     ) -> Result<(String, Option<String>), ToolError> {
         let info = {
-            let sessions =
-                self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| ToolError::ExecutionFailed {
                     tool: tool_name.to_owned(),
                     reason: "browser session lock poisoned".to_string(),
                 })?;
@@ -342,8 +348,7 @@ fn check_bot_detection(title: &str) -> bool {
 
 /// Returns true if both BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are set.
 fn is_cloud_mode() -> bool {
-    std::env::var("BROWSERBASE_API_KEY").is_ok()
-        && std::env::var("BROWSERBASE_PROJECT_ID").is_ok()
+    std::env::var("BROWSERBASE_API_KEY").is_ok() && std::env::var("BROWSERBASE_PROJECT_ID").is_ok()
 }
 
 /// Create a local (non-cloud) session.
@@ -448,11 +453,10 @@ fn run_browser_command_raw(
         .stderr(std::process::Stdio::piped());
     apply_browser_env(&mut cmd, session_name);
 
-    let mut child = cmd.spawn()
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: "browser".to_owned(),
-            reason: format!("failed to spawn agent-browser: {e}"),
-        })?;
+    let mut child = cmd.spawn().map_err(|e| ToolError::ExecutionFailed {
+        tool: "browser".to_owned(),
+        reason: format!("failed to spawn agent-browser: {e}"),
+    })?;
 
     // Take pipes before the poll loop so we can read them in parallel threads
     let stdout_pipe = child.stdout.take();
@@ -488,10 +492,7 @@ fn run_browser_command_raw(
                     let _ = child.wait();
                     return Err(ToolError::ExecutionFailed {
                         tool: format!("browser_{command}"),
-                        reason: format!(
-                            "command timed out after {}s",
-                            timeout.as_secs()
-                        ),
+                        reason: format!("command timed out after {}s", timeout.as_secs()),
                     });
                 }
                 std::thread::sleep(poll_interval);
@@ -514,10 +515,7 @@ fn run_browser_command_raw(
 
     if !status.success() {
         let msg = if stderr.is_empty() {
-            format!(
-                "agent-browser exited with status {}: {}",
-                status, stdout
-            )
+            format!("agent-browser exited with status {}: {}", status, stdout)
         } else {
             format!("agent-browser failed: {stderr}")
         };
@@ -585,9 +583,7 @@ fn cleanup_old_screenshots(dir: &Path) {
 /// Shared HTTP client for the vision API.
 fn vision_http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        crate::http::build_blocking_client(Duration::from_secs(60), |b| b)
-    })
+    CLIENT.get_or_init(|| crate::http::build_blocking_client(Duration::from_secs(60), |b| b))
 }
 
 // ---------------------------------------------------------------------------
@@ -650,9 +646,7 @@ fn build_browserbase_session_body(
 
 fn browserbase_http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        crate::http::build_blocking_client(Duration::from_secs(30), |b| b)
-    })
+    CLIENT.get_or_init(|| crate::http::build_blocking_client(Duration::from_secs(30), |b| b))
 }
 
 /// Create a Browserbase cloud session. On 402 (payment required), retries
@@ -877,9 +871,8 @@ impl ToolHandler for BrowserNavigate {
             let proxies_active = features.get("proxies").copied().unwrap_or(false);
             let is_local = features.get("local").copied().unwrap_or(false);
             if !proxies_active && !is_local {
-                response["stealth_warning"] = json!(
-                    "Proxies are not active. Some sites may block direct cloud browser IPs."
-                );
+                response["stealth_warning"] =
+                    json!("Proxies are not active. Some sites may block direct cloud browser IPs.");
             }
         }
 
@@ -1047,21 +1040,18 @@ pub struct BrowserScroll {
 
 impl ToolHandler for BrowserScroll {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let direction = call
-            .arguments
-            .get("direction")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "direction",
-            })?;
+        let direction =
+            call.arguments
+                .get("direction")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "direction",
+                })?;
 
         if direction != "up" && direction != "down" {
             return Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "Invalid direction '{}'. Must be 'up' or 'down'.",
-                    direction
-                ),
+                reason: format!("Invalid direction '{}'. Must be 'up' or 'down'.", direction),
             });
         }
 
@@ -1332,13 +1322,13 @@ pub struct BrowserVision {
 
 impl ToolHandler for BrowserVision {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let question = call
-            .arguments
-            .get("question")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "question",
-            })?;
+        let question =
+            call.arguments
+                .get("question")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "question",
+                })?;
 
         let sid = &context.session_id;
         let (session_name, cdp_url) = self.manager.require_session(sid, &call.name)?;
@@ -1399,13 +1389,11 @@ impl ToolHandler for BrowserVision {
         // Get vision model config
         let api_base = std::env::var("OPENAI_API_BASE")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
-        let api_key =
-            std::env::var("OPENAI_API_KEY").map_err(|_| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: "OPENAI_API_KEY environment variable not set".to_owned(),
-            })?;
-        let model = std::env::var("AUXILIARY_VISION_MODEL")
-            .unwrap_or_else(|_| "gpt-4o".to_owned());
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: "OPENAI_API_KEY environment variable not set".to_owned(),
+        })?;
+        let model = std::env::var("AUXILIARY_VISION_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
 
         // Build vision API request
         let vision_url = format!("{api_base}/chat/completions");
@@ -1450,11 +1438,10 @@ impl ToolHandler for BrowserVision {
             });
         }
 
-        let resp_json: serde_json::Value =
-            resp.json().map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to parse vision API response: {e}"),
-            })?;
+        let resp_json: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("failed to parse vision API response: {e}"),
+        })?;
 
         let analysis = resp_json
             .pointer("/choices/0/message/content")
@@ -1492,10 +1479,7 @@ mod tests {
     fn socket_safe_tmpdir_returns_short_path() {
         let dir = socket_safe_tmpdir();
         // The path must be short enough for Unix domain sockets (~104 chars)
-        assert!(
-            dir.len() < 50,
-            "tmpdir path too long for sockets: {dir}"
-        );
+        assert!(dir.len() < 50, "tmpdir path too long for sockets: {dir}");
         // Must be a valid directory
         assert!(
             std::path::Path::new(&dir).is_dir(),

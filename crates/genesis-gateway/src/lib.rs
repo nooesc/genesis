@@ -1118,25 +1118,26 @@ async fn export_session_handler(
         export_chatml, export_json, export_jsonl, export_markdown,
     };
 
-    let (content, content_type) =
-        match format.as_str() {
-            "json" => (
-                export_json(&id, session_title.as_deref(), &messages),
-                "application/json",
-            ),
-            "markdown" | "md" => (
-                export_markdown(&id, session_title.as_deref(), &messages),
-                "text/markdown; charset=utf-8",
-            ),
-            "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
-            "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
-            _ => return Err((
+    let (content, content_type) = match format.as_str() {
+        "json" => (
+            export_json(&id, session_title.as_deref(), &messages),
+            "application/json",
+        ),
+        "markdown" | "md" => (
+            export_markdown(&id, session_title.as_deref(), &messages),
+            "text/markdown; charset=utf-8",
+        ),
+        "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
+        "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
+        _ => {
+            return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
                     "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
                 ),
-            )),
-        };
+            ))
+        }
+    };
 
     Response::builder()
         .status(StatusCode::OK)
@@ -3472,9 +3473,7 @@ async fn chat_batch_handler(
                 Err(_) => {
                     return BatchItemResult {
                         index,
-                        session_id: item
-                            .session_id
-                            .unwrap_or_else(default_api_session_id),
+                        session_id: item.session_id.unwrap_or_else(default_api_session_id),
                         response: None,
                         error: Some("batch semaphore closed".to_string()),
                         turns_used: 0,
@@ -4305,11 +4304,29 @@ mod tests {
         //   le=500  -> 2  (50ms + 200ms)
         //   le=1000 -> 3  (50ms + 200ms + 800ms)
         //   le=+Inf -> 3
-        assert!(output.contains(r#"test_duration_ms_bucket{le="100"} 1"#), "le=100 should be 1, got:\n{output}");
-        assert!(output.contains(r#"test_duration_ms_bucket{le="500"} 2"#), "le=500 should be 2, got:\n{output}");
-        assert!(output.contains(r#"test_duration_ms_bucket{le="1000"} 3"#), "le=1000 should be 3, got:\n{output}");
-        assert!(output.contains(r#"test_duration_ms_bucket{le="+Inf"} 3"#), "le=+Inf should be 3, got:\n{output}");
-        assert!(output.contains("test_duration_ms_sum 1050"), "sum should be 1050, got:\n{output}");
-        assert!(output.contains("test_duration_ms_count 3"), "count should be 3, got:\n{output}");
+        assert!(
+            output.contains(r#"test_duration_ms_bucket{le="100"} 1"#),
+            "le=100 should be 1, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#"test_duration_ms_bucket{le="500"} 2"#),
+            "le=500 should be 2, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#"test_duration_ms_bucket{le="1000"} 3"#),
+            "le=1000 should be 3, got:\n{output}"
+        );
+        assert!(
+            output.contains(r#"test_duration_ms_bucket{le="+Inf"} 3"#),
+            "le=+Inf should be 3, got:\n{output}"
+        );
+        assert!(
+            output.contains("test_duration_ms_sum 1050"),
+            "sum should be 1050, got:\n{output}"
+        );
+        assert!(
+            output.contains("test_duration_ms_count 3"),
+            "count should be 3, got:\n{output}"
+        );
     }
 }

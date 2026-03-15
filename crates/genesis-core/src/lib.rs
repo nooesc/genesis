@@ -4,46 +4,48 @@ pub mod audit;
 pub mod compress;
 #[allow(dead_code)]
 pub(crate) mod context_security;
-pub mod dataset;
-pub mod embedding;
 pub mod cost;
+pub mod dataset;
 pub mod delivery;
+pub mod embedding;
 pub mod eval;
 pub mod execution;
 pub mod guardrails;
 pub mod hooks;
 pub mod moa;
 pub mod nudge;
+pub mod personality;
 pub mod prompt;
+pub mod quality;
 pub mod replay;
+pub mod sandbox;
 pub mod sanitize;
 pub mod scheduler;
+pub mod skill_manifest;
 pub mod skill_sync;
 pub mod skills;
-pub mod skills_hub;
-pub mod quality;
-pub mod skill_manifest;
 pub mod skills_guard;
-pub mod personality;
+pub mod skills_hub;
 pub mod tagger;
 pub mod templates;
 pub mod toolset;
-pub mod workflow;
 pub mod trajectory;
-pub mod sandbox;
+pub mod workflow;
 
 use std::path::Path;
 use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
+use genesis_mcp::McpManager;
 use genesis_provider::resolve;
 use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
-use genesis_mcp::McpManager;
 use genesis_tools::{
-    default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
-    ToolOutput, ToolRegistry,
+    default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput,
+    ToolRegistry,
 };
-use genesis_types::{DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent, ToolDefinition};
+use genesis_types::{
+    DeliveryPlatform, ModelProviderKind, ModelSelection, RuntimeEvent, ToolDefinition,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -269,7 +271,9 @@ fn build_doctor_report(
     // Storage stats (sessions, skills, schedules) when DB exists
     if storage.database_exists {
         checks.push(check_storage_stats(&loaded.config.storage.database_path));
-        checks.push(check_database_integrity(&loaded.config.storage.database_path));
+        checks.push(check_database_integrity(
+            &loaded.config.storage.database_path,
+        ));
     }
 
     // MCP servers
@@ -279,12 +283,7 @@ fn build_doctor_report(
         profile: loaded.config.profile,
         config_path: loaded.paths.config_path.display().to_string(),
         data_dir: loaded.config.storage.data_dir.display().to_string(),
-        database_path: loaded
-            .config
-            .storage
-            .database_path
-            .display()
-            .to_string(),
+        database_path: loaded.config.storage.database_path.display().to_string(),
         provider_backend: loaded.config.provider.backend,
         model: loaded.config.provider.model,
         storage,
@@ -316,7 +315,11 @@ fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
 
     // Check OAuth auth store for openai-codex backend
     if resolved.api_key.is_empty()
-        && loaded.config.provider.backend.eq_ignore_ascii_case("openai-codex")
+        && loaded
+            .config
+            .provider
+            .backend
+            .eq_ignore_ascii_case("openai-codex")
     {
         if let Ok(auth_path) = genesis_auth::default_auth_path() {
             if let Ok(store) = genesis_auth::store::read_store(&auth_path) {
@@ -405,9 +408,7 @@ fn check_storage_stats(db_path: &Path) -> DoctorCheck {
 fn check_database_integrity(db_path: &Path) -> DoctorCheck {
     match rusqlite::Connection::open(db_path) {
         Ok(conn) => {
-            match conn.query_row("PRAGMA integrity_check", [], |row| {
-                row.get::<_, String>(0)
-            }) {
+            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
                 Ok(result) if result == "ok" => DoctorCheck {
                     name: "db_integrity".to_owned(),
                     status: CheckStatus::Pass,
@@ -443,7 +444,11 @@ fn check_mcp_servers(loaded: &LoadedConfig) -> DoctorCheck {
             detail: "none configured".to_owned(),
         }
     } else {
-        let names: String = servers.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+        let names: String = servers
+            .keys()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         DoctorCheck {
             name: "mcp_servers".to_owned(),
             status: CheckStatus::Pass,
@@ -509,7 +514,11 @@ fn infer_backend(model: &str) -> (&'static str, &'static str) {
         ("anthropic", "ANTHROPIC_API_KEY")
     } else if m.starts_with("gemini") {
         ("gemini", "GEMINI_API_KEY")
-    } else if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+    } else if m.starts_with("gpt")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+    {
         ("openai", "OPENAI_API_KEY")
     } else {
         // Default to OpenRouter for unknown models
@@ -633,7 +642,11 @@ impl ToolRuntime {
                         let content = if lines.is_empty() {
                             "No MCP resources available.".to_owned()
                         } else {
-                            format!("Available MCP resources ({}):\n{}", lines.len(), lines.join("\n"))
+                            format!(
+                                "Available MCP resources ({}):\n{}",
+                                lines.len(),
+                                lines.join("\n")
+                            )
                         };
                         return Ok(ToolOutput {
                             content,
@@ -642,15 +655,26 @@ impl ToolRuntime {
                     }
                     "mcp_read_resource" => {
                         let server = call.arguments.get("server").ok_or_else(|| {
-                            ToolError::MissingArgument { tool: call.name.clone(), argument: "server" }
+                            ToolError::MissingArgument {
+                                tool: call.name.clone(),
+                                argument: "server",
+                            }
                         })?;
                         let uri = call.arguments.get("uri").ok_or_else(|| {
-                            ToolError::MissingArgument { tool: call.name.clone(), argument: "uri" }
+                            ToolError::MissingArgument {
+                                tool: call.name.clone(),
+                                argument: "uri",
+                            }
                         })?;
                         let result = mcp.read_resource(server, uri).await.map_err(|e| {
-                            ToolError::ExecutionFailed { tool: call.name.clone(), reason: e.to_string() }
+                            ToolError::ExecutionFailed {
+                                tool: call.name.clone(),
+                                reason: e.to_string(),
+                            }
                         })?;
-                        let content = result.contents.iter()
+                        let content = result
+                            .contents
+                            .iter()
                             .filter_map(|c| c.text.as_deref())
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -664,21 +688,39 @@ impl ToolRuntime {
                         let mut lines = Vec::new();
                         for (server, prompt) in &prompts {
                             let desc = prompt.description.as_deref().unwrap_or("");
-                            let args = prompt.arguments.as_ref()
-                                .map(|a| a.iter().map(|arg| {
-                                    let req = if arg.required == Some(true) { " (required)" } else { "" };
-                                    format!("{}{}", arg.name, req)
-                                }).collect::<Vec<_>>().join(", "))
+                            let args = prompt
+                                .arguments
+                                .as_ref()
+                                .map(|a| {
+                                    a.iter()
+                                        .map(|arg| {
+                                            let req = if arg.required == Some(true) {
+                                                " (required)"
+                                            } else {
+                                                ""
+                                            };
+                                            format!("{}{}", arg.name, req)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
                                 .unwrap_or_default();
                             lines.push(format!(
                                 "- [{}] {} — {} [args: {}]",
-                                server, prompt.name, desc, if args.is_empty() { "none" } else { &args }
+                                server,
+                                prompt.name,
+                                desc,
+                                if args.is_empty() { "none" } else { &args }
                             ));
                         }
                         let content = if lines.is_empty() {
                             "No MCP prompts available.".to_owned()
                         } else {
-                            format!("Available MCP prompts ({}):\n{}", lines.len(), lines.join("\n"))
+                            format!(
+                                "Available MCP prompts ({}):\n{}",
+                                lines.len(),
+                                lines.join("\n")
+                            )
                         };
                         return Ok(ToolOutput {
                             content,
@@ -687,16 +729,28 @@ impl ToolRuntime {
                     }
                     "mcp_get_prompt" => {
                         let server = call.arguments.get("server").ok_or_else(|| {
-                            ToolError::MissingArgument { tool: call.name.clone(), argument: "server" }
+                            ToolError::MissingArgument {
+                                tool: call.name.clone(),
+                                argument: "server",
+                            }
                         })?;
                         let name = call.arguments.get("name").ok_or_else(|| {
-                            ToolError::MissingArgument { tool: call.name.clone(), argument: "name" }
+                            ToolError::MissingArgument {
+                                tool: call.name.clone(),
+                                argument: "name",
+                            }
                         })?;
-                        let arguments = call.arguments.get("arguments")
-                            .and_then(|v| serde_json::from_str::<std::collections::HashMap<String, String>>(v).ok());
-                        let result = mcp.get_prompt(server, name, arguments).await.map_err(|e| {
-                            ToolError::ExecutionFailed { tool: call.name.clone(), reason: e.to_string() }
-                        })?;
+                        let arguments = call.arguments.get("arguments").and_then(|v| {
+                            serde_json::from_str::<std::collections::HashMap<String, String>>(v)
+                                .ok()
+                        });
+                        let result =
+                            mcp.get_prompt(server, name, arguments).await.map_err(|e| {
+                                ToolError::ExecutionFailed {
+                                    tool: call.name.clone(),
+                                    reason: e.to_string(),
+                                }
+                            })?;
                         let mut content = String::new();
                         if let Some(desc) = &result.description {
                             content.push_str(&format!("Description: {desc}\n\n"));
@@ -779,12 +833,13 @@ impl ToolRuntime {
     async fn execute_moa(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
         use crate::moa::{MoaConfig, MoaModelConfig};
 
-        let prompt = call.arguments.get("prompt").ok_or_else(|| {
-            ToolError::MissingArgument {
+        let prompt = call
+            .arguments
+            .get("prompt")
+            .ok_or_else(|| ToolError::MissingArgument {
                 tool: call.name.clone(),
                 argument: "prompt",
-            }
-        })?;
+            })?;
 
         if prompt.trim().is_empty() {
             return Err(ToolError::ExecutionFailed {
@@ -805,7 +860,12 @@ impl ToolRuntime {
         let models: Vec<&str> = call
             .arguments
             .get("models")
-            .map(|m| m.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
+            .map(|m| {
+                m.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let proposers = if models.is_empty() {
@@ -1068,8 +1128,11 @@ pub(crate) mod tests {
     fn execution_context_exposes_storage_and_runtime_limits() {
         let loaded = sample_loaded_config();
 
-        let context =
-            build_execution_context_from_loaded(&loaded, "session-99".to_owned(), DeliveryPlatform::Slack);
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-99".to_owned(),
+            DeliveryPlatform::Slack,
+        );
 
         assert_eq!(context.max_concurrency, 8);
         assert!(!context.allow_destructive_tools);
@@ -1079,8 +1142,7 @@ pub(crate) mod tests {
 
     #[test]
     fn check_status_serialization_contract_stays_snake_case() {
-        let encoded = serde_json::to_string(&CheckStatus::Warn)
-            .expect("status should serialize");
+        let encoded = serde_json::to_string(&CheckStatus::Warn).expect("status should serialize");
 
         assert_eq!(encoded, "\"warn\"");
     }

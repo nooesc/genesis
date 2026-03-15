@@ -23,8 +23,7 @@ impl ToolHandler for ReadFileTool {
             reason: format!("failed to read `{path}`: {e}"),
         })?;
 
-        let content =
-            crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
+        let content = crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
 
         Ok(ToolOutput {
             content,

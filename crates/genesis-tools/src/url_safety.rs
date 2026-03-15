@@ -30,8 +30,7 @@ pub enum UrlValidationError {
 /// - Cloud metadata endpoints (169.254.169.254)
 /// - IPv6 loopback and unique-local addresses
 pub fn validate_url(url: &str) -> Result<(), UrlValidationError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| UrlValidationError::InvalidUrl(e.to_string()))?;
+    let parsed = url::Url::parse(url).map_err(|e| UrlValidationError::InvalidUrl(e.to_string()))?;
 
     // Only allow HTTP and HTTPS
     match parsed.scheme() {
@@ -39,9 +38,7 @@ pub fn validate_url(url: &str) -> Result<(), UrlValidationError> {
         other => return Err(UrlValidationError::DisallowedScheme(other.to_owned())),
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or(UrlValidationError::MissingHost)?;
+    let host = parsed.host_str().ok_or(UrlValidationError::MissingHost)?;
 
     // Block well-known localhost hostnames
     let lower = host.to_ascii_lowercase();
@@ -94,7 +91,8 @@ fn check_ipv4(ip: Ipv4Addr) -> Result<(), UrlValidationError> {
         || ip.is_broadcast()       // 255.255.255.255
         || ip.is_unspecified()     // 0.0.0.0
         || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127) // CGN 100.64.0.0/10
-        || (ip.octets()[0] == 198 && ip.octets()[1] >= 18 && ip.octets()[1] <= 19) // benchmarking 198.18.0.0/15
+        || (ip.octets()[0] == 198 && ip.octets()[1] >= 18 && ip.octets()[1] <= 19)
+    // benchmarking 198.18.0.0/15
     {
         return Err(UrlValidationError::BlockedIp(IpAddr::V4(ip)));
     }
@@ -105,7 +103,8 @@ fn check_ipv6(ip: Ipv6Addr) -> Result<(), UrlValidationError> {
     if ip.is_loopback()        // ::1
         || ip.is_unspecified() // ::
         || is_ipv6_unique_local(&ip)  // fc00::/7
-        || is_ipv6_link_local(&ip)    // fe80::/10
+        || is_ipv6_link_local(&ip)
+    // fe80::/10
     {
         return Err(UrlValidationError::BlockedIp(IpAddr::V6(ip)));
     }

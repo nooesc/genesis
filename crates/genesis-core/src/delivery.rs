@@ -412,25 +412,24 @@ impl DeliveryRouter {
                 );
 
                 // Graceful fallback: try saving locally
-                let fallback_ok =
-                    match save_local_output(&self.config.output_dir, job_id, output) {
-                        Ok(path) => {
-                            info!(
-                                job_id = job_id,
-                                path = %path.display(),
-                                "fallback local save succeeded"
-                            );
-                            true
-                        }
-                        Err(local_err) => {
-                            error!(
-                                job_id = job_id,
-                                error = %local_err,
-                                "fallback local save also failed"
-                            );
-                            false
-                        }
-                    };
+                let fallback_ok = match save_local_output(&self.config.output_dir, job_id, output) {
+                    Ok(path) => {
+                        info!(
+                            job_id = job_id,
+                            path = %path.display(),
+                            "fallback local save succeeded"
+                        );
+                        true
+                    }
+                    Err(local_err) => {
+                        error!(
+                            job_id = job_id,
+                            error = %local_err,
+                            "fallback local save also failed"
+                        );
+                        false
+                    }
+                };
 
                 DeliveryResult {
                     destination: dest.clone(),
@@ -476,9 +475,7 @@ fn is_known_platform(name: &str) -> bool {
 /// traversal attacks. If the sanitized result is empty, falls back to
 /// `"_unnamed_"`.
 fn sanitize_job_id(job_id: &str) -> String {
-    let sanitized: String = job_id
-        .replace(['/', '\\'], "_")
-        .replace("..", "_");
+    let sanitized: String = job_id.replace(['/', '\\'], "_").replace("..", "_");
     let sanitized = sanitized.trim_matches(|c: char| c == '_' || c == '.' || c.is_whitespace());
     if sanitized.is_empty() {
         "_unnamed_".to_owned()
@@ -504,9 +501,8 @@ fn save_local_output(output_dir: &Path, job_id: &str, content: &str) -> std::io:
     let file_path = job_dir.join(&filename);
 
     let iso_timestamp = now.to_rfc3339();
-    let full_content = format!(
-        "---\njob_id: {job_id}\ntimestamp: {iso_timestamp}\n---\n\n{content}\n"
-    );
+    let full_content =
+        format!("---\njob_id: {job_id}\ntimestamp: {iso_timestamp}\n---\n\n{content}\n");
 
     std::fs::write(&file_path, full_content)?;
     Ok(file_path)
@@ -757,7 +753,11 @@ mod tests {
             },
         ];
         let dests = router.resolve(&targets);
-        assert_eq!(dests.len(), 1, "duplicate telegram:42 should be deduplicated");
+        assert_eq!(
+            dests.len(),
+            1,
+            "duplicate telegram:42 should be deduplicated"
+        );
     }
 
     #[test]
@@ -796,8 +796,7 @@ mod tests {
     #[test]
     fn save_local_output_creates_file_with_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = save_local_output(dir.path(), "job-1", "Hello, world!")
-            .expect("should save");
+        let path = save_local_output(dir.path(), "job-1", "Hello, world!").expect("should save");
 
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).expect("should read");
@@ -856,10 +855,7 @@ mod tests {
         let text_part = truncated
             .strip_suffix("\n\n[Output truncated. Full output saved locally.]")
             .expect("should have suffix");
-        assert!(
-            !text_part.is_empty(),
-            "should preserve some content"
-        );
+        assert!(!text_part.is_empty(), "should preserve some content");
         // Should contain complete lines
         assert!(text_part.contains("line 0"));
     }
@@ -974,10 +970,11 @@ mod tests {
             let chat_id_owned = chat_id.map(ToOwned::to_owned);
             let message_owned = message.to_owned();
             let should_fail = self.fail_platforms.contains(&platform_owned);
-            self.calls
-                .lock()
-                .expect("lock")
-                .push((platform_owned.clone(), chat_id_owned, message_owned));
+            self.calls.lock().expect("lock").push((
+                platform_owned.clone(),
+                chat_id_owned,
+                message_owned,
+            ));
             Box::pin(async move {
                 if should_fail {
                     Err(format!("{platform_owned} is down"))
@@ -1003,7 +1000,9 @@ mod tests {
             chat_id: None,
         }];
 
-        let report = router.dispatch("job-1", "test output", &dests, &sender).await;
+        let report = router
+            .dispatch("job-1", "test output", &dests, &sender)
+            .await;
         assert_eq!(report.success_count(), 1);
         assert!(dir.path().join("job-1").is_dir());
     }
@@ -1200,7 +1199,10 @@ mod tests {
 
     #[test]
     fn sanitize_job_id_handles_backslash_traversal() {
-        assert_eq!(sanitize_job_id("..\\..\\Windows\\System32"), "Windows_System32");
+        assert_eq!(
+            sanitize_job_id("..\\..\\Windows\\System32"),
+            "Windows_System32"
+        );
     }
 
     #[test]

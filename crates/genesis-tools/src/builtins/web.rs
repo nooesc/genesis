@@ -100,9 +100,7 @@ impl ToolHandler for WebRequestTool {
                     "content-type" | "content-length" | "location" | "server"
                 )
             })
-            .map(|(name, value)| {
-                format!("{}: {}", name, value.to_str().unwrap_or("<binary>"))
-            })
+            .map(|(name, value)| format!("{}: {}", name, value.to_str().unwrap_or("<binary>")))
             .collect();
 
         let response_body = response.text().map_err(|e| ToolError::ExecutionFailed {
@@ -110,8 +108,11 @@ impl ToolHandler for WebRequestTool {
             reason: format!("failed to read response body: {e}"),
         })?;
 
-        let truncated =
-            crate::truncate_at(&response_body, MAX_RESPONSE_BYTES, "\n... (response truncated)");
+        let truncated = crate::truncate_at(
+            &response_body,
+            MAX_RESPONSE_BYTES,
+            "\n... (response truncated)",
+        );
 
         let mut content = format!("HTTP {status}\n");
         for header in &headers {

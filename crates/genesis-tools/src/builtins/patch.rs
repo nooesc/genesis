@@ -25,21 +25,21 @@ impl ToolHandler for PatchTool {
                 argument: "path",
             })?;
 
-        let old_text = call
-            .arguments
-            .get("old_text")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "old_text",
-            })?;
+        let old_text =
+            call.arguments
+                .get("old_text")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "old_text",
+                })?;
 
-        let new_text = call
-            .arguments
-            .get("new_text")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "new_text",
-            })?;
+        let new_text =
+            call.arguments
+                .get("new_text")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "new_text",
+                })?;
 
         let file_path = Path::new(path);
         let content = fs::read_to_string(file_path).map_err(|e| ToolError::ExecutionFailed {
@@ -415,9 +415,7 @@ fn levenshtein_bytes(a: &[u8], b: &[u8]) -> usize {
         curr[0] = i;
         for j in 1..=m {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -438,7 +436,12 @@ fn build_diff_hint(expected: &str, actual: &str) -> String {
         let exp = exp_lines.get(i).copied().unwrap_or("");
         let act = act_lines.get(i).copied().unwrap_or("");
         if exp != act {
-            diffs.push(format!("  line {}: expected `{}`, found `{}`", i + 1, exp, act));
+            diffs.push(format!(
+                "  line {}: expected `{}`, found `{}`",
+                i + 1,
+                exp,
+                act
+            ));
             if diffs.len() >= show_limit {
                 diffs.push("  ... and more differences".to_string());
                 break;
@@ -449,7 +452,10 @@ fn build_diff_hint(expected: &str, actual: &str) -> String {
     if diffs.is_empty() {
         String::new()
     } else {
-        format!("\nDifferences between expected and matched text:\n{}", diffs.join("\n"))
+        format!(
+            "\nDifferences between expected and matched text:\n{}",
+            diffs.join("\n")
+        )
     }
 }
 
@@ -557,11 +563,7 @@ mod tests {
     fn patch_preserves_indentation() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("code.rs");
-        fs::write(
-            &file,
-            "fn main() {\n    let x = 1;\n    let y = 2;\n}\n",
-        )
-        .unwrap();
+        fs::write(&file, "fn main() {\n    let x = 1;\n    let y = 2;\n}\n").unwrap();
 
         let tool = PatchTool;
         let call = ToolCall {

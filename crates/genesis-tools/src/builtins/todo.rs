@@ -43,7 +43,9 @@ fn parse_status(s: &str) -> Result<TodoStatus, String> {
         "pending" => Ok(TodoStatus::Pending),
         "in_progress" => Ok(TodoStatus::InProgress),
         "done" => Ok(TodoStatus::Done),
-        other => Err(format!("invalid status `{other}`: expected pending, in_progress, or done")),
+        other => Err(format!(
+            "invalid status `{other}`: expected pending, in_progress, or done"
+        )),
     }
 }
 
@@ -63,13 +65,13 @@ impl ToolHandler for TodoTool {
 
         match action.as_str() {
             "add" => {
-                let text = call
-                    .arguments
-                    .get("text")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "text",
-                    })?;
+                let text =
+                    call.arguments
+                        .get("text")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "text",
+                        })?;
 
                 let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
@@ -92,24 +94,24 @@ impl ToolHandler for TodoTool {
                 })
             }
             "update" => {
-                let id_str = call
-                    .arguments
-                    .get("id")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "id",
-                    })?;
+                let id_str =
+                    call.arguments
+                        .get("id")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "id",
+                        })?;
                 let id: usize = id_str.parse().map_err(|_| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("invalid id `{id_str}`: expected a number"),
                 })?;
-                let status_str = call
-                    .arguments
-                    .get("status")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "status",
-                    })?;
+                let status_str =
+                    call.arguments
+                        .get("status")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "status",
+                        })?;
                 let status = parse_status(status_str).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: e,
@@ -171,7 +173,8 @@ impl ToolHandler for TodoTool {
                     }
                 }
 
-                let summary = format!("\n({pending} pending, {in_progress} in progress, {done} done)");
+                let summary =
+                    format!("\n({pending} pending, {in_progress} in progress, {done} done)");
 
                 Ok(ToolOutput {
                     content: format!("{}{summary}", lines.join("\n")),
@@ -197,9 +200,7 @@ impl ToolHandler for TodoTool {
             }
             other => Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "unknown action `{other}`: expected add, update, list, or clear"
-                ),
+                reason: format!("unknown action `{other}`: expected add, update, list, or clear"),
             }),
         }
     }
@@ -274,7 +275,11 @@ mod tests {
         };
         let output = tool.run(&call, &ctx()).unwrap();
         // Extract ID from "#N [ ] text"
-        let id = output.content.lines().next().unwrap()
+        let id = output
+            .content
+            .lines()
+            .next()
+            .unwrap()
             .trim_start_matches('#')
             .split_whitespace()
             .next()

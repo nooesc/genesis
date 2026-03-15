@@ -49,47 +49,61 @@ impl AgentHooks for AuditHooks {
         } else {
             user_message.to_owned()
         };
-        self.log_event(session_id, "turn_start", &json!({
-            "message_preview": preview,
-        }));
+        self.log_event(
+            session_id,
+            "turn_start",
+            &json!({
+                "message_preview": preview,
+            }),
+        );
     }
 
     fn on_turn_end(&self, session_id: &str, result: &AgentResult) {
-        self.log_event(session_id, "turn_end", &json!({
-            "turns_used": result.turns_used,
-            "tool_calls_made": result.tool_calls_made,
-            "finished_naturally": result.finished_naturally,
-            "input_tokens": result.total_input_tokens,
-            "output_tokens": result.total_output_tokens,
-            "estimated_cost": result.estimated_cost,
-        }));
+        self.log_event(
+            session_id,
+            "turn_end",
+            &json!({
+                "turns_used": result.turns_used,
+                "tool_calls_made": result.tool_calls_made,
+                "finished_naturally": result.finished_naturally,
+                "input_tokens": result.total_input_tokens,
+                "output_tokens": result.total_output_tokens,
+                "estimated_cost": result.estimated_cost,
+            }),
+        );
     }
 
     fn on_tool_call_start(&self, session_id: &str, tool_name: &str) {
-        self.log_event(session_id, "tool_call_start", &json!({
-            "tool": tool_name,
-        }));
+        self.log_event(
+            session_id,
+            "tool_call_start",
+            &json!({
+                "tool": tool_name,
+            }),
+        );
     }
 
-    fn on_tool_call_end(
-        &self,
-        session_id: &str,
-        tool_name: &str,
-        success: bool,
-        duration_ms: u64,
-    ) {
-        self.log_event(session_id, "tool_call_end", &json!({
-            "tool": tool_name,
-            "success": success,
-            "duration_ms": duration_ms,
-        }));
+    fn on_tool_call_end(&self, session_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+        self.log_event(
+            session_id,
+            "tool_call_end",
+            &json!({
+                "tool": tool_name,
+                "success": success,
+                "duration_ms": duration_ms,
+            }),
+        );
     }
 
     fn on_llm_request(&self, session_id: &str, model: &str, turn: usize) {
-        self.log_event(session_id, "llm_request", &json!({
-            "model": model,
-            "turn": turn,
-        }));
+        self.log_event(
+            session_id,
+            "llm_request",
+            &json!({
+                "model": model,
+                "turn": turn,
+            }),
+        );
     }
 
     fn on_llm_response(
@@ -99,25 +113,37 @@ impl AgentHooks for AuditHooks {
         input_tokens: u32,
         output_tokens: u32,
     ) {
-        self.log_event(session_id, "llm_response", &json!({
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }));
+        self.log_event(
+            session_id,
+            "llm_response",
+            &json!({
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }),
+        );
     }
 
     fn on_context_prune(&self, session_id: &str, messages_before: usize, messages_after: usize) {
-        self.log_event(session_id, "context_prune", &json!({
-            "messages_before": messages_before,
-            "messages_after": messages_after,
-        }));
+        self.log_event(
+            session_id,
+            "context_prune",
+            &json!({
+                "messages_before": messages_before,
+                "messages_after": messages_after,
+            }),
+        );
     }
 
     fn on_stuck_loop(&self, session_id: &str, tool_name: &str, failure_count: usize) {
-        self.log_event(session_id, "stuck_loop", &json!({
-            "tool": tool_name,
-            "failure_count": failure_count,
-        }));
+        self.log_event(
+            session_id,
+            "stuck_loop",
+            &json!({
+                "tool": tool_name,
+                "failure_count": failure_count,
+            }),
+        );
     }
 }
 
@@ -138,16 +164,19 @@ mod tests {
         hooks.on_tool_call_end("s1", "shell_execute", true, 150);
         hooks.on_llm_request("s1", "gpt-4", 1);
         hooks.on_llm_response("s1", "gpt-4", 500, 200);
-        hooks.on_turn_end("s1", &AgentResult {
-            response: "Done".into(),
-            turns_used: 2,
-            tool_calls_made: 1,
-            finished_naturally: true,
-            total_input_tokens: 500,
-            total_output_tokens: 200,
-            estimated_cost: Some(0.001),
-            pending_clarification: None,
-        });
+        hooks.on_turn_end(
+            "s1",
+            &AgentResult {
+                response: "Done".into(),
+                turns_used: 2,
+                tool_calls_made: 1,
+                finished_naturally: true,
+                total_input_tokens: 500,
+                total_output_tokens: 200,
+                estimated_cost: Some(0.001),
+                pending_clarification: None,
+            },
+        );
 
         let store = AuditLogStore::new(&db_path);
         let entries = store.by_session("s1", 100).unwrap();

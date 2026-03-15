@@ -5,10 +5,10 @@ pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
 
+use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
 use genesis_storage::PairingStore;
 use std::collections::HashSet;
 use std::path::Path;
-use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
 
 /// Extract the reply text from a `run_turn` result, logging success or failure.
 ///

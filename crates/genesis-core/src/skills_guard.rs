@@ -114,15 +114,30 @@ impl GuardReport {
 
     /// Returns the number of findings at the given severity or above.
     pub fn count_at_or_above(&self, threshold: Severity) -> usize {
-        self.findings.iter().filter(|f| f.severity >= threshold).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity >= threshold)
+            .count()
     }
 
     /// Human-readable summary suitable for logging or CLI output.
     pub fn summary(&self) -> String {
         let critical = self.count_at_or_above(Severity::Critical);
-        let high = self.findings.iter().filter(|f| f.severity == Severity::High).count();
-        let medium = self.findings.iter().filter(|f| f.severity == Severity::Medium).count();
-        let low = self.findings.iter().filter(|f| f.severity == Severity::Low).count();
+        let high = self
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::High)
+            .count();
+        let medium = self
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Medium)
+            .count();
+        let low = self
+            .findings
+            .iter()
+            .filter(|f| f.severity == Severity::Low)
+            .count();
         format!(
             "skill={} trust={:?} verdict={:?} findings={} (critical={}, high={}, medium={}, low={})",
             self.skill_name,
@@ -173,14 +188,18 @@ fn build_patterns() -> Vec<PatternRule> {
     vec![
         // ---- 1. Data exfiltration ----
         PatternRule {
-            regex: r(r"(?i)curl\s+.*(\$\{?\w*(KEY|TOKEN|SECRET|PASS|CRED)\w*\}?|/etc/shadow|\.env\b)"),
+            regex: r(
+                r"(?i)curl\s+.*(\$\{?\w*(KEY|TOKEN|SECRET|PASS|CRED)\w*\}?|/etc/shadow|\.env\b)",
+            ),
             description: "curl with secrets or sensitive files",
             category: ThreatCategory::DataExfiltration,
             severity: Severity::Critical,
             exclude: None,
         },
         PatternRule {
-            regex: r(r"(?i)wget\s+.*(\$\{?\w*(KEY|TOKEN|SECRET|PASS|CRED)\w*\}?|/etc/shadow|\.env\b)"),
+            regex: r(
+                r"(?i)wget\s+.*(\$\{?\w*(KEY|TOKEN|SECRET|PASS|CRED)\w*\}?|/etc/shadow|\.env\b)",
+            ),
             description: "wget with secrets or sensitive files",
             category: ThreatCategory::DataExfiltration,
             severity: Severity::Critical,
@@ -207,7 +226,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::High,
             exclude: None,
         },
-
         // ---- 2. Prompt injection ----
         PatternRule {
             regex: r(r"(?i)\bignore\s+(all\s+)?previous\s+instructions\b"),
@@ -265,7 +283,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Critical,
             exclude: None,
         },
-
         // ---- 3. Destructive operations ----
         PatternRule {
             regex: r(r"(?i)\brm\s+-(r|f|rf|fr)\s+/(?:\s|$)"),
@@ -309,7 +326,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Critical,
             exclude: None,
         },
-
         // ---- 4. Persistence mechanisms ----
         PatternRule {
             regex: r(r"(?i)\bcrontab\b|\bcron\s"),
@@ -353,7 +369,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::High,
             exclude: None,
         },
-
         // ---- 5. Network threats ----
         PatternRule {
             regex: r(r"(?i)\b(nc|ncat|netcat)\s+.*-[elp]"),
@@ -397,10 +412,11 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::High,
             exclude: None,
         },
-
         // ---- 6. Code obfuscation ----
         PatternRule {
-            regex: r(r"(?i)\bbase64\s+(--)?-?d(ecode)?\b.*\|\s*(sh|bash|zsh|python|perl|ruby|node)"),
+            regex: r(
+                r"(?i)\bbase64\s+(--)?-?d(ecode)?\b.*\|\s*(sh|bash|zsh|python|perl|ruby|node)",
+            ),
             description: "base64 decode piped to execution",
             category: ThreatCategory::CodeObfuscation,
             severity: Severity::Critical,
@@ -434,7 +450,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Medium,
             exclude: None,
         },
-
         // ---- 7. Privilege escalation ----
         PatternRule {
             regex: r(r"(?i)\bsudo\s"),
@@ -478,7 +493,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::High,
             exclude: None,
         },
-
         // ---- 8. Supply chain risks ----
         PatternRule {
             regex: r(r"(?i)\bcurl\s+.*\|\s*(sudo\s+)?(sh|bash|zsh)\b"),
@@ -518,10 +532,11 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Medium,
             exclude: excl(r"--version"),
         },
-
         // ---- 9. Credential exposure ----
         PatternRule {
-            regex: r(r#"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*['"][A-Za-z0-9_/+.-]{16,}['"]"#),
+            regex: r(
+                r#"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]\s*['"][A-Za-z0-9_/+.-]{16,}['"]"#,
+            ),
             description: "hardcoded API key or secret token",
             category: ThreatCategory::CredentialExposure,
             severity: Severity::Critical,
@@ -555,7 +570,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Critical,
             exclude: None,
         },
-
         // (Category 10, structural anomalies, is handled in `collect_files`.)
 
         // ---- 11. Advanced injection ----
@@ -580,7 +594,6 @@ fn build_patterns() -> Vec<PatternRule> {
             severity: Severity::Critical,
             exclude: None,
         },
-
         // ---- 12. Subprocess execution ----
         PatternRule {
             regex: r(r"(?i)\bsubprocess\.(call|run|Popen|check_output|check_call)\b"),
@@ -628,8 +641,7 @@ fn build_patterns() -> Vec<PatternRule> {
 }
 
 // Use `std::sync::LazyLock` (stable since Rust 1.80) to compile patterns once.
-static PATTERNS: std::sync::LazyLock<Vec<PatternRule>> =
-    std::sync::LazyLock::new(build_patterns);
+static PATTERNS: std::sync::LazyLock<Vec<PatternRule>> = std::sync::LazyLock::new(build_patterns);
 
 // Invisible Unicode characters that can hide injected content.
 const SUSPICIOUS_UNICODE: &[(char, &str)] = &[
@@ -653,8 +665,7 @@ const SUSPICIOUS_UNICODE: &[(char, &str)] = &[
 
 // Extensions considered as binary (non-text) files.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "exe", "dll", "so", "dylib", "bin", "o", "a", "lib", "class", "pyc",
-    "pyo", "wasm", "elf",
+    "exe", "dll", "so", "dylib", "bin", "o", "a", "lib", "class", "pyc", "pyo", "wasm", "elf",
 ];
 
 // ---------------------------------------------------------------------------
@@ -697,15 +708,20 @@ pub fn scan_skill_directory(
     let mut total_size: u64 = 0;
     let mut text_files: Vec<(String, std::path::PathBuf)> = Vec::new();
 
-    collect_files(dir, dir, &mut file_count, &mut total_size, &mut text_files, &mut findings)?;
+    collect_files(
+        dir,
+        dir,
+        &mut file_count,
+        &mut total_size,
+        &mut text_files,
+        &mut findings,
+    )?;
 
     if file_count > MAX_FILE_COUNT {
         findings.push(Finding {
             category: ThreatCategory::StructuralAnomaly,
             severity: Severity::High,
-            description: format!(
-                "skill contains {file_count} files (limit: {MAX_FILE_COUNT})"
-            ),
+            description: format!("skill contains {file_count} files (limit: {MAX_FILE_COUNT})"),
             file: None,
             line: None,
         });
@@ -865,10 +881,8 @@ fn scan_unicode(content: &str, file: Option<&str>, findings: &mut Vec<Finding>) 
         for &(ch, name) in SUSPICIOUS_UNICODE {
             if line.contains(ch) {
                 let count = line.matches(ch).count();
-                let is_directional = matches!(
-                    ch,
-                    '\u{202A}' | '\u{202B}' | '\u{202D}' | '\u{202E}'
-                );
+                let is_directional =
+                    matches!(ch, '\u{202A}' | '\u{202B}' | '\u{202D}' | '\u{202E}');
                 findings.push(Finding {
                     category: ThreatCategory::AdvancedInjection,
                     severity: if is_directional {
@@ -876,10 +890,7 @@ fn scan_unicode(content: &str, file: Option<&str>, findings: &mut Vec<Finding>) 
                     } else {
                         Severity::Medium
                     },
-                    description: format!(
-                        "{count} invisible char(s): {name} (U+{:04X})",
-                        ch as u32
-                    ),
+                    description: format!("{count} invisible char(s): {name} (U+{:04X})", ch as u32),
                     file: file.map(str::to_owned),
                     line: Some(line_idx + 1),
                 });
@@ -1214,8 +1225,7 @@ mod tests {
         let r = scan("pip install requests==2.31.0");
         // Pinned version should not match the unpinned pattern
         assert!(!r.findings.iter().any(|f| {
-            f.category == ThreatCategory::SupplyChainRisk
-                && f.description.contains("pip")
+            f.category == ThreatCategory::SupplyChainRisk && f.description.contains("pip")
         }));
     }
 
@@ -1297,7 +1307,10 @@ mod tests {
         }
         let r = scan_skill_directory("big-skill", dir.path(), TrustLevel::Community).unwrap();
         assert!(has_category(&r, ThreatCategory::StructuralAnomaly));
-        assert!(r.findings.iter().any(|f| f.description.contains("55 files")));
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.description.contains("55 files")));
     }
 
     #[test]
@@ -1335,8 +1348,7 @@ mod tests {
         std::fs::write(dir.path().join("payload.exe"), b"MZ\x90\x00").unwrap();
         let r = scan_skill_directory("bin-skill", dir.path(), TrustLevel::Community).unwrap();
         assert!(r.findings.iter().any(|f| {
-            f.category == ThreatCategory::StructuralAnomaly
-                && f.description.contains("binary file")
+            f.category == ThreatCategory::StructuralAnomaly && f.description.contains("binary file")
         }));
     }
 
@@ -1355,8 +1367,7 @@ mod tests {
         }
         let r = scan_skill_directory("link-skill", dir.path(), TrustLevel::Community).unwrap();
         assert!(r.findings.iter().any(|f| {
-            f.category == ThreatCategory::StructuralAnomaly
-                && f.description.contains("symlink")
+            f.category == ThreatCategory::StructuralAnomaly && f.description.contains("symlink")
         }));
     }
 
@@ -1369,10 +1380,10 @@ mod tests {
         std::fs::write(&f, "secret payload").unwrap();
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let r = scan_skill_directory("unreadable-skill", dir.path(), TrustLevel::Community).unwrap();
+        let r =
+            scan_skill_directory("unreadable-skill", dir.path(), TrustLevel::Community).unwrap();
         assert!(r.findings.iter().any(|f| {
-            f.category == ThreatCategory::StructuralAnomaly
-                && f.description.contains("unreadable")
+            f.category == ThreatCategory::StructuralAnomaly && f.description.contains("unreadable")
         }));
 
         // Restore permissions so tempdir cleanup succeeds.
@@ -1657,9 +1668,10 @@ subprocess.run(['whoami'])";
 
         let r = scan_skill_directory("nested-skill", dir.path(), TrustLevel::Community).unwrap();
         assert!(r.is_blocked());
-        assert!(r.findings.iter().any(|f| {
-            f.file.as_deref() == Some("scripts/evil.sh")
-        }));
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| { f.file.as_deref() == Some("scripts/evil.sh") }));
     }
 
     #[test]
@@ -1673,9 +1685,10 @@ subprocess.run(['whoami'])";
 
         let r = scan_skill_directory("file-attr", dir.path(), TrustLevel::Community).unwrap();
         assert!(!r.findings.is_empty());
-        assert!(r.findings.iter().any(|f| {
-            f.file.as_deref() == Some("main.py")
-        }));
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| { f.file.as_deref() == Some("main.py") }));
     }
 
     // ============================================================

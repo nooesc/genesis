@@ -315,15 +315,14 @@ pub(crate) fn to_gemini_request(req: &ChatCompletionRequest) -> GeminiRequest {
     });
 
     // Generation config
-    let generation_config =
-        if req.temperature.is_some() || req.max_tokens.is_some() {
-            Some(GeminiGenerationConfig {
-                temperature: req.temperature,
-                max_output_tokens: req.max_tokens,
-            })
-        } else {
-            None
-        };
+    let generation_config = if req.temperature.is_some() || req.max_tokens.is_some() {
+        Some(GeminiGenerationConfig {
+            temperature: req.temperature,
+            max_output_tokens: req.max_tokens,
+        })
+    } else {
+        None
+    };
 
     GeminiRequest {
         contents,
@@ -338,25 +337,23 @@ pub(crate) fn to_gemini_request(req: &ChatCompletionRequest) -> GeminiRequest {
 fn content_to_gemini_parts(content: &Option<MessageContent>) -> Vec<GeminiPart> {
     match content {
         Some(MessageContent::Text(text)) => {
-            vec![GeminiPart::Text {
-                text: text.clone(),
-            }]
+            vec![GeminiPart::Text { text: text.clone() }]
         }
         Some(MessageContent::Parts(parts)) => parts
             .iter()
             .filter_map(|p| match p {
-                crate::api_types::ContentPart::Text { text } => Some(GeminiPart::Text {
-                    text: text.clone(),
-                }),
+                crate::api_types::ContentPart::Text { text } => {
+                    Some(GeminiPart::Text { text: text.clone() })
+                }
                 crate::api_types::ContentPart::ImageUrl { image_url } => {
-                    crate::api_types::parse_data_uri(&image_url.url).map(
-                        |(media_type, data)| GeminiPart::InlineData {
+                    crate::api_types::parse_data_uri(&image_url.url).map(|(media_type, data)| {
+                        GeminiPart::InlineData {
                             inline_data: GeminiInlineData {
                                 mime_type: media_type.to_owned(),
                                 data: data.to_owned(),
                             },
-                        },
-                    )
+                        }
+                    })
                 }
             })
             .collect(),
@@ -389,13 +386,12 @@ pub(crate) fn from_gemini_response(
 
             // If there are tool calls and no explicit finish reason for them,
             // set it to "tool_calls"
-            let finish_reason = if message.tool_calls.is_some()
-                && finish_reason.as_deref() == Some("stop")
-            {
-                Some("tool_calls".to_owned())
-            } else {
-                finish_reason
-            };
+            let finish_reason =
+                if message.tool_calls.is_some() && finish_reason.as_deref() == Some("stop") {
+                    Some("tool_calls".to_owned())
+                } else {
+                    finish_reason
+                };
 
             (message, finish_reason)
         }
@@ -431,8 +427,7 @@ fn parts_to_chat_message(parts: &[GeminiPart]) -> ChatMessage {
                     call_type: "function".to_owned(),
                     function: FunctionCall {
                         name: function_call.name.clone(),
-                        arguments: serde_json::to_string(&function_call.args)
-                            .unwrap_or_default(),
+                        arguments: serde_json::to_string(&function_call.args).unwrap_or_default(),
                     },
                 });
             }
@@ -482,8 +477,7 @@ pub(crate) fn from_gemini_stream_chunk(
                     call_type: "function".to_owned(),
                     function: FunctionCall {
                         name: function_call.name.clone(),
-                        arguments: serde_json::to_string(&function_call.args)
-                            .unwrap_or_default(),
+                        arguments: serde_json::to_string(&function_call.args).unwrap_or_default(),
                     },
                 };
                 tool_calls.get_or_insert_with(Vec::new).push(entry);
@@ -625,10 +619,8 @@ mod tests {
 
     #[test]
     fn tools_converted_to_function_declarations() {
-        let mut req = ChatCompletionRequest::new(
-            "gemini-2.5-pro",
-            vec![ChatMessage::user("hello")],
-        );
+        let mut req =
+            ChatCompletionRequest::new("gemini-2.5-pro", vec![ChatMessage::user("hello")]);
         req.tools = vec![ChatTool {
             tool_type: "function".to_owned(),
             function: ChatToolFunction {
@@ -652,10 +644,8 @@ mod tests {
 
     #[test]
     fn tool_choice_translated() {
-        let mut req = ChatCompletionRequest::new(
-            "gemini-2.5-pro",
-            vec![ChatMessage::user("hello")],
-        );
+        let mut req =
+            ChatCompletionRequest::new("gemini-2.5-pro", vec![ChatMessage::user("hello")]);
 
         req.tool_choice = Some(ToolChoice::Required);
         let gemini = to_gemini_request(&req);
@@ -681,10 +671,8 @@ mod tests {
 
     #[test]
     fn generation_config_set() {
-        let mut req = ChatCompletionRequest::new(
-            "gemini-2.5-pro",
-            vec![ChatMessage::user("hello")],
-        );
+        let mut req =
+            ChatCompletionRequest::new("gemini-2.5-pro", vec![ChatMessage::user("hello")]);
         req.temperature = Some(0.7);
         req.max_tokens = Some(1024);
 
@@ -716,10 +704,7 @@ mod tests {
         let openai = from_gemini_response(resp, "resp-123");
         assert_eq!(openai.id, "resp-123");
         assert_eq!(openai.choices[0].message.content_text(), Some("Hello!"));
-        assert_eq!(
-            openai.choices[0].finish_reason.as_deref(),
-            Some("stop")
-        );
+        assert_eq!(openai.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = openai.usage.as_ref().unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
@@ -810,9 +795,7 @@ mod tests {
 
         let gemini = to_gemini_request(&req);
 
-        if let GeminiPart::FunctionResponse { function_response } =
-            &gemini.contents[2].parts[0]
-        {
+        if let GeminiPart::FunctionResponse { function_response } = &gemini.contents[2].parts[0] {
             assert_eq!(function_response.name, "search");
         } else {
             panic!("expected FunctionResponse part");

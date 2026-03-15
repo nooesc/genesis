@@ -118,7 +118,10 @@ impl SessionCost {
             } else {
                 0.0
             };
-            lines.push(format!("Budget: ${:.2} / ${:.2} ({:.0}%)", self.total_cost, limit, pct));
+            lines.push(format!(
+                "Budget: ${:.2} / ${:.2} ({:.0}%)",
+                self.total_cost, limit, pct
+            ));
         }
 
         lines.push(format!("Turns: {}", self.turns.len()));

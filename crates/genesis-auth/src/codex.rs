@@ -111,7 +111,10 @@ pub async fn request_device_code(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::DeviceCodeRequest {
             message: format!("status {status}: {body}"),
         });
@@ -176,9 +179,11 @@ pub async fn poll_for_authorization(
         match resp.status().as_u16() {
             200 => {
                 let data: serde_json::Value =
-                    resp.json().await.map_err(|e| AuthError::DeviceCodeRequest {
-                        message: e.to_string(),
-                    })?;
+                    resp.json()
+                        .await
+                        .map_err(|e| AuthError::DeviceCodeRequest {
+                            message: e.to_string(),
+                        })?;
                 let authorization_code = data["authorization_code"]
                     .as_str()
                     .ok_or_else(|| AuthError::TokenExchange {
@@ -225,27 +230,24 @@ pub async fn exchange_code_for_tokens(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::TokenExchange {
             message: format!("status {status}: {body}"),
         });
     }
-    let data: serde_json::Value =
-        resp.json()
-            .await
-            .map_err(|e| AuthError::TokenExchange {
-                message: e.to_string(),
-            })?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| AuthError::TokenExchange {
+        message: e.to_string(),
+    })?;
     let access_token = data["access_token"]
         .as_str()
         .ok_or_else(|| AuthError::TokenExchange {
             message: "missing access_token".to_owned(),
         })?
         .to_owned();
-    let refresh_token = data["refresh_token"]
-        .as_str()
-        .unwrap_or("")
-        .to_owned();
+    let refresh_token = data["refresh_token"].as_str().unwrap_or("").to_owned();
 
     if refresh_token.is_empty() {
         tracing::warn!("Token exchange returned no refresh_token — token refresh will not work");
@@ -276,17 +278,17 @@ pub async fn refresh_access_token(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::TokenRefresh {
             message: format!("status {status}: {body}"),
         });
     }
-    let data: serde_json::Value =
-        resp.json()
-            .await
-            .map_err(|e| AuthError::TokenRefresh {
-                message: e.to_string(),
-            })?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| AuthError::TokenRefresh {
+        message: e.to_string(),
+    })?;
     let access_token = data["access_token"]
         .as_str()
         .ok_or_else(|| AuthError::TokenRefresh {

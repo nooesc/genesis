@@ -41,7 +41,10 @@ impl ToolHandler for SessionSearchTool {
             });
         }
 
-        let mut lines = vec![format!("Found {} sessions matching \"{query}\":", sessions.len())];
+        let mut lines = vec![format!(
+            "Found {} sessions matching \"{query}\":",
+            sessions.len()
+        )];
         for session in &sessions {
             let title = session.title.as_deref().unwrap_or("(untitled)");
             lines.push(format!(
@@ -66,13 +69,13 @@ pub struct SessionHistoryTool;
 
 impl ToolHandler for SessionHistoryTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let session_id = call
-            .arguments
-            .get("session_id")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "session_id",
-            })?;
+        let session_id =
+            call.arguments
+                .get("session_id")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "session_id",
+                })?;
 
         let limit = call
             .arguments

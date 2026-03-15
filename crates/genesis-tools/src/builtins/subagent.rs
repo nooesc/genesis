@@ -65,7 +65,13 @@ impl ToolHandler for SpawnSubagentTool {
         // Create the subagent record
         let subagent_store = SubagentStore::new(&db_path);
         subagent_store
-            .create(&subagent_id, &context.session_id, &child_session_id, &name, task)
+            .create(
+                &subagent_id,
+                &context.session_id,
+                &child_session_id,
+                &name,
+                task,
+            )
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!("failed to create subagent record: {e}"),
@@ -92,13 +98,13 @@ pub struct CheckSubagentTool;
 
 impl ToolHandler for CheckSubagentTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let subagent_id = call
-            .arguments
-            .get("subagent_id")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "subagent_id",
-            })?;
+        let subagent_id =
+            call.arguments
+                .get("subagent_id")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "subagent_id",
+                })?;
 
         let db_path = context.db_path();
         let store = SubagentStore::new(&db_path);
@@ -147,12 +153,13 @@ impl ToolHandler for ListSubagentsTool {
         let db_path = context.db_path();
         let store = SubagentStore::new(&db_path);
 
-        let subagents = store
-            .list_by_parent(&context.session_id)
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to list subagents: {e}"),
-            })?;
+        let subagents =
+            store
+                .list_by_parent(&context.session_id)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to list subagents: {e}"),
+                })?;
 
         if subagents.is_empty() {
             return Ok(ToolOutput {

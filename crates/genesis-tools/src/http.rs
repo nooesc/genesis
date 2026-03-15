@@ -13,9 +13,7 @@ use std::time::Duration;
 /// minimal builder with only the timeout is tried.
 pub fn build_blocking_client(
     timeout: Duration,
-    configure: impl FnOnce(
-        reqwest::blocking::ClientBuilder,
-    ) -> reqwest::blocking::ClientBuilder,
+    configure: impl FnOnce(reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder,
 ) -> reqwest::blocking::Client {
     let builder = reqwest::blocking::Client::builder().timeout(timeout);
     configure(builder).build().unwrap_or_else(|e| {

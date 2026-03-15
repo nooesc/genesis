@@ -111,15 +111,24 @@ fn build_replay_report_with_source(
 
     for event in replay_events {
         match event {
-            ReplayEvent::User { metadata: _, content } => {
+            ReplayEvent::User {
+                metadata: _,
+                content,
+            } => {
                 event_counts.user += 1;
                 push_truncation_warning(&mut warnings, content.as_str(), "content", None);
             }
-            ReplayEvent::Assistant { metadata: _, content } => {
+            ReplayEvent::Assistant {
+                metadata: _,
+                content,
+            } => {
                 event_counts.assistant += 1;
                 push_truncation_warning(&mut warnings, content.as_str(), "content", None);
             }
-            ReplayEvent::System { metadata: _, content } => {
+            ReplayEvent::System {
+                metadata: _,
+                content,
+            } => {
                 event_counts.system += 1;
                 push_truncation_warning(&mut warnings, content.as_str(), "content", None);
             }

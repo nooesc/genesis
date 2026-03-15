@@ -132,10 +132,13 @@ pub async fn run_moa(
     request.temperature = config.temperature;
     request.max_tokens = config.max_tokens;
 
-    let response = client.complete(request).await.map_err(|e| MoaError::Provider {
-        model: aggregator_model,
-        source: e,
-    })?;
+    let response = client
+        .complete(request)
+        .await
+        .map_err(|e| MoaError::Provider {
+            model: aggregator_model,
+            source: e,
+        })?;
 
     let content = response
         .choices

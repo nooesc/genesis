@@ -18,21 +18,21 @@ pub struct SkillViewFileTool;
 
 impl ToolHandler for SkillViewFileTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let skill_name = call
-            .arguments
-            .get("skill_name")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "skill_name",
-            })?;
+        let skill_name =
+            call.arguments
+                .get("skill_name")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "skill_name",
+                })?;
 
-        let file_path = call
-            .arguments
-            .get("file_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "file_path",
-            })?;
+        let file_path =
+            call.arguments
+                .get("file_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "file_path",
+                })?;
 
         let store = file_store(context, &call.name)?;
 
@@ -44,9 +44,7 @@ impl ToolHandler for SkillViewFileTool {
             })?
             .ok_or_else(|| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "supporting file `{file_path}` for skill `{skill_name}` not found"
-                ),
+                reason: format!("supporting file `{file_path}` for skill `{skill_name}` not found"),
             })?;
 
         Ok(ToolOutput {
@@ -65,21 +63,21 @@ pub struct SkillStoreFileTool;
 
 impl ToolHandler for SkillStoreFileTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let skill_name = call
-            .arguments
-            .get("skill_name")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "skill_name",
-            })?;
+        let skill_name =
+            call.arguments
+                .get("skill_name")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "skill_name",
+                })?;
 
-        let file_path = call
-            .arguments
-            .get("file_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "file_path",
-            })?;
+        let file_path =
+            call.arguments
+                .get("file_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "file_path",
+                })?;
 
         let content = call
             .arguments
@@ -114,13 +112,13 @@ pub struct SkillListFilesTool;
 
 impl ToolHandler for SkillListFilesTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let skill_name = call
-            .arguments
-            .get("skill_name")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "skill_name",
-            })?;
+        let skill_name =
+            call.arguments
+                .get("skill_name")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "skill_name",
+                })?;
 
         let store = file_store(context, &call.name)?;
 
@@ -158,30 +156,31 @@ pub struct SkillDeleteFileTool;
 
 impl ToolHandler for SkillDeleteFileTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let skill_name = call
-            .arguments
-            .get("skill_name")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "skill_name",
-            })?;
+        let skill_name =
+            call.arguments
+                .get("skill_name")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "skill_name",
+                })?;
 
-        let file_path = call
-            .arguments
-            .get("file_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "file_path",
-            })?;
+        let file_path =
+            call.arguments
+                .get("file_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "file_path",
+                })?;
 
         let store = file_store(context, &call.name)?;
 
-        let deleted = store
-            .delete_file(skill_name, file_path)
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to delete skill file: {e}"),
-            })?;
+        let deleted =
+            store
+                .delete_file(skill_name, file_path)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to delete skill file: {e}"),
+                })?;
 
         let content = if deleted {
             format!("Deleted file `{file_path}` from skill `{skill_name}`.")
@@ -311,7 +310,10 @@ mod tests {
 
         // Verify the file was actually stored
         let file_store = SkillFileStore::new(&db_path);
-        let content = file_store.get_file("deploy", "docs/setup.md").unwrap().unwrap();
+        let content = file_store
+            .get_file("deploy", "docs/setup.md")
+            .unwrap()
+            .unwrap();
         assert_eq!(content, "# Setup\nInstall things.");
     }
 
@@ -359,9 +361,7 @@ mod tests {
             .run(
                 &ToolCall {
                     name: "skill_list_files".to_owned(),
-                    arguments: BTreeMap::from([
-                        ("skill_name".to_owned(), "deploy".to_owned()),
-                    ]),
+                    arguments: BTreeMap::from([("skill_name".to_owned(), "deploy".to_owned())]),
                 },
                 &context(dir.path().to_string_lossy().as_ref()),
             )
@@ -383,9 +383,7 @@ mod tests {
             .run(
                 &ToolCall {
                     name: "skill_list_files".to_owned(),
-                    arguments: BTreeMap::from([
-                        ("skill_name".to_owned(), "noskill".to_owned()),
-                    ]),
+                    arguments: BTreeMap::from([("skill_name".to_owned(), "noskill".to_owned())]),
                 },
                 &context(dir.path().to_string_lossy().as_ref()),
             )
@@ -426,7 +424,10 @@ mod tests {
         assert_eq!(output.metadata.get("deleted").unwrap(), "true");
 
         // Verify it's gone
-        assert!(file_store.get_file("deploy", "refs/a.md").unwrap().is_none());
+        assert!(file_store
+            .get_file("deploy", "refs/a.md")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

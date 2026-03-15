@@ -7,9 +7,9 @@ use tracing::{debug, error, info, warn};
 
 use genesis_storage::SandboxStore;
 
-use super::{ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance};
 #[cfg(test)]
 use super::BackendSpecific;
+use super::{ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance};
 
 pub struct SandboxManager {
     cache: Mutex<HashMap<String, SandboxInstance>>,
@@ -90,7 +90,9 @@ impl SandboxManager {
         };
 
         // Step 5: Execute the command.
-        let result = backend.execute(&instance, command, working_dir, timeout).await?;
+        let result = backend
+            .execute(&instance, command, working_dir, timeout)
+            .await?;
 
         // Step 6: Update cache_instant and store last_active.
         {
@@ -147,10 +149,14 @@ impl SandboxManager {
             cache.drain().map(|(_, v)| v).collect()
         };
 
-        info!(count = instances.len(), "shutting down all sandbox instances");
+        info!(
+            count = instances.len(),
+            "shutting down all sandbox instances"
+        );
 
         for instance in instances {
-            self.snapshot_and_cleanup(&*backend, &instance, true, "shutdown").await;
+            self.snapshot_and_cleanup(&*backend, &instance, true, "shutdown")
+                .await;
         }
     }
 
@@ -174,10 +180,14 @@ impl SandboxManager {
             return;
         }
 
-        info!(count = idle_instances.len(), "cleaning up idle sandbox instances");
+        info!(
+            count = idle_instances.len(),
+            "cleaning up idle sandbox instances"
+        );
 
         for instance in idle_instances {
-            self.snapshot_and_cleanup(&*backend, &instance, instance.persistent, "idle cleanup").await;
+            self.snapshot_and_cleanup(&*backend, &instance, instance.persistent, "idle cleanup")
+                .await;
         }
     }
 }

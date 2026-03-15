@@ -17,21 +17,21 @@ impl ToolHandler for SkillCreateTool {
                 argument: "name",
             })?;
 
-        let description = call
-            .arguments
-            .get("description")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "description",
-            })?;
+        let description =
+            call.arguments
+                .get("description")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "description",
+                })?;
 
-        let instructions = call
-            .arguments
-            .get("instructions")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "instructions",
-            })?;
+        let instructions =
+            call.arguments
+                .get("instructions")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "instructions",
+                })?;
 
         let trigger_hint = call.arguments.get("trigger_hint").map(|s| s.as_str());
 
@@ -206,13 +206,13 @@ pub struct SkillRecordUsageTool;
 
 impl ToolHandler for SkillRecordUsageTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let skill_name = call
-            .arguments
-            .get("skill_name")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "skill_name",
-            })?;
+        let skill_name =
+            call.arguments
+                .get("skill_name")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "skill_name",
+                })?;
 
         let outcome = call
             .arguments
@@ -329,13 +329,21 @@ mod tests {
             name: "skill_create".to_owned(),
             arguments: BTreeMap::from([
                 ("name".to_owned(), "code_review".to_owned()),
-                ("description".to_owned(), "Review code for issues".to_owned()),
-                ("instructions".to_owned(), "1. Read code\n2. Find bugs".to_owned()),
+                (
+                    "description".to_owned(),
+                    "Review code for issues".to_owned(),
+                ),
+                (
+                    "instructions".to_owned(),
+                    "1. Read code\n2. Find bugs".to_owned(),
+                ),
                 ("trigger_hint".to_owned(), "review code".to_owned()),
                 ("tags".to_owned(), "dev, review".to_owned()),
             ]),
         };
-        let output = SkillCreateTool.run(&create_call, &ctx).expect("create should work");
+        let output = SkillCreateTool
+            .run(&create_call, &ctx)
+            .expect("create should work");
         assert!(output.content.contains("code_review"));
         assert!(output.content.contains("version 1"));
 
@@ -344,7 +352,9 @@ mod tests {
             name: "skill_list".to_owned(),
             arguments: BTreeMap::new(),
         };
-        let output = SkillListTool.run(&list_call, &ctx).expect("list should work");
+        let output = SkillListTool
+            .run(&list_call, &ctx)
+            .expect("list should work");
         assert!(output.content.contains("code_review"));
         assert!(output.content.contains("Review code for issues"));
     }

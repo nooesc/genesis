@@ -11,24 +11,24 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 use clap::{CommandFactory, Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::{AgentError, StreamEvent};
-use genesis_core::replay::{load_and_report, ReplayEventCounts, ReplayReport};
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
 };
 use genesis_core::prompt::{agent_name, load_context_file};
-use genesis_core::scheduler::{check_due_schedules, CronTime};
+use genesis_core::replay::{load_and_report, ReplayEventCounts, ReplayReport};
 use genesis_core::run_doctor;
+use genesis_core::scheduler::{check_due_schedules, CronTime};
+use genesis_gateway::{build_router, AppState};
 use genesis_provider::ProviderError;
 use genesis_storage::{
     bootstrap, InsightsData, MemoryStore, PairingStore, ScheduleStore, SessionStore,
     SessionSummary, SkillStore, StorageError, StoredSchedule, SubagentStore, UsageStats,
     UserModelStore,
 };
-use genesis_gateway::{AppState, build_router};
 use genesis_types::DeliveryPlatform;
 use rustyline::completion::{Completer, Pair};
-use rustyline::hint::Hinter;
 use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use thiserror::Error;
 
@@ -42,11 +42,36 @@ impl SlashCompleter {
     fn new() -> Self {
         Self {
             commands: vec![
-                "/help", "/history", "/export", "/tokens", "/session",
-                "/new", "/undo", "/retry", "/fork", "/resume", "/search",
-                "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/eval", "/clear",
+                "/help",
+                "/history",
+                "/export",
+                "/tokens",
+                "/session",
+                "/new",
+                "/undo",
+                "/retry",
+                "/fork",
+                "/resume",
+                "/search",
+                "/memories",
+                "/compress",
+                "/tools",
+                "/skills",
+                "/model",
+                "/personality",
+                "/system",
+                "/cache",
+                "/stats",
+                "/tag",
+                "/title",
+                "/tree",
+                "/audit",
+                "/analytics",
+                "/template",
+                "/workflow",
+                "/bus",
+                "/eval",
+                "/clear",
                 "/paste",
             ],
         }
@@ -103,7 +128,11 @@ impl rustyline::Helper for SlashCompleter {}
 struct CliApprovalHandler;
 
 impl genesis_tools::ApprovalHandler for CliApprovalHandler {
-    fn request_approval(&self, tool_name: &str, arguments: &std::collections::BTreeMap<String, String>) -> bool {
+    fn request_approval(
+        &self,
+        tool_name: &str,
+        arguments: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
         eprintln!("\n[Tool approval required] {tool_name}");
         for (key, value) in arguments {
             let display = match value.char_indices().nth(100) {
@@ -140,9 +169,16 @@ pub enum Command {
     Chat {
         #[arg(long, help = "Override the generated session id")]
         session_id: Option<String>,
-        #[arg(long, help = "Resume an existing session instead of creating a new one")]
+        #[arg(
+            long,
+            help = "Resume an existing session instead of creating a new one"
+        )]
         resume: Option<String>,
-        #[arg(short, long, help = "Send an initial prompt before entering interactive mode")]
+        #[arg(
+            short,
+            long,
+            help = "Send an initial prompt before entering interactive mode"
+        )]
         prompt: Option<String>,
         #[arg(long, help = "Override the system prompt / agent identity")]
         system: Option<String>,
@@ -191,12 +227,22 @@ pub enum Command {
     Nudge,
     #[command(about = "Show usage insights and analytics")]
     Insights {
-        #[arg(long, default_value = "30", help = "Number of days to analyze (default: 30)")]
+        #[arg(
+            long,
+            default_value = "30",
+            help = "Number of days to analyze (default: 30)"
+        )]
         days: u32,
     },
-    #[command(alias = "setup", about = "Initialize Genesis — interactive setup wizard (or pass flags for non-interactive)")]
+    #[command(
+        alias = "setup",
+        about = "Initialize Genesis — interactive setup wizard (or pass flags for non-interactive)"
+    )]
     Init {
-        #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
+        #[arg(
+            long,
+            help = "LLM provider backend (e.g. openai, openrouter, anthropic)"
+        )]
         backend: Option<String>,
         #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
         model: Option<String>,
@@ -217,16 +263,26 @@ pub enum Command {
         raw: bool,
         #[arg(long, help = "Override the system prompt / agent identity")]
         system: Option<String>,
-        #[arg(long, help = "Stream output as it arrives (default: wait for full response)")]
+        #[arg(
+            long,
+            help = "Stream output as it arrives (default: wait for full response)"
+        )]
         stream: bool,
-        #[arg(short = 'i', long = "image", help = "Attach an image file or URL to the prompt (can be repeated)")]
+        #[arg(
+            short = 'i',
+            long = "image",
+            help = "Attach an image file or URL to the prompt (can be repeated)"
+        )]
         images: Vec<String>,
     },
     #[command(about = "Show status dashboard of all Genesis components")]
     Status,
     #[command(about = "Generate agent training trajectories from a JSONL prompt file")]
     Batch {
-        #[arg(long, help = "Input JSONL file where each line is {\"prompt\": ..., \"tags\": [...]}")]
+        #[arg(
+            long,
+            help = "Input JSONL file where each line is {\"prompt\": ..., \"tags\": [...]}"
+        )]
         input: String,
         #[arg(long, help = "Output directory for saved trajectory files")]
         output: String,
@@ -236,24 +292,39 @@ pub enum Command {
         max_turns: Option<usize>,
         #[arg(long, help = "Maximum number of prompts to run concurrently")]
         concurrency: Option<usize>,
-        #[arg(long, help = "Toolset distribution name (e.g. full, development, research, safe, minimal, creative, ops, home-assistant, coding-agent, random)")]
+        #[arg(
+            long,
+            help = "Toolset distribution name (e.g. full, development, research, safe, minimal, creative, ops, home-assistant, coding-agent, random)"
+        )]
         toolset: Option<String>,
-        #[arg(long, help = "Discard generated trajectories whose quality score is below this threshold (0.0-1.0)")]
+        #[arg(
+            long,
+            help = "Discard generated trajectories whose quality score is below this threshold (0.0-1.0)"
+        )]
         quality_filter: Option<f64>,
-        #[arg(long, help = "Automatically tag generated trajectories based on content analysis")]
+        #[arg(
+            long,
+            help = "Automatically tag generated trajectories based on content analysis"
+        )]
         auto_tag: bool,
     },
     #[command(about = "Compress a trajectory JSON file for training/export")]
     Compress {
         #[arg(long, help = "Input trajectory JSON file")]
         input: String,
-        #[arg(long, help = "Optional output file path; writes to stdout when omitted")]
+        #[arg(
+            long,
+            help = "Optional output file path; writes to stdout when omitted"
+        )]
         output: Option<String>,
         #[arg(long, help = "Compression level: light, medium, or heavy")]
         level: Option<String>,
         #[arg(long, help = "Output format: json, sharegpt, or chatml")]
         format: Option<String>,
-        #[arg(long, help = "Use the training compressor that protects first/last turns and summarizes the middle")]
+        #[arg(
+            long,
+            help = "Use the training compressor that protects first/last turns and summarizes the middle"
+        )]
         training: bool,
     },
     #[command(about = "Update Genesis to the latest version from source")]
@@ -271,9 +342,15 @@ pub enum Command {
     },
     #[command(subcommand, about = "Inspect offline trajectory replay reports")]
     Eval(EvalCommand),
-    #[command(subcommand, about = "Manage DM pairing authorization for messaging platforms")]
+    #[command(
+        subcommand,
+        about = "Manage DM pairing authorization for messaging platforms"
+    )]
     Pairing(PairingCommand),
-    #[command(subcommand, about = "List and inspect toolset distributions for batch training")]
+    #[command(
+        subcommand,
+        about = "List and inspect toolset distributions for batch training"
+    )]
     Toolset(ToolsetCommand),
     #[command(subcommand, about = "List and preview agent personalities")]
     Personality(PersonalityCommand),
@@ -295,9 +372,15 @@ pub enum Command {
 
     #[command(about = "Uninstall Genesis — remove binary, data, and config files")]
     Uninstall {
-        #[arg(long, help = "Also remove the data directory (database, trajectories, etc.)")]
+        #[arg(
+            long,
+            help = "Also remove the data directory (database, trajectories, etc.)"
+        )]
         remove_data: bool,
-        #[arg(long, help = "Also remove the config directory (config.yaml, auth, etc.)")]
+        #[arg(
+            long,
+            help = "Also remove the config directory (config.yaml, auth, etc.)"
+        )]
         remove_config: bool,
         #[arg(long, help = "Remove everything without prompting for confirmation")]
         force: bool,
@@ -344,7 +427,10 @@ pub enum EvalCommand {
     Summarize {
         #[arg(help = "Directory containing trajectory JSON files")]
         dir: String,
-        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        #[arg(
+            long,
+            help = "Recursively scan nested directories for trajectory JSON files"
+        )]
         recursive: bool,
         #[arg(long, help = "Only include trajectories for this model")]
         model: Option<String>,
@@ -356,7 +442,10 @@ pub enum EvalCommand {
         failures_only: bool,
         #[arg(long, help = "Only include trajectories that contain replay warnings")]
         warnings_only: bool,
-        #[arg(long, help = "Only include trajectories with at least this many replay warnings")]
+        #[arg(
+            long,
+            help = "Only include trajectories with at least this many replay warnings"
+        )]
         min_warnings: Option<usize>,
     },
     #[command(about = "Compare two trajectory replay reports")]
@@ -370,14 +459,20 @@ pub enum EvalCommand {
     ExportChatml {
         #[arg(help = "Directory containing trajectory JSON files")]
         dir: String,
-        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        #[arg(
+            long,
+            help = "Recursively scan nested directories for trajectory JSON files"
+        )]
         recursive: bool,
     },
     #[command(about = "Export a directory of trajectories as ShareGPT JSONL")]
     ExportSharegpt {
         #[arg(help = "Directory containing trajectory JSON files")]
         dir: String,
-        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        #[arg(
+            long,
+            help = "Recursively scan nested directories for trajectory JSON files"
+        )]
         recursive: bool,
     },
     #[command(about = "Import ChatML JSONL and create trajectory JSON files")]
@@ -416,7 +511,10 @@ pub enum EvalCommand {
     Stats {
         #[arg(help = "Directory containing trajectory JSON files")]
         dir: String,
-        #[arg(long, help = "Recursively scan nested directories for trajectory JSON files")]
+        #[arg(
+            long,
+            help = "Recursively scan nested directories for trajectory JSON files"
+        )]
         recursive: bool,
         #[arg(long, help = "Only include trajectories for this model")]
         model: Option<String>,
@@ -433,9 +531,15 @@ pub enum EvalCommand {
         dir: String,
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
-        #[arg(long, help = "Minimum quality score to pass (0.0-1.0, default: show all)")]
+        #[arg(
+            long,
+            help = "Minimum quality score to pass (0.0-1.0, default: show all)"
+        )]
         min_score: Option<f64>,
-        #[arg(long, help = "Sort by score ascending (worst first) instead of descending")]
+        #[arg(
+            long,
+            help = "Sort by score ascending (worst first) instead of descending"
+        )]
         worst_first: bool,
     },
     #[command(about = "Automatically tag trajectory files using genesis_core::tagger::auto_tag")]
@@ -444,7 +548,10 @@ pub enum EvalCommand {
         dir: String,
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
-        #[arg(long, help = "Only print the tags that would be added without writing files")]
+        #[arg(
+            long,
+            help = "Only print the tags that would be added without writing files"
+        )]
         dry_run: bool,
     },
     #[command(about = "Show tag frequency distribution across trajectory files")]
@@ -460,7 +567,10 @@ pub enum EvalCommand {
         dir: String,
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
-        #[arg(long, help = "Delete duplicate files, keeping the first file in each group")]
+        #[arg(
+            long,
+            help = "Delete duplicate files, keeping the first file in each group"
+        )]
         remove: bool,
     },
     #[command(about = "Filter trajectories by criteria and copy matching files to output")]
@@ -498,14 +608,20 @@ pub enum EvalCommand {
         train: String,
         #[arg(long, help = "Output directory for test set")]
         test: String,
-        #[arg(long, default_value = "0.8", help = "Fraction of data for training (0.0-1.0)")]
+        #[arg(
+            long,
+            default_value = "0.8",
+            help = "Fraction of data for training (0.0-1.0)"
+        )]
         ratio: f64,
         #[arg(long, help = "Random seed for reproducibility")]
         seed: Option<u64>,
         #[arg(long, help = "Recursively scan nested directories")]
         recursive: bool,
     },
-    #[command(about = "Build or show a dataset manifest (dataset.json) for a trajectory directory")]
+    #[command(
+        about = "Build or show a dataset manifest (dataset.json) for a trajectory directory"
+    )]
     Manifest {
         #[arg(help = "Directory containing trajectory JSON files")]
         dir: String,
@@ -585,7 +701,11 @@ pub enum McpCommand {
 pub enum MemoryCommand {
     #[command(about = "List stored memories")]
     List {
-        #[arg(long, default_value = "50", help = "Maximum number of memories to show")]
+        #[arg(
+            long,
+            default_value = "50",
+            help = "Maximum number of memories to show"
+        )]
         limit: usize,
     },
     #[command(about = "Search memories using full-text search")]
@@ -610,7 +730,9 @@ pub enum ConfigCommand {
     Show,
     #[command(about = "Open the config file in $EDITOR")]
     Edit,
-    #[command(about = "Set a config value (dot-notation: provider.model, runtime.max_turns, etc.)")]
+    #[command(
+        about = "Set a config value (dot-notation: provider.model, runtime.max_turns, etc.)"
+    )]
     Set {
         /// Config key in dot-notation (e.g. provider.model, runtime.max_turns)
         key: String,
@@ -635,7 +757,10 @@ pub enum ModelCommand {
     Show,
     #[command(about = "List popular models grouped by provider")]
     List {
-        #[arg(long, help = "Filter by provider backend (e.g. openai, anthropic, google)")]
+        #[arg(
+            long,
+            help = "Filter by provider backend (e.g. openai, anthropic, google)"
+        )]
         backend: Option<String>,
     },
     #[command(about = "Switch the active model (persisted to config file)")]
@@ -703,7 +828,10 @@ pub enum SessionsCommand {
     Import {
         #[arg(help = "Path to the file to import")]
         file: String,
-        #[arg(long, help = "Import format: 'sharegpt' or 'jsonl' (auto-detected from extension if omitted)")]
+        #[arg(
+            long,
+            help = "Import format: 'sharegpt' or 'jsonl' (auto-detected from extension if omitted)"
+        )]
         format: Option<String>,
         #[arg(long, help = "Optional title for the imported session")]
         title: Option<String>,
@@ -748,7 +876,10 @@ pub enum SkillsCommand {
         #[arg(help = "Path to a directory containing a SKILL.md file")]
         path: String,
     },
-    #[command(subcommand, about = "Browse, install, and manage skills from registries")]
+    #[command(
+        subcommand,
+        about = "Browse, install, and manage skills from registries"
+    )]
     Hub(HubCommand),
 }
 
@@ -807,7 +938,11 @@ pub enum TapCommand {
         name: String,
         #[arg(help = "GitHub owner/repo (e.g. 'nooesc/genesis-skills')")]
         repo: String,
-        #[arg(long, default_value = "skills", help = "Path within the repo where skills live")]
+        #[arg(
+            long,
+            default_value = "skills",
+            help = "Path within the repo where skills live"
+        )]
         path: String,
     },
     #[command(about = "Remove a tap by name")]
@@ -952,10 +1087,24 @@ pub enum CliError {
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard } => {
-            run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard).await
+        Command::Chat {
+            session_id,
+            resume,
+            prompt,
+            system,
+            last,
+            worktree,
+            clipboard,
+        } => {
+            run_chat(
+                cli.config, session_id, resume, prompt, system, last, worktree, clipboard,
+            )
+            .await
         }
-        Command::Doctor { bootstrap_storage, verify } => {
+        Command::Doctor {
+            bootstrap_storage,
+            verify,
+        } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
             let mut output = if cli.json {
                 serde_json::to_string_pretty(&report)?
@@ -979,9 +1128,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     Err(e) => {
                         output.push_str(&format!(
                             "  [FAIL] {} / {}: {}",
-                            loaded.config.provider.backend,
-                            loaded.config.provider.model,
-                            e
+                            loaded.config.provider.backend, loaded.config.provider.model, e
                         ));
                     }
                 }
@@ -1012,7 +1159,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if status.success() {
                 Ok(format!("config saved: {config_path}"))
             } else {
-                Err(CliError::Other(format!("{editor} exited with status {status}")))
+                Err(CliError::Other(format!(
+                    "{editor} exited with status {status}"
+                )))
             }
         }
         Command::Config(ConfigCommand::Set { key, value }) => {
@@ -1026,7 +1175,17 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let mut warnings: Vec<String> = Vec::new();
 
             // Check provider
-            let valid_backends = ["openai", "anthropic", "google", "openrouter", "custom", "openai-codex", "gemini", "vllm", "ollama"];
+            let valid_backends = [
+                "openai",
+                "anthropic",
+                "google",
+                "openrouter",
+                "custom",
+                "openai-codex",
+                "gemini",
+                "vllm",
+                "ollama",
+            ];
             if !valid_backends.contains(&loaded.config.provider.backend.as_str()) {
                 warnings.push(format!(
                     "Unknown provider backend '{}' (known: {})",
@@ -1039,17 +1198,17 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
 
             // Check API key resolution
-            let api_key_env = loaded.config.provider.api_key_env.as_deref()
-                .unwrap_or(match loaded.config.provider.backend.as_str() {
-                    "anthropic" => "ANTHROPIC_API_KEY",
-                    "google" | "gemini" => "GOOGLE_API_KEY",
-                    "openrouter" => "OPENROUTER_API_KEY",
-                    _ => "OPENAI_API_KEY",
-                });
+            let api_key_env =
+                loaded.config.provider.api_key_env.as_deref().unwrap_or(
+                    match loaded.config.provider.backend.as_str() {
+                        "anthropic" => "ANTHROPIC_API_KEY",
+                        "google" | "gemini" => "GOOGLE_API_KEY",
+                        "openrouter" => "OPENROUTER_API_KEY",
+                        _ => "OPENAI_API_KEY",
+                    },
+                );
             if std::env::var(api_key_env).is_err() {
-                warnings.push(format!(
-                    "API key env var '{}' is not set.", api_key_env
-                ));
+                warnings.push(format!("API key env var '{}' is not set.", api_key_env));
             }
 
             // Check storage paths
@@ -1081,7 +1240,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             for (name, mcp) in &loaded.config.mcp_servers {
                 if mcp.command.is_none() && mcp.url.is_none() {
                     issues.push(format!(
-                        "MCP server '{}' has no command or URL configured.", name
+                        "MCP server '{}' has no command or URL configured.",
+                        name
                     ));
                 }
             }
@@ -1119,8 +1279,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Eval(eval_command) => match eval_command {
             EvalCommand::Report { file } => {
-                let report = load_and_report(&file)
-                    .map_err(|e| CliError::Replay(e.to_string()))?;
+                let report = load_and_report(&file).map_err(|e| CliError::Replay(e.to_string()))?;
                 if cli.json {
                     Ok(serde_json::to_string_pretty(&report)?)
                 } else {
@@ -1149,7 +1308,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 )
                 .map_err(|e| CliError::Replay(e.to_string()))?;
                 if cli.json {
-                    Ok(serde_json::to_string_pretty(&eval_summary_to_json(&summary))?)
+                    Ok(serde_json::to_string_pretty(&eval_summary_to_json(
+                        &summary,
+                    ))?)
                 } else {
                     Ok(format_eval_summary(&summary))
                 }
@@ -1164,24 +1325,24 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     Ok(format_eval_comparison(&comparison))
                 }
             }
-            EvalCommand::ExportChatml { dir, recursive } => {
-                run_eval_export_chatml(&dir, recursive)
-            }
+            EvalCommand::ExportChatml { dir, recursive } => run_eval_export_chatml(&dir, recursive),
             EvalCommand::ExportSharegpt { dir, recursive } => {
                 run_eval_export_sharegpt(&dir, recursive)
             }
-            EvalCommand::ImportChatml { file, output } => {
-                run_eval_import_chatml(&file, &output)
-            }
+            EvalCommand::ImportChatml { file, output } => run_eval_import_chatml(&file, &output),
             EvalCommand::ImportSharegpt { file, output } => {
                 run_eval_import_sharegpt(&file, &output)
             }
-            EvalCommand::Merge { sources, output, dedup } => {
-                run_eval_merge(&sources, &output, dedup)
-            }
-            EvalCommand::Convert { input, output, format } => {
-                run_eval_convert(&input, &output, &format)
-            }
+            EvalCommand::Merge {
+                sources,
+                output,
+                dedup,
+            } => run_eval_merge(&sources, &output, dedup),
+            EvalCommand::Convert {
+                input,
+                output,
+                format,
+            } => run_eval_convert(&input, &output, &format),
             EvalCommand::Stats {
                 dir,
                 recursive,
@@ -1209,18 +1370,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 recursive,
                 min_score,
                 worst_first,
-            } => {
-                run_eval_quality(&dir, recursive, min_score, worst_first, cli.json)
-            }
-            EvalCommand::AutoTag { dir, recursive, dry_run } => {
-                run_eval_auto_tag(&dir, recursive, dry_run, cli.json)
-            }
+            } => run_eval_quality(&dir, recursive, min_score, worst_first, cli.json),
+            EvalCommand::AutoTag {
+                dir,
+                recursive,
+                dry_run,
+            } => run_eval_auto_tag(&dir, recursive, dry_run, cli.json),
             EvalCommand::TagStats { dir, recursive } => {
                 run_eval_tag_stats(&dir, recursive, cli.json)
             }
-            EvalCommand::Deduplicate { dir, recursive, remove } => {
-                run_eval_deduplicate(&dir, recursive, remove, cli.json)
-            }
+            EvalCommand::Deduplicate {
+                dir,
+                recursive,
+                remove,
+            } => run_eval_deduplicate(&dir, recursive, remove, cli.json),
             EvalCommand::Filter {
                 dir,
                 output,
@@ -1235,9 +1398,18 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 max_steps,
                 tool,
             } => run_eval_filter(
-                &dir, &output, recursive, model.as_deref(), tag.as_deref(),
-                min_quality, max_quality, success_only, failure_only,
-                min_steps, max_steps, tool.as_deref(),
+                &dir,
+                &output,
+                recursive,
+                model.as_deref(),
+                tag.as_deref(),
+                min_quality,
+                max_quality,
+                success_only,
+                failure_only,
+                min_steps,
+                max_steps,
+                tool.as_deref(),
             ),
             EvalCommand::Split {
                 dir,
@@ -1276,9 +1448,19 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 limit,
                 seed,
             } => run_eval_pipeline(
-                &dir, &output, recursive, validate, auto_tag,
-                min_quality, success_only, tag.as_deref(), model.as_deref(),
-                format.as_deref(), manifest, limit, seed,
+                &dir,
+                &output,
+                recursive,
+                validate,
+                auto_tag,
+                min_quality,
+                success_only,
+                tag.as_deref(),
+                model.as_deref(),
+                format.as_deref(),
+                manifest,
+                limit,
+                seed,
             ),
             EvalCommand::Validate {
                 dir,
@@ -1365,7 +1547,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
                 SessionsCommand::Purge { older_than } => {
                     let deleted = store.purge_older_than(older_than)?;
-                    Ok(format!("Purged {deleted} session(s) older than {older_than} days"))
+                    Ok(format!(
+                        "Purged {deleted} session(s) older than {older_than} days"
+                    ))
                 }
                 SessionsCommand::Rename { id, title } => {
                     if store.set_title(&id, &title)? {
@@ -1374,14 +1558,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Err(CliError::SessionNotFound(id))
                     }
                 }
-                SessionsCommand::Import { file, format, title } => {
-                    run_session_import(
-                        &store,
-                        &file,
-                        format.as_deref(),
-                        title.as_deref(),
-                    )
-                }
+                SessionsCommand::Import {
+                    file,
+                    format,
+                    title,
+                } => run_session_import(&store, &file, format.as_deref(), title.as_deref()),
             }
         }
         Command::Skills(skills_command) => {
@@ -1420,8 +1601,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     Ok(serde_json::to_string_pretty(&skills)?)
                 }
                 SkillsCommand::Import { file } => {
-                    let contents = std::fs::read_to_string(&file)
-                        .map_err(|e| CliError::Other(format!("failed to read {}: {e}", file.display())))?;
+                    let contents = std::fs::read_to_string(&file).map_err(|e| {
+                        CliError::Other(format!("failed to read {}: {e}", file.display()))
+                    })?;
                     let skills: Vec<genesis_storage::StoredSkill> = serde_json::from_str(&contents)
                         .map_err(|e| CliError::Other(format!("invalid JSON: {e}")))?;
 
@@ -1438,20 +1620,17 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         imported += 1;
                     }
 
-                    Ok(format!("imported {imported} skill(s) from {}", file.display()))
+                    Ok(format!(
+                        "imported {imported} skill(s) from {}",
+                        file.display()
+                    ))
                 }
-                SkillsCommand::Scan { dir } => {
-                    run_skills_scan(&dir, cli.json)
-                }
+                SkillsCommand::Scan { dir } => run_skills_scan(&dir, cli.json),
                 SkillsCommand::Search { query, dir } => {
                     run_skills_search(&store, &query, dir.as_deref(), cli.json)
                 }
-                SkillsCommand::InstallLocal { path } => {
-                    run_skills_install_local(&store, &path)
-                }
-                SkillsCommand::Hub(hub_command) => {
-                    run_skills_hub(hub_command, &loaded, cli.json)
-                }
+                SkillsCommand::InstallLocal { path } => run_skills_install_local(&store, &path),
+                SkillsCommand::Hub(hub_command) => run_skills_hub(hub_command, &loaded, cli.json),
             }
         }
         Command::Context(context_command) => run_context(context_command),
@@ -1494,12 +1673,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     destination,
                     prompt,
                 } => {
-                    let schedule = store.create(
-                        &default_schedule_id(),
-                        &cron,
-                        &destination,
-                        &prompt,
-                    )?;
+                    let schedule =
+                        store.create(&default_schedule_id(), &cron, &destination, &prompt)?;
 
                     if cli.json {
                         Ok(serde_json::to_string_pretty(&schedule)?)
@@ -1553,8 +1728,18 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
-        Command::Run { prompt, session_id, raw, system, stream, images } => {
-            run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream, &images).await
+        Command::Run {
+            prompt,
+            session_id,
+            raw,
+            system,
+            stream,
+            images,
+        } => {
+            run_oneshot(
+                cli.config, &prompt, session_id, raw, cli.json, system, stream, &images,
+            )
+            .await
         }
         Command::Status => {
             let loaded = load(cli.config.as_deref())?;
@@ -1628,9 +1813,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Mcp(mcp_command) => run_mcp(cli.config, mcp_command, cli.json).await,
-        Command::Benchmark { runs, tool_provider } => {
-            run_benchmark(cli.config, runs, tool_provider, cli.json).await
-        }
+        Command::Benchmark {
+            runs,
+            tool_provider,
+        } => run_benchmark(cli.config, runs, tool_provider, cli.json).await,
         Command::Pairing(pairing_command) => {
             run_pairing(cli.config, pairing_command, cli.json).await
         }
@@ -1643,12 +1829,23 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 .map_err(|e| CliError::Other(format!("invalid workflow YAML: {e}")))?;
             let issues = genesis_core::workflow::validate_workflow(&workflow);
             if issues.is_empty() {
-                Ok(format!("Workflow '{}' is valid ({} steps)", workflow.name, workflow.steps.len()))
+                Ok(format!(
+                    "Workflow '{}' is valid ({} steps)",
+                    workflow.name,
+                    workflow.steps.len()
+                ))
             } else {
-                Err(CliError::Other(format!("Validation errors:\n{}", issues.join("\n"))))
+                Err(CliError::Other(format!(
+                    "Validation errors:\n{}",
+                    issues.join("\n")
+                )))
             }
         }
-        Command::Workflow(WorkflowCommand::Run { file, input, session_id }) => {
+        Command::Workflow(WorkflowCommand::Run {
+            file,
+            input,
+            session_id,
+        }) => {
             let yaml = fs::read_to_string(&file)
                 .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
             let workflow = genesis_core::workflow::parse_workflow(&yaml)
@@ -1656,18 +1853,27 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
 
             let loaded = load(cli.config.as_deref())?;
             let session_id = session_id.unwrap_or_else(|| {
-                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
                 format!("workflow-{}-{ts}", workflow.name)
             });
 
             let svc = genesis_core::execution::SessionExecutionService::new(&loaded);
-            let result = svc.run_workflow(&workflow, &input, &session_id).await
+            let result = svc
+                .run_workflow(&workflow, &input, &session_id)
+                .await
                 .map_err(|e| CliError::Other(format!("workflow failed: {e}")))?;
 
             if cli.json {
                 Ok(serde_json::to_string_pretty(&result)?)
             } else {
-                let mut output = format!("Workflow '{}' completed ({} steps)\n", result.workflow_name, result.steps_completed());
+                let mut output = format!(
+                    "Workflow '{}' completed ({} steps)\n",
+                    result.workflow_name,
+                    result.steps_completed()
+                );
                 for step in &result.step_results {
                     output.push_str(&format!("\n--- {} ---\n{}\n", step.step_name, step.output));
                 }
@@ -1685,9 +1891,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
             Ok(String::new())
         }
-        Command::Uninstall { remove_data, remove_config, force } => {
-            run_uninstall(cli.config.as_deref(), remove_data, remove_config, force)
-        }
+        Command::Uninstall {
+            remove_data,
+            remove_config,
+            force,
+        } => run_uninstall(cli.config.as_deref(), remove_data, remove_config, force),
     }
 }
 
@@ -1831,13 +2039,14 @@ fn summarize_replay_reports(
             *tag_counts.entry(tag.clone()).or_default() += 1;
         }
         for tool in &report.tool_usage {
-            let entry = tool_counts
-                .entry(tool.name.clone())
-                .or_insert_with(|| AggregatedToolUsage {
-                    name: tool.name.clone(),
-                    call_count: 0,
-                    result_count: 0,
-                });
+            let entry =
+                tool_counts
+                    .entry(tool.name.clone())
+                    .or_insert_with(|| AggregatedToolUsage {
+                        name: tool.name.clone(),
+                        call_count: 0,
+                        result_count: 0,
+                    });
             entry.call_count += tool.call_count;
             entry.result_count += tool.result_count;
         }
@@ -1855,9 +2064,7 @@ fn summarize_replay_reports(
                     *failure_reasons.entry(reason.clone()).or_default() += 1;
                 }
             }
-            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => {
-                abandoned_count += 1
-            }
+            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => abandoned_count += 1,
             None => missing_outcome_count += 1,
         }
     }
@@ -1871,15 +2078,11 @@ fn summarize_replay_reports(
             .then(left.name.cmp(&right.name))
     });
     let mut top_warning_messages = warning_counts.into_iter().collect::<Vec<_>>();
-    top_warning_messages.sort_by(|left, right| {
-        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
-    });
+    top_warning_messages.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     top_warning_messages.truncate(5);
 
     let mut top_failure_reasons = failure_reasons.into_iter().collect::<Vec<_>>();
-    top_failure_reasons.sort_by(|left, right| {
-        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
-    });
+    top_failure_reasons.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     top_failure_reasons.truncate(5);
 
     Ok(EvalSummary {
@@ -1933,7 +2136,11 @@ fn load_filtered_replay_reports(
             }
         }
         if let Some(tool_filter) = tool_filter {
-            if !report.tool_usage.iter().any(|tool| tool.name == tool_filter) {
+            if !report
+                .tool_usage
+                .iter()
+                .any(|tool| tool.name == tool_filter)
+            {
                 continue;
             }
         }
@@ -2021,13 +2228,14 @@ fn compute_eval_stats(
         *outcome_distribution.entry(outcome.to_owned()).or_default() += 1;
 
         for tool in &report.tool_usage {
-            let entry = tool_usage
-                .entry(tool.name.clone())
-                .or_insert_with(|| AggregatedToolUsage {
-                    name: tool.name.clone(),
-                    call_count: 0,
-                    result_count: 0,
-                });
+            let entry =
+                tool_usage
+                    .entry(tool.name.clone())
+                    .or_insert_with(|| AggregatedToolUsage {
+                        name: tool.name.clone(),
+                        call_count: 0,
+                        result_count: 0,
+                    });
             entry.call_count += tool.call_count;
             entry.result_count += tool.result_count;
         }
@@ -2381,9 +2589,18 @@ fn format_eval_stats(stats: &EvalStats) -> String {
         "tool filter:               {}\n",
         stats.tool_filter.as_deref().unwrap_or("<none>")
     ));
-    output.push_str(&format!("failures only:             {}\n", stats.failures_only));
-    output.push_str(&format!("total trajectories:        {}\n", stats.total_trajectories));
-    output.push_str(&format!("total turns:               {}\n", stats.total_turns));
+    output.push_str(&format!(
+        "failures only:             {}\n",
+        stats.failures_only
+    ));
+    output.push_str(&format!(
+        "total trajectories:        {}\n",
+        stats.total_trajectories
+    ));
+    output.push_str(&format!(
+        "total turns:               {}\n",
+        stats.total_turns
+    ));
     output.push_str(&format!(
         "avg turns / trajectory:    {:.2}\n",
         stats.average_turns_per_trajectory
@@ -2574,16 +2791,15 @@ fn percentile(values: &[usize], pct: f64) -> usize {
 }
 
 fn is_production_profile(profile: &str) -> bool {
-    matches!(
-        profile.to_ascii_lowercase().as_str(),
-        "prod" | "production"
-    )
+    matches!(profile.to_ascii_lowercase().as_str(), "prod" | "production")
 }
 
 fn parse_bool_env(name: &str) -> Option<Result<bool, CliError>> {
     std::env::var(name).ok().map(|value| {
         value.parse::<bool>().map_err(|_| {
-            CliError::Other(format!("invalid value for {name}: {value} (expected true or false)"))
+            CliError::Other(format!(
+                "invalid value for {name}: {value} (expected true or false)"
+            ))
         })
     })
 }
@@ -2771,7 +2987,8 @@ async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new()).await?;
+                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new())
+                            .await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -2803,7 +3020,10 @@ async fn run_chat(
                         let old_id = session_id.clone();
                         session_id = target_id.to_owned();
                         let msgs = store.load_messages(&session_id).unwrap_or_default();
-                        println!("Switched from {old_id} → {session_id} ({} messages)", msgs.len());
+                        println!(
+                            "Switched from {old_id} → {session_id} ({} messages)",
+                            msgs.len()
+                        );
                     }
                     Ok(None) => println!("Session '{target_id}' not found."),
                     Err(e) => println!("Error looking up session: {e}"),
@@ -2839,7 +3059,10 @@ async fn run_chat(
                 let templates = genesis_core::templates::list_templates();
                 println!("Available agent templates:");
                 for t in templates {
-                    println!("  {:12} - {} [personality: {}]", t.name, t.description, t.personality);
+                    println!(
+                        "  {:12} - {} [personality: {}]",
+                        t.name, t.description, t.personality
+                    );
                 }
                 println!("\nApply with: /template <name>");
             } else {
@@ -2848,7 +3071,10 @@ async fn run_chat(
                         let prompt = genesis_core::templates::format_template_prompt(t);
                         service.set_personality_override(t.personality.to_owned());
                         service.set_system_prompt_override(prompt);
-                        println!("Applied template '{}' (personality: {}).", t.name, t.personality);
+                        println!(
+                            "Applied template '{}' (personality: {}).",
+                            t.name, t.personality
+                        );
                         println!("Guidelines:");
                         for g in t.guidelines {
                             println!("  - {g}");
@@ -2856,11 +3082,10 @@ async fn run_chat(
                         println!("Takes effect on next turn.");
                     }
                     None => {
-                        let names: Vec<&str> =
-                            genesis_core::templates::list_templates()
-                                .iter()
-                                .map(|t| t.name)
-                                .collect();
+                        let names: Vec<&str> = genesis_core::templates::list_templates()
+                            .iter()
+                            .map(|t| t.name)
+                            .collect();
                         println!("Unknown template '{arg}'. Available: {}", names.join(", "));
                     }
                 }
@@ -2899,9 +3124,17 @@ async fn run_chat(
                             Ok(wf) => {
                                 let issues = genesis_core::workflow::validate_workflow(&wf);
                                 if issues.is_empty() {
-                                    println!("Workflow '{}' is valid ({} steps).", wf.name, wf.steps.len());
+                                    println!(
+                                        "Workflow '{}' is valid ({} steps).",
+                                        wf.name,
+                                        wf.steps.len()
+                                    );
                                 } else {
-                                    println!("Workflow '{}' has {} issue(s):", wf.name, issues.len());
+                                    println!(
+                                        "Workflow '{}' has {} issue(s):",
+                                        wf.name,
+                                        issues.len()
+                                    );
                                     for issue in &issues {
                                         println!("  - {issue}");
                                     }
@@ -2923,8 +3156,15 @@ async fn run_chat(
                                 println!("Workflow: {} — {}", wf.name, wf.description);
                                 for (i, step) in wf.steps.iter().enumerate() {
                                     let model_str = step.model.as_deref().unwrap_or("default");
-                                    let terminal_str = if step.terminal { " [terminal]" } else { "" };
-                                    println!("  Step {}: {} (model: {}){}", i + 1, step.name, model_str, terminal_str);
+                                    let terminal_str =
+                                        if step.terminal { " [terminal]" } else { "" };
+                                    println!(
+                                        "  Step {}: {} (model: {}){}",
+                                        i + 1,
+                                        step.name,
+                                        model_str,
+                                        terminal_str
+                                    );
                                     // Show truncated prompt
                                     let prompt_preview = if step.prompt.len() > 80 {
                                         format!("{}...", &step.prompt[..80])
@@ -2956,13 +3196,31 @@ async fn run_chat(
                                     }
                                     println!("Fix these before running.");
                                 } else {
-                                    println!("Running workflow '{}' ({} steps)...", wf.name, wf.steps.len());
+                                    println!(
+                                        "Running workflow '{}' ({} steps)...",
+                                        wf.name,
+                                        wf.steps.len()
+                                    );
                                     let wf_session_id = format!("{session_id}__wf__{}", wf.name);
-                                    match service.run_workflow(&wf, input_text, &wf_session_id).await {
+                                    match service
+                                        .run_workflow(&wf, input_text, &wf_session_id)
+                                        .await
+                                    {
                                         Ok(result) => {
-                                            println!("\nWorkflow '{}' complete!", result.workflow_name);
-                                            println!("Steps completed: {}/{}", result.steps_completed(), wf.steps.len());
-                                            println!("Total tokens: {} in / {} out", result.total_input_tokens, result.total_output_tokens);
+                                            println!(
+                                                "\nWorkflow '{}' complete!",
+                                                result.workflow_name
+                                            );
+                                            println!(
+                                                "Steps completed: {}/{}",
+                                                result.steps_completed(),
+                                                wf.steps.len()
+                                            );
+                                            println!(
+                                                "Total tokens: {} in / {} out",
+                                                result.total_input_tokens,
+                                                result.total_output_tokens
+                                            );
                                             for sr in &result.step_results {
                                                 println!("\n--- Step: {} ---", sr.step_name);
                                                 // Show first 500 chars of output
@@ -3020,9 +3278,17 @@ async fn run_chat(
                             Ok(suite) => {
                                 let issues = genesis_core::eval::validate_suite(&suite);
                                 if issues.is_empty() {
-                                    println!("Suite '{}' is valid ({} cases).", suite.name, suite.cases.len());
+                                    println!(
+                                        "Suite '{}' is valid ({} cases).",
+                                        suite.name,
+                                        suite.cases.len()
+                                    );
                                 } else {
-                                    println!("Suite '{}' has {} issue(s):", suite.name, issues.len());
+                                    println!(
+                                        "Suite '{}' has {} issue(s):",
+                                        suite.name,
+                                        issues.len()
+                                    );
                                     for issue in &issues {
                                         println!("  - {issue}");
                                     }
@@ -3041,13 +3307,24 @@ async fn run_chat(
                     match std::fs::read_to_string(file) {
                         Ok(yaml) => match genesis_core::eval::parse_suite(&yaml) {
                             Ok(suite) => {
-                                println!("Suite: {} v{} — {}", suite.name, suite.version, suite.description);
+                                println!(
+                                    "Suite: {} v{} — {}",
+                                    suite.name, suite.version, suite.description
+                                );
                                 println!("Cases: {}", suite.cases.len());
                                 for case in &suite.cases {
                                     let criteria_count = case.criteria.must_contain.len()
                                         + case.criteria.must_not_contain.len()
-                                        + if case.criteria.exact_match.is_some() { 1 } else { 0 }
-                                        + if case.criteria.regex_match.is_some() { 1 } else { 0 };
+                                        + if case.criteria.exact_match.is_some() {
+                                            1
+                                        } else {
+                                            0
+                                        }
+                                        + if case.criteria.regex_match.is_some() {
+                                            1
+                                        } else {
+                                            0
+                                        };
                                     println!(
                                         "  {} (difficulty: {}, {} criteria, tags: [{}])",
                                         case.id,
@@ -3084,24 +3361,47 @@ async fn run_chat(
                                     }
                                     println!("Fix these before running.");
                                 } else {
-                                    println!("Running eval suite '{}' ({} cases)...", suite.name, suite.cases.len());
+                                    println!(
+                                        "Running eval suite '{}' ({} cases)...",
+                                        suite.name,
+                                        suite.cases.len()
+                                    );
                                     match service.run_eval(&suite).await {
                                         Ok(report) => {
-                                            println!("\n=== Eval Report: {} v{} ===", report.suite_name, report.suite_version);
+                                            println!(
+                                                "\n=== Eval Report: {} v{} ===",
+                                                report.suite_name, report.suite_version
+                                            );
                                             println!("Model: {}", report.model);
                                             println!("Duration: {}ms", report.total_duration_ms);
                                             println!("Results: {} passed, {} failed, {} errored ({:.0}% pass rate)",
                                                 report.passed, report.failed, report.errored, report.pass_rate * 100.0);
                                             println!("Avg score: {:.2}", report.avg_score);
-                                            println!("Tokens: {} in / {} out\n", report.total_input_tokens, report.total_output_tokens);
+                                            println!(
+                                                "Tokens: {} in / {} out\n",
+                                                report.total_input_tokens,
+                                                report.total_output_tokens
+                                            );
 
                                             for r in &report.results {
-                                                let status = if r.passed { "PASS" } else if r.error.is_some() { "ERROR" } else { "FAIL" };
-                                                println!("[{status}] {} — score: {:.2}, {}ms, {} turns",
-                                                    r.case_id, r.score, r.duration_ms, r.turns_used);
+                                                let status = if r.passed {
+                                                    "PASS"
+                                                } else if r.error.is_some() {
+                                                    "ERROR"
+                                                } else {
+                                                    "FAIL"
+                                                };
+                                                println!(
+                                                    "[{status}] {} — score: {:.2}, {}ms, {} turns",
+                                                    r.case_id, r.score, r.duration_ms, r.turns_used
+                                                );
                                                 for check in &r.checks {
-                                                    let mark = if check.passed { "✓" } else { "✗" };
-                                                    println!("  {mark} {}: {}", check.criterion, check.detail);
+                                                    let mark =
+                                                        if check.passed { "✓" } else { "✗" };
+                                                    println!(
+                                                        "  {mark} {}: {}",
+                                                        check.criterion, check.detail
+                                                    );
                                                 }
                                                 if let Some(ref err) = r.error {
                                                     println!("  Error: {err}");
@@ -3111,7 +3411,12 @@ async fn run_chat(
                                             if !report.tag_results.is_empty() {
                                                 println!("\nBy tag:");
                                                 for (tag, tr) in &report.tag_results {
-                                                    println!("  {tag}: {}/{} passed ({:.0}%)", tr.passed, tr.total, tr.pass_rate * 100.0);
+                                                    println!(
+                                                        "  {tag}: {}/{} passed ({:.0}%)",
+                                                        tr.passed,
+                                                        tr.total,
+                                                        tr.pass_rate * 100.0
+                                                    );
                                                 }
                                             }
                                         }
@@ -3144,15 +3449,20 @@ async fn run_chat(
                 match genesis_core::personality::get_personality(arg) {
                     Some(p) => {
                         service.set_personality_override(p.name.to_owned());
-                        println!("Personality set to '{}'. Takes effect on next turn.", p.name);
+                        println!(
+                            "Personality set to '{}'. Takes effect on next turn.",
+                            p.name
+                        );
                     }
                     None => {
-                        let names: Vec<&str> =
-                            genesis_core::personality::list_personalities()
-                                .iter()
-                                .map(|p| p.name)
-                                .collect();
-                        println!("Unknown personality '{arg}'. Available: {}", names.join(", "));
+                        let names: Vec<&str> = genesis_core::personality::list_personalities()
+                            .iter()
+                            .map(|p| p.name)
+                            .collect();
+                        println!(
+                            "Unknown personality '{arg}'. Available: {}",
+                            names.join(", ")
+                        );
                     }
                 }
             }
@@ -3235,7 +3545,9 @@ async fn run_oneshot(
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
         let mut buf = String::new();
-        io::stdin().read_line(&mut buf).map_err(|e| CliError::Other(format!("stdin read error: {e}")))?;
+        io::stdin()
+            .read_line(&mut buf)
+            .map_err(|e| CliError::Other(format!("stdin read error: {e}")))?;
         buf.trim().to_owned()
     } else {
         prompt.to_owned()
@@ -3257,7 +3569,14 @@ async fn run_oneshot(
 
     if stream && !json {
         // Streaming mode — print output as it arrives
-        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images).await?;
+        run_streaming_turn(
+            &service,
+            &session_id,
+            &prompt,
+            &loaded.config.provider.model,
+            images,
+        )
+        .await?;
         return Ok(String::new());
     }
 
@@ -3342,10 +3661,7 @@ async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> 
 
             println!(
                 "fired {} -> session {} [{}]: {}",
-                schedule.id,
-                outcome.session_id,
-                schedule.destination,
-                outcome.result.response
+                schedule.id, outcome.session_id, schedule.destination, outcome.result.response
             );
         }
 
@@ -3372,7 +3688,13 @@ async fn run_serve(
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .or_else(|| loaded.config.gateway.as_ref().and_then(|g| g.rate_limit_rpm));
+        .or_else(|| {
+            loaded
+                .config
+                .gateway
+                .as_ref()
+                .and_then(|g| g.rate_limit_rpm)
+        });
     let state = std::sync::Arc::new(AppState::new(
         loaded,
         api_key,
@@ -3384,9 +3706,9 @@ async fn run_serve(
     let router = build_router(std::sync::Arc::clone(&state));
 
     let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        CliError::Io(e)
-    })?;
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| CliError::Io(e))?;
 
     // Start background scheduler
     let db_path = state.loaded.config.storage.database_path.clone();
@@ -3404,10 +3726,18 @@ async fn run_serve(
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             let uptime = shutdown_state.started_at.elapsed().as_secs();
-            let requests = shutdown_state.requests_total.load(std::sync::atomic::Ordering::Relaxed);
-            let errors = shutdown_state.errors_total.load(std::sync::atomic::Ordering::Relaxed);
-            let input_tokens = shutdown_state.input_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
-            let output_tokens = shutdown_state.output_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
+            let requests = shutdown_state
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let errors = shutdown_state
+                .errors_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let input_tokens = shutdown_state
+                .input_tokens_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let output_tokens = shutdown_state
+                .output_tokens_total
+                .load(std::sync::atomic::Ordering::Relaxed);
             println!("\nshutting down gateway...");
             println!(
                 "  uptime: {}s | requests: {} | errors: {} | tokens: {} in / {} out",
@@ -3488,7 +3818,9 @@ async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
     );
 
     let response = genesis_core::nudge::run_nudge(&loaded, &session_id).await?;
-    Ok(format!("Nudge complete (session: {session_id}):\n\n{response}"))
+    Ok(format!(
+        "Nudge complete (session: {session_id}):\n\n{response}"
+    ))
 }
 
 #[derive(Debug)]
@@ -3522,15 +3854,13 @@ async fn run_batch(
 
     let distribution = match &toolset {
         Some(name) => {
-            let dist = genesis_core::toolset::resolve_distribution(
-                name,
-                &loaded.config.toolsets,
-            )
-            .ok_or_else(|| {
-                let mut available: Vec<String> = genesis_core::toolset::builtin_distribution_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+            let dist = genesis_core::toolset::resolve_distribution(name, &loaded.config.toolsets)
+                .ok_or_else(|| {
+                let mut available: Vec<String> =
+                    genesis_core::toolset::builtin_distribution_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                 available.extend(loaded.config.toolsets.keys().cloned());
                 CliError::Other(format!(
                     "unknown toolset distribution '{name}'. Available: {}",
@@ -3549,13 +3879,22 @@ async fn run_batch(
 
     for (line_no, line) in std::io::BufRead::lines(reader).enumerate() {
         let line = line.map_err(|e| {
-            CliError::Other(format!("failed to read line {} from {}: {e}", line_no + 1, input))
+            CliError::Other(format!(
+                "failed to read line {} from {}: {e}",
+                line_no + 1,
+                input
+            ))
         })?;
         if line.trim().is_empty() {
             continue;
         }
         let item = parse_batch_input_line(&line).map_err(|e| {
-            CliError::Other(format!("invalid JSONL at {} line {}: {}", input, line_no + 1, e))
+            CliError::Other(format!(
+                "invalid JSONL at {} line {}: {}",
+                input,
+                line_no + 1,
+                e
+            ))
         })?;
         items.push(item);
     }
@@ -3589,9 +3928,10 @@ async fn run_batch(
             continue;
         }
 
-        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-            CliError::Other(format!("failed to acquire concurrency permit: {e}"))
-        })?;
+        let permit =
+            semaphore.clone().acquire_owned().await.map_err(|e| {
+                CliError::Other(format!("failed to acquire concurrency permit: {e}"))
+            })?;
         let loaded = loaded.clone();
         let output_dir = output.clone();
         let model_override = model_override.clone();
@@ -3759,12 +4099,13 @@ fn discard_low_quality_trajectory(
 
     let raw = std::fs::read_to_string(&output_path)
         .map_err(|e| CliError::Other(format!("failed to read {}: {e}", output_path.display())))?;
-    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
-        CliError::Other(format!(
-            "invalid trajectory JSON in {}: {e}",
-            output_path.display()
-        ))
-    })?;
+    let trajectory: genesis_core::trajectory::Trajectory =
+        serde_json::from_str(&raw).map_err(|e| {
+            CliError::Other(format!(
+                "invalid trajectory JSON in {}: {e}",
+                output_path.display()
+            ))
+        })?;
     let quality = genesis_core::quality::score(&trajectory);
     if quality.overall < min_quality {
         std::fs::remove_file(&output_path).map_err(|e| {
@@ -3815,8 +4156,7 @@ fn apply_auto_tags(output_dir: &str, session_id: &str) -> Result<(), CliError> {
 }
 
 fn parse_batch_input_line(line: &str) -> Result<BatchInputLine, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
     let object = value
         .as_object()
         .ok_or_else(|| "expected JSON object".to_owned())?;
@@ -3873,8 +4213,7 @@ fn run_compress(
         .map_err(|e| CliError::Other(format!("invalid trajectory JSON in {}: {e}", input)))?;
 
     let compressed = if training {
-        genesis_core::compress::TrajectoryCompressor::default()
-            .compress_for_training(&trajectory)
+        genesis_core::compress::TrajectoryCompressor::default().compress_for_training(&trajectory)
     } else {
         genesis_core::compress::compress(&trajectory, level)
     };
@@ -3948,7 +4287,9 @@ fn run_eval_import_sharegpt(file: &str, output_dir: &str) -> Result<String, CliE
         imported += 1;
     }
 
-    Ok(format!("imported {imported} trajectories into {output_dir}"))
+    Ok(format!(
+        "imported {imported} trajectories into {output_dir}"
+    ))
 }
 
 fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> Result<String, CliError> {
@@ -3965,25 +4306,26 @@ fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> Result<Strin
             return Err(CliError::Other(format!("{source} is not a directory")));
         }
 
-        for entry in std::fs::read_dir(&source_path).map_err(|e| {
-            CliError::Other(format!("failed to read directory {source}: {e}"))
-        })? {
-            let entry = entry.map_err(|e| {
-                CliError::Other(format!("failed to read entry in {source}: {e}"))
-            })?;
+        for entry in std::fs::read_dir(&source_path)
+            .map_err(|e| CliError::Other(format!("failed to read directory {source}: {e}")))?
+        {
+            let entry = entry
+                .map_err(|e| CliError::Other(format!("failed to read entry in {source}: {e}")))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
 
-            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
 
             if dedup {
                 let raw = std::fs::read_to_string(&path).map_err(|e| {
                     CliError::Other(format!("failed to read {}: {e}", path.display()))
                 })?;
-                if let Ok(traj) =
-                    serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw)
+                if let Ok(traj) = serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw)
                 {
                     if !seen_ids.insert(traj.session_id.clone()) {
                         skipped += 1;
@@ -4056,7 +4398,9 @@ fn run_eval_import_chatml(file: &str, output_dir: &str) -> Result<String, CliErr
         imported += 1;
     }
 
-    Ok(format!("imported {imported} trajectories into {output_dir}"))
+    Ok(format!(
+        "imported {imported} trajectories into {output_dir}"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4079,8 +4423,7 @@ fn run_eval_convert(input: &str, output: &str, format: &str) -> Result<String, C
             serde_json::to_string_pretty(&trajectory)?
         }
         (EvalFileFormat::TrajectoryJson, "chatml") => {
-            let compressed =
-                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            let compressed = load_training_compressed_trajectory(std::path::Path::new(input))?;
             serde_json::to_string(&serde_json::json!({
                 "session_id": compressed.session_id,
                 "model": compressed.model,
@@ -4090,8 +4433,7 @@ fn run_eval_convert(input: &str, output: &str, format: &str) -> Result<String, C
             }))?
         }
         (EvalFileFormat::TrajectoryJson, "sharegpt") => {
-            let compressed =
-                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            let compressed = load_training_compressed_trajectory(std::path::Path::new(input))?;
             serde_json::to_string(&serde_json::json!({
                 "session_id": compressed.session_id,
                 "model": compressed.model,
@@ -4178,16 +4520,14 @@ fn load_training_compressed_trajectory(
 ) -> Result<genesis_core::compress::CompressedTrajectory, CliError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
-        CliError::Other(format!(
-            "invalid trajectory JSON in {}: {e}",
-            path.display()
-        ))
-    })?;
-    Ok(
-        genesis_core::compress::TrajectoryCompressor::default()
-            .compress_for_training(&trajectory),
-    )
+    let trajectory: genesis_core::trajectory::Trajectory =
+        serde_json::from_str(&raw).map_err(|e| {
+            CliError::Other(format!(
+                "invalid trajectory JSON in {}: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(genesis_core::compress::TrajectoryCompressor::default().compress_for_training(&trajectory))
 }
 
 fn trajectory_from_chatml_entry(
@@ -4197,7 +4537,9 @@ fn trajectory_from_chatml_entry(
     let chatml = entry
         .get("chatml")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::Other(format!("JSONL line {} missing 'chatml' field", index + 1)))?;
+        .ok_or_else(|| {
+            CliError::Other(format!("JSONL line {} missing 'chatml' field", index + 1))
+        })?;
 
     let session_id = entry
         .get("session_id")
@@ -4230,21 +4572,23 @@ fn trajectory_from_chatml_entry(
     let steps = messages
         .into_iter()
         .enumerate()
-        .map(|(step_index, (role, content))| genesis_core::trajectory::TrajectoryStep {
-            step_index,
-            timestamp: now.clone(),
-            action_type: match role.as_str() {
-                "system" => genesis_core::trajectory::ActionType::SystemMessage,
-                "user" => genesis_core::trajectory::ActionType::UserMessage,
-                "assistant" | "tool" => genesis_core::trajectory::ActionType::AssistantMessage,
-                _ => genesis_core::trajectory::ActionType::AssistantMessage,
+        .map(
+            |(step_index, (role, content))| genesis_core::trajectory::TrajectoryStep {
+                step_index,
+                timestamp: now.clone(),
+                action_type: match role.as_str() {
+                    "system" => genesis_core::trajectory::ActionType::SystemMessage,
+                    "user" => genesis_core::trajectory::ActionType::UserMessage,
+                    "assistant" | "tool" => genesis_core::trajectory::ActionType::AssistantMessage,
+                    _ => genesis_core::trajectory::ActionType::AssistantMessage,
+                },
+                content,
+                tool_name: None,
+                tool_arguments: None,
+                tool_result: None,
+                tokens: None,
             },
-            content,
-            tool_name: None,
-            tool_arguments: None,
-            tool_result: None,
-            tokens: None,
-        })
+        )
         .collect::<Vec<_>>();
 
     Ok(genesis_core::trajectory::Trajectory {
@@ -4362,7 +4706,9 @@ fn parse_chatml_blocks(chatml: &str) -> Result<Vec<(String, String)>, CliError> 
     }
 
     if messages.is_empty() {
-        return Err(CliError::Other("invalid ChatML: no messages found".to_owned()));
+        return Err(CliError::Other(
+            "invalid ChatML: no messages found".to_owned(),
+        ));
     }
 
     Ok(messages)
@@ -4552,9 +4898,8 @@ fn run_eval_auto_tag(
             trajectory.tags.sort();
             trajectory.tags.dedup();
             let serialized = serde_json::to_string_pretty(&trajectory)?;
-            std::fs::write(&path, serialized).map_err(|e| {
-                CliError::Other(format!("failed to write {}: {e}", path.display()))
-            })?;
+            std::fs::write(&path, serialized)
+                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", path.display())))?;
         }
 
         updated.push((path.display().to_string(), additions));
@@ -4599,8 +4944,8 @@ fn run_eval_tag_stats(dir: &str, recursive: bool, json: bool) -> Result<String, 
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
-            .map_err(|e| {
+        let trajectory: genesis_core::trajectory::Trajectory =
+            serde_json::from_str(&raw).map_err(|e| {
                 CliError::Other(format!(
                     "invalid trajectory JSON in {}: {e}",
                     path.display()
@@ -4671,9 +5016,8 @@ fn run_eval_filter(
 
     for path in files {
         total += 1;
-        let raw = std::fs::read_to_string(&path).map_err(|e| {
-            CliError::Other(format!("failed to read {}: {e}", path.display()))
-        })?;
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
         let traj: genesis_core::trajectory::Trajectory = match serde_json::from_str(&raw) {
             Ok(t) => t,
             Err(_) => continue,
@@ -4717,9 +5061,10 @@ fn run_eval_filter(
             }
         }
         if let Some(tool_name) = tool {
-            let has_tool = traj.steps.iter().any(|s| {
-                s.tool_name.as_deref() == Some(tool_name)
-            });
+            let has_tool = traj
+                .steps
+                .iter()
+                .any(|s| s.tool_name.as_deref() == Some(tool_name));
             if !has_tool {
                 continue;
             }
@@ -4739,7 +5084,10 @@ fn run_eval_filter(
         }
 
         // Passed all filters — copy to output
-        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let dest = std::path::Path::new(output).join(&filename);
         std::fs::copy(&path, &dest).map_err(|e| {
             CliError::Other(format!(
@@ -4799,17 +5147,21 @@ fn run_eval_split(
     let (train_files, test_files) = files.split_at(split_point);
 
     for path in train_files {
-        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        std::fs::copy(path, std::path::Path::new(train_dir).join(&filename)).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::fs::copy(path, std::path::Path::new(train_dir).join(&filename))
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     for path in test_files {
-        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        std::fs::copy(path, std::path::Path::new(test_dir).join(&filename)).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::fs::copy(path, std::path::Path::new(test_dir).join(&filename))
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     Ok(format!(
@@ -4852,11 +5204,13 @@ fn run_eval_sample(
     files.shuffle(&mut rng);
 
     for path in &files[..actual_count] {
-        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let dest = std::path::Path::new(output).join(&filename);
-        std::fs::copy(path, &dest).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        std::fs::copy(path, &dest)
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     Ok(format!(
@@ -4994,10 +5348,16 @@ fn run_eval_pipeline(
     }
 
     if validate {
-        log.push(format!("validate: {} valid, {invalid} invalid", trajectories.len()));
+        log.push(format!(
+            "validate: {} valid, {invalid} invalid",
+            trajectories.len()
+        ));
     }
     if auto_tag {
-        log.push(format!("auto-tag: applied to {} trajectories", trajectories.len()));
+        log.push(format!(
+            "auto-tag: applied to {} trajectories",
+            trajectories.len()
+        ));
     }
 
     // Step 3: Filter
@@ -5073,10 +5433,14 @@ fn run_eval_pipeline(
                     CliError::Other(format!("failed to write {}: {e}", dest.display()))
                 })?;
             }
-            log.push(format!("output: {} JSON files in {output}", trajectories.len()));
+            log.push(format!(
+                "output: {} JSON files in {output}",
+                trajectories.len()
+            ));
         }
         "chatml" | "sharegpt" => {
-            let output_file = std::path::Path::new(output).join(format!("dataset.{output_format}.jsonl"));
+            let output_file =
+                std::path::Path::new(output).join(format!("dataset.{output_format}.jsonl"));
             let mut lines = Vec::new();
             for (original_path, _) in &trajectories {
                 let compressed = load_training_compressed_trajectory(original_path)?;
@@ -5099,8 +5463,9 @@ fn run_eval_pipeline(
                 };
                 lines.push(serde_json::to_string(&data)?);
             }
-            std::fs::write(&output_file, lines.join("\n"))
-                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", output_file.display())))?;
+            std::fs::write(&output_file, lines.join("\n")).map_err(|e| {
+                CliError::Other(format!("failed to write {}: {e}", output_file.display()))
+            })?;
             log.push(format!(
                 "output: {} records as {output_format} JSONL",
                 trajectories.len()
@@ -5130,11 +5495,7 @@ fn run_eval_pipeline(
     Ok(log.join("\n"))
 }
 
-fn run_eval_validate(
-    dir: &str,
-    recursive: bool,
-    remove: bool,
-) -> Result<String, CliError> {
+fn run_eval_validate(dir: &str, recursive: bool, remove: bool) -> Result<String, CliError> {
     let files = collect_eval_files(PathBuf::from(dir), recursive)?;
     let mut valid = 0usize;
     let mut invalid = 0usize;
@@ -5170,11 +5531,7 @@ fn run_eval_validate(
                 if issues.is_empty() {
                     valid += 1;
                 } else {
-                    errors.push(format!(
-                        "{}: {}",
-                        path.display(),
-                        issues.join(", ")
-                    ));
+                    errors.push(format!("{}: {}", path.display(), issues.join(", ")));
                     invalid += 1;
                     if remove {
                         let _ = std::fs::remove_file(path);
@@ -5219,8 +5576,8 @@ fn run_eval_deduplicate(
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
-            .map_err(|e| {
+        let trajectory: genesis_core::trajectory::Trajectory =
+            serde_json::from_str(&raw).map_err(|e| {
                 CliError::Other(format!(
                     "invalid trajectory JSON in {}: {e}",
                     path.display()
@@ -5345,9 +5702,7 @@ fn parse_compression_format(raw: Option<&str>) -> Result<CompressionFormat, CliE
     }
 }
 
-async fn run_login(
-    config_path: Option<PathBuf>,
-) -> Result<String, CliError> {
+async fn run_login(config_path: Option<PathBuf>) -> Result<String, CliError> {
     use genesis_config::{update_provider_in_file, AppPaths};
 
     let auth_path = genesis_auth::default_auth_path()?;
@@ -5360,7 +5715,9 @@ async fn run_login(
             eprint!("  Use existing credentials? [Y/n]: ");
 
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(CliError::Io)?;
             let input = input.trim().to_lowercase();
 
             if input.is_empty() || input == "y" || input == "yes" {
@@ -5386,11 +5743,17 @@ async fn run_login(
         eprint!("  Import these credentials? [y/N]: ");
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(CliError::Io)?;
         let input = input.trim().to_lowercase();
 
         if input == "y" || input == "yes" {
-            genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, genesis_auth::store::CredentialSource::CodexMigration)?;
+            genesis_auth::store::save_codex_tokens(
+                &auth_path,
+                cli_tokens,
+                genesis_auth::store::CredentialSource::CodexMigration,
+            )?;
             update_provider_in_file(
                 &paths.config_path,
                 Some("openai-codex"),
@@ -5478,7 +5841,11 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         ("openai", "OpenAI", "OPENAI_API_KEY"),
         ("anthropic", "Anthropic (Claude)", "ANTHROPIC_API_KEY"),
         ("google", "Google (Gemini)", "GEMINI_API_KEY"),
-        ("openrouter", "OpenRouter (200+ models)", "OPENROUTER_API_KEY"),
+        (
+            "openrouter",
+            "OpenRouter (200+ models)",
+            "OPENROUTER_API_KEY",
+        ),
         ("openai-codex", "Sign in with ChatGPT (OAuth)", ""),
         ("local", "Local / Self-hosted (vLLM, Ollama, etc.)", ""),
         ("compatible", "Custom OpenAI-compatible endpoint", ""),
@@ -5532,7 +5899,10 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         for (i, (_, model_id, desc)) in backend_models.iter().enumerate() {
             eprintln!("    {}. {} — {}", i + 1, model_id, desc);
         }
-        eprintln!("    {}. Enter a custom model name", backend_models.len() + 1);
+        eprintln!(
+            "    {}. Enter a custom model name",
+            backend_models.len() + 1
+        );
         eprintln!();
 
         let model_idx = prompt_choice("  Model", backend_models.len() + 1)?;
@@ -5556,10 +5926,7 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
 
     // Step 4: API key
     let api_key_env = if !default_key_env.is_empty() {
-        eprintln!(
-            "  API key env var [default: {}]:",
-            default_key_env
-        );
+        eprintln!("  API key env var [default: {}]:", default_key_env);
         let input = prompt_line_or_default("  Env var", default_key_env)?;
         eprintln!();
 
@@ -5567,10 +5934,7 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         if std::env::var(&input).is_ok() {
             eprintln!("  [ok] ${} is set", input);
         } else {
-            eprintln!(
-                "  [!!] ${} is NOT set — set it before chatting:",
-                input
-            );
+            eprintln!("  [!!] ${} is NOT set — set it before chatting:", input);
             eprintln!("       export {}=your-api-key-here", input);
         }
         eprintln!();
@@ -5612,10 +5976,7 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
         base_url.as_ref().map(|u| Some(u.as_str())),
         api_key_env.as_ref().map(|k| Some(k.as_str())),
     )?;
-    steps.push(format!(
-        "  [+] Provider: {} / {}",
-        backend, chosen_model
-    ));
+    steps.push(format!("  [+] Provider: {} / {}", backend, chosen_model));
 
     // Bootstrap storage
     std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
@@ -5739,9 +6100,7 @@ fn prompt_choice(label: &str, max: usize) -> Result<usize, CliError> {
         let _ = io::stderr().flush();
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(CliError::Io)?;
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
         match input.trim().parse::<usize>() {
             Ok(n) if n >= 1 && n <= max => return Ok(n - 1),
@@ -5757,9 +6116,7 @@ fn prompt_line(label: &str) -> Result<String, CliError> {
         let _ = io::stderr().flush();
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(CliError::Io)?;
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
         let trimmed = input.trim().to_owned();
         if !trimmed.is_empty() {
@@ -5775,9 +6132,7 @@ fn prompt_line_or_default(label: &str, default: &str) -> Result<String, CliError
     let _ = io::stderr().flush();
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(CliError::Io)?;
+    io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -5831,9 +6186,7 @@ async fn run_update() -> Result<String, CliError> {
 
     if !build.status.success() {
         let build_err = String::from_utf8_lossy(&build.stderr);
-        return Err(CliError::Other(format!(
-            "cargo build failed:\n{build_err}"
-        )));
+        return Err(CliError::Other(format!("cargo build failed:\n{build_err}")));
     }
     steps.push("[ok] Build succeeded.".to_owned());
 
@@ -5932,7 +6285,10 @@ fn run_uninstall(
                 data_dir.display()
             ))
         })?;
-        results.push(format!("[ok] Removed data directory: {}", data_dir.display()));
+        results.push(format!(
+            "[ok] Removed data directory: {}",
+            data_dir.display()
+        ));
     }
 
     // Remove config directory (if requested)
@@ -5984,18 +6340,14 @@ impl genesis_mcp::McpToolBackend for RegistryMcpBackend {
             .map(|def| genesis_mcp::McpServerToolDef {
                 name: def.name,
                 description: Some(def.description),
-                input_schema: def.parameters.unwrap_or_else(|| {
-                    serde_json::json!({"type": "object", "properties": {}})
-                }),
+                input_schema: def
+                    .parameters
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
             })
             .collect()
     }
 
-    fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String, String> {
+    fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
         // Convert JSON arguments to BTreeMap<String, String>
         let mut args = std::collections::BTreeMap::new();
         if let Some(obj) = arguments.as_object() {
@@ -6049,11 +6401,7 @@ async fn run_mcp(
                     "unknown"
                 };
 
-                let endpoint = cfg
-                    .command
-                    .as_deref()
-                    .or(cfg.url.as_deref())
-                    .unwrap_or("-");
+                let endpoint = cfg.command.as_deref().or(cfg.url.as_deref()).unwrap_or("-");
 
                 let timeout = cfg.timeout.unwrap_or(120);
                 let connect_timeout = cfg.connect_timeout.unwrap_or(60);
@@ -6145,9 +6493,15 @@ async fn run_pairing(
                 return Ok("No approved users.".to_owned());
             }
 
-            let mut lines = vec![format!("{:<12} {:<20} {:<20} {}", "PLATFORM", "USER_ID", "NAME", "APPROVED_AT")];
+            let mut lines = vec![format!(
+                "{:<12} {:<20} {:<20} {}",
+                "PLATFORM", "USER_ID", "NAME", "APPROVED_AT"
+            )];
             for u in &users {
-                lines.push(format!("{:<12} {:<20} {:<20} {}", u.platform, u.user_id, u.user_name, u.approved_at));
+                lines.push(format!(
+                    "{:<12} {:<20} {:<20} {}",
+                    u.platform, u.user_id, u.user_name, u.approved_at
+                ));
             }
             lines.push(format!("\n{} approved user(s)", users.len()));
             Ok(lines.join("\n"))
@@ -6168,9 +6522,15 @@ async fn run_pairing(
                 return Ok("No pending pairing requests.".to_owned());
             }
 
-            let mut lines = vec![format!("{:<12} {:<10} {:<20} {:<20} {}", "PLATFORM", "CODE", "USER_ID", "NAME", "CREATED_AT")];
+            let mut lines = vec![format!(
+                "{:<12} {:<10} {:<20} {:<20} {}",
+                "PLATFORM", "CODE", "USER_ID", "NAME", "CREATED_AT"
+            )];
             for p in &pending {
-                lines.push(format!("{:<12} {:<10} {:<20} {:<20} {}", p.platform, p.code, p.user_id, p.user_name, p.created_at));
+                lines.push(format!(
+                    "{:<12} {:<10} {:<20} {:<20} {}",
+                    p.platform, p.code, p.user_id, p.user_name, p.created_at
+                ));
             }
             lines.push(format!("\n{} pending request(s)", pending.len()));
             Ok(lines.join("\n"))
@@ -6235,7 +6595,10 @@ async fn run_pairing(
 
             match platform {
                 Some(p) => Ok(format!("Cleared {} pending code(s) for {}", cleared, p)),
-                None => Ok(format!("Cleared {} pending code(s) across all platforms", cleared)),
+                None => Ok(format!(
+                    "Cleared {} pending code(s) across all platforms",
+                    cleared
+                )),
             }
         }
     }
@@ -6453,7 +6816,11 @@ async fn run_benchmark(
                     let elapsed = start.elapsed();
                     latencies.push(elapsed);
 
-                    let tokens = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                    let tokens = response
+                        .usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(0);
                     eprintln!(
                         "  run {}: {:.0}ms ({tokens} tokens)",
                         i + 1,
@@ -6492,7 +6859,12 @@ async fn run_benchmark(
             let p50 = latencies[successful / 2];
             (min, max, avg, p50)
         } else {
-            (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+            (
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
         };
 
         results.push(serde_json::json!({
@@ -6544,9 +6916,7 @@ fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError
 
     let tool_count = genesis_core::default_tool_count();
 
-    let session_count = SessionStore::new(db_path)
-        .session_count()
-        .unwrap_or(0);
+    let session_count = SessionStore::new(db_path).session_count().unwrap_or(0);
 
     let skill_count = SkillStore::new(db_path)
         .list_all()
@@ -6631,10 +7001,12 @@ fn run_context(command: ContextCommand) -> Result<String, CliError> {
     let current_dir = std::env::current_dir()?;
 
     match command {
-        ContextCommand::Show => Ok(match load_context_file(&current_dir, &genesis_config::ContextSecurityPolicy::Warn) {
-            Some(contents) => contents,
-            None => "no context file found in current directory".to_owned(),
-        }),
+        ContextCommand::Show => Ok(
+            match load_context_file(&current_dir, &genesis_config::ContextSecurityPolicy::Warn) {
+                Some(contents) => contents,
+                None => "no context file found in current directory".to_owned(),
+            },
+        ),
         ContextCommand::Init => {
             let context_dir = current_dir.join(".genesis");
             let context_path = context_dir.join("context.md");
@@ -6670,7 +7042,9 @@ fn run_context(command: ContextCommand) -> Result<String, CliError> {
             if status.success() {
                 Ok(format!("context saved: {path_str}"))
             } else {
-                Err(CliError::Other(format!("{editor} exited with status {status}")))
+                Err(CliError::Other(format!(
+                    "{editor} exited with status {status}"
+                )))
             }
         }
     }
@@ -6763,8 +7137,7 @@ fn run_model(
             api_key_env,
         } => {
             let loaded = load(config_path.as_deref())?;
-            let config_file = config_path
-                .unwrap_or_else(|| loaded.paths.config_path.clone());
+            let config_file = config_path.unwrap_or_else(|| loaded.paths.config_path.clone());
 
             genesis_config::update_provider_in_file(
                 &config_file,
@@ -6810,10 +7183,7 @@ async fn verify_api_connectivity(loaded: &LoadedConfig) -> Result<u128, String> 
     request.max_tokens = Some(5);
 
     let start = std::time::Instant::now();
-    client
-        .complete(request)
-        .await
-        .map_err(|e| format!("{e}"))?;
+    client.complete(request).await.map_err(|e| format!("{e}"))?;
 
     Ok(start.elapsed().as_millis())
 }
@@ -6836,9 +7206,21 @@ fn estimate_token_cost(input_tokens: u32, output_tokens: u32) -> Option<(f64, &'
 fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         // Anthropic
-        ("anthropic", "claude-opus-4-6", "Most capable, complex reasoning"),
-        ("anthropic", "claude-sonnet-4-6", "Balanced speed and capability"),
-        ("anthropic", "claude-haiku-4-5-20251001", "Fastest, lightweight tasks"),
+        (
+            "anthropic",
+            "claude-opus-4-6",
+            "Most capable, complex reasoning",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-4-6",
+            "Balanced speed and capability",
+        ),
+        (
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "Fastest, lightweight tasks",
+        ),
         // OpenAI
         ("openai", "gpt-4.1", "Flagship GPT model"),
         ("openai", "gpt-4.1-mini", "Fast and affordable"),
@@ -6854,11 +7236,27 @@ fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
         ("google", "gemini-2.5-pro", "Best for complex tasks"),
         ("google", "gemini-2.5-flash", "Fast and versatile"),
         // OpenRouter (aggregator — any model)
-        ("openrouter", "anthropic/claude-sonnet-4-6", "Claude via OpenRouter"),
+        (
+            "openrouter",
+            "anthropic/claude-sonnet-4-6",
+            "Claude via OpenRouter",
+        ),
         ("openrouter", "openai/gpt-4.1", "GPT-4.1 via OpenRouter"),
-        ("openrouter", "google/gemini-2.5-pro", "Gemini via OpenRouter"),
-        ("openrouter", "deepseek/deepseek-r1", "DeepSeek R1 reasoning"),
-        ("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick"),
+        (
+            "openrouter",
+            "google/gemini-2.5-pro",
+            "Gemini via OpenRouter",
+        ),
+        (
+            "openrouter",
+            "deepseek/deepseek-r1",
+            "DeepSeek R1 reasoning",
+        ),
+        (
+            "openrouter",
+            "meta-llama/llama-4-maverick",
+            "Llama 4 Maverick",
+        ),
     ]
 }
 
@@ -7395,7 +7793,10 @@ fn read_multiline_input(
     Some(buf)
 }
 
-fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>, prompt: &str) -> Option<String> {
+fn read_user_input(
+    rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>,
+    prompt: &str,
+) -> Option<String> {
     match rl.readline(prompt) {
         Ok(line) => {
             if !line.trim().is_empty() {
@@ -7403,9 +7804,9 @@ fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyline::history
             }
             Some(line)
         }
-        Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
-            None
-        }
+        Err(
+            rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+        ) => None,
         Err(_) => None,
     }
 }
@@ -7464,9 +7865,7 @@ fn extract_clipboard_as_image_url(
 
     let clip_dir = data_dir.join("clipboard");
     std::fs::create_dir_all(&clip_dir).map_err(|e| {
-        clipboard::ClipboardError::ExtractionFailed(format!(
-            "failed to create clipboard dir: {e}"
-        ))
+        clipboard::ClipboardError::ExtractionFailed(format!("failed to create clipboard dir: {e}"))
     })?;
 
     let timestamp = SystemTime::now()
@@ -7759,10 +8158,7 @@ fn format_insights(data: &InsightsData, model: &str) -> String {
         0
     };
 
-    let mut lines = vec![format!(
-        "genesis insights (last {} days)",
-        data.period_days
-    )];
+    let mut lines = vec![format!("genesis insights (last {} days)", data.period_days)];
     lines.push(format!("  model:           {model}"));
     lines.push(format!("  sessions:        {}", data.sessions_count));
     lines.push(format!("  input tokens:    {}", data.total_input_tokens));
@@ -7829,7 +8225,10 @@ fn format_memory_list(memories: &[genesis_storage::StoredMemory]) -> String {
         } else {
             m.content.clone()
         };
-        lines.push(format!("[{}] {} ({})", m.kind, content_preview, m.created_at));
+        lines.push(format!(
+            "[{}] {} ({})",
+            m.kind, content_preview, m.created_at
+        ));
     }
     lines.join("\n")
 }
@@ -7866,8 +8265,7 @@ fn build_status_text(loaded: &LoadedConfig) -> String {
         let skill_store = genesis_storage::SkillStore::new(&loaded.config.storage.database_path);
         let schedule_store =
             genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
-        let memory_store =
-            MemoryStore::new(&loaded.config.storage.database_path);
+        let memory_store = MemoryStore::new(&loaded.config.storage.database_path);
 
         if let Ok(stats) = session_store.usage_stats() {
             lines.push(format!("  sessions:  {}", stats.total_sessions));
@@ -7925,12 +8323,18 @@ fn build_status_json(loaded: &LoadedConfig) -> serde_json::Value {
     data
 }
 
-fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+fn format_session_messages(
+    session_id: &str,
+    messages: &[genesis_storage::StoredMessage],
+) -> String {
     if messages.is_empty() {
         return format!("session {session_id}: no messages");
     }
 
-    let mut lines = vec![format!("session {session_id} ({} messages)", messages.len())];
+    let mut lines = vec![format!(
+        "session {session_id} ({} messages)",
+        messages.len()
+    )];
     for msg in messages {
         let content = msg.content.as_deref().unwrap_or("[no content]");
         let truncated = if content.len() > 200 {
@@ -7943,7 +8347,10 @@ fn format_session_messages(session_id: &str, messages: &[genesis_storage::Stored
     lines.join("\n")
 }
 
-fn export_session_markdown(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+fn export_session_markdown(
+    session_id: &str,
+    messages: &[genesis_storage::StoredMessage],
+) -> String {
     let mut lines = vec![format!("# Session {session_id}\n")];
     for msg in messages {
         let role = match msg.role.as_str() {
@@ -8003,27 +8410,27 @@ fn run_session_import(
                 })
                 .collect()
         }
-        "jsonl" => {
-            contents
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| {
-                    let entry: serde_json::Value = serde_json::from_str(line)
-                        .map_err(|e| CliError::Other(format!("invalid JSONL line: {e}")))?;
-                    let role = entry
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CliError::Other("JSONL line missing 'role' field".to_owned()))?
-                        .to_owned();
-                    let content = entry
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CliError::Other("JSONL line missing 'content' field".to_owned()))?
-                        .to_owned();
-                    Ok((role, content))
-                })
-                .collect::<Result<Vec<_>, CliError>>()?
-        }
+        "jsonl" => contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|e| CliError::Other(format!("invalid JSONL line: {e}")))?;
+                let role = entry
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CliError::Other("JSONL line missing 'role' field".to_owned()))?
+                    .to_owned();
+                let content = entry
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CliError::Other("JSONL line missing 'content' field".to_owned())
+                    })?
+                    .to_owned();
+                Ok((role, content))
+            })
+            .collect::<Result<Vec<_>, CliError>>()?,
         other => {
             return Err(CliError::Other(format!(
                 "unknown import format '{other}', expected 'sharegpt' or 'jsonl'"
@@ -8040,7 +8447,9 @@ fn run_session_import(
 
     store.import_session(&session_id, title, messages)?;
 
-    Ok(format!("Imported {count} messages into session {session_id}"))
+    Ok(format!(
+        "Imported {count} messages into session {session_id}"
+    ))
 }
 
 fn format_skill_list(skills: &[genesis_storage::StoredSkill]) -> String {
@@ -8237,7 +8646,11 @@ fn run_skills_hub(
             Ok(lines.join("\n"))
         }
 
-        HubCommand::Search { query, source, limit } => {
+        HubCommand::Search {
+            query,
+            source,
+            limit,
+        } => {
             let results = hub
                 .search(&query, source.as_deref(), limit)
                 .map_err(|e| CliError::Other(e.to_string()))?;
@@ -8250,7 +8663,11 @@ fn run_skills_hub(
                 return Ok(format!("no skills matching \"{query}\""));
             }
 
-            let mut lines = vec![format!("found {} skill(s) matching \"{}\"", results.len(), query)];
+            let mut lines = vec![format!(
+                "found {} skill(s) matching \"{}\"",
+                results.len(),
+                query
+            )];
             for m in &results {
                 let tags = if m.tags.is_empty() {
                     String::new()
@@ -8297,10 +8714,7 @@ fn run_skills_hub(
             lines.push(format!("  {}", report.summary()));
             for finding in &report.findings {
                 let file = finding.file.as_deref().unwrap_or("(unknown)");
-                let line = finding
-                    .line
-                    .map(|l| format!(":{l}"))
-                    .unwrap_or_default();
+                let line = finding.line.map(|l| format!(":{l}")).unwrap_or_default();
                 lines.push(format!(
                     "  [{:?}] {}{}: {} ({})",
                     finding.severity, file, line, finding.description, finding.category
@@ -8340,9 +8754,7 @@ fn run_skills_hub(
         }
 
         HubCommand::Audit => {
-            let results = hub
-                .audit()
-                .map_err(|e| CliError::Other(e.to_string()))?;
+            let results = hub.audit().map_err(|e| CliError::Other(e.to_string()))?;
 
             if json {
                 return Ok(serde_json::to_string_pretty(&results)?);
@@ -8360,7 +8772,9 @@ fn run_skills_hub(
                     r.name, r.verdict, r.finding_count, integrity
                 ));
                 if !r.integrity_ok {
-                    lines.push("    WARNING: content has been modified since installation".to_owned());
+                    lines.push(
+                        "    WARNING: content has been modified since installation".to_owned(),
+                    );
                 }
             }
             Ok(lines.join("\n"))
@@ -8414,7 +8828,8 @@ fn run_skills_hub(
                 let parts: Vec<&str> = repo.splitn(2, '/').collect();
                 if parts.len() != 2 {
                     return Err(CliError::Other(
-                        "repo must be in 'owner/repo' format (e.g. 'nooesc/genesis-skills')".to_owned(),
+                        "repo must be in 'owner/repo' format (e.g. 'nooesc/genesis-skills')"
+                            .to_owned(),
                     ));
                 }
 
@@ -8564,17 +8979,17 @@ fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        batch_output_path, context_template, parse_batch_input_line,
-        parse_compression_format, parse_compression_level, sha256_hex,
-        cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
-        default_session_id, delivery_platform_from_str, export_session_markdown,
-        format_insights, format_memory_list, format_schedule_list, format_session_list,
-        format_usage_stats, format_session_messages, format_skill, format_skill_list,
-        format_subagent, format_subagent_list, handle_chat_command, is_exit_command, known_models,
-        run, run_compress, run_eval_export_chatml, run_eval_quality, run_personality, run_toolset,
-        BootstrapCommand, Cli, Command, ConfigCommand, ContextCommand, McpCommand,
-        MemoryCommand, ModelCommand, PairingCommand, PersonalityCommand, ScheduleCommand,
-        SessionsCommand, SkillsCommand, StorageCommand, SubagentsCommand, ToolsetCommand,
+        batch_output_path, context_template, cron_time_from_datetime, default_schedule_id,
+        default_schedule_session_id, default_session_id, delivery_platform_from_str,
+        export_session_markdown, format_insights, format_memory_list, format_schedule_list,
+        format_session_list, format_session_messages, format_skill, format_skill_list,
+        format_subagent, format_subagent_list, format_usage_stats, handle_chat_command,
+        is_exit_command, known_models, parse_batch_input_line, parse_compression_format,
+        parse_compression_level, run, run_compress, run_eval_export_chatml, run_eval_quality,
+        run_personality, run_toolset, sha256_hex, BootstrapCommand, Cli, Command, ConfigCommand,
+        ContextCommand, McpCommand, MemoryCommand, ModelCommand, PairingCommand,
+        PersonalityCommand, ScheduleCommand, SessionsCommand, SkillsCommand, StorageCommand,
+        SubagentsCommand, ToolsetCommand,
     };
     use chrono::{LocalResult, TimeZone};
     use clap::Parser;
@@ -8592,10 +9007,17 @@ mod tests {
             "--resume",
             "session-1",
         ])
-            .expect("chat command should parse");
+        .expect("chat command should parse");
 
         match cli.command {
-            Command::Chat { session_id, resume, prompt, system, last, .. } => {
+            Command::Chat {
+                session_id,
+                resume,
+                prompt,
+                system,
+                last,
+                ..
+            } => {
                 assert_eq!(session_id.as_deref(), Some("session-42"));
                 assert_eq!(resume.as_deref(), Some("session-1"));
                 assert!(prompt.is_none());
@@ -8954,8 +9376,7 @@ storage:
 
     #[test]
     fn parses_serve_command_with_defaults() {
-        let cli = Cli::try_parse_from(["genesis", "serve"])
-            .expect("serve command should parse");
+        let cli = Cli::try_parse_from(["genesis", "serve"]).expect("serve command should parse");
 
         match cli.command {
             Command::Serve { host, port } => {
@@ -8968,8 +9389,9 @@ storage:
 
     #[test]
     fn parses_serve_command_with_custom_host_port() {
-        let cli = Cli::try_parse_from(["genesis", "serve", "--host", "127.0.0.1", "--port", "8080"])
-            .expect("serve command should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "serve", "--host", "127.0.0.1", "--port", "8080"])
+                .expect("serve command should parse");
 
         match cli.command {
             Command::Serve { host, port } => {
@@ -9005,7 +9427,12 @@ storage:
     #[test]
     fn parses_model_set_command_with_backend() {
         let cli = Cli::try_parse_from([
-            "genesis", "model", "set", "claude-sonnet-4-6", "--backend", "anthropic",
+            "genesis",
+            "model",
+            "set",
+            "claude-sonnet-4-6",
+            "--backend",
+            "anthropic",
         ])
         .expect("model set command should parse");
 
@@ -9152,8 +9579,7 @@ storage:
 
     #[test]
     fn parses_tools_command() {
-        let cli = Cli::try_parse_from(["genesis", "tools"])
-            .expect("tools command should parse");
+        let cli = Cli::try_parse_from(["genesis", "tools"]).expect("tools command should parse");
         assert!(matches!(cli.command, Command::Tools));
     }
 
@@ -9251,9 +9677,8 @@ storage:
 
     #[test]
     fn parses_sessions_search_command() {
-        let cli =
-            Cli::try_parse_from(["genesis", "sessions", "search", "hello world"])
-                .expect("sessions search should parse");
+        let cli = Cli::try_parse_from(["genesis", "sessions", "search", "hello world"])
+            .expect("sessions search should parse");
 
         match cli.command {
             Command::Sessions(SessionsCommand::Search { query }) => {
@@ -9282,7 +9707,9 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
-        store.create_session("s-1", "cli", None).expect("create session");
+        store
+            .create_session("s-1", "cli", None)
+            .expect("create session");
 
         let result = handle_chat_command("/help", "s-1", &store);
         assert!(result.is_some());
@@ -9318,7 +9745,9 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
-        store.create_session("s-tok", "cli", None).expect("create session");
+        store
+            .create_session("s-tok", "cli", None)
+            .expect("create session");
         store.add_usage("s-tok", 100, 50).expect("add usage");
 
         let result = handle_chat_command("/tokens", "s-tok", &store);
@@ -9370,36 +9799,33 @@ storage:
 
     #[test]
     fn parses_info_command() {
-        let cli = Cli::try_parse_from(["genesis", "info"])
-            .expect("info command should parse");
+        let cli = Cli::try_parse_from(["genesis", "info"]).expect("info command should parse");
         assert!(matches!(cli.command, Command::Info));
     }
 
     #[test]
     fn parses_nudge_command() {
-        let cli = Cli::try_parse_from(["genesis", "nudge"])
-            .expect("nudge command should parse");
+        let cli = Cli::try_parse_from(["genesis", "nudge"]).expect("nudge command should parse");
         assert!(matches!(cli.command, Command::Nudge));
     }
 
     #[test]
     fn parses_update_command() {
-        let cli = Cli::try_parse_from(["genesis", "update"])
-            .expect("update command should parse");
+        let cli = Cli::try_parse_from(["genesis", "update"]).expect("update command should parse");
         assert!(matches!(cli.command, Command::Update));
     }
 
     #[test]
     fn parses_mcp_list_command() {
-        let cli = Cli::try_parse_from(["genesis", "mcp", "list"])
-            .expect("mcp list command should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "mcp", "list"]).expect("mcp list command should parse");
         assert!(matches!(cli.command, Command::Mcp(McpCommand::List)));
     }
 
     #[test]
     fn parses_mcp_test_command() {
-        let cli = Cli::try_parse_from(["genesis", "mcp", "test"])
-            .expect("mcp test command should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "mcp", "test"]).expect("mcp test command should parse");
         assert!(matches!(cli.command, Command::Mcp(McpCommand::Test)));
     }
 
@@ -9415,7 +9841,14 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "run", "hello world"])
             .expect("run command should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system, stream, .. } => {
+            Command::Run {
+                prompt,
+                session_id,
+                raw,
+                system,
+                stream,
+                ..
+            } => {
                 assert_eq!(prompt, "hello world");
                 assert!(session_id.is_none());
                 assert!(!raw);
@@ -9429,11 +9862,23 @@ storage:
     #[test]
     fn parses_run_command_with_flags() {
         let cli = Cli::try_parse_from([
-            "genesis", "run", "--raw", "--session-id", "my-session", "what is 2+2",
+            "genesis",
+            "run",
+            "--raw",
+            "--session-id",
+            "my-session",
+            "what is 2+2",
         ])
         .expect("run command with flags should parse");
         match cli.command {
-            Command::Run { prompt, session_id, raw, system, stream, .. } => {
+            Command::Run {
+                prompt,
+                session_id,
+                raw,
+                system,
+                stream,
+                ..
+            } => {
                 assert_eq!(prompt, "what is 2+2");
                 assert_eq!(session_id.as_deref(), Some("my-session"));
                 assert!(raw);
@@ -9446,10 +9891,8 @@ storage:
 
     #[test]
     fn parses_chat_with_system_override() {
-        let cli = Cli::try_parse_from([
-            "genesis", "chat", "--system", "You are a pirate.",
-        ])
-        .expect("chat with --system should parse");
+        let cli = Cli::try_parse_from(["genesis", "chat", "--system", "You are a pirate."])
+            .expect("chat with --system should parse");
         match cli.command {
             Command::Chat { system, .. } => {
                 assert_eq!(system.as_deref(), Some("You are a pirate."));
@@ -9461,7 +9904,11 @@ storage:
     #[test]
     fn parses_run_with_system_override() {
         let cli = Cli::try_parse_from([
-            "genesis", "run", "--system", "You are a calculator.", "what is 2+2",
+            "genesis",
+            "run",
+            "--system",
+            "You are a calculator.",
+            "what is 2+2",
         ])
         .expect("run with --system should parse");
         match cli.command {
@@ -9475,12 +9922,15 @@ storage:
 
     #[test]
     fn parses_run_with_stream() {
-        let cli = Cli::try_parse_from([
-            "genesis", "run", "--stream", "tell me a story",
-        ])
-        .expect("run with --stream should parse");
+        let cli = Cli::try_parse_from(["genesis", "run", "--stream", "tell me a story"])
+            .expect("run with --stream should parse");
         match cli.command {
-            Command::Run { prompt, stream, raw, .. } => {
+            Command::Run {
+                prompt,
+                stream,
+                raw,
+                ..
+            } => {
                 assert_eq!(prompt, "tell me a story");
                 assert!(stream);
                 assert!(!raw);
@@ -9491,8 +9941,7 @@ storage:
 
     #[test]
     fn parses_init_command() {
-        let cli = Cli::try_parse_from(["genesis", "init"])
-            .expect("init command should parse");
+        let cli = Cli::try_parse_from(["genesis", "init"]).expect("init command should parse");
         assert!(matches!(cli.command, Command::Init { .. }));
     }
 
@@ -9638,8 +10087,8 @@ storage:
 
     #[test]
     fn parses_config_edit_command() {
-        let cli = Cli::try_parse_from(["genesis", "config", "edit"])
-            .expect("config edit should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "config", "edit"]).expect("config edit should parse");
         assert!(matches!(cli.command, Command::Config(ConfigCommand::Edit)));
     }
 
@@ -9669,10 +10118,9 @@ storage:
 
     #[test]
     fn parses_sessions_rename_command() {
-        let cli = Cli::try_parse_from([
-            "genesis", "sessions", "rename", "session-42", "My Project",
-        ])
-        .expect("sessions rename should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "sessions", "rename", "session-42", "My Project"])
+                .expect("sessions rename should parse");
         match cli.command {
             Command::Sessions(SessionsCommand::Rename { id, title }) => {
                 assert_eq!(id, "session-42");
@@ -9684,8 +10132,8 @@ storage:
 
     #[test]
     fn parses_chat_last_flag() {
-        let cli = Cli::try_parse_from(["genesis", "chat", "--last"])
-            .expect("chat --last should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "chat", "--last"]).expect("chat --last should parse");
         match cli.command {
             Command::Chat { last, .. } => assert!(last),
             other => panic!("unexpected command: {other:?}"),
@@ -9704,8 +10152,7 @@ storage:
 
     #[test]
     fn parses_chat_worktree_defaults_to_false() {
-        let cli = Cli::try_parse_from(["genesis", "chat"])
-            .expect("chat should parse");
+        let cli = Cli::try_parse_from(["genesis", "chat"]).expect("chat should parse");
         match cli.command {
             Command::Chat { worktree, .. } => assert!(!worktree),
             other => panic!("unexpected command: {other:?}"),
@@ -9734,10 +10181,8 @@ storage:
 
     #[test]
     fn parses_sessions_purge_command() {
-        let cli = Cli::try_parse_from([
-            "genesis", "sessions", "purge", "--older-than", "30",
-        ])
-        .expect("sessions purge should parse");
+        let cli = Cli::try_parse_from(["genesis", "sessions", "purge", "--older-than", "30"])
+            .expect("sessions purge should parse");
         match cli.command {
             Command::Sessions(SessionsCommand::Purge { older_than }) => {
                 assert_eq!(older_than, 30);
@@ -9763,8 +10208,8 @@ storage:
 
     #[test]
     fn parses_context_edit_command() {
-        let cli = Cli::try_parse_from(["genesis", "context", "edit"])
-            .expect("context edit should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "context", "edit"]).expect("context edit should parse");
         assert!(matches!(
             cli.command,
             Command::Context(ContextCommand::Edit)
@@ -9869,7 +10314,10 @@ storage:
         assert!(result.contains("installed skill 'review'"));
         assert!(result.contains("v2.0"));
 
-        let stored = store.get("review").expect("db lookup").expect("skill exists");
+        let stored = store
+            .get("review")
+            .expect("db lookup")
+            .expect("skill exists");
         assert_eq!(stored.description, "Review code");
         assert!(stored.instructions.contains("Review all code carefully"));
         assert_eq!(stored.tags, vec!["dev", "quality"]);
@@ -9877,10 +10325,8 @@ storage:
 
     #[test]
     fn parses_config_set_command() {
-        let cli = Cli::try_parse_from([
-            "genesis", "config", "set", "provider.model", "gpt-5",
-        ])
-        .expect("config set should parse");
+        let cli = Cli::try_parse_from(["genesis", "config", "set", "provider.model", "gpt-5"])
+            .expect("config set should parse");
         match cli.command {
             Command::Config(ConfigCommand::Set { key, value }) => {
                 assert_eq!(key, "provider.model");
@@ -9892,8 +10338,7 @@ storage:
 
     #[test]
     fn parses_insights_command() {
-        let cli = Cli::try_parse_from(["genesis", "insights"])
-            .expect("insights should parse");
+        let cli = Cli::try_parse_from(["genesis", "insights"]).expect("insights should parse");
         match cli.command {
             Command::Insights { days } => assert_eq!(days, 30),
             other => panic!("unexpected command: {other:?}"),
@@ -10064,8 +10509,8 @@ storage:
 
     #[test]
     fn parses_toolset_show() {
-        let cli =
-            Cli::try_parse_from(["genesis", "toolset", "show", "development"]).expect("should parse");
+        let cli = Cli::try_parse_from(["genesis", "toolset", "show", "development"])
+            .expect("should parse");
         match cli.command {
             Command::Toolset(ToolsetCommand::Show { name }) => {
                 assert_eq!(name, "development");
@@ -10242,7 +10687,11 @@ storage:
         ])
         .expect("auto-tag should parse");
         match cli.command {
-            Command::Eval(crate::EvalCommand::AutoTag { dir, recursive, dry_run }) => {
+            Command::Eval(crate::EvalCommand::AutoTag {
+                dir,
+                recursive,
+                dry_run,
+            }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(recursive);
                 assert!(dry_run);
@@ -10282,7 +10731,11 @@ storage:
         ])
         .expect("deduplicate should parse");
         match cli.command {
-            Command::Eval(crate::EvalCommand::Deduplicate { dir, recursive, remove }) => {
+            Command::Eval(crate::EvalCommand::Deduplicate {
+                dir,
+                recursive,
+                remove,
+            }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(recursive);
                 assert!(remove);
@@ -10449,9 +10902,8 @@ storage:
         )
         .unwrap();
 
-        let output =
-            crate::run_eval_deduplicate(dir.path().to_str().unwrap(), false, true, false)
-                .expect("deduplicate should succeed");
+        let output = crate::run_eval_deduplicate(dir.path().to_str().unwrap(), false, true, false)
+            .expect("deduplicate should succeed");
 
         assert!(output.contains("duplicate groups: 1"));
         assert!(output.contains("removed files:    1"));
@@ -10480,13 +10932,8 @@ storage:
         });
         std::fs::write(&path, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
 
-        let dry_run = crate::run_eval_auto_tag(
-            dir.path().to_str().unwrap(),
-            false,
-            true,
-            false,
-        )
-        .expect("dry run should succeed");
+        let dry_run = crate::run_eval_auto_tag(dir.path().to_str().unwrap(), false, true, false)
+            .expect("dry run should succeed");
         assert!(dry_run.contains("files changed: 1"));
 
         let unchanged: serde_json::Value =
@@ -10535,8 +10982,7 @@ storage:
 
     #[test]
     fn batch_input_line_defaults_tags() {
-        let parsed =
-            parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
+        let parsed = parse_batch_input_line(r#"{"prompt":"hello"}"#).expect("json should parse");
         assert_eq!(parsed.prompt, "hello");
         assert!(parsed.tags.is_empty());
     }
@@ -10557,13 +11003,8 @@ storage:
 
     #[test]
     fn parses_compress_command_minimal() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "compress",
-            "--input",
-            "trajectory.json",
-        ])
-        .expect("compress should parse");
+        let cli = Cli::try_parse_from(["genesis", "compress", "--input", "trajectory.json"])
+            .expect("compress should parse");
 
         match cli.command {
             Command::Compress {
@@ -10669,22 +11110,13 @@ storage:
             sessions_count: 10,
             total_input_tokens: 5000,
             total_output_tokens: 3000,
-            sessions_per_day: vec![
-                ("2026-03-07".to_owned(), 3),
-                ("2026-03-08".to_owned(), 7),
-            ],
-            platform_breakdown: vec![
-                ("cli".to_owned(), 8),
-                ("api".to_owned(), 2),
-            ],
+            sessions_per_day: vec![("2026-03-07".to_owned(), 3), ("2026-03-08".to_owned(), 7)],
+            platform_breakdown: vec![("cli".to_owned(), 8), ("api".to_owned(), 2)],
             tokens_per_day: vec![
                 ("2026-03-07".to_owned(), 1500, 900),
                 ("2026-03-08".to_owned(), 3500, 2100),
             ],
-            tool_usage: vec![
-                ("shell_exec".to_owned(), 15),
-                ("echo".to_owned(), 5),
-            ],
+            tool_usage: vec![("shell_exec".to_owned(), 15), ("echo".to_owned(), 5)],
             avg_input_tokens: 500,
             avg_output_tokens: 300,
         };
@@ -10721,11 +11153,21 @@ storage:
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
         store.create_session("s-undo", "cli", None).expect("create");
-        store.append_message("s-undo", "system", Some("You are Eve."), None, None).unwrap();
-        store.append_message("s-undo", "user", Some("Hello"), None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Hi!"), None, None).unwrap();
-        store.append_message("s-undo", "user", Some("How are you?"), None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Great!"), None, None).unwrap();
+        store
+            .append_message("s-undo", "system", Some("You are Eve."), None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "user", Some("Hello"), None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "assistant", Some("Hi!"), None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "user", Some("How are you?"), None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "assistant", Some("Great!"), None, None)
+            .unwrap();
 
         let result = handle_chat_command("/undo", "s-undo", &store);
         assert!(result.is_some());
@@ -10744,12 +11186,26 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
-        store.create_session("s-undo2", "cli", None).expect("create");
-        store.append_message("s-undo2", "user", Some("search for X"), None, None).unwrap();
+        store
+            .create_session("s-undo2", "cli", None)
+            .expect("create");
+        store
+            .append_message("s-undo2", "user", Some("search for X"), None, None)
+            .unwrap();
         // assistant with tool call, tool result, then final assistant response
         store.append_message("s-undo2", "assistant", None, Some(r#"[{"id":"t1","type":"function","function":{"name":"web_search","arguments":"{}"}}]"#), None).unwrap();
-        store.append_message("s-undo2", "tool", Some("result"), None, None).unwrap();
-        store.append_message("s-undo2", "assistant", Some("Here's what I found"), None, None).unwrap();
+        store
+            .append_message("s-undo2", "tool", Some("result"), None, None)
+            .unwrap();
+        store
+            .append_message(
+                "s-undo2",
+                "assistant",
+                Some("Here's what I found"),
+                None,
+                None,
+            )
+            .unwrap();
 
         let result = handle_chat_command("/undo", "s-undo2", &store);
         let output = result.unwrap();
@@ -10765,7 +11221,9 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
-        store.create_session("s-empty", "cli", None).expect("create");
+        store
+            .create_session("s-empty", "cli", None)
+            .expect("create");
 
         let result = handle_chat_command("/undo", "s-empty", &store);
         assert!(result.is_some());
@@ -10830,8 +11288,8 @@ storage:
 
     #[test]
     fn parses_memory_list_command() {
-        let cli = Cli::try_parse_from(["genesis", "memory", "list"])
-            .expect("memory list should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "memory", "list"]).expect("memory list should parse");
         match cli.command {
             Command::Memory(MemoryCommand::List { limit }) => assert_eq!(limit, 50),
             other => panic!("unexpected command: {other:?}"),
@@ -11032,14 +11490,8 @@ storage:
 
     #[test]
     fn parses_eval_compare_command() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "eval",
-            "compare",
-            "left.json",
-            "right.json",
-        ])
-        .expect("eval compare should parse");
+        let cli = Cli::try_parse_from(["genesis", "eval", "compare", "left.json", "right.json"])
+            .expect("eval compare should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Compare { left, right }) => {
                 assert_eq!(left, "left.json");
@@ -11122,7 +11574,11 @@ storage:
         ])
         .expect("eval convert should parse");
         match cli.command {
-            Command::Eval(crate::EvalCommand::Convert { input, output, format }) => {
+            Command::Eval(crate::EvalCommand::Convert {
+                input,
+                output,
+                format,
+            }) => {
                 assert_eq!(input, "trajectory.json");
                 assert_eq!(output, "out.jsonl");
                 assert_eq!(format, "chatml");
@@ -11274,9 +11730,7 @@ storage:
         assert!(summary.top_failure_reasons.is_empty());
         assert!(summary.top_warning_messages.is_empty());
         assert_eq!(summary.models, vec![("gpt-4.1-mini".to_owned(), 2)]);
-        assert!(summary
-            .tags
-            .contains(&("offline_eval".to_owned(), 2)));
+        assert!(summary.tags.contains(&("offline_eval".to_owned(), 2)));
         assert!(summary
             .tools
             .iter()
@@ -11353,16 +11807,20 @@ storage:
             "tags": ["baseline", "with_tools"]
         });
 
-        std::fs::write(&left, serde_json::to_string_pretty(&left_trajectory).unwrap())
-            .expect("write left");
-        std::fs::write(&right, serde_json::to_string_pretty(&right_trajectory).unwrap())
-            .expect("write right");
-
-        let comparison = crate::compare_replay_reports(
-            left.to_str().unwrap(),
-            right.to_str().unwrap(),
+        std::fs::write(
+            &left,
+            serde_json::to_string_pretty(&left_trajectory).unwrap(),
         )
-        .expect("comparison should build");
+        .expect("write left");
+        std::fs::write(
+            &right,
+            serde_json::to_string_pretty(&right_trajectory).unwrap(),
+        )
+        .expect("write right");
+
+        let comparison =
+            crate::compare_replay_reports(left.to_str().unwrap(), right.to_str().unwrap())
+                .expect("comparison should build");
 
         assert_eq!(comparison.left_session_id, "left-session");
         assert_eq!(comparison.right_session_id, "right-session");
@@ -11562,14 +12020,15 @@ storage:
             "outcome": { "type": "success" },
             "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
-            .expect("write jsonl");
-
-        let result = crate::run_eval_import_chatml(
-            input.to_str().unwrap(),
-            output_dir.to_str().unwrap(),
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
-        .expect("chatml import should succeed");
+        .expect("write jsonl");
+
+        let result =
+            crate::run_eval_import_chatml(input.to_str().unwrap(), output_dir.to_str().unwrap())
+                .expect("chatml import should succeed");
 
         assert!(result.contains("imported 1 trajectories"));
         let imported_path = output_dir.join("chatml-session.json");
@@ -11601,14 +12060,15 @@ storage:
                 {"from": "gpt", "value": "hi there"}
             ]
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
-            .expect("write jsonl");
-
-        let result = crate::run_eval_import_sharegpt(
-            input.to_str().unwrap(),
-            output_dir.to_str().unwrap(),
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
-        .expect("sharegpt import should succeed");
+        .expect("write jsonl");
+
+        let result =
+            crate::run_eval_import_sharegpt(input.to_str().unwrap(), output_dir.to_str().unwrap())
+                .expect("sharegpt import should succeed");
 
         assert!(result.contains("imported 1 trajectories"));
         let imported_path = output_dir.join("sharegpt-session.json");
@@ -11704,7 +12164,12 @@ storage:
     #[test]
     fn parses_eval_import_sharegpt_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "import-sharegpt", "data.jsonl", "--output", "out",
+            "genesis",
+            "eval",
+            "import-sharegpt",
+            "data.jsonl",
+            "--output",
+            "out",
         ])
         .expect("import-sharegpt should parse");
         match cli.command {
@@ -11763,8 +12228,18 @@ storage:
         std::fs::write(src.join("s3.json"), serde_json::to_string(&t3).unwrap()).unwrap();
 
         let result = crate::run_eval_filter(
-            src.to_str().unwrap(), out.to_str().unwrap(), false,
-            Some("gpt-4"), None, None, None, true, false, None, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            Some("gpt-4"),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+            None,
         )
         .expect("filter should succeed");
 
@@ -11795,8 +12270,18 @@ storage:
         std::fs::write(src.join("s2.json"), serde_json::to_string(&t2).unwrap()).unwrap();
 
         let result = crate::run_eval_filter(
-            src.to_str().unwrap(), out.to_str().unwrap(), false,
-            None, Some("coding"), None, None, false, false, None, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            None,
+            Some("coding"),
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
         )
         .expect("filter should succeed");
 
@@ -11867,21 +12352,33 @@ storage:
         let test2 = dir.path().join("e2");
 
         crate::run_eval_split(
-            src.to_str().unwrap(), train1.to_str().unwrap(), test1.to_str().unwrap(),
-            0.6, Some(99), false,
-        ).unwrap();
+            src.to_str().unwrap(),
+            train1.to_str().unwrap(),
+            test1.to_str().unwrap(),
+            0.6,
+            Some(99),
+            false,
+        )
+        .unwrap();
 
         crate::run_eval_split(
-            src.to_str().unwrap(), train2.to_str().unwrap(), test2.to_str().unwrap(),
-            0.6, Some(99), false,
-        ).unwrap();
+            src.to_str().unwrap(),
+            train2.to_str().unwrap(),
+            test2.to_str().unwrap(),
+            0.6,
+            Some(99),
+            false,
+        )
+        .unwrap();
 
-        let names1: Vec<String> = std::fs::read_dir(&train1).unwrap()
+        let names1: Vec<String> = std::fs::read_dir(&train1)
+            .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let names2: Vec<String> = std::fs::read_dir(&train2).unwrap()
+        let names2: Vec<String> = std::fs::read_dir(&train2)
+            .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -11892,13 +12389,27 @@ storage:
     #[test]
     fn parses_eval_filter_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "filter", "src", "--output", "out",
-            "--model", "gpt-4", "--success-only", "--min-quality", "0.5",
+            "genesis",
+            "eval",
+            "filter",
+            "src",
+            "--output",
+            "out",
+            "--model",
+            "gpt-4",
+            "--success-only",
+            "--min-quality",
+            "0.5",
         ])
         .expect("filter should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Filter {
-                dir, output, model, success_only, min_quality, ..
+                dir,
+                output,
+                model,
+                success_only,
+                min_quality,
+                ..
             }) => {
                 assert_eq!(dir, "src");
                 assert_eq!(output, "out");
@@ -11913,13 +12424,18 @@ storage:
     #[test]
     fn parses_eval_split_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "split", "src", "--train", "train", "--test", "test",
-            "--ratio", "0.7", "--seed", "42",
+            "genesis", "eval", "split", "src", "--train", "train", "--test", "test", "--ratio",
+            "0.7", "--seed", "42",
         ])
         .expect("split should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Split {
-                dir, train, test, ratio, seed, ..
+                dir,
+                train,
+                test,
+                ratio,
+                seed,
+                ..
             }) => {
                 assert_eq!(dir, "src");
                 assert_eq!(train, "train");
@@ -11934,13 +12450,24 @@ storage:
     #[test]
     fn parses_eval_manifest_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "manifest", "src", "--name", "my-dataset",
-            "--description", "test set", "--save",
+            "genesis",
+            "eval",
+            "manifest",
+            "src",
+            "--name",
+            "my-dataset",
+            "--description",
+            "test set",
+            "--save",
         ])
         .expect("manifest should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Manifest {
-                dir, name, description, save, ..
+                dir,
+                name,
+                description,
+                save,
+                ..
             }) => {
                 assert_eq!(dir, "src");
                 assert_eq!(name.as_deref(), Some("my-dataset"));
@@ -11963,11 +12490,18 @@ storage:
         std::fs::write(
             dir.path().join("s1.json"),
             serde_json::to_string(&t).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = crate::run_eval_manifest(
-            dir.path().to_str().unwrap(), "test-ds", "a test", false, false, false,
-        ).expect("manifest should succeed");
+            dir.path().to_str().unwrap(),
+            "test-ds",
+            "a test",
+            false,
+            false,
+            false,
+        )
+        .expect("manifest should succeed");
 
         assert!(result.contains("test-ds"));
         assert!(result.contains("files: 1"));
@@ -11977,9 +12511,18 @@ storage:
     #[test]
     fn parses_eval_pipeline_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "pipeline", "src", "--output", "out",
-            "--validate", "--auto-tag", "--min-quality", "0.5",
-            "--success-only", "--manifest",
+            "genesis",
+            "eval",
+            "pipeline",
+            "src",
+            "--output",
+            "out",
+            "--validate",
+            "--auto-tag",
+            "--min-quality",
+            "0.5",
+            "--success-only",
+            "--manifest",
         ])
         .expect("pipeline should parse");
         match cli.command {
@@ -12029,8 +12572,19 @@ storage:
         std::fs::write(src.join("bad.json"), serde_json::to_string(&bad).unwrap()).unwrap();
 
         let result = crate::run_eval_pipeline(
-            src.to_str().unwrap(), out.to_str().unwrap(),
-            false, true, true, None, true, None, None, None, false, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            true,
+            true,
+            None,
+            true,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
         )
         .expect("pipeline should succeed");
 
@@ -12059,12 +12613,27 @@ storage:
                 "steps": [{"step_index": 0, "timestamp": "t", "action_type": "user_message", "content": "hi"}],
                 "outcome": {"type": "success"}, "tags": []
             });
-            std::fs::write(src.join(format!("s{i}.json")), serde_json::to_string(&t).unwrap()).unwrap();
+            std::fs::write(
+                src.join(format!("s{i}.json")),
+                serde_json::to_string(&t).unwrap(),
+            )
+            .unwrap();
         }
 
         let result = crate::run_eval_pipeline(
-            src.to_str().unwrap(), out.to_str().unwrap(),
-            false, false, false, None, false, None, None, None, false, Some(3), Some(42),
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(3),
+            Some(42),
         )
         .expect("pipeline should succeed");
 
@@ -12074,10 +12643,8 @@ storage:
 
     #[test]
     fn parses_eval_validate_command() {
-        let cli = Cli::try_parse_from([
-            "genesis", "eval", "validate", "src", "--remove",
-        ])
-        .expect("validate should parse");
+        let cli = Cli::try_parse_from(["genesis", "eval", "validate", "src", "--remove"])
+            .expect("validate should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Validate { dir, remove, .. }) => {
                 assert_eq!(dir, "src");
@@ -12112,9 +12679,8 @@ storage:
         });
         std::fs::write(src.join("empty.json"), serde_json::to_string(&t3).unwrap()).unwrap();
 
-        let result = crate::run_eval_validate(
-            src.to_str().unwrap(), false, false,
-        ).expect("validate should succeed");
+        let result = crate::run_eval_validate(src.to_str().unwrap(), false, false)
+            .expect("validate should succeed");
 
         assert!(result.contains("1 valid"));
         assert!(result.contains("2 invalid"));
@@ -12135,9 +12701,8 @@ storage:
         });
         std::fs::write(src.join("good.json"), serde_json::to_string(&t).unwrap()).unwrap();
 
-        let result = crate::run_eval_validate(
-            src.to_str().unwrap(), false, true,
-        ).expect("validate with remove should succeed");
+        let result = crate::run_eval_validate(src.to_str().unwrap(), false, true)
+            .expect("validate with remove should succeed");
 
         assert!(result.contains("removed 1 invalid"));
         assert!(!src.join("bad.json").exists());
@@ -12147,13 +12712,16 @@ storage:
     #[test]
     fn parses_eval_sample_command() {
         let cli = Cli::try_parse_from([
-            "genesis", "eval", "sample", "src", "--output", "out",
-            "--count", "100", "--seed", "42",
+            "genesis", "eval", "sample", "src", "--output", "out", "--count", "100", "--seed", "42",
         ])
         .expect("sample should parse");
         match cli.command {
             Command::Eval(crate::EvalCommand::Sample {
-                dir, output, count, seed, ..
+                dir,
+                output,
+                count,
+                seed,
+                ..
             }) => {
                 assert_eq!(dir, "src");
                 assert_eq!(output, "out");
@@ -12179,12 +12747,18 @@ storage:
             std::fs::write(
                 src.join(format!("s{i}.json")),
                 serde_json::to_string(&t).unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let result = crate::run_eval_sample(
-            src.to_str().unwrap(), out.to_str().unwrap(), 3, Some(42), false,
-        ).expect("sample should succeed");
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            3,
+            Some(42),
+            false,
+        )
+        .expect("sample should succeed");
 
         assert!(result.contains("sampled 3/10"));
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
@@ -12204,8 +12778,13 @@ storage:
         std::fs::write(src.join("s1.json"), serde_json::to_string(&t).unwrap()).unwrap();
 
         let result = crate::run_eval_sample(
-            src.to_str().unwrap(), out.to_str().unwrap(), 100, Some(1), false,
-        ).expect("sample should succeed");
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            100,
+            Some(1),
+            false,
+        )
+        .expect("sample should succeed");
 
         assert!(result.contains("sampled 1/1"));
     }
@@ -12230,17 +12809,16 @@ storage:
         });
         std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
 
-        crate::run_eval_convert(
-            input.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "chatml",
-        )
-        .expect("conversion should succeed");
+        crate::run_eval_convert(input.to_str().unwrap(), output.to_str().unwrap(), "chatml")
+            .expect("conversion should succeed");
 
         let raw = std::fs::read_to_string(output).expect("read output");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json line");
         assert_eq!(parsed["session_id"], "convert-chatml");
-        assert!(parsed["chatml"].as_str().unwrap().contains("<|im_start|>user"));
+        assert!(parsed["chatml"]
+            .as_str()
+            .unwrap()
+            .contains("<|im_start|>user"));
     }
 
     #[test]
@@ -12288,14 +12866,14 @@ storage:
             "outcome": { "type": "success" },
             "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
-
-        crate::run_eval_convert(
-            input.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "json",
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
-        .expect("conversion should succeed");
+        .unwrap();
+
+        crate::run_eval_convert(input.to_str().unwrap(), output.to_str().unwrap(), "json")
+            .expect("conversion should succeed");
 
         let raw = std::fs::read_to_string(output).expect("read output");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
@@ -12318,14 +12896,14 @@ storage:
                 { "from": "gpt", "value": "hi" }
             ]
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
-
-        crate::run_eval_convert(
-            input.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "json",
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
-        .expect("conversion should succeed");
+        .unwrap();
+
+        crate::run_eval_convert(input.to_str().unwrap(), output.to_str().unwrap(), "json")
+            .expect("conversion should succeed");
 
         let raw = std::fs::read_to_string(output).expect("read output");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("json");
@@ -12344,60 +12922,63 @@ storage:
                 .expect("write trajectory");
         };
 
-        write("a.json", serde_json::json!({
-            "session_id": "a",
-            "model": "gpt-4.1-mini",
-            "system_prompt_hash": "hash-a",
-            "started_at": "2026-03-08T10:00:00Z",
-            "completed_at": "2026-03-08T10:01:00Z",
-            "steps": [
-                {"step_index": 0, "timestamp": "2026-03-08T10:00:00Z", "action_type": "user_message", "content": "u1"},
-                {"step_index": 1, "timestamp": "2026-03-08T10:00:01Z", "action_type": "assistant_message", "content": "a1"},
-                {"step_index": 2, "timestamp": "2026-03-08T10:00:02Z", "action_type": "tool_call", "content": "tool_call: shell", "tool_name": "shell", "tool_arguments": "{\"cmd\":\"pwd\"}"},
-                {"step_index": 3, "timestamp": "2026-03-08T10:00:03Z", "action_type": "tool_result", "content": "tool_result: shell", "tool_name": "shell", "tool_result": "/tmp"}
-            ],
-            "outcome": { "type": "success" },
-            "tags": ["offline_eval", "baseline"]
-        }));
+        write(
+            "a.json",
+            serde_json::json!({
+                "session_id": "a",
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": "hash-a",
+                "started_at": "2026-03-08T10:00:00Z",
+                "completed_at": "2026-03-08T10:01:00Z",
+                "steps": [
+                    {"step_index": 0, "timestamp": "2026-03-08T10:00:00Z", "action_type": "user_message", "content": "u1"},
+                    {"step_index": 1, "timestamp": "2026-03-08T10:00:01Z", "action_type": "assistant_message", "content": "a1"},
+                    {"step_index": 2, "timestamp": "2026-03-08T10:00:02Z", "action_type": "tool_call", "content": "tool_call: shell", "tool_name": "shell", "tool_arguments": "{\"cmd\":\"pwd\"}"},
+                    {"step_index": 3, "timestamp": "2026-03-08T10:00:03Z", "action_type": "tool_result", "content": "tool_result: shell", "tool_name": "shell", "tool_result": "/tmp"}
+                ],
+                "outcome": { "type": "success" },
+                "tags": ["offline_eval", "baseline"]
+            }),
+        );
 
-        write("b.json", serde_json::json!({
-            "session_id": "b",
-            "model": "gpt-4.1-mini",
-            "system_prompt_hash": "hash-b",
-            "started_at": "2026-03-08T11:00:00Z",
-            "completed_at": "2026-03-08T11:01:00Z",
-            "steps": [
-                {"step_index": 0, "timestamp": "2026-03-08T11:00:00Z", "action_type": "user_message", "content": "u2"},
-                {"step_index": 1, "timestamp": "2026-03-08T11:00:01Z", "action_type": "assistant_message", "content": "a2"}
-            ],
-            "outcome": { "type": "failure", "reason": "tool broke" },
-            "tags": ["offline_eval"]
-        }));
+        write(
+            "b.json",
+            serde_json::json!({
+                "session_id": "b",
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": "hash-b",
+                "started_at": "2026-03-08T11:00:00Z",
+                "completed_at": "2026-03-08T11:01:00Z",
+                "steps": [
+                    {"step_index": 0, "timestamp": "2026-03-08T11:00:00Z", "action_type": "user_message", "content": "u2"},
+                    {"step_index": 1, "timestamp": "2026-03-08T11:00:01Z", "action_type": "assistant_message", "content": "a2"}
+                ],
+                "outcome": { "type": "failure", "reason": "tool broke" },
+                "tags": ["offline_eval"]
+            }),
+        );
 
-        write("c.json", serde_json::json!({
-            "session_id": "c",
-            "model": "claude-sonnet-4-6",
-            "system_prompt_hash": "hash-c",
-            "started_at": "2026-03-08T12:00:00Z",
-            "completed_at": "2026-03-08T12:01:00Z",
-            "steps": [
-                {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "u3"},
-                {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "a3"},
-                {"step_index": 2, "timestamp": "2026-03-08T12:00:02Z", "action_type": "assistant_message", "content": "a4"}
-            ],
-            "outcome": { "type": "abandoned" },
-            "tags": ["other"]
-        }));
+        write(
+            "c.json",
+            serde_json::json!({
+                "session_id": "c",
+                "model": "claude-sonnet-4-6",
+                "system_prompt_hash": "hash-c",
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [
+                    {"step_index": 0, "timestamp": "2026-03-08T12:00:00Z", "action_type": "user_message", "content": "u3"},
+                    {"step_index": 1, "timestamp": "2026-03-08T12:00:01Z", "action_type": "assistant_message", "content": "a3"},
+                    {"step_index": 2, "timestamp": "2026-03-08T12:00:02Z", "action_type": "assistant_message", "content": "a4"}
+                ],
+                "outcome": { "type": "abandoned" },
+                "tags": ["other"]
+            }),
+        );
 
-        let stats = crate::compute_eval_stats(
-            dir.path().to_str().unwrap(),
-            false,
-            None,
-            None,
-            None,
-            false,
-        )
-        .expect("stats should compute");
+        let stats =
+            crate::compute_eval_stats(dir.path().to_str().unwrap(), false, None, None, None, false)
+                .expect("stats should compute");
 
         assert_eq!(stats.total_trajectories, 3);
         assert_eq!(stats.total_turns, 9);
@@ -12434,24 +13015,29 @@ storage:
         let root_file = dir.path().join("root.json");
         let nested_file = nested.join("child.json");
 
-        let trajectory = |session_id: &str| serde_json::json!({
-            "session_id": session_id,
-            "model": "gpt-4.1-mini",
-            "system_prompt_hash": format!("hash-{session_id}"),
-            "started_at": "2026-03-08T12:00:00Z",
-            "completed_at": "2026-03-08T12:01:00Z",
-            "steps": [{
-                "step_index": 0,
-                "timestamp": "2026-03-08T12:00:00Z",
-                "action_type": "user_message",
-                "content": "hello"
-            }],
-            "outcome": { "type": "success" },
-            "tags": []
-        });
+        let trajectory = |session_id: &str| {
+            serde_json::json!({
+                "session_id": session_id,
+                "model": "gpt-4.1-mini",
+                "system_prompt_hash": format!("hash-{session_id}"),
+                "started_at": "2026-03-08T12:00:00Z",
+                "completed_at": "2026-03-08T12:01:00Z",
+                "steps": [{
+                    "step_index": 0,
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "action_type": "user_message",
+                    "content": "hello"
+                }],
+                "outcome": { "type": "success" },
+                "tags": []
+            })
+        };
 
-        std::fs::write(&root_file, serde_json::to_string_pretty(&trajectory("root")).unwrap())
-            .expect("write root");
+        std::fs::write(
+            &root_file,
+            serde_json::to_string_pretty(&trajectory("root")).unwrap(),
+        )
+        .expect("write root");
         std::fs::write(
             &nested_file,
             serde_json::to_string_pretty(&trajectory("nested")).unwrap(),
@@ -12534,10 +13120,10 @@ storage:
         assert_eq!(summary.model_filter.as_deref(), Some("gpt-4.1-mini"));
         assert_eq!(summary.tag_filter.as_deref(), Some("offline_eval"));
         assert_eq!(summary.models, vec![("gpt-4.1-mini".to_owned(), 1)]);
-        assert_eq!(summary.tags, vec![
-            ("offline_eval".to_owned(), 1),
-            ("smoke".to_owned(), 1),
-        ]);
+        assert_eq!(
+            summary.tags,
+            vec![("offline_eval".to_owned(), 1), ("smoke".to_owned(), 1),]
+        );
     }
 
     #[test]
@@ -12583,7 +13169,12 @@ storage:
                 .expect("write trajectory");
         };
 
-        write(&success_clean, "s-1", serde_json::json!({ "type": "success" }), false);
+        write(
+            &success_clean,
+            "s-1",
+            serde_json::json!({ "type": "success" }),
+            false,
+        );
         write(
             &failure_warn,
             "s-2",
@@ -12669,8 +13260,7 @@ storage:
 
     #[test]
     fn parses_status_command() {
-        let cli = Cli::try_parse_from(["genesis", "status"])
-            .expect("status should parse");
+        let cli = Cli::try_parse_from(["genesis", "status"]).expect("status should parse");
         assert!(matches!(cli.command, Command::Status));
     }
 
@@ -12679,7 +13269,11 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "sessions", "import", "chat.json"])
             .expect("sessions import should parse");
         match cli.command {
-            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+            Command::Sessions(SessionsCommand::Import {
+                file,
+                format,
+                title,
+            }) => {
                 assert_eq!(file, "chat.json");
                 assert!(format.is_none());
                 assert!(title.is_none());
@@ -12691,13 +13285,22 @@ storage:
     #[test]
     fn parses_sessions_import_with_options() {
         let cli = Cli::try_parse_from([
-            "genesis", "sessions", "import", "data.jsonl",
-            "--format", "jsonl",
-            "--title", "My Chat",
+            "genesis",
+            "sessions",
+            "import",
+            "data.jsonl",
+            "--format",
+            "jsonl",
+            "--title",
+            "My Chat",
         ])
         .expect("sessions import with options should parse");
         match cli.command {
-            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+            Command::Sessions(SessionsCommand::Import {
+                file,
+                format,
+                title,
+            }) => {
                 assert_eq!(file, "data.jsonl");
                 assert_eq!(format.as_deref(), Some("jsonl"));
                 assert_eq!(title.as_deref(), Some("My Chat"));
@@ -12709,13 +13312,22 @@ storage:
     #[test]
     fn parses_sessions_import_sharegpt_format() {
         let cli = Cli::try_parse_from([
-            "genesis", "sessions", "import", "conversation.json",
-            "--format", "sharegpt",
-            "--title", "Imported Conversation",
+            "genesis",
+            "sessions",
+            "import",
+            "conversation.json",
+            "--format",
+            "sharegpt",
+            "--title",
+            "Imported Conversation",
         ])
         .expect("sessions import sharegpt should parse");
         match cli.command {
-            Command::Sessions(SessionsCommand::Import { file, format, title }) => {
+            Command::Sessions(SessionsCommand::Import {
+                file,
+                format,
+                title,
+            }) => {
                 assert_eq!(file, "conversation.json");
                 assert_eq!(format.as_deref(), Some("sharegpt"));
                 assert_eq!(title.as_deref(), Some("Imported Conversation"));
@@ -12728,8 +13340,8 @@ storage:
 
     #[test]
     fn parses_pairing_list() {
-        let cli = Cli::try_parse_from(["genesis", "pairing", "list"])
-            .expect("pairing list should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "pairing", "list"]).expect("pairing list should parse");
         match cli.command {
             Command::Pairing(PairingCommand::List { platform }) => {
                 assert!(platform.is_none());
@@ -12740,10 +13352,8 @@ storage:
 
     #[test]
     fn parses_pairing_list_with_platform() {
-        let cli = Cli::try_parse_from([
-            "genesis", "pairing", "list", "--platform", "telegram",
-        ])
-        .expect("pairing list --platform should parse");
+        let cli = Cli::try_parse_from(["genesis", "pairing", "list", "--platform", "telegram"])
+            .expect("pairing list --platform should parse");
         match cli.command {
             Command::Pairing(PairingCommand::List { platform }) => {
                 assert_eq!(platform.as_deref(), Some("telegram"));
@@ -12766,10 +13376,8 @@ storage:
 
     #[test]
     fn parses_pairing_approve() {
-        let cli = Cli::try_parse_from([
-            "genesis", "pairing", "approve", "telegram", "ABC12345",
-        ])
-        .expect("pairing approve should parse");
+        let cli = Cli::try_parse_from(["genesis", "pairing", "approve", "telegram", "ABC12345"])
+            .expect("pairing approve should parse");
         match cli.command {
             Command::Pairing(PairingCommand::Approve { platform, code }) => {
                 assert_eq!(platform, "telegram");
@@ -12781,10 +13389,8 @@ storage:
 
     #[test]
     fn parses_pairing_revoke() {
-        let cli = Cli::try_parse_from([
-            "genesis", "pairing", "revoke", "discord", "user-42",
-        ])
-        .expect("pairing revoke should parse");
+        let cli = Cli::try_parse_from(["genesis", "pairing", "revoke", "discord", "user-42"])
+            .expect("pairing revoke should parse");
         match cli.command {
             Command::Pairing(PairingCommand::Revoke { platform, user_id }) => {
                 assert_eq!(platform, "discord");
@@ -12808,10 +13414,9 @@ storage:
 
     #[test]
     fn parses_pairing_clear_pending_with_platform() {
-        let cli = Cli::try_parse_from([
-            "genesis", "pairing", "clear-pending", "--platform", "slack",
-        ])
-        .expect("pairing clear-pending --platform should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "pairing", "clear-pending", "--platform", "slack"])
+                .expect("pairing clear-pending --platform should parse");
         match cli.command {
             Command::Pairing(PairingCommand::ClearPending { platform }) => {
                 assert_eq!(platform.as_deref(), Some("slack"));
@@ -12822,10 +13427,14 @@ storage:
 
     #[test]
     fn parses_uninstall_command_defaults() {
-        let cli = Cli::try_parse_from(["genesis", "uninstall"])
-            .expect("uninstall command should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "uninstall"]).expect("uninstall command should parse");
         match cli.command {
-            Command::Uninstall { remove_data, remove_config, force } => {
+            Command::Uninstall {
+                remove_data,
+                remove_config,
+                force,
+            } => {
                 assert!(!remove_data);
                 assert!(!remove_config);
                 assert!(!force);
@@ -12837,11 +13446,19 @@ storage:
     #[test]
     fn parses_uninstall_command_with_all_flags() {
         let cli = Cli::try_parse_from([
-            "genesis", "uninstall", "--remove-data", "--remove-config", "--force",
+            "genesis",
+            "uninstall",
+            "--remove-data",
+            "--remove-config",
+            "--force",
         ])
         .expect("uninstall command with flags should parse");
         match cli.command {
-            Command::Uninstall { remove_data, remove_config, force } => {
+            Command::Uninstall {
+                remove_data,
+                remove_config,
+                force,
+            } => {
                 assert!(remove_data);
                 assert!(remove_config);
                 assert!(force);
@@ -12855,7 +13472,11 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "uninstall", "--remove-data"])
             .expect("uninstall --remove-data should parse");
         match cli.command {
-            Command::Uninstall { remove_data, remove_config, force } => {
+            Command::Uninstall {
+                remove_data,
+                remove_config,
+                force,
+            } => {
                 assert!(remove_data);
                 assert!(!remove_config);
                 assert!(!force);
@@ -12869,7 +13490,11 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "uninstall", "--remove-config"])
             .expect("uninstall --remove-config should parse");
         match cli.command {
-            Command::Uninstall { remove_data, remove_config, force } => {
+            Command::Uninstall {
+                remove_data,
+                remove_config,
+                force,
+            } => {
                 assert!(!remove_data);
                 assert!(remove_config);
                 assert!(!force);

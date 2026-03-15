@@ -61,10 +61,22 @@ mod session_store_tests {
             .create_session("session-beta", "slack", None)
             .expect("second session should be created");
         store
-            .append_message("session-alpha", "user", Some("rust migration checklist"), None, None)
+            .append_message(
+                "session-alpha",
+                "user",
+                Some("rust migration checklist"),
+                None,
+                None,
+            )
             .expect("first message should be stored");
         store
-            .append_message("session-beta", "user", Some("provider client work"), None, None)
+            .append_message(
+                "session-beta",
+                "user",
+                Some("provider client work"),
+                None,
+                None,
+            )
             .expect("second message should be stored");
 
         let matches = store
@@ -87,10 +99,17 @@ mod session_store_tests {
             .create_session("session-tok", "cli", None)
             .expect("session should be created");
 
-        store.add_usage("session-tok", 100, 50).expect("first add_usage");
-        store.add_usage("session-tok", 200, 75).expect("second add_usage");
+        store
+            .add_usage("session-tok", 100, 50)
+            .expect("first add_usage");
+        store
+            .add_usage("session-tok", 200, 75)
+            .expect("second add_usage");
 
-        let session = store.get_session("session-tok").expect("get should work").expect("session should exist");
+        let session = store
+            .get_session("session-tok")
+            .expect("get should work")
+            .expect("session should exist");
         assert_eq!(session.total_input_tokens, 300);
         assert_eq!(session.total_output_tokens, 125);
     }
@@ -107,9 +126,14 @@ mod session_store_tests {
             .expect("session should be created");
 
         // Should be a no-op
-        store.add_usage("session-zero", 0, 0).expect("zero add_usage");
+        store
+            .add_usage("session-zero", 0, 0)
+            .expect("zero add_usage");
 
-        let session = store.get_session("session-zero").expect("get should work").expect("session should exist");
+        let session = store
+            .get_session("session-zero")
+            .expect("get should work")
+            .expect("session should exist");
         assert_eq!(session.total_input_tokens, 0);
         assert_eq!(session.total_output_tokens, 0);
     }
@@ -139,7 +163,9 @@ mod session_store_tests {
         bootstrap(&database_path).expect("bootstrap should succeed");
 
         let store = SessionStore::new(&database_path);
-        store.create_session("s1", "cli", Some("Original")).expect("create");
+        store
+            .create_session("s1", "cli", Some("Original"))
+            .expect("create");
 
         let session = store.get_session("s1").unwrap().unwrap();
         assert_eq!(session.title.as_deref(), Some("Original"));
@@ -168,7 +194,9 @@ mod session_store_tests {
 
         let store = SessionStore::new(&database_path);
         store.create_session("recent", "cli", None).expect("create");
-        store.append_message("recent", "user", Some("hello"), None, None).expect("msg");
+        store
+            .append_message("recent", "user", Some("hello"), None, None)
+            .expect("msg");
 
         let deleted = store.purge_older_than(30).unwrap();
         assert_eq!(deleted, 0);
@@ -357,7 +385,13 @@ mod session_store_tests {
             .append_message("session-search", "user", Some("hello world"), None, None)
             .expect("first message should be stored");
         store
-            .append_message("session-search", "assistant", Some("goodbye moon"), None, None)
+            .append_message(
+                "session-search",
+                "assistant",
+                Some("goodbye moon"),
+                None,
+                None,
+            )
             .expect("second message should be stored");
         store
             .append_message("session-search", "user", Some("hello again"), None, None)
@@ -449,10 +483,11 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 
 /// Run a batch of SQL statements as a migration step.
 fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), StorageError> {
-    conn.execute_batch(sql).map_err(|source| StorageError::Sqlite {
-        path: path.to_path_buf(),
-        source,
-    })
+    conn.execute_batch(sql)
+        .map_err(|source| StorageError::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
@@ -1338,7 +1373,11 @@ impl SessionStore {
     /// Remove a tag from a session.
     pub fn remove_tag(&self, session_id: &str, tag: &str) -> Result<bool, StorageError> {
         let tags = self.get_tags(session_id)?;
-        let filtered: Vec<&str> = tags.iter().filter(|t| t.as_str() != tag).map(|t| t.as_str()).collect();
+        let filtered: Vec<&str> = tags
+            .iter()
+            .filter(|t| t.as_str() != tag)
+            .map(|t| t.as_str())
+            .collect();
         if filtered.len() == tags.len() {
             return Ok(false); // Tag wasn't present
         }
@@ -1416,10 +1455,7 @@ impl SessionStore {
             })?;
         // Delete session
         let deleted = connection
-            .execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                params![session_id],
-            )
+            .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1900,9 +1936,7 @@ impl SessionStore {
                 source,
             })?;
         let tool_jsons: Vec<String> = stmt
-            .query_map([&period], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map([&period], |row| row.get::<_, String>(0))
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -2021,11 +2055,10 @@ impl ScheduleStore {
                 source,
             })?;
 
-        self.get(id)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(id)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a schedule by ID.
@@ -2235,11 +2268,10 @@ impl UserModelStore {
                 source,
             })?;
 
-        self.get(trait_key)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(trait_key)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a specific user trait by key.
@@ -2272,12 +2304,12 @@ impl UserModelStore {
                 source,
             })?;
 
-        let rows = stmt
-            .query_map([], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        let rows =
+            stmt.query_map([], Self::row_to_trait)
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
 
         collect_rows(rows, &self.database_path)
     }
@@ -2332,7 +2364,10 @@ impl UserModelStore {
     pub fn delete(&self, trait_key: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let rows = connection
-            .execute("DELETE FROM user_model WHERE trait_key = ?1", params![trait_key])
+            .execute(
+                "DELETE FROM user_model WHERE trait_key = ?1",
+                params![trait_key],
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -2429,11 +2464,10 @@ impl SkillStore {
                 source,
             })?;
 
-        self.get(name)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(name)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a skill by name.
@@ -2466,12 +2500,12 @@ impl SkillStore {
                 source,
             })?;
 
-        let rows = stmt
-            .query_map([], Self::row_to_skill)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        let rows =
+            stmt.query_map([], Self::row_to_skill)
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
 
         collect_rows(rows, &self.database_path)
     }
@@ -2504,7 +2538,11 @@ impl SkillStore {
     /// Find skills whose trigger hints, names, descriptions, or tags match the
     /// given user prompt. Uses simple keyword overlap scoring to rank results.
     /// Returns up to `limit` matching skills, ordered by relevance score.
-    pub fn find_matching(&self, prompt: &str, limit: usize) -> Result<Vec<StoredSkill>, StorageError> {
+    pub fn find_matching(
+        &self,
+        prompt: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredSkill>, StorageError> {
         let all_skills = self.list_all()?;
         if all_skills.is_empty() {
             return Ok(Vec::new());
@@ -2513,7 +2551,11 @@ impl SkillStore {
         // Tokenize the prompt into lowercase words.
         let prompt_words: Vec<String> = prompt
             .split_whitespace()
-            .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_owned())
+            .map(|w| {
+                w.to_lowercase()
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_owned()
+            })
             .filter(|w| w.len() >= 2)
             .collect();
 
@@ -2680,11 +2722,7 @@ fn skill_match_score(skill: &StoredSkill, prompt_words: &[String]) -> f64 {
         .map(|w| w.to_lowercase())
         .collect();
 
-    let tag_words: Vec<String> = skill
-        .tags
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let tag_words: Vec<String> = skill.tags.iter().map(|t| t.to_lowercase()).collect();
 
     for word in prompt_words {
         // Trigger hint matches are weighted highest (3x).
@@ -2756,11 +2794,10 @@ impl SubagentStore {
                 source,
             })?;
 
-        self.get(id)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(id)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a subagent by ID.
@@ -2781,7 +2818,10 @@ impl SubagentStore {
     }
 
     /// List all subagents for a parent session.
-    pub fn list_by_parent(&self, parent_session_id: &str) -> Result<Vec<StoredSubagent>, StorageError> {
+    pub fn list_by_parent(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<StoredSubagent>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -3245,11 +3285,9 @@ impl EmbeddingStore {
     pub fn count(&self) -> Result<usize, StorageError> {
         let connection = open(&self.database_path)?;
         let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM memory_embeddings",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| {
+                row.get(0)
+            })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3436,13 +3474,13 @@ impl PairingStore {
     }
 
     /// List all approved users, optionally filtered by platform.
-    pub fn list_approved(
-        &self,
-        platform: Option<&str>,
-    ) -> Result<Vec<ApprovedUser>, StorageError> {
+    pub fn list_approved(&self, platform: Option<&str>) -> Result<Vec<ApprovedUser>, StorageError> {
         let connection = open(&self.database_path)?;
         let db = &self.database_path;
-        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
 
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<ApprovedUser> {
             Ok(ApprovedUser {
@@ -3559,12 +3597,7 @@ impl PairingStore {
                 "SELECT user_id, user_name FROM pairing_pending
                  WHERE platform = ?1 AND code = ?2",
                 params![platform, &code],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -3631,7 +3664,10 @@ impl PairingStore {
     ) -> Result<Vec<PendingPairing>, StorageError> {
         let connection = open(&self.database_path)?;
         let db = &self.database_path;
-        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
 
         // Clean up expired first
         Self::cleanup_expired_codes(
@@ -3676,11 +3712,7 @@ impl PairingStore {
     }
 
     /// Revoke an approved user's access.
-    pub fn revoke(
-        &self,
-        platform: &str,
-        user_id: &str,
-    ) -> Result<bool, StorageError> {
+    pub fn revoke(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let rows = connection
             .execute(
@@ -3744,10 +3776,7 @@ impl ChannelStore {
     }
 
     /// List cached channels, optionally filtered by platform.
-    pub fn list(
-        &self,
-        platform: Option<&str>,
-    ) -> Result<Vec<CachedChannel>, StorageError> {
+    pub fn list(&self, platform: Option<&str>) -> Result<Vec<CachedChannel>, StorageError> {
         let connection = open(&self.database_path)?;
 
         let (sql, param): (&str, Option<&str>) = if platform.is_some() {
@@ -3765,10 +3794,12 @@ impl ChannelStore {
             )
         };
 
-        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
-        })?;
+        let mut stmt = connection
+            .prepare(sql)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let row_mapper = |row: &rusqlite::Row| {
             Ok(CachedChannel {
@@ -3836,11 +3867,7 @@ impl ChannelStore {
     }
 
     /// Check if channels for a platform are cached and fresh (within max_age_secs).
-    pub fn is_fresh(
-        &self,
-        platform: &str,
-        max_age_secs: i64,
-    ) -> Result<bool, StorageError> {
+    pub fn is_fresh(&self, platform: &str, max_age_secs: i64) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let fresh: bool = connection
             .query_row(
@@ -3943,7 +3970,11 @@ impl AuditLogStore {
     }
 
     /// Query audit entries for a specific session.
-    pub fn by_session(&self, session_id: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+    pub fn by_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -3969,7 +4000,11 @@ impl AuditLogStore {
     }
 
     /// Query audit entries by event type.
-    pub fn by_event_type(&self, event_type: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+    pub fn by_event_type(
+        &self,
+        event_type: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -4239,8 +4274,15 @@ impl ResponseCacheStore {
                   hit_count, created_at, expires_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'),
                          datetime('now', '+' || ?7 || ' seconds'))",
-                params![cache_key, model, response, tool_calls_json,
-                        input_tokens, output_tokens, ttl_seconds],
+                params![
+                    cache_key,
+                    model,
+                    response,
+                    tool_calls_json,
+                    input_tokens,
+                    output_tokens,
+                    ttl_seconds
+                ],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
@@ -4520,10 +4562,12 @@ impl SandboxStore {
             )
         };
 
-        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
-        })?;
+        let mut stmt = connection
+            .prepare(sql)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let row_mapper = |row: &rusqlite::Row| {
             Ok(SandboxRow {
@@ -4645,9 +4689,15 @@ mod sandbox_store_tests {
         bootstrap(&db_path).expect("bootstrap should succeed");
 
         let store = SandboxStore::new(&db_path);
-        store.upsert("sb-a1", "singularity", "task-a1", None).expect("upsert a1");
-        store.upsert("sb-a2", "singularity", "task-a2", None).expect("upsert a2");
-        store.upsert("sb-b1", "modal", "task-b1", None).expect("upsert b1");
+        store
+            .upsert("sb-a1", "singularity", "task-a1", None)
+            .expect("upsert a1");
+        store
+            .upsert("sb-a2", "singularity", "task-a2", None)
+            .expect("upsert a2");
+        store
+            .upsert("sb-b1", "modal", "task-b1", None)
+            .expect("upsert b1");
 
         let singularity_rows = store
             .list(Some("singularity"))
@@ -4666,8 +4716,12 @@ mod sandbox_store_tests {
         bootstrap(&db_path).expect("bootstrap should succeed");
 
         let store = SandboxStore::new(&db_path);
-        store.upsert("sb-fresh", "singularity", "task-fresh", None).expect("upsert fresh");
-        store.upsert("sb-stale", "singularity", "task-stale", None).expect("upsert stale");
+        store
+            .upsert("sb-fresh", "singularity", "task-fresh", None)
+            .expect("upsert fresh");
+        store
+            .upsert("sb-stale", "singularity", "task-stale", None)
+            .expect("upsert stale");
 
         // Backdate the stale record's last_active by 10 days.
         let connection = open(&db_path).expect("open should succeed");
@@ -4769,7 +4823,9 @@ mod sticker_cache_tests {
         bootstrap(&db_path).unwrap();
 
         let store = StickerCacheStore::new(&db_path);
-        store.set("del-1", "A bird flying", "🐦", "BirdPack").unwrap();
+        store
+            .set("del-1", "A bird flying", "🐦", "BirdPack")
+            .unwrap();
 
         assert!(store.delete("del-1").unwrap());
         assert!(store.get("del-1").unwrap().is_none());
@@ -4843,11 +4899,16 @@ mod tests {
             root: dir.path().join("legacy-hermes"),
             config_path: Some(dir.path().join("legacy-hermes").join("cli-config.yaml")),
             data_dir: Some(dir.path().join("legacy-hermes").join("data")),
-            database_path: Some(dir.path().join("legacy-hermes").join("data").join("genesis.db")),
+            database_path: Some(
+                dir.path()
+                    .join("legacy-hermes")
+                    .join("data")
+                    .join("genesis.db"),
+            ),
         };
 
-        let recorded =
-            record_import_run(&database_path, &source, ImportStatus::Planned).expect("recording should work");
+        let recorded = record_import_run(&database_path, &source, ImportStatus::Planned)
+            .expect("recording should work");
         let latest = latest_import_run(&database_path)
             .expect("query should work")
             .expect("latest import run should exist");
@@ -4904,9 +4965,7 @@ mod tests {
             .append_message("s-2", "tool", Some("test"), Some("call_1"), None)
             .expect("append tool result should work");
 
-        let messages = store
-            .load_messages("s-2")
-            .expect("load should work");
+        let messages = store.load_messages("s-2").expect("load should work");
 
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "user");
@@ -4929,7 +4988,13 @@ mod tests {
             .expect("create should work");
 
         store
-            .append_message("s-3", "user", Some("Tell me about quantum computing"), None, None)
+            .append_message(
+                "s-3",
+                "user",
+                Some("Tell me about quantum computing"),
+                None,
+                None,
+            )
             .expect("append should work");
         store
             .append_message("s-4", "user", Some("What is the weather today"), None, None)
@@ -5014,7 +5079,10 @@ mod tests {
         assert_eq!(skill.description, "Reviews code for bugs and style issues");
         assert_eq!(skill.version, 1);
         assert_eq!(skill.tags, vec!["dev", "review"]);
-        assert_eq!(skill.trigger_hint.as_deref(), Some("when user asks to review code"));
+        assert_eq!(
+            skill.trigger_hint.as_deref(),
+            Some("when user asks to review code")
+        );
 
         let fetched = store.get("code_review").unwrap().expect("should exist");
         assert_eq!(fetched.name, "code_review");
@@ -5033,7 +5101,13 @@ mod tests {
         assert_eq!(v1.version, 1);
 
         let v2 = store
-            .upsert("deploy", "Deploy to production (improved)", "run deploy script v2", None, &["ops"])
+            .upsert(
+                "deploy",
+                "Deploy to production (improved)",
+                "run deploy script v2",
+                None,
+                &["ops"],
+            )
             .expect("v2");
         assert_eq!(v2.version, 2);
         assert_eq!(v2.description, "Deploy to production (improved)");
@@ -5047,8 +5121,12 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("alpha", "A skill", "do A", None, &["a"]).unwrap();
-        store.upsert("beta", "B skill", "do B", None, &["b"]).unwrap();
+        store
+            .upsert("alpha", "A skill", "do A", None, &["a"])
+            .unwrap();
+        store
+            .upsert("beta", "B skill", "do B", None, &["b"])
+            .unwrap();
 
         let all = store.list_all().unwrap();
         assert_eq!(all.len(), 2);
@@ -5070,9 +5148,33 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("web_scrape", "Scrape web", "use curl", None, &["web", "data"]).unwrap();
-        store.upsert("deploy", "Deploy", "kubectl apply", None, &["ops", "deploy"]).unwrap();
-        store.upsert("test_runner", "Run tests", "cargo test", None, &["dev", "test"]).unwrap();
+        store
+            .upsert(
+                "web_scrape",
+                "Scrape web",
+                "use curl",
+                None,
+                &["web", "data"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy",
+                "kubectl apply",
+                None,
+                &["ops", "deploy"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "test_runner",
+                "Run tests",
+                "cargo test",
+                None,
+                &["dev", "test"],
+            )
+            .unwrap();
 
         let web_skills = store.find_by_tag("web").unwrap();
         assert_eq!(web_skills.len(), 1);
@@ -5090,11 +5192,37 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("deploy", "Deploy app to production", "kubectl apply", Some("deploy production"), &["ops", "deploy"]).unwrap();
-        store.upsert("review", "Review code for bugs", "check bugs", Some("review code"), &["dev", "review"]).unwrap();
-        store.upsert("unrelated", "Unrelated skill", "do nothing", Some("bake cookies"), &["cooking"]).unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy app to production",
+                "kubectl apply",
+                Some("deploy production"),
+                &["ops", "deploy"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "review",
+                "Review code for bugs",
+                "check bugs",
+                Some("review code"),
+                &["dev", "review"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "unrelated",
+                "Unrelated skill",
+                "do nothing",
+                Some("bake cookies"),
+                &["cooking"],
+            )
+            .unwrap();
 
-        let matches = store.find_matching("please deploy to production", 5).unwrap();
+        let matches = store
+            .find_matching("please deploy to production", 5)
+            .unwrap();
         assert!(!matches.is_empty(), "should find deploy skill");
         assert_eq!(matches[0].name, "deploy");
     }
@@ -5106,7 +5234,15 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("deploy", "Deploy app", "run deploy", Some("deploy"), &["ops"]).unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy app",
+                "run deploy",
+                Some("deploy"),
+                &["ops"],
+            )
+            .unwrap();
 
         let matches = store.find_matching("quantum physics lecture", 5).unwrap();
         assert!(matches.is_empty());
@@ -5121,7 +5257,15 @@ mod tests {
         let store = super::SkillStore::new(&db_path);
         for i in 0..10 {
             let name = format!("deploy_{i}");
-            store.upsert(&name, "Deploy variant", "run it", Some("deploy app"), &["deploy"]).unwrap();
+            store
+                .upsert(
+                    &name,
+                    "Deploy variant",
+                    "run it",
+                    Some("deploy app"),
+                    &["deploy"],
+                )
+                .unwrap();
         }
 
         let matches = store.find_matching("deploy my app", 3).unwrap();
@@ -5136,7 +5280,12 @@ mod tests {
 
         let store = super::UserModelStore::new(&db_path);
         let t = store
-            .observe("prefers_rust", "preference", "User prefers Rust over Python", Some("s1"))
+            .observe(
+                "prefers_rust",
+                "preference",
+                "User prefers Rust over Python",
+                Some("s1"),
+            )
             .expect("observe");
 
         assert_eq!(t.trait_key, "prefers_rust");
@@ -5152,9 +5301,30 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
-        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
-        let t = store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
+        store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
+        store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
+        let t = store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
 
         assert_eq!(t.evidence_count, 3);
         assert!((t.confidence - 0.7).abs() < 0.01); // 0.5 + 0.1 + 0.1 = 0.7
@@ -5169,7 +5339,14 @@ mod tests {
         let store = super::UserModelStore::new(&db_path);
         // Observe 10 times: 0.5 + 9*0.1 = 1.4 -> capped at 1.0
         for _ in 0..10 {
-            store.observe("expert_rust", "expertise", "Expert-level Rust developer", None).unwrap();
+            store
+                .observe(
+                    "expert_rust",
+                    "expertise",
+                    "Expert-level Rust developer",
+                    None,
+                )
+                .unwrap();
         }
         let t = store.get("expert_rust").unwrap().expect("should exist");
         assert!(t.confidence <= 1.0);
@@ -5183,9 +5360,15 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("pref_dark_mode", "preference", "Likes dark mode", None).unwrap();
-        store.observe("pref_vim", "preference", "Uses vim bindings", None).unwrap();
-        store.observe("style_formal", "communication_style", "Formal tone", None).unwrap();
+        store
+            .observe("pref_dark_mode", "preference", "Likes dark mode", None)
+            .unwrap();
+        store
+            .observe("pref_vim", "preference", "Uses vim bindings", None)
+            .unwrap();
+        store
+            .observe("style_formal", "communication_style", "Formal tone", None)
+            .unwrap();
 
         let prefs = store.list_by_category("preference").unwrap();
         assert_eq!(prefs.len(), 2);
@@ -5201,10 +5384,14 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("low_conf", "preference", "Maybe likes X", None).unwrap();
+        store
+            .observe("low_conf", "preference", "Maybe likes X", None)
+            .unwrap();
         // Observe "high_conf" 4 times: confidence = 0.5 + 3*0.1 = 0.8
         for _ in 0..4 {
-            store.observe("high_conf", "preference", "Definitely likes Y", None).unwrap();
+            store
+                .observe("high_conf", "preference", "Definitely likes Y", None)
+                .unwrap();
         }
 
         let confident = store.confident_traits(0.7).unwrap();
@@ -5219,7 +5406,9 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("temp", "preference", "Temporary", None).unwrap();
+        store
+            .observe("temp", "preference", "Temporary", None)
+            .unwrap();
         assert!(store.delete("temp").unwrap());
         assert!(!store.delete("temp").unwrap());
         assert!(store.get("temp").unwrap().is_none());
@@ -5268,7 +5457,9 @@ mod tests {
         session_store.create_session("c", "subagent", None).unwrap();
 
         let store = super::SubagentStore::new(&db_path);
-        store.create("sub-2", "p", "c", "runner", "build it").unwrap();
+        store
+            .create("sub-2", "p", "c", "runner", "build it")
+            .unwrap();
 
         // pending -> running
         assert!(store.set_running("sub-2").unwrap());
@@ -5292,9 +5483,15 @@ mod tests {
         let session_store = SessionStore::new(&db_path);
         session_store.create_session("p1", "cli", None).unwrap();
         session_store.create_session("p2", "cli", None).unwrap();
-        session_store.create_session("c1", "subagent", None).unwrap();
-        session_store.create_session("c2", "subagent", None).unwrap();
-        session_store.create_session("c3", "subagent", None).unwrap();
+        session_store
+            .create_session("c1", "subagent", None)
+            .unwrap();
+        session_store
+            .create_session("c2", "subagent", None)
+            .unwrap();
+        session_store
+            .create_session("c3", "subagent", None)
+            .unwrap();
 
         let store = super::SubagentStore::new(&db_path);
         store.create("s1", "p1", "c1", "a", "task a").unwrap();
@@ -5366,7 +5563,9 @@ mod tests {
         let store = super::SkillUsageStore::new(&db_path);
         store.record_usage("test", None, "success", None).unwrap();
         store.record_usage("test", None, "success", None).unwrap();
-        store.record_usage("test", None, "failure", Some("Flaky")).unwrap();
+        store
+            .record_usage("test", None, "failure", Some("Flaky"))
+            .unwrap();
 
         let stats = store.stats("test").unwrap();
         assert_eq!(stats.total_uses, 3);
@@ -5465,12 +5664,8 @@ mod tests {
             .unwrap();
 
         let store = super::SkillFileStore::new(&db_path);
-        store
-            .store_file("review", "refs/a.md", "a")
-            .unwrap();
-        store
-            .store_file("review", "refs/b.md", "b")
-            .unwrap();
+        store.store_file("review", "refs/a.md", "a").unwrap();
+        store.store_file("review", "refs/b.md", "b").unwrap();
 
         assert!(store.delete_file("review", "refs/a.md").unwrap());
         assert_eq!(store.get_file("review", "refs/a.md").unwrap(), None);
@@ -5492,12 +5687,8 @@ mod tests {
             .unwrap();
 
         let store = super::SkillFileStore::new(&db_path);
-        store
-            .store_file("test", "refs/doc.md", "v1")
-            .unwrap();
-        store
-            .store_file("test", "refs/doc.md", "v2")
-            .unwrap();
+        store.store_file("test", "refs/doc.md", "v1").unwrap();
+        store.store_file("test", "refs/doc.md", "v2").unwrap();
 
         let content = store
             .get_file("test", "refs/doc.md")
@@ -5539,16 +5730,27 @@ mod tests {
     #[test]
     fn fork_session_copies_messages_and_sets_parent() {
         let (_dir, store) = bootstrapped_store();
-        store.create_session("s-orig", "cli", Some("Original")).unwrap();
-        store.append_message("s-orig", "system", Some("sys"), None, None).unwrap();
-        store.append_message("s-orig", "user", Some("hello"), None, None).unwrap();
-        store.append_message("s-orig", "assistant", Some("hi"), None, None).unwrap();
+        store
+            .create_session("s-orig", "cli", Some("Original"))
+            .unwrap();
+        store
+            .append_message("s-orig", "system", Some("sys"), None, None)
+            .unwrap();
+        store
+            .append_message("s-orig", "user", Some("hello"), None, None)
+            .unwrap();
+        store
+            .append_message("s-orig", "assistant", Some("hi"), None, None)
+            .unwrap();
 
         let forked_id = store.fork_session("s-orig", "s-fork").unwrap();
         assert_eq!(forked_id, "s-fork");
 
         // Check the forked session exists
-        let session = store.get_session("s-fork").unwrap().expect("forked session should exist");
+        let session = store
+            .get_session("s-fork")
+            .unwrap()
+            .expect("forked session should exist");
         assert_eq!(session.title.as_deref(), Some("Original (fork)"));
         assert_eq!(session.platform, "cli");
         assert_eq!(session.parent_session_id.as_deref(), Some("s-orig"));
@@ -5565,7 +5767,9 @@ mod tests {
     fn fork_session_without_title() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-notitle", "api", None).unwrap();
-        store.append_message("s-notitle", "user", Some("test"), None, None).unwrap();
+        store
+            .append_message("s-notitle", "user", Some("test"), None, None)
+            .unwrap();
 
         store.fork_session("s-notitle", "s-fork2").unwrap();
 
@@ -5587,11 +5791,21 @@ mod tests {
     fn delete_last_n_messages_removes_most_recent() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-del", "cli", None).unwrap();
-        store.append_message("s-del", "system", Some("sys"), None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg1"), None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp1"), None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg2"), None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp2"), None, None).unwrap();
+        store
+            .append_message("s-del", "system", Some("sys"), None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "user", Some("msg1"), None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "assistant", Some("resp1"), None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "user", Some("msg2"), None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "assistant", Some("resp2"), None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-del", 2).unwrap();
         assert_eq!(deleted, 2);
@@ -5608,7 +5822,9 @@ mod tests {
     fn delete_last_n_messages_zero_is_noop() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-noop", "cli", None).unwrap();
-        store.append_message("s-noop", "user", Some("hello"), None, None).unwrap();
+        store
+            .append_message("s-noop", "user", Some("hello"), None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-noop", 0).unwrap();
         assert_eq!(deleted, 0);
@@ -5619,7 +5835,9 @@ mod tests {
     fn delete_last_n_messages_more_than_exists() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-over", "cli", None).unwrap();
-        store.append_message("s-over", "user", Some("hello"), None, None).unwrap();
+        store
+            .append_message("s-over", "user", Some("hello"), None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-over", 100).unwrap();
         assert_eq!(deleted, 1);
@@ -5686,7 +5904,9 @@ mod tests {
             .expect("import should succeed");
         assert_eq!(id, "import-empty");
 
-        let stored = store.load_messages("import-empty").expect("load should work");
+        let stored = store
+            .load_messages("import-empty")
+            .expect("load should work");
         assert_eq!(stored.len(), 0);
     }
 
@@ -5760,7 +5980,10 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::PairingStore::new(&db_path);
-        let code = store.generate_code("slack", "u2", "Carol").unwrap().unwrap();
+        let code = store
+            .generate_code("slack", "u2", "Carol")
+            .unwrap()
+            .unwrap();
         store.approve_code("slack", &code).unwrap();
 
         assert!(store.is_approved("slack", "u2").unwrap());
@@ -5860,7 +6083,10 @@ mod tests {
             .set("key-1", "gpt-4", "Hello world", None, 100, 20, 3600)
             .unwrap();
 
-        let entry = cache.get("key-1").unwrap().expect("should find cached entry");
+        let entry = cache
+            .get("key-1")
+            .unwrap()
+            .expect("should find cached entry");
         assert_eq!(entry.model, "gpt-4");
         assert_eq!(entry.response, "Hello world");
         assert_eq!(entry.input_tokens, 100);
@@ -5886,7 +6112,9 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let cache = super::ResponseCacheStore::new(&db_path);
-        cache.set("key-2", "gpt-4", "cached", None, 50, 10, 3600).unwrap();
+        cache
+            .set("key-2", "gpt-4", "cached", None, 50, 10, 3600)
+            .unwrap();
 
         let _ = cache.get("key-2").unwrap();
         let _ = cache.get("key-2").unwrap();
@@ -5904,7 +6132,9 @@ mod tests {
 
         let cache = super::ResponseCacheStore::new(&db_path);
         // TTL of 0 seconds = immediately expired
-        cache.set("expired", "gpt-4", "old", None, 10, 5, 0).unwrap();
+        cache
+            .set("expired", "gpt-4", "old", None, 10, 5, 0)
+            .unwrap();
 
         let result = cache.get("expired").unwrap();
         assert!(result.is_none(), "expired entry should not be returned");
@@ -5971,8 +6201,20 @@ mod tests {
         let store = super::AuditLogStore::new(&db_path);
         let details = serde_json::json!({"tool": "shell_execute", "args": "ls"});
         store.log(Some("s1"), "tool_call", &details).unwrap();
-        store.log(Some("s1"), "llm_request", &serde_json::json!({"model": "gpt-4"})).unwrap();
-        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "memory_create"})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_request",
+                &serde_json::json!({"model": "gpt-4"}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s2"),
+                "tool_call",
+                &serde_json::json!({"tool": "memory_create"}),
+            )
+            .unwrap();
 
         let entries = store.by_session("s1", 100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -5988,9 +6230,15 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "tool_call", &serde_json::json!({"tool": "a"})).unwrap();
-        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "b"})).unwrap();
-        store.log(Some("s1"), "llm_request", &serde_json::json!({})).unwrap();
+        store
+            .log(Some("s1"), "tool_call", &serde_json::json!({"tool": "a"}))
+            .unwrap();
+        store
+            .log(Some("s2"), "tool_call", &serde_json::json!({"tool": "b"}))
+            .unwrap();
+        store
+            .log(Some("s1"), "llm_request", &serde_json::json!({}))
+            .unwrap();
 
         let entries = store.by_event_type("tool_call", 100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -6003,8 +6251,12 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(None, "config_change", &serde_json::json!({"key": "model"})).unwrap();
-        store.log(Some("s1"), "tool_call", &serde_json::json!({})).unwrap();
+        store
+            .log(None, "config_change", &serde_json::json!({"key": "model"}))
+            .unwrap();
+        store
+            .log(Some("s1"), "tool_call", &serde_json::json!({}))
+            .unwrap();
 
         let entries = store.recent(100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -6017,9 +6269,15 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
-        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
-        store.log(None, "llm_request", &serde_json::json!({})).unwrap();
+        store
+            .log(None, "tool_call", &serde_json::json!({}))
+            .unwrap();
+        store
+            .log(None, "tool_call", &serde_json::json!({}))
+            .unwrap();
+        store
+            .log(None, "llm_request", &serde_json::json!({}))
+            .unwrap();
 
         let stats = store.stats().unwrap();
         assert_eq!(stats.len(), 2);
@@ -6051,7 +6309,9 @@ mod tests {
 
         let store = super::AuditLogStore::new(&db_path);
         for i in 0..10 {
-            store.log(Some("s1"), "tool_call", &serde_json::json!({"i": i})).unwrap();
+            store
+                .log(Some("s1"), "tool_call", &serde_json::json!({"i": i}))
+                .unwrap();
         }
 
         let entries = store.by_session("s1", 3).unwrap();
@@ -6065,9 +6325,27 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 100})).unwrap();
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 200})).unwrap();
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "file_read", "success": false, "duration_ms": 50})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 100}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 200}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "file_read", "success": false, "duration_ms": 50}),
+            )
+            .unwrap();
 
         let analytics = store.tool_analytics(30).unwrap();
         assert_eq!(analytics.len(), 2);
@@ -6089,8 +6367,20 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 100, "output_tokens": 50})).unwrap();
-        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 200, "output_tokens": 80})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_response",
+                &serde_json::json!({"model": "gpt-4", "input_tokens": 100, "output_tokens": 50}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_response",
+                &serde_json::json!({"model": "gpt-4", "input_tokens": 200, "output_tokens": 80}),
+            )
+            .unwrap();
         store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "claude-3", "input_tokens": 300, "output_tokens": 100})).unwrap();
 
         let analytics = store.llm_analytics(30).unwrap();
@@ -6141,10 +6431,7 @@ mod tests {
             )
             .expect("response_cache should exist");
         connection
-            .execute(
-                "INSERT INTO audit_log (event_type) VALUES ('test')",
-                [],
-            )
+            .execute("INSERT INTO audit_log (event_type) VALUES ('test')", [])
             .expect("audit_log should exist");
     }
 
@@ -6273,7 +6560,9 @@ mod embedding_store_tests {
         let store = EmbeddingStore::new(&db_path);
 
         let embedding = vec![0.1_f32, 0.2, 0.3, 0.4, 0.5];
-        store.store("mem1", &embedding, "text-embedding-3-small").unwrap();
+        store
+            .store("mem1", &embedding, "text-embedding-3-small")
+            .unwrap();
 
         assert!(store.has_embedding("mem1").unwrap());
         assert!(!store.has_embedding("mem2").unwrap());

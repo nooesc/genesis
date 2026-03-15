@@ -335,10 +335,7 @@ mod tests {
         let output = tool.run(&call, &ctx()).expect("should succeed");
 
         assert!(output.content.contains("a/"));
-        assert!(
-            !output.content.contains("b/"),
-            "depth 1+ should not appear"
-        );
+        assert!(!output.content.contains("b/"), "depth 1+ should not appear");
     }
 
     #[test]
@@ -378,10 +375,7 @@ mod tests {
         fs::write(root.join("readme.md"), "").unwrap();
 
         let tool = ListTreeTool;
-        let call = make_call(vec![
-            ("path", &root.to_string_lossy()),
-            ("pattern", "*.rs"),
-        ]);
+        let call = make_call(vec![("path", &root.to_string_lossy()), ("pattern", "*.rs")]);
         let output = tool.run(&call, &ctx()).expect("should succeed");
 
         assert!(output.content.contains("main.rs"));

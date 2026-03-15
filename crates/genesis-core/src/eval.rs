@@ -371,8 +371,16 @@ pub fn build_report(
                 TagResult {
                     total,
                     passed: pass,
-                    pass_rate: if total > 0 { pass as f64 / total as f64 } else { 0.0 },
-                    avg_score: if total > 0 { score_sum / total as f64 } else { 0.0 },
+                    pass_rate: if total > 0 {
+                        pass as f64 / total as f64
+                    } else {
+                        0.0
+                    },
+                    avg_score: if total > 0 {
+                        score_sum / total as f64
+                    } else {
+                        0.0
+                    },
                 },
             )
         })
@@ -382,9 +390,7 @@ pub fn build_report(
     let mut diff_results: HashMap<u8, (usize, usize, f64)> = HashMap::new();
     for (i, result) in results.iter().enumerate() {
         if let Some(case) = suite.cases.get(i) {
-            let entry = diff_results
-                .entry(case.difficulty)
-                .or_insert((0, 0, 0.0));
+            let entry = diff_results.entry(case.difficulty).or_insert((0, 0, 0.0));
             entry.0 += 1;
             if result.passed {
                 entry.1 += 1;
@@ -400,8 +406,16 @@ pub fn build_report(
                 TagResult {
                     total,
                     passed: pass,
-                    pass_rate: if total > 0 { pass as f64 / total as f64 } else { 0.0 },
-                    avg_score: if total > 0 { score_sum / total as f64 } else { 0.0 },
+                    pass_rate: if total > 0 {
+                        pass as f64 / total as f64
+                    } else {
+                        0.0
+                    },
+                    avg_score: if total > 0 {
+                        score_sum / total as f64
+                    } else {
+                        0.0
+                    },
                 },
             )
         })
@@ -511,11 +525,13 @@ mod tests {
     #[test]
     fn evaluate_missing_required_content() {
         let criteria = sample_criteria();
-        let (passed, score, checks) =
-            evaluate_response("Hello there!", &criteria, 1, 0);
+        let (passed, score, checks) = evaluate_response("Hello there!", &criteria, 1, 0);
         assert!(!passed);
         assert!(score < 1.0);
-        let world_check = checks.iter().find(|c| c.criterion.contains("world")).unwrap();
+        let world_check = checks
+            .iter()
+            .find(|c| c.criterion.contains("world"))
+            .unwrap();
         assert!(!world_check.passed);
     }
 
@@ -525,7 +541,10 @@ mod tests {
         let (passed, _score, checks) =
             evaluate_response("Hello World! But there was an error.", &criteria, 1, 0);
         assert!(!passed);
-        let error_check = checks.iter().find(|c| c.criterion.contains("error")).unwrap();
+        let error_check = checks
+            .iter()
+            .find(|c| c.criterion.contains("error"))
+            .unwrap();
         assert!(!error_check.passed);
     }
 
@@ -587,12 +606,16 @@ mod tests {
         // Too few
         let (passed, _, checks) = evaluate_response("done", &criteria, 1, 1);
         assert!(!passed);
-        assert!(checks.iter().any(|c| c.criterion.contains("min_tool_calls") && !c.passed));
+        assert!(checks
+            .iter()
+            .any(|c| c.criterion.contains("min_tool_calls") && !c.passed));
 
         // Too many
         let (passed, _, checks) = evaluate_response("done", &criteria, 1, 6);
         assert!(!passed);
-        assert!(checks.iter().any(|c| c.criterion.contains("max_tool_calls") && !c.passed));
+        assert!(checks
+            .iter()
+            .any(|c| c.criterion.contains("max_tool_calls") && !c.passed));
     }
 
     #[test]
@@ -729,7 +752,11 @@ cases:
 "#;
         let suite = parse_suite(yaml).unwrap();
         let issues = validate_suite(&suite);
-        assert!(issues.is_empty(), "Expected no issues but got: {:?}", issues);
+        assert!(
+            issues.is_empty(),
+            "Expected no issues but got: {:?}",
+            issues
+        );
     }
 
     #[test]

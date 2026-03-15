@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 pub use client::{McpClient, McpServerConfig};
 pub use protocol::{McpPromptDef, McpResourceDef, PromptGetResult, ResourceReadResult};
-pub use server::{McpServeConfig, McpToolBackend, McpServerToolDef, run_stdio_server};
+pub use server::{run_stdio_server, McpServeConfig, McpServerToolDef, McpToolBackend};
 
 /// Read a single newline-delimited line from an async reader, enforcing a
 /// maximum byte limit. Returns `Ok(None)` on EOF.
@@ -238,11 +238,7 @@ impl McpManager {
         let clients = self.clients.read().await;
         clients
             .iter()
-            .flat_map(|(name, c)| {
-                c.resources()
-                    .iter()
-                    .map(move |r| (name.clone(), r.clone()))
-            })
+            .flat_map(|(name, c)| c.resources().iter().map(move |r| (name.clone(), r.clone())))
             .collect()
     }
 
@@ -253,11 +249,7 @@ impl McpManager {
         let clients = self.clients.read().await;
         clients
             .iter()
-            .flat_map(|(name, c)| {
-                c.prompts()
-                    .iter()
-                    .map(move |p| (name.clone(), p.clone()))
-            })
+            .flat_map(|(name, c)| c.prompts().iter().map(move |p| (name.clone(), p.clone())))
             .collect()
     }
 

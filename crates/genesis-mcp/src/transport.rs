@@ -201,7 +201,9 @@ impl McpTransport for StdioTransport {
         let json = serde_json::to_string(&msg)
             .map_err(|e| McpError::Protocol(format!("failed to serialize notification: {e}")))?;
         if json.len() > MAX_STDIN_FRAME_BYTES {
-            return Err(McpError::Protocol("JSON-RPC notification too large".to_owned()));
+            return Err(McpError::Protocol(
+                "JSON-RPC notification too large".to_owned(),
+            ));
         }
 
         self.outgoing_tx
@@ -236,8 +238,9 @@ impl HttpTransport {
         for (key, value) in headers {
             let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                 .map_err(|e| McpError::Transport(format!("invalid header name `{key}`: {e}")))?;
-            let val = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|e| McpError::Transport(format!("invalid header value for `{key}`: {e}")))?;
+            let val = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                McpError::Transport(format!("invalid header value for `{key}`: {e}"))
+            })?;
             header_map.insert(name, val);
         }
 
@@ -294,9 +297,8 @@ async fn read_http_response_json(
     max_bytes: usize,
 ) -> Result<JsonRpcResponse, McpError> {
     let body = read_http_body_bytes(response, max_bytes).await?;
-    serde_json::from_slice(&body).map_err(|e| {
-        McpError::Protocol(format!("failed to parse JSON-RPC response: {e}"))
-    })
+    serde_json::from_slice(&body)
+        .map_err(|e| McpError::Protocol(format!("failed to parse JSON-RPC response: {e}")))
 }
 
 impl McpTransport for HttpTransport {
@@ -333,9 +335,7 @@ impl McpTransport for HttpTransport {
                 let body = read_http_body_text(response, MAX_HTTP_RESPONSE_BYTES)
                     .await
                     .unwrap_or_else(|error| format!("[unreadable response body: {error}]"));
-                return Err(McpError::Transport(format!(
-                    "HTTP {status}: {body}"
-                )));
+                return Err(McpError::Transport(format!("HTTP {status}: {body}")));
             }
 
             read_http_response_json(response, MAX_HTTP_RESPONSE_BYTES).await

@@ -252,8 +252,7 @@ impl ProcessRegistry {
 
         // Build and spawn the command.
         let wd_owned = working_dir.map(String::from);
-        let mut cmd =
-            super::shell::build_command(command, wd_owned.as_ref(), backend);
+        let mut cmd = super::shell::build_command(command, wd_owned.as_ref(), backend);
 
         let mut child = cmd
             .stdout(Stdio::piped())
@@ -381,8 +380,7 @@ impl ProcessRegistry {
             .lines()
             .take_while(|line| {
                 let trimmed = line.trim();
-                trimmed.is_empty()
-                    || NOISE_PATTERNS.iter().any(|p| trimmed.starts_with(p))
+                trimmed.is_empty() || NOISE_PATTERNS.iter().any(|p| trimmed.starts_with(p))
             })
             .count();
 
@@ -405,13 +403,10 @@ impl ProcessRegistry {
 
     /// List all tracked processes.
     fn action_list(&self) -> Result<ToolOutput, ToolError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "process".to_owned(),
-                reason: format!("lock error: {e}"),
-            })?;
+        let mut inner = self.inner.lock().map_err(|e| ToolError::ExecutionFailed {
+            tool: "process".to_owned(),
+            reason: format!("lock error: {e}"),
+        })?;
 
         // Prune expired entries.
         let expired: Vec<String> = inner
@@ -508,10 +503,13 @@ impl ProcessRegistry {
             })?;
 
         let (preview, total_bytes) = {
-            let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
-                tool: "process".to_owned(),
-                reason: format!("output lock error: {e}"),
-            })?;
+            let buf = entry
+                .output
+                .lock()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "process".to_owned(),
+                    reason: format!("output lock error: {e}"),
+                })?;
             (Self::strip_noise(&buf.tail(POLL_PREVIEW_BYTES)), buf.len())
         };
         let status = entry.status.to_string();
@@ -539,12 +537,7 @@ impl ProcessRegistry {
     }
 
     /// Get full log output with pagination.
-    fn action_log(
-        &self,
-        id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<ToolOutput, ToolError> {
+    fn action_log(&self, id: &str, offset: usize, limit: usize) -> Result<ToolOutput, ToolError> {
         let mut inner = self.inner.lock().map_err(|e| ToolError::ExecutionFailed {
             tool: "process".to_owned(),
             reason: format!("lock error: {e}"),
@@ -561,10 +554,13 @@ impl ProcessRegistry {
             })?;
 
         let (page, total_bytes) = {
-            let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
-                tool: "process".to_owned(),
-                reason: format!("output lock error: {e}"),
-            })?;
+            let buf = entry
+                .output
+                .lock()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: "process".to_owned(),
+                    reason: format!("output lock error: {e}"),
+                })?;
             (Self::strip_noise(&buf.page(offset, limit)), buf.len())
         };
         let has_more = offset + limit < total_bytes;
@@ -604,29 +600,30 @@ impl ProcessRegistry {
 
         loop {
             {
-                let mut inner =
-                    self.inner.lock().map_err(|e| ToolError::ExecutionFailed {
-                        tool: "process".to_owned(),
-                        reason: format!("lock error: {e}"),
-                    })?;
+                let mut inner = self.inner.lock().map_err(|e| ToolError::ExecutionFailed {
+                    tool: "process".to_owned(),
+                    reason: format!("lock error: {e}"),
+                })?;
 
                 Self::collect_output(&mut inner, id);
 
-                let entry =
-                    inner
-                        .entries
-                        .get(id)
-                        .ok_or_else(|| ToolError::ExecutionFailed {
-                            tool: "process".to_owned(),
-                            reason: format!("no process with id `{id}`"),
-                        })?;
+                let entry = inner
+                    .entries
+                    .get(id)
+                    .ok_or_else(|| ToolError::ExecutionFailed {
+                        tool: "process".to_owned(),
+                        reason: format!("no process with id `{id}`"),
+                    })?;
 
                 if entry.is_finished() {
                     let (preview, total_bytes) = {
-                        let buf = entry.output.lock().map_err(|e| ToolError::ExecutionFailed {
-                            tool: "process".to_owned(),
-                            reason: format!("output lock error: {e}"),
-                        })?;
+                        let buf = entry
+                            .output
+                            .lock()
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: "process".to_owned(),
+                                reason: format!("output lock error: {e}"),
+                            })?;
                         (Self::strip_noise(&buf.tail(POLL_PREVIEW_BYTES)), buf.len())
                     };
                     let status = entry.status.to_string();
@@ -687,7 +684,10 @@ impl ProcessRegistry {
 
         if entry.is_finished() {
             return Ok(ToolOutput {
-                content: format!("Process {} is already finished (status: {})", id, entry.status),
+                content: format!(
+                    "Process {} is already finished (status: {})",
+                    id, entry.status
+                ),
                 metadata: BTreeMap::from([
                     ("tool".to_owned(), "process".to_owned()),
                     ("action".to_owned(), "kill".to_owned()),
@@ -795,13 +795,17 @@ impl ProcessRegistry {
     /// Submit data + newline to process stdin.
     fn action_submit(&self, id: &str, data: &str) -> Result<ToolOutput, ToolError> {
         let data_with_newline = format!("{data}\n");
-        self.action_write(id, &data_with_newline)
-            .map(|mut output| {
-                // Fix up metadata to say "submit" not "write".
-                output.metadata.insert("action".to_owned(), "submit".to_owned());
-                output.content = format!("Submitted {} bytes (with newline) to stdin of {id}", data.len() + 1);
-                output
-            })
+        self.action_write(id, &data_with_newline).map(|mut output| {
+            // Fix up metadata to say "submit" not "write".
+            output
+                .metadata
+                .insert("action".to_owned(), "submit".to_owned());
+            output.content = format!(
+                "Submitted {} bytes (with newline) to stdin of {id}",
+                data.len() + 1
+            );
+            output
+        })
     }
 }
 
@@ -934,7 +938,11 @@ impl ToolHandler for BackgroundShellExecTool {
 
         let session_id = self
             .registry
-            .spawn(command, working_dir.map(|s| s.as_str()), &context.terminal_backend)
+            .spawn(
+                command,
+                working_dir.map(|s| s.as_str()),
+                &context.terminal_backend,
+            )
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: e,
@@ -1231,9 +1239,7 @@ mod tests {
     fn write_to_running_process() {
         let registry = ProcessRegistry::new();
         // cat will read stdin and echo it back.
-        let id = registry
-            .spawn("cat", None, &None)
-            .expect("should spawn");
+        let id = registry.spawn("cat", None, &None).expect("should spawn");
 
         std::thread::sleep(Duration::from_millis(100));
 
@@ -1252,9 +1258,7 @@ mod tests {
     #[test]
     fn submit_adds_newline() {
         let registry = ProcessRegistry::new();
-        let id = registry
-            .spawn("cat", None, &None)
-            .expect("should spawn");
+        let id = registry.spawn("cat", None, &None).expect("should spawn");
 
         std::thread::sleep(Duration::from_millis(100));
 

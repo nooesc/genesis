@@ -125,7 +125,13 @@ mod tests {
         };
 
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "prompt", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "prompt",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -137,7 +143,13 @@ mod tests {
         };
 
         let err = tool.run(&call, &ctx()).unwrap_err();
-        assert!(matches!(err, ToolError::MissingArgument { argument: "model", .. }));
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "model",
+                ..
+            }
+        ));
     }
 
     // Note: Full integration tests require a running LLM endpoint.

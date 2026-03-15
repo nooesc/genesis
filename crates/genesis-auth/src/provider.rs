@@ -22,10 +22,8 @@ pub struct AuthProviderConfig {
 pub const CODEX_INFERENCE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub const CODEX_DEVICE_CODE_URL: &str =
-    "https://auth.openai.com/api/accounts/deviceauth/usercode";
-pub const CODEX_DEVICE_POLL_URL: &str =
-    "https://auth.openai.com/api/accounts/deviceauth/token";
+pub const CODEX_DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+pub const CODEX_DEVICE_POLL_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 pub const CODEX_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 pub const CODEX_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 
@@ -53,7 +51,12 @@ pub fn all() -> &'static [AuthProviderConfig] {
 pub fn oauth_providers() -> Vec<&'static AuthProviderConfig> {
     PROVIDERS
         .iter()
-        .filter(|p| matches!(p.auth_type, AuthType::OAuthExternal | AuthType::OAuthDeviceCode))
+        .filter(|p| {
+            matches!(
+                p.auth_type,
+                AuthType::OAuthExternal | AuthType::OAuthDeviceCode
+            )
+        })
         .collect()
 }
 

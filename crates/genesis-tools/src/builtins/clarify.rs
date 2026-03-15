@@ -12,13 +12,13 @@ pub struct ClarifyTool;
 
 impl ToolHandler for ClarifyTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let question = call
-            .arguments
-            .get("question")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "question",
-            })?;
+        let question =
+            call.arguments
+                .get("question")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "question",
+                })?;
 
         if question.trim().is_empty() {
             return Err(ToolError::ExecutionFailed {
@@ -73,10 +73,7 @@ mod tests {
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert!(output.content.contains("What database should I use?"));
         assert!(output.content.contains("[Clarification needed]"));
-        assert_eq!(
-            output.metadata.get("requires_input").unwrap(),
-            "true"
-        );
+        assert_eq!(output.metadata.get("requires_input").unwrap(), "true");
     }
 
     #[test]

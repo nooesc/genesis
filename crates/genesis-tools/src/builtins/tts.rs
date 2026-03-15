@@ -17,13 +17,13 @@ impl ToolHandler for TextToSpeechTool {
                 argument: "text",
             })?;
 
-        let output_path = call
-            .arguments
-            .get("output_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "output_path",
-            })?;
+        let output_path =
+            call.arguments
+                .get("output_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "output_path",
+                })?;
 
         let voice = call
             .arguments

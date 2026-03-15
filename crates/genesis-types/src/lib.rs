@@ -57,27 +57,44 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    SessionStarted { session_id: String },
-    ModelSelected { provider: String, model: String },
+    SessionStarted {
+        session_id: String,
+    },
+    ModelSelected {
+        provider: String,
+        model: String,
+    },
     SessionPlanned {
         session_id: String,
         platform: DeliveryPlatform,
         provider: String,
         model: String,
     },
-    TokenStream { chunk: String },
-    ToolCallRequested { tool_name: String },
-    ToolCallCompleted { tool_name: String, success: bool },
-    SchedulerTick { job_id: String },
-    DeliveryQueued { platform: DeliveryPlatform, destination: String },
+    TokenStream {
+        chunk: String,
+    },
+    ToolCallRequested {
+        tool_name: String,
+    },
+    ToolCallCompleted {
+        tool_name: String,
+        success: bool,
+    },
+    SchedulerTick {
+        job_id: String,
+    },
+    DeliveryQueued {
+        platform: DeliveryPlatform,
+        destination: String,
+    },
 }
 
 // These types were originally public but have zero callers outside this crate's
 // test module. They are kept behind #[cfg(test)] until an external consumer needs them.
 #[cfg(test)]
 mod provider_types {
-    use serde::{Deserialize, Serialize};
     use super::{ConversationMessage, ModelSelection, ToolDefinition};
+    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct ProviderTurnRequest {
@@ -111,11 +128,13 @@ mod provider_types {
 
 #[cfg(test)]
 mod tests {
+    use super::provider_types::{
+        ProviderTurnRequest, ProviderTurnResponse, StopReason, UsageStats,
+    };
     use super::{
         ConversationMessage, ConversationRole, DeliveryPlatform, ModelProviderKind, ModelSelection,
         RuntimeEvent, ToolDefinition,
     };
-    use super::provider_types::{ProviderTurnRequest, ProviderTurnResponse, StopReason, UsageStats};
 
     #[test]
     fn runtime_events_round_trip_through_json() {

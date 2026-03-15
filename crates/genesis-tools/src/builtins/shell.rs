@@ -153,10 +153,7 @@ pub fn build_command(
             cmd
         }
         Some(crate::TerminalBackend::Modal {
-            app,
-            gpu,
-            image,
-            ..
+            app, gpu, image, ..
         }) => {
             // Modal cloud sandbox: `modal shell [--app ...] [--gpu ...] [--image ...] --cmd 'command'`
             let mut cmd = Command::new("modal");
@@ -252,11 +249,7 @@ impl ToolHandler for ShellExecTool {
         // Use lifecycle-managed sandbox execution when available
         if let Some(ref executor) = context.sandbox_manager {
             let (output, exit_code) = executor
-                .execute_in_sandbox(
-                    command,
-                    working_dir.map(|s| s.as_str()),
-                    timeout_secs,
-                )
+                .execute_in_sandbox(command, working_dir.map(|s| s.as_str()), timeout_secs)
                 .map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: e,
@@ -359,7 +352,7 @@ impl ToolHandler for ShellExecTool {
                     });
                 }
             }
-        };
+        }
 
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
@@ -432,10 +425,7 @@ mod tests {
         let tool = ShellExecTool;
         let call = ToolCall {
             name: "shell_exec".to_owned(),
-            arguments: BTreeMap::from([(
-                "command".to_owned(),
-                "echo oops >&2; exit 1".to_owned(),
-            )]),
+            arguments: BTreeMap::from([("command".to_owned(), "echo oops >&2; exit 1".to_owned())]),
         };
 
         let output = tool.run(&call, &ctx()).expect("should succeed");
@@ -595,7 +585,10 @@ mod tests {
         let err = tool.run(&call, &ctx()).unwrap_err();
         match err {
             ToolError::ExecutionFailed { reason, .. } => {
-                assert!(reason.contains("timed out"), "expected timeout, got: {reason}");
+                assert!(
+                    reason.contains("timed out"),
+                    "expected timeout, got: {reason}"
+                );
             }
             _ => panic!("expected ExecutionFailed, got: {err:?}"),
         }
@@ -669,7 +662,10 @@ mod tests {
             cpu: 1.0,
             memory_mb: 5120,
             persistent: true,
-            bind: Some(vec!["/data:/data".to_owned(), "/scratch:/scratch".to_owned()]),
+            bind: Some(vec![
+                "/data:/data".to_owned(),
+                "/scratch:/scratch".to_owned(),
+            ]),
             working_dir: Some("/workspace".to_owned()),
         });
         let cmd = build_command("python train.py", None, &backend);
@@ -802,19 +798,23 @@ mod tests {
 
     #[test]
     fn is_sandboxed_backend_classification() {
-        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Singularity {
-            image: "test.sif".to_owned(),
-            bind: None,
-            working_dir: None,
-            cpu: 1.0,
-            memory_mb: 5120,
-            persistent: false,
-        })));
-        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Docker {
-            container: "test".to_owned(),
-            user: None,
-            working_dir: None,
-        })));
+        assert!(is_sandboxed_backend(&Some(
+            crate::TerminalBackend::Singularity {
+                image: "test.sif".to_owned(),
+                bind: None,
+                working_dir: None,
+                cpu: 1.0,
+                memory_mb: 5120,
+                persistent: false,
+            }
+        )));
+        assert!(is_sandboxed_backend(&Some(
+            crate::TerminalBackend::Docker {
+                container: "test".to_owned(),
+                user: None,
+                working_dir: None,
+            }
+        )));
         assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Modal {
             app: None,
             gpu: None,
@@ -825,16 +825,18 @@ mod tests {
             persistent: false,
             working_dir: None,
         })));
-        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Daytona {
-            image: None,
-            cpu: 1.0,
-            memory_mb: 5120,
-            disk_mb: 10240,
-            persistent: false,
-            target: None,
-            api_url: None,
-            working_dir: None,
-        })));
+        assert!(is_sandboxed_backend(&Some(
+            crate::TerminalBackend::Daytona {
+                image: None,
+                cpu: 1.0,
+                memory_mb: 5120,
+                disk_mb: 10240,
+                persistent: false,
+                target: None,
+                api_url: None,
+                working_dir: None,
+            }
+        )));
         assert!(!is_sandboxed_backend(&None));
         assert!(!is_sandboxed_backend(&Some(crate::TerminalBackend::Ssh {
             host: "test".to_owned(),

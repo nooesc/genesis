@@ -124,19 +124,16 @@ impl CronField {
         if let Some(dash_pos) = token.find('-') {
             let start_str = &token[..dash_pos];
             let end_str = &token[dash_pos + 1..];
-            let start: u32 =
-                start_str
-                    .parse()
-                    .map_err(|_| CronParseError::InvalidField {
-                        field: original.to_owned(),
-                        reason: format!("range start `{start_str}` is not a valid number"),
-                    })?;
-            let end: u32 = end_str
+            let start: u32 = start_str
                 .parse()
                 .map_err(|_| CronParseError::InvalidField {
                     field: original.to_owned(),
-                    reason: format!("range end `{end_str}` is not a valid number"),
+                    reason: format!("range start `{start_str}` is not a valid number"),
                 })?;
+            let end: u32 = end_str.parse().map_err(|_| CronParseError::InvalidField {
+                field: original.to_owned(),
+                reason: format!("range end `{end_str}` is not a valid number"),
+            })?;
             if start > end {
                 return Err(CronParseError::InvalidField {
                     field: original.to_owned(),
@@ -251,8 +248,10 @@ impl SchedulerRuntime {
             // Sleep until the next minute boundary
             let now = chrono::Local::now();
             let secs_until_next_minute = 60 - now.second();
-            tokio::time::sleep(std::time::Duration::from_secs(secs_until_next_minute as u64))
-                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                secs_until_next_minute as u64,
+            ))
+            .await;
         }
     }
 
@@ -290,7 +289,11 @@ impl SchedulerRuntime {
             let id = schedule.id.clone();
             match self.executor.execute(schedule).await {
                 Ok(()) => tracing::info!(schedule_id = id.as_str(), "schedule executed"),
-                Err(e) => tracing::warn!(schedule_id = id.as_str(), error = e.as_str(), "schedule execution failed"),
+                Err(e) => tracing::warn!(
+                    schedule_id = id.as_str(),
+                    error = e.as_str(),
+                    "schedule execution failed"
+                ),
             }
         }
     }
@@ -331,13 +334,25 @@ mod tests {
         let expr = CronExpr::parse("*/5 * * * *").unwrap();
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 12, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 12,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 15, hour: 3, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 15,
+            hour: 3,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 7, hour: 3, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 7,
+            hour: 3,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
     }
 
@@ -346,13 +361,25 @@ mod tests {
         let expr = CronExpr::parse("30 14 * * *").unwrap();
 
         assert!(expr.matches(&CronTime {
-            minute: 30, hour: 14, day_of_month: 5, month: 3, day_of_week: 6,
+            minute: 30,
+            hour: 14,
+            day_of_month: 5,
+            month: 3,
+            day_of_week: 6,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 31, hour: 14, day_of_month: 5, month: 3, day_of_week: 6,
+            minute: 31,
+            hour: 14,
+            day_of_month: 5,
+            month: 3,
+            day_of_week: 6,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 30, hour: 15, day_of_month: 5, month: 3, day_of_week: 6,
+            minute: 30,
+            hour: 15,
+            day_of_month: 5,
+            month: 3,
+            day_of_week: 6,
         }));
     }
 
@@ -361,10 +388,18 @@ mod tests {
         let expr = CronExpr::parse("0 0 * * *").unwrap();
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 0, day_of_month: 15, month: 6, day_of_week: 3,
+            minute: 0,
+            hour: 0,
+            day_of_month: 15,
+            month: 6,
+            day_of_week: 3,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 1, day_of_month: 15, month: 6, day_of_week: 3,
+            minute: 0,
+            hour: 1,
+            day_of_month: 15,
+            month: 6,
+            day_of_week: 3,
         }));
     }
 
@@ -373,10 +408,18 @@ mod tests {
         let expr = CronExpr::parse("0 9 * * 1").unwrap(); // Mon 9:00
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 10, month: 3, day_of_week: 1,
+            minute: 0,
+            hour: 9,
+            day_of_month: 10,
+            month: 3,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 11, month: 3, day_of_week: 2,
+            minute: 0,
+            hour: 9,
+            day_of_month: 11,
+            month: 3,
+            day_of_week: 2,
         }));
     }
 
@@ -410,7 +453,11 @@ mod tests {
         ];
 
         let now = CronTime {
-            minute: 10, hour: 14, day_of_month: 8, month: 3, day_of_week: 6,
+            minute: 10,
+            hour: 14,
+            day_of_month: 8,
+            month: 3,
+            day_of_week: 6,
         };
 
         let due = check_due_schedules(&schedules, &now);
@@ -430,19 +477,39 @@ mod tests {
         let expr = CronExpr::parse("0 9-17 * * *").unwrap(); // 9am-5pm hourly
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 9,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 13, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 13,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 17, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 17,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 8, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 8,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 18, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 18,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
     }
 
@@ -466,13 +533,25 @@ mod tests {
         let expr = CronExpr::parse("0,15,30,45 * * * *").unwrap();
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 12, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 12,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 30, hour: 12, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 30,
+            hour: 12,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 10, hour: 12, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 10,
+            hour: 12,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
     }
 
@@ -489,19 +568,35 @@ mod tests {
 
         // Monday
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 10, month: 3, day_of_week: 1,
+            minute: 0,
+            hour: 9,
+            day_of_month: 10,
+            month: 3,
+            day_of_week: 1,
         }));
         // Friday
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 14, month: 3, day_of_week: 5,
+            minute: 0,
+            hour: 9,
+            day_of_month: 14,
+            month: 3,
+            day_of_week: 5,
         }));
         // Sunday
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 9, month: 3, day_of_week: 0,
+            minute: 0,
+            hour: 9,
+            day_of_month: 9,
+            month: 3,
+            day_of_week: 0,
         }));
         // Saturday
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 9, day_of_month: 15, month: 3, day_of_week: 6,
+            minute: 0,
+            hour: 9,
+            day_of_month: 15,
+            month: 3,
+            day_of_week: 6,
         }));
     }
 
@@ -520,19 +615,39 @@ mod tests {
         }
 
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 1, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 1,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 4, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 4,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(expr.matches(&CronTime {
-            minute: 0, hour: 7, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 7,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 2, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 2,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
         assert!(!expr.matches(&CronTime {
-            minute: 0, hour: 6, day_of_month: 1, month: 1, day_of_week: 1,
+            minute: 0,
+            hour: 6,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 1,
         }));
     }
 
@@ -554,7 +669,11 @@ mod tests {
         }];
 
         let now = CronTime {
-            minute: 0, hour: 0, day_of_month: 1, month: 1, day_of_week: 0,
+            minute: 0,
+            hour: 0,
+            day_of_month: 1,
+            month: 1,
+            day_of_week: 0,
         };
 
         let due = check_due_schedules(&schedules, &now);

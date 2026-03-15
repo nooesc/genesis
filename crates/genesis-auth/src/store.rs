@@ -123,7 +123,11 @@ pub fn write_store(path: &Path, store: &AuthStore) -> Result<(), AuthError> {
 }
 
 /// Save Codex tokens into the auth store, setting it as the active provider.
-pub fn save_codex_tokens(path: &Path, tokens: CodexTokens, source: CredentialSource) -> Result<(), AuthError> {
+pub fn save_codex_tokens(
+    path: &Path,
+    tokens: CodexTokens,
+    source: CredentialSource,
+) -> Result<(), AuthError> {
     let mut store = read_store(path)?;
     store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
     let now = chrono::Utc::now().to_rfc3339();
@@ -305,7 +309,8 @@ mod tests {
                 }
             }
         }"#;
-        let store: AuthStore = serde_json::from_str(legacy_json).expect("should parse legacy format");
+        let store: AuthStore =
+            serde_json::from_str(legacy_json).expect("should parse legacy format");
         let codex = get_codex_state(&store).unwrap();
         assert_eq!(codex.auth_mode, AuthMode::Chatgpt);
         assert_eq!(codex.source, CredentialSource::DeviceCode);

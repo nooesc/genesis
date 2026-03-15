@@ -179,13 +179,27 @@ pub struct CacheConfig {
     pub max_context_messages: usize,
 }
 
-fn default_true() -> bool { true }
-fn default_cpu() -> f32 { 1.0 }
-fn default_memory() -> u32 { 5120 }
-fn default_disk() -> u32 { 51200 }
-fn default_daytona_disk() -> u32 { 10240 }
-fn default_cache_ttl() -> u32 { 3600 }
-fn default_cache_context_messages() -> usize { 4 }
+fn default_true() -> bool {
+    true
+}
+fn default_cpu() -> f32 {
+    1.0
+}
+fn default_memory() -> u32 {
+    5120
+}
+fn default_disk() -> u32 {
+    51200
+}
+fn default_daytona_disk() -> u32 {
+    10240
+}
+fn default_cache_ttl() -> u32 {
+    3600
+}
+fn default_cache_context_messages() -> usize {
+    4
+}
 
 impl Default for CacheConfig {
     fn default() -> Self {
@@ -238,8 +252,12 @@ pub struct GuardrailCustomRule {
     pub message: String,
 }
 
-fn default_pii_action() -> String { "redact".to_owned() }
-fn default_applies_to() -> String { "both".to_owned() }
+fn default_pii_action() -> String {
+    "redact".to_owned()
+}
+fn default_applies_to() -> String {
+    "both".to_owned()
+}
 
 /// Reasoning effort level controlling how much compute the model spends.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -373,8 +391,12 @@ pub struct EmbeddingConfig {
     pub dimensions: Option<usize>,
 }
 
-fn default_embedding_backend() -> String { "openai".to_owned() }
-fn default_embedding_model() -> String { "text-embedding-3-small".to_owned() }
+fn default_embedding_backend() -> String {
+    "openai".to_owned()
+}
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_owned()
+}
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
@@ -436,8 +458,12 @@ pub struct WebhookConfig {
     pub retry_backoff_ms: u64,
 }
 
-fn default_max_retries() -> u32 { 3 }
-fn default_retry_backoff_ms() -> u64 { 1000 }
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_retry_backoff_ms() -> u64 {
+    1000
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
@@ -640,7 +666,12 @@ pub fn load_from_map(
     let data_dir = env
         .get("GENESIS_DATA_DIR")
         .map(PathBuf::from)
-        .or_else(|| file_config.storage.as_ref().and_then(|storage| storage.data_dir.clone()))
+        .or_else(|| {
+            file_config
+                .storage
+                .as_ref()
+                .and_then(|storage| storage.data_dir.clone())
+        })
         .unwrap_or_else(|| paths.data_dir.clone());
 
     let database_path = env
@@ -686,31 +717,29 @@ pub fn load_from_map(
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
-    let tool_provider = file_config.tool_provider.as_ref().map(|tp| {
-        ProviderConfig {
-            backend: env
-                .get("GENESIS_TOOL_PROVIDER_BACKEND")
-                .cloned()
-                .or_else(|| tp.backend.clone())
-                .unwrap_or_else(|| provider.backend.clone()),
-            model: env
-                .get("GENESIS_TOOL_MODEL")
-                .cloned()
-                .or_else(|| tp.model.clone())
-                .unwrap_or_else(|| provider.model.clone()),
-            base_url: env
-                .get("GENESIS_TOOL_PROVIDER_BASE_URL")
-                .cloned()
-                .or_else(|| tp.base_url.clone())
-                .or_else(|| provider.base_url.clone()),
-            api_key_env: env
-                .get("GENESIS_TOOL_PROVIDER_API_KEY_ENV")
-                .cloned()
-                .or_else(|| tp.api_key_env.clone())
-                .or_else(|| provider.api_key_env.clone()),
-            extra_body: tp.extra_body.clone(),
-            tool_call_parser: tp.tool_call_parser.clone(),
-        }
+    let tool_provider = file_config.tool_provider.as_ref().map(|tp| ProviderConfig {
+        backend: env
+            .get("GENESIS_TOOL_PROVIDER_BACKEND")
+            .cloned()
+            .or_else(|| tp.backend.clone())
+            .unwrap_or_else(|| provider.backend.clone()),
+        model: env
+            .get("GENESIS_TOOL_MODEL")
+            .cloned()
+            .or_else(|| tp.model.clone())
+            .unwrap_or_else(|| provider.model.clone()),
+        base_url: env
+            .get("GENESIS_TOOL_PROVIDER_BASE_URL")
+            .cloned()
+            .or_else(|| tp.base_url.clone())
+            .or_else(|| provider.base_url.clone()),
+        api_key_env: env
+            .get("GENESIS_TOOL_PROVIDER_API_KEY_ENV")
+            .cloned()
+            .or_else(|| tp.api_key_env.clone())
+            .or_else(|| provider.api_key_env.clone()),
+        extra_body: tp.extra_body.clone(),
+        tool_call_parser: tp.tool_call_parser.clone(),
     });
 
     // Fallback providers — each inherits primary provider defaults when partially specified.
@@ -723,14 +752,8 @@ pub fn load_from_map(
                 .backend
                 .clone()
                 .unwrap_or_else(|| provider.backend.clone()),
-            model: fp
-                .model
-                .clone()
-                .unwrap_or_else(|| provider.model.clone()),
-            base_url: fp
-                .base_url
-                .clone()
-                .or_else(|| provider.base_url.clone()),
+            model: fp.model.clone().unwrap_or_else(|| provider.model.clone()),
+            base_url: fp.base_url.clone().or_else(|| provider.base_url.clone()),
             api_key_env: fp
                 .api_key_env
                 .clone()
@@ -841,12 +864,12 @@ fn read_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     };
 
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("yaml") | Some("yml") => serde_yaml::from_str(&raw).map_err(|source| {
-            ConfigError::ParseYaml {
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).map_err(|source| ConfigError::ParseYaml {
                 path: path.to_path_buf(),
                 source,
-            }
-        }),
+            })
+        }
         Some("toml") => toml::from_str(&raw).map_err(|source| ConfigError::ParseToml {
             path: path.to_path_buf(),
             source,
@@ -864,10 +887,12 @@ where
     T: std::str::FromStr,
 {
     match env.get(name) {
-        Some(value) => value.parse::<T>().map_err(|_| ConfigError::InvalidEnvValue {
-            name,
-            value: value.clone(),
-        }),
+        Some(value) => value
+            .parse::<T>()
+            .map_err(|_| ConfigError::InvalidEnvValue {
+                name,
+                value: value.clone(),
+            }),
         None => Ok(default),
     }
 }
@@ -885,7 +910,9 @@ pub fn update_provider_in_file(
     // Read existing partial config (or start fresh).
     let mut file_config = read_config_file(config_path)?;
 
-    let provider = file_config.provider.get_or_insert_with(FileProviderConfig::default);
+    let provider = file_config
+        .provider
+        .get_or_insert_with(FileProviderConfig::default);
 
     if let Some(b) = backend {
         provider.backend = Some(b.to_owned());
@@ -964,32 +991,67 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .tool_call_parser = Some(value.to_owned());
         }
         "runtime.max_turns" => parse_and_set!(
-            value, "runtime.max_turns", usize,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_turns
+            value,
+            "runtime.max_turns",
+            usize,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_turns
         ),
         "runtime.max_concurrency" => parse_and_set!(
-            value, "runtime.max_concurrency", usize,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_concurrency
+            value,
+            "runtime.max_concurrency",
+            usize,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_concurrency
         ),
         "runtime.allow_destructive_tools" => parse_and_set!(
-            value, "runtime.allow_destructive_tools", bool,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).allow_destructive_tools
+            value,
+            "runtime.allow_destructive_tools",
+            bool,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .allow_destructive_tools
         ),
         "runtime.max_context_messages" => parse_and_set!(
-            value, "runtime.max_context_messages", usize,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_context_messages
+            value,
+            "runtime.max_context_messages",
+            usize,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_context_messages
         ),
         "runtime.thinking_budget" => parse_and_set!(
-            value, "runtime.thinking_budget", u32,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).thinking_budget
+            value,
+            "runtime.thinking_budget",
+            u32,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .thinking_budget
         ),
         "runtime.max_context_tokens" => parse_and_set!(
-            value, "runtime.max_context_tokens", u32,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_context_tokens
+            value,
+            "runtime.max_context_tokens",
+            u32,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_context_tokens
         ),
         "runtime.max_iterations" => parse_and_set!(
-            value, "runtime.max_iterations", usize,
-            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_iterations
+            value,
+            "runtime.max_iterations",
+            usize,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .max_iterations
         ),
         "runtime.reasoning_effort" => {
             let effort: ReasoningEffort = match value.to_ascii_lowercase().as_str() {
@@ -1009,13 +1071,23 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .reasoning_effort = Some(effort);
         }
         "gateway.idle_timeout_minutes" => parse_and_set!(
-            value, "gateway.idle_timeout_minutes", u64,
-            file_config.gateway.get_or_insert_with(GatewayConfig::default).idle_timeout_minutes
+            value,
+            "gateway.idle_timeout_minutes",
+            u64,
+            file_config
+                .gateway
+                .get_or_insert_with(GatewayConfig::default)
+                .idle_timeout_minutes
         ),
         "gateway.daily_reset_hour" => {
             parse_and_set!(
-                value, "gateway.daily_reset_hour", u8,
-                file_config.gateway.get_or_insert_with(GatewayConfig::default).daily_reset_hour
+                value,
+                "gateway.daily_reset_hour",
+                u8,
+                file_config
+                    .gateway
+                    .get_or_insert_with(GatewayConfig::default)
+                    .daily_reset_hour
             );
             // Extra validation: hour must be 0..=23.
             if let Some(gw) = file_config.gateway.as_ref() {
@@ -1028,8 +1100,13 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
             }
         }
         "gateway.rate_limit_rpm" => parse_and_set!(
-            value, "gateway.rate_limit_rpm", u32,
-            file_config.gateway.get_or_insert_with(GatewayConfig::default).rate_limit_rpm
+            value,
+            "gateway.rate_limit_rpm",
+            u32,
+            file_config
+                .gateway
+                .get_or_insert_with(GatewayConfig::default)
+                .rate_limit_rpm
         ),
         _ => {
             return Err(ConfigError::InvalidEnvValue {
@@ -1059,8 +1136,8 @@ fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), Config
         })?;
     }
 
-    let yaml =
-        serde_yaml::to_string(file_config).map_err(|source| ConfigError::SerializeYaml { source })?;
+    let yaml = serde_yaml::to_string(file_config)
+        .map_err(|source| ConfigError::SerializeYaml { source })?;
     fs::write(path, yaml).map_err(|source| ConfigError::WriteFile {
         path: path.to_path_buf(),
         source,
@@ -1161,14 +1238,8 @@ runtime:
         )
         .expect("initial write");
 
-        super::update_provider_in_file(
-            &config_path,
-            None,
-            Some("gpt-5"),
-            None,
-            None,
-        )
-        .expect("update should succeed");
+        super::update_provider_in_file(&config_path, None, Some("gpt-5"), None, None)
+            .expect("update should succeed");
 
         let loaded = load_from_map(Some(&config_path), &std::collections::BTreeMap::new())
             .expect("reload should work");
@@ -1181,8 +1252,11 @@ runtime:
     fn update_provider_changes_both_backend_and_model() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
-        fs::write(&config_path, "provider:\n  backend: openai\n  model: gpt-4.1-mini\n")
-            .expect("initial write");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\n",
+        )
+        .expect("initial write");
 
         super::update_provider_in_file(
             &config_path,
@@ -1223,7 +1297,10 @@ tool_provider:
         let loaded =
             load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
 
-        let tp = loaded.config.tool_provider.expect("tool_provider should be set");
+        let tp = loaded
+            .config
+            .tool_provider
+            .expect("tool_provider should be set");
         assert_eq!(tp.model, "openai/gpt-4.1-mini");
         // Should inherit backend from primary provider
         assert_eq!(tp.backend, "openrouter");
@@ -1337,14 +1414,17 @@ mcp_servers:
     fn set_value_in_file_sets_provider_model() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
-        fs::write(&config_path, "provider:\n  backend: openai\n  model: gpt-4.1-mini\n")
-            .expect("initial write");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\n",
+        )
+        .expect("initial write");
 
         super::set_value_in_file(&config_path, "provider.model", "gpt-5")
             .expect("set should succeed");
 
-        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
-            .expect("reload should work");
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
         assert_eq!(loaded.config.provider.model, "gpt-5");
         assert_eq!(loaded.config.provider.backend, "openai");
     }
@@ -1358,8 +1438,8 @@ mcp_servers:
         super::set_value_in_file(&config_path, "runtime.max_turns", "50")
             .expect("set should succeed");
 
-        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
-            .expect("reload should work");
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
         assert_eq!(loaded.config.runtime.max_turns, 50);
     }
 
@@ -1372,8 +1452,8 @@ mcp_servers:
         super::set_value_in_file(&config_path, "runtime.thinking_budget", "4096")
             .expect("set should succeed");
 
-        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
-            .expect("reload should work");
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
         assert_eq!(loaded.config.runtime.thinking_budget, Some(4096));
     }
 
@@ -1386,8 +1466,8 @@ mcp_servers:
         super::set_value_in_file(&config_path, "gateway.idle_timeout_minutes", "120")
             .expect("set should succeed");
 
-        let loaded = load_from_map(Some(&config_path), &BTreeMap::new())
-            .expect("reload should work");
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
         let gw = loaded.config.gateway.expect("gateway should be set");
         assert_eq!(gw.idle_timeout_minutes, Some(120));
         assert_eq!(gw.daily_reset_hour, None);
@@ -1501,7 +1581,13 @@ toolsets:
         let json = r#"{"backend":"singularity","image":"docker://ubuntu:22.04","cpu":2.0,"memory_mb":8192,"persistent":true}"#;
         let config: super::TerminalConfig = serde_json::from_str(json).unwrap();
         match &config {
-            super::TerminalConfig::Singularity { image, cpu, memory_mb, persistent, .. } => {
+            super::TerminalConfig::Singularity {
+                image,
+                cpu,
+                memory_mb,
+                persistent,
+                ..
+            } => {
                 assert_eq!(image, "docker://ubuntu:22.04");
                 assert_eq!(*cpu, 2.0);
                 assert_eq!(*memory_mb, 8192);
@@ -1516,7 +1602,13 @@ toolsets:
         let json = r#"{"backend":"modal"}"#;
         let config: super::TerminalConfig = serde_json::from_str(json).unwrap();
         match &config {
-            super::TerminalConfig::Modal { cpu, memory_mb, disk_mb, persistent, .. } => {
+            super::TerminalConfig::Modal {
+                cpu,
+                memory_mb,
+                disk_mb,
+                persistent,
+                ..
+            } => {
                 assert_eq!(*cpu, 1.0);
                 assert_eq!(*memory_mb, 5120);
                 assert_eq!(*disk_mb, 51200);
