@@ -22,6 +22,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tracing::{error, info, warn};
+
 /// The maximum message length for platform delivery before truncation.
 const PLATFORM_MAX_LENGTH: usize = 4000;
 
@@ -265,7 +267,7 @@ impl DeliveryRouter {
                     }
                 } else {
                     // Graceful fallback: origin unavailable → local
-                    tracing::warn!("origin platform not configured, falling back to local");
+                    warn!("origin platform not configured, falling back to local");
                     ResolvedDestination {
                         platform: "local".to_owned(),
                         chat_id: None,
@@ -278,7 +280,7 @@ impl DeliveryRouter {
             },
             DeliveryTarget::Platform { platform, chat_id } => {
                 if !is_known_platform(platform) {
-                    tracing::warn!(
+                    warn!(
                         platform = platform.as_str(),
                         "unknown platform, falling back to local"
                     );
@@ -334,7 +336,7 @@ impl DeliveryRouter {
 
         match save_local_output(&self.config.output_dir, job_id, output) {
             Ok(path) => {
-                tracing::info!(
+                info!(
                     job_id = job_id,
                     path = %path.display(),
                     "schedule output saved locally"
@@ -347,7 +349,7 @@ impl DeliveryRouter {
                 }
             }
             Err(e) => {
-                tracing::error!(
+                error!(
                     job_id = job_id,
                     error = %e,
                     "failed to save schedule output locally"
@@ -373,7 +375,7 @@ impl DeliveryRouter {
         let message = if output.len() > PLATFORM_MAX_LENGTH {
             // Save the full output locally before truncating
             if let Err(e) = save_local_output(&self.config.output_dir, job_id, output) {
-                tracing::warn!(
+                warn!(
                     job_id = job_id,
                     error = %e,
                     "failed to save full output locally before truncation"
@@ -389,7 +391,7 @@ impl DeliveryRouter {
             .await
         {
             Ok(()) => {
-                tracing::info!(
+                info!(
                     job_id = job_id,
                     destination = %dest,
                     "schedule output delivered to platform"
@@ -402,7 +404,7 @@ impl DeliveryRouter {
                 }
             }
             Err(e) => {
-                tracing::error!(
+                error!(
                     job_id = job_id,
                     destination = %dest,
                     error = %e,
@@ -413,7 +415,7 @@ impl DeliveryRouter {
                 let fallback_ok =
                     match save_local_output(&self.config.output_dir, job_id, output) {
                         Ok(path) => {
-                            tracing::info!(
+                            info!(
                                 job_id = job_id,
                                 path = %path.display(),
                                 "fallback local save succeeded"
@@ -421,7 +423,7 @@ impl DeliveryRouter {
                             true
                         }
                         Err(local_err) => {
-                            tracing::error!(
+                            error!(
                                 job_id = job_id,
                                 error = %local_err,
                                 "fallback local save also failed"

@@ -87,15 +87,15 @@ impl StdioTransport {
         tokio::spawn(async move {
             while let Some(msg) = outgoing_rx.recv().await {
                 if let Err(e) = stdin.write_all(msg.as_bytes()).await {
-                    error!("mcp stdin write error: {e}");
+                    error!(error = %e, "mcp stdin write error");
                     break;
                 }
                 if let Err(e) = stdin.write_all(b"\n").await {
-                    error!("mcp stdin newline error: {e}");
+                    error!(error = %e, "mcp stdin newline error");
                     break;
                 }
                 if let Err(e) = stdin.flush().await {
-                    error!("mcp stdin flush error: {e}");
+                    error!(error = %e, "mcp stdin flush error");
                     break;
                 }
             }
@@ -134,7 +134,7 @@ impl StdioTransport {
                         break;
                     }
                     Err(e) => {
-                        error!("mcp stdout read error: {e}");
+                        error!(error = %e, "mcp stdout read error");
                         break;
                     }
                 }

@@ -399,7 +399,7 @@ async fn resolve_credentials_inner(
                     });
                 }
                 Err(e) => {
-                    tracing::warn!("Token refresh failed, using existing token: {e}");
+                    tracing::warn!(error = %e, "token refresh failed, using existing token");
                 }
             }
         }
@@ -436,7 +436,7 @@ pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthEr
 
     if !is_remote_session() {
         if let Err(e) = open::that(&device.verification_url) {
-            tracing::debug!("Could not open browser: {e}");
+            tracing::debug!(error = %e, "could not open browser");
         }
     }
 
