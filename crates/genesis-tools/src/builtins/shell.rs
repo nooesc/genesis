@@ -390,9 +390,7 @@ impl ToolHandler for ShellExecTool {
         let exit_code = status.code().unwrap_or(-1);
 
         let mut content = String::new();
-        if !stdout.is_empty() {
-            content.push_str(&stdout);
-        }
+        content.push_str(&stdout);
         if !stderr.is_empty() {
             if !content.is_empty() {
                 content.push('\n');

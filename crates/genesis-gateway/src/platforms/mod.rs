@@ -130,15 +130,15 @@ fn parse_env_id_set(value: &str) -> HashSet<String> {
 }
 
 fn is_user_in_allowlist(allowed: &HashSet<String>, user_id: &str) -> bool {
-    let mut candidates = HashSet::new();
-    candidates.insert(user_id.to_owned());
-    if let Some((short_user_id, _)) = user_id.split_once('@') {
-        if !short_user_id.is_empty() {
-            candidates.insert(short_user_id.to_owned());
+    if allowed.contains(user_id) {
+        return true;
+    }
+    if let Some((short, _)) = user_id.split_once('@') {
+        if !short.is_empty() && allowed.contains(short) {
+            return true;
         }
     }
-
-    !candidates.is_disjoint(allowed)
+    false
 }
 
 /// Format a pairing reply message for a user who needs to be approved.
