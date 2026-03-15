@@ -22,8 +22,6 @@ pub mod skill_sync;
 pub mod skills;
 pub mod skills_hub;
 pub mod quality;
-#[allow(dead_code)]
-pub(crate) mod redact;
 pub mod skill_manifest;
 pub mod skills_guard;
 pub mod personality;

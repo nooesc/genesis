@@ -255,47 +255,6 @@ fn platform_hint(platform: &str) -> Option<&'static str> {
     }
 }
 
-// --- Compatibility wrappers for existing callers ---
-
-/// Build a system prompt for the agent from the current context.
-pub fn build_system_prompt(
-    profile: &str,
-    tools: &[ToolDefinition],
-    custom_identity: Option<&str>,
-) -> String {
-    let mut builder = SystemPromptBuilder::new(profile, tools);
-    if let Some(id) = custom_identity { builder = builder.identity(id); }
-    builder.build()
-}
-
-/// Build a system prompt with optional skills context.
-pub fn build_system_prompt_with_skills(
-    profile: &str,
-    tools: &[ToolDefinition],
-    custom_identity: Option<&str>,
-    skills_section: Option<&str>,
-) -> String {
-    let mut builder = SystemPromptBuilder::new(profile, tools);
-    if let Some(id) = custom_identity { builder = builder.identity(id); }
-    if let Some(s) = skills_section { builder = builder.skills(s); }
-    builder.build()
-}
-
-/// Build a system prompt with all optional sections.
-pub fn build_system_prompt_full(
-    profile: &str,
-    tools: &[ToolDefinition],
-    custom_identity: Option<&str>,
-    skills_section: Option<&str>,
-    user_model_section: Option<&str>,
-) -> String {
-    let mut builder = SystemPromptBuilder::new(profile, tools);
-    if let Some(id) = custom_identity { builder = builder.identity(id); }
-    if let Some(s) = skills_section { builder = builder.skills(s); }
-    if let Some(u) = user_model_section { builder = builder.user_model(u); }
-    builder.build()
-}
-
 /// Build a system prompt with all optional sections including project context.
 pub fn build_system_prompt_complete(
     profile: &str,
@@ -310,25 +269,6 @@ pub fn build_system_prompt_complete(
     if let Some(s) = skills_section { builder = builder.skills(s); }
     if let Some(u) = user_model_section { builder = builder.user_model(u); }
     if let Some(c) = context_section { builder = builder.context(c); }
-    builder.build()
-}
-
-/// Build a system prompt with all optional sections including recalled memories.
-pub fn build_system_prompt_with_memories(
-    profile: &str,
-    tools: &[ToolDefinition],
-    custom_identity: Option<&str>,
-    skills_section: Option<&str>,
-    user_model_section: Option<&str>,
-    context_section: Option<&str>,
-    memories_section: Option<&str>,
-) -> String {
-    let mut builder = SystemPromptBuilder::new(profile, tools);
-    if let Some(id) = custom_identity { builder = builder.identity(id); }
-    if let Some(s) = skills_section { builder = builder.skills(s); }
-    if let Some(u) = user_model_section { builder = builder.user_model(u); }
-    if let Some(c) = context_section { builder = builder.context(c); }
-    if let Some(m) = memories_section { builder = builder.memories(m); }
     builder.build()
 }
 
@@ -433,7 +373,7 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
 
 /// Scan context file content for potential security issues.
 /// Returns a list of warning messages (empty if clean).
-pub fn scan_context_security(content: &str) -> Vec<String> {
+pub(crate) fn scan_context_security(content: &str) -> Vec<String> {
     let mut warnings = Vec::new();
 
     // Check file size
@@ -496,6 +436,62 @@ pub fn agent_name() -> &'static str {
 mod tests {
     use super::*;
     use genesis_types::ToolDefinition;
+
+    // --- Test-only compatibility wrappers (no external callers) ---
+
+    fn build_system_prompt(
+        profile: &str,
+        tools: &[ToolDefinition],
+        custom_identity: Option<&str>,
+    ) -> String {
+        let mut builder = SystemPromptBuilder::new(profile, tools);
+        if let Some(id) = custom_identity { builder = builder.identity(id); }
+        builder.build()
+    }
+
+    fn build_system_prompt_with_skills(
+        profile: &str,
+        tools: &[ToolDefinition],
+        custom_identity: Option<&str>,
+        skills_section: Option<&str>,
+    ) -> String {
+        let mut builder = SystemPromptBuilder::new(profile, tools);
+        if let Some(id) = custom_identity { builder = builder.identity(id); }
+        if let Some(s) = skills_section { builder = builder.skills(s); }
+        builder.build()
+    }
+
+    fn build_system_prompt_full(
+        profile: &str,
+        tools: &[ToolDefinition],
+        custom_identity: Option<&str>,
+        skills_section: Option<&str>,
+        user_model_section: Option<&str>,
+    ) -> String {
+        let mut builder = SystemPromptBuilder::new(profile, tools);
+        if let Some(id) = custom_identity { builder = builder.identity(id); }
+        if let Some(s) = skills_section { builder = builder.skills(s); }
+        if let Some(u) = user_model_section { builder = builder.user_model(u); }
+        builder.build()
+    }
+
+    fn build_system_prompt_with_memories(
+        profile: &str,
+        tools: &[ToolDefinition],
+        custom_identity: Option<&str>,
+        skills_section: Option<&str>,
+        user_model_section: Option<&str>,
+        context_section: Option<&str>,
+        memories_section: Option<&str>,
+    ) -> String {
+        let mut builder = SystemPromptBuilder::new(profile, tools);
+        if let Some(id) = custom_identity { builder = builder.identity(id); }
+        if let Some(s) = skills_section { builder = builder.skills(s); }
+        if let Some(u) = user_model_section { builder = builder.user_model(u); }
+        if let Some(c) = context_section { builder = builder.context(c); }
+        if let Some(m) = memories_section { builder = builder.memories(m); }
+        builder.build()
+    }
 
     #[test]
     fn default_prompt_includes_eve_identity() {
