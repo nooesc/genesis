@@ -301,7 +301,11 @@ impl ToolRegistry {
 
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
+    register_standard_tools(&mut registry);
+    registry
+}
 
+fn register_standard_tools(registry: &mut ToolRegistry) {
     // Shared process registry for background shell commands.
     let process_registry = builtins::process_registry::ProcessRegistry::new();
 
@@ -1376,7 +1380,10 @@ pub fn default_registry() -> ToolRegistry {
             builtins::homeassistant::HaCallServiceTool,
         );
 
-    // ── Browser automation tools ──────────────────────────────────────
+    register_browser_tools(registry);
+}
+
+fn register_browser_tools(registry: &mut ToolRegistry) {
     let browser_mgr = std::sync::Arc::new(builtins::browser::BrowserManager::new());
 
     registry
@@ -1541,8 +1548,6 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Destructive,
             builtins::browser::BrowserConsole { manager: browser_mgr },
         );
-
-    registry
 }
 
 struct EchoTool;
@@ -1585,7 +1590,8 @@ impl ToolHandler for SessionInfoTool {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
+        default_registry, register_standard_tools, ApprovalPolicy, ToolCall, ToolContext,
+        ToolError, ToolHandler,
         ToolOutput, ToolRegistry,
     };
     use genesis_types::ToolDefinition;
@@ -1656,6 +1662,25 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "browser_get_images"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_vision"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_console"));
+    }
+
+    #[test]
+    fn grouped_registration_matches_default_registry_tool_names() {
+        let mut registry = ToolRegistry::new();
+        register_standard_tools(&mut registry);
+        let grouped_names = registry
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let default_names = default_registry()
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(grouped_names, default_names);
     }
 
     #[test]
