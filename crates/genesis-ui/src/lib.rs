@@ -3,6 +3,7 @@
 //! This crate provides colors, terminal detection, and formatted output
 //! for the CLI. It does NOT depend on any other genesis crate.
 
+pub mod banner;
 pub mod colors;
 pub mod terminal;
 

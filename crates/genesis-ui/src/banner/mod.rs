@@ -1,0 +1,240 @@
+//! Eve ASCII art banner with animation for Genesis CLI startup.
+//!
+//! Displays an animated ASCII art welcome banner featuring Eve — an anime-style
+//! hooded girl character. The banner adapts to terminal width:
+//!
+//! | Terminal Width | Version  | Description                        |
+//! |---------------|----------|------------------------------------|
+//! | >= 100 cols   | Full     | ~34 lines, ~60 cols with side info  |
+//! | 60-99 cols    | Compact  | ~18 lines, ~40 cols with info below |
+//! | < 60 cols     | Text     | Single line: "Eve v0.1.0"           |
+
+mod animate;
+mod frames;
+
+use crate::colors::{UI_ACCENT, UI_DIM, UI_TEXT};
+use crate::terminal::TerminalSize;
+use crate::UiContext;
+
+/// Information displayed alongside the Eve banner art.
+pub struct BannerInfo {
+    pub session_id: String,
+    pub model: String,
+    pub cwd: String,
+    pub builtin_tools: usize,
+    pub mcp_tools: usize,
+}
+
+/// Which banner variant to show based on terminal width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerSize {
+    /// Full art + side info panel (>= 100 cols).
+    Full,
+    /// Compact art + info below (60-99 cols).
+    Compact,
+    /// Text-only single line (< 60 cols).
+    Text,
+}
+
+impl BannerSize {
+    /// Select the appropriate banner size for the given terminal width.
+    pub fn for_width(cols: u16) -> Self {
+        if cols >= 100 {
+            Self::Full
+        } else if cols >= 60 {
+            Self::Compact
+        } else {
+            Self::Text
+        }
+    }
+}
+
+/// Display the Eve banner with animation and session info.
+///
+/// Adapts to terminal width. Does nothing if colors are disabled.
+pub fn show_banner(ui: &UiContext, info: &BannerInfo) {
+    if !ui.colors_enabled {
+        // When colors are off, just print a plain text header.
+        println!("Eve v0.1.0");
+        print_session_info_plain(info);
+        return;
+    }
+
+    let size = TerminalSize::detect();
+    let banner_size = BannerSize::for_width(size.cols);
+
+    match banner_size {
+        BannerSize::Full => show_full(info),
+        BannerSize::Compact => show_compact(info),
+        BannerSize::Text => show_text_only(),
+    }
+}
+
+/// Full banner: animated art with session info to the right.
+fn show_full(info: &BannerInfo) {
+    let art_frames = frames::full_frames();
+
+    // Play the animation.
+    animate::play_animation(&art_frames);
+
+    // Now we need to print session info. For the full variant we move the
+    // cursor back up and print info to the right of the art. However,
+    // since the art lines already contain trailing spaces and ANSI codes,
+    // it's cleaner to print info below with a separator.
+    println!();
+    print_session_info(info);
+    println!();
+}
+
+/// Compact banner: animated art with session info below.
+fn show_compact(info: &BannerInfo) {
+    let art_frames = frames::compact_frames();
+    animate::play_animation(&art_frames);
+    println!();
+    print_session_info(info);
+    println!();
+}
+
+/// Text-only banner for very narrow terminals.
+fn show_text_only() {
+    let accent = format!("\x1b[38;2;{};{};{}m", UI_ACCENT.0, UI_ACCENT.1, UI_ACCENT.2);
+    let reset = "\x1b[0m";
+    println!("{accent}Eve v0.1.0{reset}");
+    println!();
+}
+
+/// Print session info with colors.
+fn print_session_info(info: &BannerInfo) {
+    let dim = format!("\x1b[38;2;{};{};{}m", UI_DIM.0, UI_DIM.1, UI_DIM.2);
+    let text = format!("\x1b[38;2;{};{};{}m", UI_TEXT.0, UI_TEXT.1, UI_TEXT.2);
+    let reset = "\x1b[0m";
+
+    // Shorten cwd: replace home dir with ~
+    let cwd = shorten_home(&info.cwd);
+
+    // Shorten session id to last 6 chars if it has a prefix
+    let session_display = shorten_session_id(&info.session_id);
+
+    let tools_display = if info.mcp_tools > 0 {
+        format!("{} builtin, {} mcp", info.builtin_tools, info.mcp_tools)
+    } else {
+        format!("{} builtin", info.builtin_tools)
+    };
+
+    println!(
+        "  {dim}session   {text}{session_display}{reset}"
+    );
+    println!(
+        "  {dim}model     {text}{}{reset}",
+        info.model
+    );
+    println!(
+        "  {dim}cwd       {text}{cwd}{reset}"
+    );
+    println!(
+        "  {dim}tools     {text}{tools_display}{reset}"
+    );
+}
+
+/// Print session info without colors.
+fn print_session_info_plain(info: &BannerInfo) {
+    let cwd = shorten_home(&info.cwd);
+    let session_display = shorten_session_id(&info.session_id);
+    let tools_display = if info.mcp_tools > 0 {
+        format!("{} builtin, {} mcp", info.builtin_tools, info.mcp_tools)
+    } else {
+        format!("{} builtin", info.builtin_tools)
+    };
+
+    println!("  session   {session_display}");
+    println!("  model     {}", info.model);
+    println!("  cwd       {cwd}");
+    println!("  tools     {tools_display}");
+}
+
+/// Shorten home directory prefix to ~.
+fn shorten_home(path: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if path.starts_with(&home) {
+            return format!("~{}", &path[home.len()..]);
+        }
+    }
+    path.to_string()
+}
+
+/// Display a shortened session id: "cli-a4f2e1" from "cli-20260315-a4f2e1..."
+fn shorten_session_id(id: &str) -> String {
+    // If the id is short enough, keep it.
+    if id.len() <= 16 {
+        return id.to_string();
+    }
+    // Take prefix (e.g. "cli") and last 6 hex chars.
+    if let Some(pos) = id.find('-') {
+        let prefix = &id[..pos];
+        let suffix = &id[id.len().saturating_sub(6)..];
+        format!("{prefix}-{suffix}")
+    } else {
+        id.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::terminal::ColorMode;
+
+    #[test]
+    fn banner_info_display_no_panic_colors_disabled() {
+        let ui = UiContext::new(ColorMode::Never);
+        let info = BannerInfo {
+            session_id: "cli-20260315-abc123".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            cwd: "/tmp/test".to_string(),
+            builtin_tools: 60,
+            mcp_tools: 4,
+        };
+        // Should not panic.
+        show_banner(&ui, &info);
+    }
+
+    #[test]
+    fn adaptive_selection_full() {
+        assert_eq!(BannerSize::for_width(120), BannerSize::Full);
+        assert_eq!(BannerSize::for_width(100), BannerSize::Full);
+    }
+
+    #[test]
+    fn adaptive_selection_compact() {
+        assert_eq!(BannerSize::for_width(99), BannerSize::Compact);
+        assert_eq!(BannerSize::for_width(60), BannerSize::Compact);
+    }
+
+    #[test]
+    fn adaptive_selection_text() {
+        assert_eq!(BannerSize::for_width(59), BannerSize::Text);
+        assert_eq!(BannerSize::for_width(40), BannerSize::Text);
+        assert_eq!(BannerSize::for_width(1), BannerSize::Text);
+    }
+
+    #[test]
+    fn shorten_home_replaces_prefix() {
+        if let Ok(home) = std::env::var("HOME") {
+            let path = format!("{home}/projects/genesis");
+            let short = shorten_home(&path);
+            assert!(short.starts_with("~/"), "expected ~/..., got: {short}");
+        }
+    }
+
+    #[test]
+    fn shorten_session_id_short_ids_unchanged() {
+        assert_eq!(shorten_session_id("cli-abc123"), "cli-abc123");
+    }
+
+    #[test]
+    fn shorten_session_id_long_ids_truncated() {
+        let long = "cli-20260315-143022-a4f2e1b9c3d5";
+        let short = shorten_session_id(long);
+        assert!(short.starts_with("cli-"));
+        assert!(short.len() < long.len());
+    }
+}

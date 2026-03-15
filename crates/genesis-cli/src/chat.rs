@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
-use genesis_core::prompt::agent_name;
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
 use genesis_ui::UiContext;
@@ -105,20 +104,27 @@ pub(crate) async fn run_chat(
         service.ensure_session(&session_id, "cli", None)?;
     }
 
+    // Show the Eve banner with animation and session info.
+    {
+        use genesis_ui::banner::{show_banner, BannerInfo};
+
+        let info = BannerInfo {
+            session_id: session_id.clone(),
+            model: loaded.config.provider.model.clone(),
+            cwd: std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".into()),
+            builtin_tools: 60,
+            mcp_tools: 0,
+        };
+        show_banner(ui, &info);
+    }
+
     if is_resumed {
         println!(
             "{}",
             ui.format_metadata(&format!(
-                "Resuming session `{session_id}` with {}. Type `exit` or `quit` to leave.",
-                agent_name()
-            ))
-        );
-    } else {
-        println!(
-            "{}",
-            ui.format_metadata(&format!(
-                "Starting session `{session_id}` with {}. Type `exit` or `quit` to leave.",
-                agent_name()
+                "Resuming session `{session_id}`. Type `exit` or `quit` to leave.",
             ))
         );
     }
