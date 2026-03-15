@@ -1050,7 +1050,7 @@ pub(crate) async fn run_streaming_turn(
                     let _ = io::stdout().flush();
                 }
             }
-            StreamEvent::ToolCallStart { name, args_summary } => {
+            StreamEvent::ToolCallStart { name, args_summary, .. } => {
                 if streamed.load(Ordering::Relaxed) {
                     println!();
                 }
@@ -1068,18 +1068,21 @@ pub(crate) async fn run_streaming_turn(
                 }
                 streamed.store(false, Ordering::Relaxed);
             }
-            StreamEvent::ToolCallEnd { name, duration, success } => {
+            StreamEvent::ToolCallEnd { name, duration_ms, success, .. } => {
                 // Go back to Thinking while waiting for next LLM response
                 if let Ok(mut bar) = status_bar.lock() {
                     bar.set_state(BarState::Thinking);
                 }
                 if let Ok(mut buf) = tool_buffer.lock() {
-                    buf.on_tool_end(name, duration, success);
+                    buf.on_tool_end(name, std::time::Duration::from_millis(duration_ms), success);
                 }
             }
             StreamEvent::ClarificationNeeded { question } => {
                 println!("\n{}{question}", ui.eve_prompt());
             }
+            StreamEvent::TurnStarted
+            | StreamEvent::TokenUsage { .. }
+            | StreamEvent::Warning(_) => {}
         },
     );
 

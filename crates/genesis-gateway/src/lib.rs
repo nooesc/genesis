@@ -3052,14 +3052,23 @@ async fn websocket_session(
                             StreamEvent::Chunk(chunk) => {
                                 serde_json::json!({"type": "chunk", "content": chunk})
                             }
-                            StreamEvent::ToolCallStart { name, args_summary } => {
-                                serde_json::json!({"type": "tool_call", "tool": name, "args_summary": args_summary})
+                            StreamEvent::TurnStarted => {
+                                serde_json::json!({"type": "turn_started"})
                             }
-                            StreamEvent::ToolCallEnd { name, duration, success } => {
-                                serde_json::json!({"type": "tool_call_end", "tool": name, "duration_ms": duration.as_millis() as u64, "success": success})
+                            StreamEvent::ToolCallStart { name, call_id, args_summary } => {
+                                serde_json::json!({"type": "tool_call", "tool": name, "call_id": call_id, "args_summary": args_summary})
+                            }
+                            StreamEvent::ToolCallEnd { name, call_id, duration_ms, success } => {
+                                serde_json::json!({"type": "tool_call_end", "tool": name, "call_id": call_id, "duration_ms": duration_ms, "success": success})
+                            }
+                            StreamEvent::TokenUsage { input_tokens, output_tokens } => {
+                                serde_json::json!({"type": "token_usage", "input_tokens": input_tokens, "output_tokens": output_tokens})
                             }
                             StreamEvent::ClarificationNeeded { question } => {
                                 serde_json::json!({"type": "clarification", "question": question})
+                            }
+                            StreamEvent::Warning(msg) => {
+                                serde_json::json!({"type": "warning", "message": msg})
                             }
                         };
                         let _ = tx.send(json.to_string());
@@ -3235,7 +3244,10 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(Event::default().event("tool_call").data(payload)));
                             }
                         }
-                        StreamEvent::ToolCallEnd { .. } => {}
+                        StreamEvent::ToolCallEnd { .. }
+                        | StreamEvent::TurnStarted
+                        | StreamEvent::TokenUsage { .. }
+                        | StreamEvent::Warning(_) => {}
                         StreamEvent::ClarificationNeeded { question } => {
                             if let Ok(payload) = serde_json::to_string(&serde_json::json!({
                                 "session_id": &session_id,

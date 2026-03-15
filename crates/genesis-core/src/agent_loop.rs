@@ -28,22 +28,35 @@ const DEFAULT_MAX_TURNS: usize = 20;
 pub enum StreamEvent<'a> {
     /// A text content chunk from the LLM.
     Chunk(&'a str),
+    /// A new agent turn (LLM call) is starting.
+    TurnStarted,
     /// A tool call is about to be executed.
     ToolCallStart {
         name: &'a str,
+        /// The provider-assigned tool call ID (e.g. `call_abc123`).
+        call_id: &'a str,
         /// Short summary of the arguments (max ~40 chars).
         args_summary: String,
     },
     /// A tool call finished executing.
     ToolCallEnd {
         name: &'a str,
-        /// How long the tool call took to execute.
-        duration: std::time::Duration,
+        /// The provider-assigned tool call ID.
+        call_id: &'a str,
+        /// How long the tool call took to execute in milliseconds.
+        duration_ms: u64,
         /// Whether the tool call succeeded (no `Error:` prefix in output).
         success: bool,
     },
+    /// Cumulative token usage for the current streaming turn.
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     /// The agent is requesting clarification from the user.
     ClarificationNeeded { question: &'a str },
+    /// A non-fatal warning (e.g. budget approaching, context pruned).
+    Warning(&'a str),
 }
 
 /// Produce a short summary string (max ~40 chars) from a tool call's JSON
@@ -1142,6 +1155,7 @@ impl AgentLoop {
 
         // Fire turn-start hook (streaming)
         self.hooks.on_turn_start(&hook_session, &user_message);
+        on_event(StreamEvent::TurnStarted);
 
         let tool_defs: Vec<ChatTool> = self.tools.definitions_async().await.iter().map(ChatTool::from).collect();
 
@@ -1291,6 +1305,10 @@ impl AgentLoop {
                         turn_input_tokens,
                         turn_output_tokens,
                     );
+                    on_event(StreamEvent::TokenUsage {
+                        input_tokens: total_input_tokens,
+                        output_tokens: total_output_tokens,
+                    });
 
                     // If streaming didn't produce native tool calls, try parsing from text
                     if streamed_tool_calls.is_empty() && !response_text.is_empty() {
@@ -1322,6 +1340,7 @@ impl AgentLoop {
                         for tc in &streamed_tool_calls {
                             on_event(StreamEvent::ToolCallStart {
                                 name: &tc.function.name,
+                                call_id: &tc.id,
                                 args_summary: summarize_args(&tc.function.arguments),
                             });
                             self.trajectory
@@ -1361,6 +1380,7 @@ impl AgentLoop {
                         };
                         let tool_exec_duration = tool_exec_start.elapsed();
 
+                        let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
                         let mut clarification = None;
                         for (tc, (result, requires_input)) in
                             streamed_tool_calls.iter().zip(results)
@@ -1369,7 +1389,8 @@ impl AgentLoop {
                             let tool_success = !result.starts_with("Error:");
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
-                                duration: tool_exec_duration,
+                                call_id: &tc.id,
+                                duration_ms: tool_exec_duration_ms,
                                 success: tool_success,
                             });
                             self.trajectory
@@ -1473,6 +1494,10 @@ impl AgentLoop {
                         ) {
                             return Err(self.report_error(&hook_session, "usage_record", err));
                         }
+                        on_event(StreamEvent::TokenUsage {
+                            input_tokens: total_input_tokens,
+                            output_tokens: total_output_tokens,
+                        });
                     }
 
                     let choice = response.choices.first().ok_or_else(|| {
@@ -1500,9 +1525,10 @@ impl AgentLoop {
                             // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart {
-                                name: &tc.function.name,
-                                args_summary: summarize_args(&tc.function.arguments),
-                            });
+                                    name: &tc.function.name,
+                                    call_id: &tc.id,
+                                    args_summary: summarize_args(&tc.function.arguments),
+                                });
                                 self.trajectory
                                     .record_tool_call(&tc.function.name, &tc.function.arguments);
                                 self.fire_shell_hooks(
@@ -1539,6 +1565,7 @@ impl AgentLoop {
                                 }
                             };
                             let tool_exec_duration = tool_exec_start.elapsed();
+                            let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
 
                             let mut clarification = None;
                             for (tc, (result, requires_input)) in
@@ -1548,7 +1575,8 @@ impl AgentLoop {
                                 let tool_success = !result.starts_with("Error:");
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
-                                    duration: tool_exec_duration,
+                                    call_id: &tc.id,
+                                    duration_ms: tool_exec_duration_ms,
                                     success: tool_success,
                                 });
                                 self.trajectory
