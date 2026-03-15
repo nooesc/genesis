@@ -9,13 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, error, warn};
 
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
-use crate::McpError;
+use crate::{read_limited_stdin_line, McpError};
 
 const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -253,37 +253,6 @@ impl HttpTransport {
             next_id: AtomicU64::new(1),
         })
     }
-}
-
-async fn read_limited_stdin_line<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> Result<Option<String>, McpError>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut line = Vec::new();
-    let mut limited = reader.take((max_bytes as u64).saturating_add(1));
-    let bytes_read = limited
-        .read_until(b'\n', &mut line)
-        .await
-        .map_err(|e| McpError::Transport(format!("mcp stdout read error: {e}")))?;
-
-    if bytes_read == 0 {
-        return Ok(None);
-    }
-
-    if !line.ends_with(b"\n") && bytes_read > max_bytes {
-        return Err(McpError::Protocol(format!(
-            "incoming MCP frame exceeds {max_bytes} bytes"
-        )));
-    }
-
-    String::from_utf8(line)
-        .map(Some)
-        .map_err(|error| {
-            McpError::Protocol(format!("incoming MCP frame was not valid UTF-8: {error}"))
-        })
 }
 
 async fn read_http_body_bytes(
