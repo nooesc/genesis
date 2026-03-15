@@ -5877,7 +5877,7 @@ async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<String, CliErro
             std::fs::write(&paths.config_path, &yaml).map_err(CliError::Io)?;
         }
         std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
-        let _ = bootstrap(&paths.database_path)?;
+        bootstrap(&paths.database_path)?;
 
         return run_login(config_path).await;
     }
