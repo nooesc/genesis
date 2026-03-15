@@ -1762,7 +1762,7 @@ impl AgentLoop {
         /// Number of recent messages to protect from masking (approximately
         /// the last 4 assistant + tool result pairs).
         const PROTECT_RECENT: usize = 8;
-        /// Only mask tool outputs longer than this many characters.
+        /// Only mask tool outputs longer than this many bytes.
         const MIN_CONTENT_LEN: usize = 200;
 
         let has_system = self.messages.first().is_some_and(|m| m.role == "system");
@@ -1779,13 +1779,23 @@ impl AgentLoop {
                 if let Some(ref content) = msg.content {
                     let text_len = match content {
                         MessageContent::Text(t) => t.len(),
-                        MessageContent::Parts(parts) => parts
-                            .iter()
-                            .map(|p| match p {
-                                ContentPart::Text { text } => text.len(),
-                                _ => 0,
-                            })
-                            .sum(),
+                        MessageContent::Parts(parts) => {
+                            // Skip masking if any part is non-text (e.g. images)
+                            // to avoid silently discarding non-text content.
+                            let all_text = parts
+                                .iter()
+                                .all(|p| matches!(p, ContentPart::Text { .. }));
+                            if !all_text {
+                                continue;
+                            }
+                            parts
+                                .iter()
+                                .map(|p| match p {
+                                    ContentPart::Text { text } => text.len(),
+                                    _ => 0,
+                                })
+                                .sum()
+                        }
                     };
                     if text_len > MIN_CONTENT_LEN {
                         msg.content = Some(MessageContent::Text(
@@ -1816,9 +1826,6 @@ impl AgentLoop {
     /// concise summary. This summary is inserted as a system message right
     /// after the main system prompt so the agent retains awareness of context.
     async fn prune_context(&mut self) {
-        // Lightweight first pass: mask old tool outputs (no LLM call).
-        self.mask_old_tool_outputs();
-
         let has_system = self
             .messages
             .first()
@@ -1832,6 +1839,10 @@ impl AgentLoop {
         if drop_count == 0 {
             return;
         }
+
+        // Lightweight first pass: mask old tool outputs (no LLM call).
+        // Only runs when context is actually under pressure (drop_count > 0).
+        self.mask_old_tool_outputs();
 
         // Extract the messages we're about to drop and summarize them.
         let to_drop: Vec<ChatMessage> =
