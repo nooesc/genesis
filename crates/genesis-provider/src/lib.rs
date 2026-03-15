@@ -17,7 +17,7 @@ pub use api_types::{
 };
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
-pub use resolve::{resolve, ResolvedProvider};
+pub use resolve::{resolve, ResolvedProvider, OPENAI_BASE_URL};
 
 use std::collections::BTreeMap;
 

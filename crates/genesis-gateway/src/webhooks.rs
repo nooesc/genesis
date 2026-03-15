@@ -68,6 +68,9 @@ pub struct WebhookMetrics {
     pub failed: AtomicU64,
 }
 
+/// Maximum number of entries retained in the dead-letter queue.
+const MAX_DEAD_LETTER_ENTRIES: usize = 1000;
+
 /// Dispatcher that sends events to configured webhooks with retry and dead-letter.
 #[derive(Clone)]
 pub struct WebhookDispatcher {
@@ -229,8 +232,8 @@ impl WebhookDispatcher {
                     failed_at: chrono::Utc::now().to_rfc3339(),
                 };
                 let mut dl = dead_letters.lock().await;
-                // Cap the dead-letter queue at 1000 entries
-                if dl.len() >= 1000 {
+                // Cap the dead-letter queue
+                if dl.len() >= MAX_DEAD_LETTER_ENTRIES {
                     dl.pop_front();
                 }
                 dl.push_back(entry);

@@ -58,6 +58,9 @@ pub(crate) struct RateLimiter {
 /// How often (in seconds) to purge stale rate-limit entries.
 const PURGE_INTERVAL_SECS: u64 = 120;
 
+/// Duration of each rate-limit sliding window, in seconds.
+const RATE_WINDOW_SECS: u64 = 60;
+
 impl RateLimiter {
     pub fn new(max_rpm: u32) -> Self {
         Self {
@@ -95,7 +98,7 @@ impl RateLimiter {
         }
 
         let entry = map.entry(ip).or_insert((0, now));
-        if now.saturating_sub(entry.1) >= 60 {
+        if now.saturating_sub(entry.1) >= RATE_WINDOW_SECS {
             // New window
             *entry = (1, now);
             true

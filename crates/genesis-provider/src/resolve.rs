@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 use genesis_auth::provider::CODEX_INFERENCE_URL;

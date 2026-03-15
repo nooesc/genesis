@@ -115,6 +115,9 @@ struct SecretPattern {
     label: &'static str,
 }
 
+/// Minimum length for a Bearer token to be considered a real credential.
+const MIN_BEARER_TOKEN_LEN: usize = 10;
+
 /// Sanitize text by replacing known credential patterns with redaction markers.
 ///
 /// Returns a new string with all detected credentials replaced by
@@ -178,7 +181,7 @@ fn sanitize_bearer_tokens(text: &mut String) {
             .unwrap_or(text.len());
 
         let token_len = token_end - token_start;
-        if token_len >= 10 {
+        if token_len >= MIN_BEARER_TOKEN_LEN {
             text.replace_range(start..token_end, "[REDACTED:bearer-token]");
         } else {
             break;
@@ -247,7 +250,7 @@ pub fn contains_credentials(text: &str) -> bool {
             .find(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')')
             .map(|i| token_start + i)
             .unwrap_or(text.len());
-        if token_end - token_start >= 10 {
+        if token_end - token_start >= MIN_BEARER_TOKEN_LEN {
             return true;
         }
     }
