@@ -354,6 +354,7 @@ impl McpTransport for HttpTransport {
 
         let http = self.http.clone();
         let url = self.url.clone();
+        let method = method.to_string();
         tokio::spawn(async move {
             if let Err(e) = http
                 .post(&url)
@@ -362,7 +363,7 @@ impl McpTransport for HttpTransport {
                 .send()
                 .await
             {
-                warn!(error = %e, "MCP notification failed");
+                warn!(error = %e, method = %method, "MCP notification failed");
             }
         });
 
