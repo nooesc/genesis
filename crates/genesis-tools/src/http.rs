@@ -19,7 +19,7 @@ pub fn build_blocking_client(
 ) -> reqwest::blocking::Client {
     let builder = reqwest::blocking::Client::builder().timeout(timeout);
     configure(builder).build().unwrap_or_else(|e| {
-        eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
+        tracing::warn!(error = %e, "failed to build configured HTTP client, falling back to default");
         reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()

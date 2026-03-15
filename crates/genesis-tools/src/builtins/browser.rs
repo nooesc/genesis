@@ -564,10 +564,7 @@ fn cleanup_old_screenshots(dir: &Path) {
 fn vision_http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("failed to build vision HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(60), |b| b)
     })
 }
 
@@ -632,10 +629,7 @@ fn build_browserbase_session_body(
 fn browserbase_http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("failed to build HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(30), |b| b)
     })
 }
 
