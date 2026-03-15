@@ -460,15 +460,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     // ── Exact match tests (preserved from original) ──
