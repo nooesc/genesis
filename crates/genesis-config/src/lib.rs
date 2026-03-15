@@ -907,9 +907,10 @@ pub fn update_provider_in_file(
 /// `ConfigError::InvalidEnvValue` on parse failure.
 macro_rules! parse_and_set {
     ($value:expr, $key:expr, $ty:ty, $target:expr) => {{
-        let v: $ty = $value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+        let val = $value;
+        let v: $ty = val.parse().map_err(|_| ConfigError::InvalidEnvValue {
             name: $key,
-            value: $value.to_owned(),
+            value: val.to_owned(),
         })?;
         $target = Some(v);
     }};
@@ -1017,7 +1018,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 file_config.gateway.get_or_insert_with(GatewayConfig::default).daily_reset_hour
             );
             // Extra validation: hour must be 0..=23.
-            if file_config.gateway.as_ref().unwrap().daily_reset_hour.unwrap() >= 24 {
+            if file_config.gateway.as_ref().expect("just set above").daily_reset_hour.expect("just set above") >= 24 {
                 return Err(ConfigError::InvalidEnvValue {
                     name: "gateway.daily_reset_hour",
                     value: value.to_owned(),
