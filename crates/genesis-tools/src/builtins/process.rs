@@ -407,7 +407,10 @@ fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
 }
 
 fn get_memory_info_linux() -> String {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to read /proc/meminfo");
+        String::new()
+    });
     let mut total_kb: u64 = 0;
     let mut available_kb: u64 = 0;
     let mut free_kb: u64 = 0;
