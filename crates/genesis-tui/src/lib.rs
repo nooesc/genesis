@@ -153,6 +153,9 @@ pub async fn run_tui(
         screen: AppScreen::Welcome,
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
+        status_bar: crate::widgets::status_bar::StatusBarWidget::new(
+            "default".to_string(), // TODO: get from config
+        ),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -256,6 +259,9 @@ pub async fn run_tui(
                     app.welcome.next_frame();
                 }
 
+                // Advance status bar animation (sprite / spinner).
+                app.status_bar.tick();
+
                 render_frame(&mut term, &app);
 
                 // Schedule the next animation frame while on the welcome screen.
@@ -303,7 +309,16 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
                 height: area.height.saturating_sub(1),
             };
 
-            // TODO(Task 21): render status bar widget in the last row.
+            // Status bar occupies the last row.
+            if area.height >= 1 {
+                let status_area = Rect {
+                    x: area.x,
+                    y: area.y + area.height - 1,
+                    width: area.width,
+                    height: 1,
+                };
+                app.status_bar.render(status_area, buf);
+            }
 
             app.chat.render(chat_area, buf);
         }

@@ -4,6 +4,7 @@ use crate::events::{AgentEvent, AppEvent, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::input_widget::InputAction;
+use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -34,6 +35,8 @@ pub struct App {
     pub welcome: WelcomeWidget,
     /// Composed chat area: history cells + active streaming cell + input.
     pub chat: ChatWidget,
+    /// Single-row status bar rendered at the bottom of the viewport.
+    pub status_bar: StatusBarWidget,
 }
 
 impl App {
@@ -105,8 +108,8 @@ impl App {
                 // Scrollback insertion is handled in `run_tui` (which owns the
                 // terminal). See `commit_history_to_scrollback` in lib.rs.
             }
-            AppEvent::UpdateStatus(_state) => {
-                // TODO(Task 21): update status bar widget
+            AppEvent::UpdateStatus(state) => {
+                self.status_bar.set_state(state);
             }
             AppEvent::ShowOverlay(_kind) => {
                 // TODO(Task 24): enter alt screen + overlay
@@ -214,6 +217,7 @@ mod tests {
             screen: AppScreen::Chat, // Start in Chat for existing tests
             welcome,
             chat: ChatWidget::new(),
+            status_bar: StatusBarWidget::new("test".to_string()),
         };
         (app, submission_rx, app_rx)
     }
