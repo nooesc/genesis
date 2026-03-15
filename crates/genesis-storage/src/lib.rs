@@ -544,7 +544,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
             INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             ",
-            params![SCHEMA_VERSION.to_string()],
+            params![SCHEMA_VERSION],
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -1008,6 +1008,23 @@ impl SessionStore {
         &self.database_path
     }
 
+    /// Map a database row to a `SessionSummary`.
+    ///
+    /// Expects columns in order: id, title, platform, total_input_tokens,
+    /// total_output_tokens, parent_session_id, created_at, updated_at.
+    fn row_to_session_summary(row: &rusqlite::Row) -> rusqlite::Result<SessionSummary> {
+        Ok(SessionSummary {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            platform: row.get(2)?,
+            total_input_tokens: row.get(3)?,
+            total_output_tokens: row.get(4)?,
+            parent_session_id: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
     /// Create a new session record.
     pub fn create_session(
         &self,
@@ -1274,18 +1291,7 @@ impl SessionStore {
                 source,
             })?;
         let summaries = stmt
-            .query_map(params![pattern], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![pattern], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1313,18 +1319,7 @@ impl SessionStore {
                 source,
             })?;
         let summaries = stmt
-            .query_map(params![parent_id], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![parent_id], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1612,18 +1607,7 @@ impl SessionStore {
             })?;
 
         let summaries = stmt
-            .query_map(params![query], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![query], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1707,18 +1691,7 @@ impl SessionStore {
                 "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(SessionSummary {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        platform: row.get(2)?,
-                        total_input_tokens: row.get(3)?,
-                        total_output_tokens: row.get(4)?,
-                        parent_session_id: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
+                Self::row_to_session_summary,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -1742,18 +1715,7 @@ impl SessionStore {
             })?;
 
         let sessions = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![limit as i64], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1790,13 +1752,14 @@ impl SessionStore {
     /// Gather usage insights for the last N days.
     pub fn insights(&self, days: u32) -> Result<InsightsData, StorageError> {
         let connection = open(&self.database_path)?;
+        let period = format!("-{days} days");
 
         // Aggregate totals for the period
         let (count, input, output): (i64, i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
                  FROM sessions WHERE created_at >= datetime('now', ?)",
-                [format!("-{days} days")],
+                [&period],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|source| StorageError::Sqlite {
@@ -1816,15 +1779,18 @@ impl SessionStore {
                 source,
             })?;
         let sessions_per_day: Vec<(String, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Platform breakdown
         let mut stmt = connection
@@ -1838,15 +1804,18 @@ impl SessionStore {
                 source,
             })?;
         let platform_breakdown: Vec<(String, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Tokens per day
         let mut stmt = connection
@@ -1862,7 +1831,7 @@ impl SessionStore {
                 source,
             })?;
         let tokens_per_day: Vec<(String, u64, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)? as u64,
@@ -1873,8 +1842,11 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Tool usage breakdown — extract tool names from tool_calls_json
         let mut stmt = connection
@@ -1889,15 +1861,18 @@ impl SessionStore {
                 source,
             })?;
         let tool_jsons: Vec<String> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 row.get::<_, String>(0)
             })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let mut tool_counts: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
@@ -3081,6 +3056,19 @@ impl MemoryStore {
         }
     }
 
+    /// Map a database row to a `StoredMemory`.
+    ///
+    /// Expects columns in order: id, session_id, kind, content, created_at.
+    fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<StoredMemory> {
+        Ok(StoredMemory {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            kind: row.get(2)?,
+            content: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }
+
     /// List all stored memories, most recent first.
     pub fn list(&self, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3094,15 +3082,7 @@ impl MemoryStore {
                 source,
             })?;
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3122,15 +3102,7 @@ impl MemoryStore {
                 "SELECT id, session_id, kind, content, created_at
                  FROM memories WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(StoredMemory {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        content: row.get(3)?,
-                        created_at: row.get(4)?,
-                    })
-                },
+                Self::row_to_memory,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -3169,15 +3141,7 @@ impl MemoryStore {
                 source,
             })?;
         let rows = stmt
-            .query_map(params![query, limit as i64], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![query, limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3978,6 +3942,19 @@ impl AuditLogStore {
         }
     }
 
+    /// Map a database row to an `AuditEntry`.
+    ///
+    /// Expects columns in order: id, session_id, event_type, details, created_at.
+    fn row_to_audit_entry(row: &rusqlite::Row) -> rusqlite::Result<AuditEntry> {
+        Ok(AuditEntry {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            event_type: row.get(2)?,
+            details: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }
+
     /// Record an audit event.
     pub fn log(
         &self,
@@ -4017,15 +3994,7 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![session_id, limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![session_id, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -4055,15 +4024,7 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![event_type, limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![event_type, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -4092,15 +4053,7 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
