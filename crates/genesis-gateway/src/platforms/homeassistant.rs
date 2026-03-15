@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::Json;
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::Json;
 use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
@@ -55,19 +55,24 @@ fn extract_provided_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok());
 
     let auth_token = auth
-        .and_then(|value| value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")))
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
         .or(auth);
 
-    auth_token.or_else(|| {
-        headers
-            .get("x-homeassistant-token")
-            .and_then(|value| value.to_str().ok())
-    })
-    .or_else(|| {
-        headers
-            .get("x-home-assistant-token")
-            .and_then(|value| value.to_str().ok())
-    })
+    auth_token
+        .or_else(|| {
+            headers
+                .get("x-homeassistant-token")
+                .and_then(|value| value.to_str().ok())
+        })
+        .or_else(|| {
+            headers
+                .get("x-home-assistant-token")
+                .and_then(|value| value.to_str().ok())
+        })
 }
 
 // --- Handler ---
@@ -85,13 +90,19 @@ pub async fn webhook_handler(
         Some(token) => token,
         None => {
             warn!("HOMEASSISTANT_TOKEN is not configured");
-            return Err((StatusCode::FORBIDDEN, "missing HOMEASSISTANT_TOKEN".to_owned()));
+            return Err((
+                StatusCode::FORBIDDEN,
+                "missing HOMEASSISTANT_TOKEN".to_owned(),
+            ));
         }
     };
 
     if !verify_secret_token(&expected_token, extract_provided_token(&headers)) {
         warn!("homeassistant webhook token verification failed");
-        return Err((StatusCode::UNAUTHORIZED, "invalid homeassistant token".to_owned()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid homeassistant token".to_owned(),
+        ));
     }
 
     let request: HomeAssistantRequest = serde_json::from_slice(body.as_ref())
@@ -103,27 +114,16 @@ pub async fn webhook_handler(
         .map(|id| format!("ha-{id}"))
         .unwrap_or_else(|| "ha-default".to_owned());
 
-    let title = request
-        .title
-        .as_deref()
-        .unwrap_or("Home Assistant");
+    let title = request.title.as_deref().unwrap_or("Home Assistant");
 
-    let span = info_span!(
-        "homeassistant.webhook",
-        session_id = session_id.as_str(),
-    );
+    let span = info_span!("homeassistant.webhook", session_id = session_id.as_str(),);
 
     info!(parent: &span, "received home assistant webhook");
 
     // Handle gateway slash commands before reaching the agent.
     let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
     if let crate::commands::CommandResult::Reply(reply) =
-        crate::commands::handle_command(
-            &request.message,
-            &session_id,
-            &store,
-            &state.loaded.config,
-        )
+        crate::commands::handle_command(&request.message, &session_id, &store, &state.loaded.config)
     {
         return Ok(Json(HomeAssistantResponse {
             response: reply,
@@ -168,10 +168,7 @@ pub async fn webhook_handler(
     );
 
     // Append delivery mirror for cross-platform visibility.
-    let ha_chat_id = request
-        .entity_id
-        .as_deref()
-        .unwrap_or("default");
+    let ha_chat_id = request.entity_id.as_deref().unwrap_or("default");
     crate::mirror::append_delivery_mirror(
         &state.loaded.config.storage.database_path,
         "homeassistant",

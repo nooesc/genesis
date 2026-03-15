@@ -136,7 +136,11 @@ pub async fn verify_handler(Query(query): Query<VerifyQuery>) -> (StatusCode, St
         }
     };
 
-    match (query.mode.as_deref(), query.verify_token.as_deref(), query.challenge) {
+    match (
+        query.mode.as_deref(),
+        query.verify_token.as_deref(),
+        query.challenge,
+    ) {
         (Some("subscribe"), Some(token), Some(challenge)) if token == expected_token => {
             info!("whatsapp webhook verified");
             (StatusCode::OK, challenge)
@@ -168,11 +172,7 @@ pub async fn webhook_handler(
         .get("X-Hub-Signature-256")
         .and_then(|value| value.to_str().ok());
 
-    if !verify_whatsapp_signature(
-        &app_secret,
-        signature,
-        body.as_ref(),
-    ) {
+    if !verify_whatsapp_signature(&app_secret, signature, body.as_ref()) {
         warn!("whatsapp webhook signature verification failed");
         return StatusCode::UNAUTHORIZED;
     }
@@ -215,9 +215,8 @@ pub async fn webhook_handler(
                 .map(|c| c.profile.name.clone())
                 .unwrap_or_else(|| "Unknown".to_owned());
 
-            let store = genesis_storage::SessionStore::new(
-                &state.loaded.config.storage.database_path,
-            );
+            let store =
+                genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
 
             for message in &change.value.messages {
                 if message.msg_type != "text" {
@@ -349,7 +348,8 @@ pub async fn webhook_handler(
                         };
 
                         if let Err(e) =
-                            send_reply(&state.http_client, &token, &phone_id, &from, &reply_text).await
+                            send_reply(&state.http_client, &token, &phone_id, &from, &reply_text)
+                                .await
                         {
                             error!(error = %e, "failed to send whatsapp reply");
                         }
@@ -380,9 +380,7 @@ async fn send_reply(
     to: &str,
     text: &str,
 ) -> Result<(), String> {
-    let url = format!(
-        "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
-    );
+    let url = format!("https://graph.facebook.com/v21.0/{phone_number_id}/messages");
 
     // Truncate if needed (WhatsApp limit is ~4096 chars for text)
     let body = if text.len() > MAX_WHATSAPP_MESSAGE_LEN {

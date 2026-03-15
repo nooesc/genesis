@@ -121,7 +121,9 @@ pub(crate) fn handle_command(
                     if let Some(cost) = cost {
                         lines.push(format!("Estimated cost: {cost}"));
                     } else {
-                        lines.push("Estimated cost: unknown (model not in pricing table)".to_owned());
+                        lines.push(
+                            "Estimated cost: unknown (model not in pricing table)".to_owned(),
+                        );
                     }
                     CommandResult::Reply(lines.join("\n"))
                 }
@@ -203,11 +205,7 @@ pub(crate) fn check_session_expiry(
             // If the reset time has passed today and the session was last
             // updated before the reset time, it should be cleared.
             if now >= today_reset && updated_at < today_reset {
-                info!(
-                    session_id,
-                    reset_hour,
-                    "session expired due to daily reset"
-                );
+                info!(session_id, reset_hour, "session expired due to daily reset");
                 let _ = store.delete_session(session_id);
                 return true;
             }
@@ -251,7 +249,9 @@ mod tests {
     fn new_command_resets_session() {
         let store = test_store();
         // Create a session first
-        store.create_session("s1", "telegram", Some("Test")).unwrap();
+        store
+            .create_session("s1", "telegram", Some("Test"))
+            .unwrap();
         store
             .append_message("s1", "user", Some("Hello"), None, None)
             .unwrap();
@@ -322,7 +322,9 @@ mod tests {
     #[test]
     fn config_command_shows_model_and_session_info() {
         let store = test_store();
-        store.create_session("s1", "telegram", Some("Support")).unwrap();
+        store
+            .create_session("s1", "telegram", Some("Support"))
+            .unwrap();
         store
             .append_message("s1", "user", Some("Hello"), None, None)
             .unwrap();

@@ -3993,7 +3993,7 @@ fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> Result<Strin
                 continue;
             }
 
-            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 
             if dedup {
                 let raw = std::fs::read_to_string(&path).map_err(|e| {
@@ -4439,9 +4439,9 @@ fn run_eval_quality(
 
     // Sort by overall score
     if worst_first {
-        scored.sort_by(|a, b| a.1.overall.partial_cmp(&b.1.overall).unwrap());
+        scored.sort_by(|a, b| a.1.overall.total_cmp(&b.1.overall));
     } else {
-        scored.sort_by(|a, b| b.1.overall.partial_cmp(&a.1.overall).unwrap());
+        scored.sort_by(|a, b| b.1.overall.total_cmp(&a.1.overall));
     }
 
     if json {
@@ -4756,7 +4756,7 @@ fn run_eval_filter(
         }
 
         // Passed all filters — copy to output
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dest = std::path::Path::new(output).join(&filename);
         std::fs::copy(&path, &dest).map_err(|e| {
             CliError::Other(format!(
@@ -4816,14 +4816,14 @@ fn run_eval_split(
     let (train_files, test_files) = files.split_at(split_point);
 
     for path in train_files {
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         std::fs::copy(path, std::path::Path::new(train_dir).join(&filename)).map_err(|e| {
             CliError::Other(format!("failed to copy {}: {e}", path.display()))
         })?;
     }
 
     for path in test_files {
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         std::fs::copy(path, std::path::Path::new(test_dir).join(&filename)).map_err(|e| {
             CliError::Other(format!("failed to copy {}: {e}", path.display()))
         })?;
@@ -4869,7 +4869,7 @@ fn run_eval_sample(
     files.shuffle(&mut rng);
 
     for path in &files[..actual_count] {
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dest = std::path::Path::new(output).join(&filename);
         std::fs::copy(path, &dest).map_err(|e| {
             CliError::Other(format!("failed to copy {}: {e}", path.display()))
@@ -6155,8 +6155,7 @@ async fn run_pairing(
                 return Ok(serde_json::to_string_pretty(&serde_json::json!({
                     "approved": users,
                     "count": users.len(),
-                }))
-                .unwrap());
+                }))?);
             }
 
             if users.is_empty() {
@@ -6179,8 +6178,7 @@ async fn run_pairing(
                 return Ok(serde_json::to_string_pretty(&serde_json::json!({
                     "pending": pending,
                     "count": pending.len(),
-                }))
-                .unwrap());
+                }))?);
             }
 
             if pending.is_empty() {
@@ -6205,8 +6203,7 @@ async fn run_pairing(
                         Ok(serde_json::to_string_pretty(&serde_json::json!({
                             "approved": true,
                             "user": user,
-                        }))
-                        .unwrap())
+                        }))?)
                     } else {
                         Ok(format!(
                             "Approved {} ({}) on {}",
@@ -6229,8 +6226,7 @@ async fn run_pairing(
                     "revoked": revoked,
                     "platform": platform,
                     "user_id": user_id,
-                }))
-                .unwrap());
+                }))?);
             }
 
             if revoked {
@@ -6251,8 +6247,7 @@ async fn run_pairing(
                 return Ok(serde_json::to_string_pretty(&serde_json::json!({
                     "cleared": cleared,
                     "platform": platform,
-                }))
-                .unwrap());
+                }))?);
             }
 
             match platform {
@@ -6283,7 +6278,7 @@ fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String, CliError> 
                         })
                     })
                     .collect();
-                Ok(serde_json::to_string_pretty(&distributions).unwrap())
+                Ok(serde_json::to_string_pretty(&distributions)?)
             } else {
                 let mut lines = vec![format!("{:<18} {:<5} {}", "NAME", "TOOLS", "DESCRIPTION")];
                 for name in &names {
@@ -6308,7 +6303,7 @@ fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String, CliError> 
             })?;
 
             if json {
-                Ok(serde_json::to_string_pretty(&dist).unwrap())
+                Ok(serde_json::to_string_pretty(&dist)?)
             } else {
                 let mut lines = vec![
                     format!("Distribution: {}", dist.name),
@@ -6344,8 +6339,7 @@ fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String, CliError> 
                     "selected_count": tools.len(),
                     "possible_count": dist.possible_tools().len(),
                     "selected": tools,
-                }))
-                .unwrap())
+                }))?)
             } else {
                 let mut lines = vec![format!(
                     "Sampled {} tools from '{}' ({} possible):",
@@ -6378,7 +6372,7 @@ fn run_personality(command: PersonalityCommand, json: bool) -> Result<String, Cl
                         })
                     })
                     .collect();
-                Ok(serde_json::to_string_pretty(&items).unwrap())
+                Ok(serde_json::to_string_pretty(&items)?)
             } else {
                 let mut lines = vec![format!("{:<16} {}", "NAME", "DESCRIPTION")];
                 for p in &personalities {
@@ -6404,8 +6398,7 @@ fn run_personality(command: PersonalityCommand, json: bool) -> Result<String, Cl
                     "name": p.name,
                     "description": p.description,
                     "system_prompt_prefix": p.system_prompt_prefix,
-                }))
-                .unwrap())
+                }))?)
             } else {
                 Ok(format!(
                     "Personality: {}\nDescription: {}\n\nSystem prompt prefix:\n{}",

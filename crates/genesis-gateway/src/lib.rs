@@ -15,6 +15,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::extract::Path;
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
@@ -22,12 +23,14 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use axum::extract::Path;
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
 };
-use genesis_storage::{EmbeddingStore, MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore, SkillUsageStore, SubagentStore, UserModelStore};
+use genesis_storage::{
+    EmbeddingStore, MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore,
+    SkillUsageStore, SubagentStore, UserModelStore,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
@@ -85,8 +88,11 @@ impl RateLimiter {
         // Amortized purge: only scan & remove stale entries periodically
         let prev = self.last_purge.load(std::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(prev) >= PURGE_INTERVAL_SECS {
-            map.retain(|_, (_, window_start)| now.saturating_sub(*window_start) < PURGE_INTERVAL_SECS);
-            self.last_purge.store(now, std::sync::atomic::Ordering::Relaxed);
+            map.retain(|_, (_, window_start)| {
+                now.saturating_sub(*window_start) < PURGE_INTERVAL_SECS
+            });
+            self.last_purge
+                .store(now, std::sync::atomic::Ordering::Relaxed);
         }
 
         let entry = map.entry(ip).or_insert((0, now));
@@ -138,9 +144,7 @@ impl HistogramBuckets {
     }
 
     fn format_prometheus(&self, name: &str, help: &str) -> String {
-        let mut out = format!(
-            "# HELP {name} {help}\n# TYPE {name} histogram\n"
-        );
+        let mut out = format!("# HELP {name} {help}\n# TYPE {name} histogram\n");
         for (i, &boundary) in self.boundaries.iter().enumerate() {
             let _ = writeln!(out, "{name}_bucket{{le=\"{boundary}\"}} {}", self.counts[i]);
         }
@@ -198,7 +202,9 @@ impl AppState {
         rate_limit_rpm: Option<u32>,
         trusted_proxies: Vec<IpAddr>,
     ) -> Self {
-        let webhook_configs = loaded.config.gateway
+        let webhook_configs = loaded
+            .config
+            .gateway
             .as_ref()
             .map(|g| g.webhooks.clone())
             .unwrap_or_default();
@@ -285,7 +291,10 @@ fn default_request_id() -> String {
 
 /// Map a storage error into an HTTP 500 response pair.
 fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}"))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("storage error: {e}"),
+    )
 }
 
 /// Response body from the `/chat` endpoint.
@@ -382,9 +391,7 @@ fn parse_origin_values(origins: &[&str]) -> Vec<axum::http::HeaderValue> {
 fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLayer {
     use axum::http::{HeaderValue, Method};
 
-    let origins: &[String] = gateway
-        .map(|g| g.cors_origins.as_slice())
-        .unwrap_or(&[]);
+    let origins: &[String] = gateway.map(|g| g.cors_origins.as_slice()).unwrap_or(&[]);
 
     let base = CorsLayer::new()
         .allow_methods([
@@ -434,21 +441,36 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/sessions/purge", delete(purge_sessions_handler))
         .route("/sessions/import", post(import_session_handler))
         .route("/sessions/export", get(bulk_export_handler))
-        .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
+        .route(
+            "/sessions/{id}",
+            get(get_session_handler).delete(delete_session_handler),
+        )
         .route("/sessions/{id}/messages", get(session_messages_handler))
         .route("/sessions/{id}/fork", post(fork_session_handler))
         .route("/sessions/{id}/title", patch(update_session_title_handler))
         .route("/sessions/{id}/export", get(export_session_handler))
-        .route("/sessions/{id}/tags", get(get_session_tags_handler).put(set_session_tags_handler))
-        .route("/sessions/{id}/tags/{tag}", post(add_session_tag_handler).delete(remove_session_tag_handler))
+        .route(
+            "/sessions/{id}/tags",
+            get(get_session_tags_handler).put(set_session_tags_handler),
+        )
+        .route(
+            "/sessions/{id}/tags/{tag}",
+            post(add_session_tag_handler).delete(remove_session_tag_handler),
+        )
         .route("/sessions/by-tag/{tag}", get(sessions_by_tag_handler))
         .route("/messages/search", get(search_messages_handler))
         .route("/usage", get(usage_handler))
         .route("/insights", get(insights_handler))
         // Skills CRUD
-        .route("/skills", get(list_skills_handler).post(upsert_skill_handler))
+        .route(
+            "/skills",
+            get(list_skills_handler).post(upsert_skill_handler),
+        )
         .route("/skills/search", get(search_skills_handler))
-        .route("/skills/{name}", get(get_skill_handler).delete(delete_skill_handler))
+        .route(
+            "/skills/{name}",
+            get(get_skill_handler).delete(delete_skill_handler),
+        )
         // Memory endpoints
         .route("/memories", get(list_memories_handler))
         .route("/memories/search", get(search_memories_handler))
@@ -456,18 +478,39 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/memories/{id}", delete(delete_memory_handler))
         .route("/memories/{id}/embed", post(embed_single_memory_handler))
         // Schedule management
-        .route("/schedules", get(list_schedules_handler).post(create_schedule_handler))
-        .route("/schedules/{id}", get(get_schedule_handler).delete(delete_schedule_handler))
-        .route("/schedules/{id}/enabled", patch(set_schedule_enabled_handler))
+        .route(
+            "/schedules",
+            get(list_schedules_handler).post(create_schedule_handler),
+        )
+        .route(
+            "/schedules/{id}",
+            get(get_schedule_handler).delete(delete_schedule_handler),
+        )
+        .route(
+            "/schedules/{id}/enabled",
+            patch(set_schedule_enabled_handler),
+        )
         // User model (traits/preferences)
-        .route("/user/traits", get(list_user_traits_handler).post(observe_user_trait_handler))
-        .route("/user/traits/{key}", get(get_user_trait_handler).delete(delete_user_trait_handler))
+        .route(
+            "/user/traits",
+            get(list_user_traits_handler).post(observe_user_trait_handler),
+        )
+        .route(
+            "/user/traits/{key}",
+            get(get_user_trait_handler).delete(delete_user_trait_handler),
+        )
         // Subagents
         .route("/subagents/{id}", get(get_subagent_handler))
-        .route("/sessions/{id}/subagents", get(list_session_subagents_handler))
+        .route(
+            "/sessions/{id}/subagents",
+            get(list_session_subagents_handler),
+        )
         // Skill usage stats
         .route("/skills/{name}/usage", get(skill_usage_stats_handler))
-        .route("/skills/{name}/usage/recent", get(skill_usage_recent_handler))
+        .route(
+            "/skills/{name}/usage/recent",
+            get(skill_usage_recent_handler),
+        )
         // DM pairing management
         .route("/pairing/approved", get(list_approved_handler))
         .route("/pairing/pending", get(list_pending_handler))
@@ -486,7 +529,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/analytics/tools", get(tool_analytics_handler))
         .route("/analytics/llm", get(llm_analytics_handler))
         .route("/webhooks/status", get(webhooks_status_handler))
-        .route("/webhooks/dead-letters", get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler))
+        .route(
+            "/webhooks/dead-letters",
+            get(webhooks_dead_letters_handler).delete(webhooks_clear_dead_letters_handler),
+        )
         .route("/templates", get(list_templates_handler))
         .route("/templates/{name}", get(get_template_handler))
         .route("/workflows/validate", post(workflow_validate_handler))
@@ -501,7 +547,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Config introspection
         .route("/config", get(config_handler))
         // OpenAI-compatible API
-        .route("/v1/chat/completions", post(openai_chat_completions_handler))
+        .route(
+            "/v1/chat/completions",
+            post(openai_chat_completions_handler),
+        )
         .route("/v1/models", get(openai_models_handler))
         .route("/metrics", get(prometheus_metrics_handler))
         .layer(middleware::from_fn_with_state(
@@ -511,11 +560,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Platform webhook routes (no API key — each platform has strict, fail-closed webhook auth)
     let platform_webhooks = Router::new()
-        .route("/telegram/webhook", post(platforms::telegram::webhook_handler))
-        .route("/discord/interactions", post(platforms::discord::interactions_handler))
+        .route(
+            "/telegram/webhook",
+            post(platforms::telegram::webhook_handler),
+        )
+        .route(
+            "/discord/interactions",
+            post(platforms::discord::interactions_handler),
+        )
         .route("/slack/events", post(platforms::slack::events_handler))
-        .route("/whatsapp/webhook", get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler))
-        .route("/homeassistant/webhook", post(platforms::homeassistant::webhook_handler))
+        .route(
+            "/whatsapp/webhook",
+            get(platforms::whatsapp::verify_handler).post(platforms::whatsapp::webhook_handler),
+        )
+        .route(
+            "/homeassistant/webhook",
+            post(platforms::homeassistant::webhook_handler),
+        )
         .route("/signal/webhook", post(platforms::signal::webhook_handler))
         .route("/signal/poll", post(platforms::signal::poll_handler));
 
@@ -540,10 +601,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 /// Middleware that logs every request with method, path, status, and duration.
-async fn request_logging_middleware(
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
+async fn request_logging_middleware(request: Request<axum::body::Body>, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let start = std::time::Instant::now();
@@ -661,9 +719,7 @@ async fn rate_limit_middleware(
     }
 }
 
-async fn health_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<HealthResponse> {
+async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mcp_count = match &state.mcp {
         Some(mcp) => mcp.server_count().await,
         None => 0,
@@ -673,9 +729,7 @@ async fn health_handler(
         .list_enabled()
         .map(|s| s.len())
         .unwrap_or(0);
-    let total_sessions = SessionStore::new(db_path)
-        .session_count()
-        .unwrap_or(0) as usize;
+    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0) as usize;
     let mcp_tools = match &state.mcp {
         Some(mcp) => mcp.tool_count().await,
         None => 0,
@@ -687,8 +741,7 @@ async fn health_handler(
         uptime_seconds: state.started_at.elapsed().as_secs(),
         model: format!(
             "{}/{}",
-            state.loaded.config.provider.backend,
-            state.loaded.config.provider.model
+            state.loaded.config.provider.backend, state.loaded.config.provider.model
         ),
         mcp_servers: mcp_count,
         active_schedules,
@@ -697,9 +750,7 @@ async fn health_handler(
     })
 }
 
-async fn mcp_status_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<McpStatusResponse> {
+async fn mcp_status_handler(State(state): State<Arc<AppState>>) -> Json<McpStatusResponse> {
     match &state.mcp {
         Some(mcp) => {
             let status = mcp.server_status().await;
@@ -770,9 +821,7 @@ async fn agent_card_handler(headers: HeaderMap) -> impl IntoResponse {
 ///
 /// Returns metrics in Prometheus text exposition format (text/plain).
 /// No external dependency needed — just formatted strings.
-async fn prometheus_metrics_handler(
-    State(state): State<Arc<AppState>>,
-) -> Response {
+async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Response {
     let uptime = state.started_at.elapsed().as_secs();
     let requests = state.requests_total.load(Ordering::Relaxed);
     let errors = state.errors_total.load(Ordering::Relaxed);
@@ -781,9 +830,7 @@ async fn prometheus_metrics_handler(
     let stream_reqs = state.stream_requests_total.load(Ordering::Relaxed);
 
     let db_path = &state.loaded.config.storage.database_path;
-    let total_sessions = SessionStore::new(db_path)
-        .session_count()
-        .unwrap_or(0);
+    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0);
     let active_schedules = ScheduleStore::new(db_path)
         .list_enabled()
         .map(|s| s.len() as u64)
@@ -799,8 +846,7 @@ async fn prometheus_metrics_handler(
 
     let model = format!(
         "{}/{}",
-        state.loaded.config.provider.backend,
-        state.loaded.config.provider.model
+        state.loaded.config.provider.backend, state.loaded.config.provider.model
     );
 
     // Webhook delivery metrics
@@ -918,12 +964,15 @@ async fn get_session_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let session = store
-        .get_session(&id)
-        .map_err(storage_err)?;
+    let session = store.get_session(&id).map_err(storage_err)?;
 
     match session {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?)),
         None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
     }
 }
@@ -933,9 +982,7 @@ async fn delete_session_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store
-        .delete_session(&id)
-        .map_err(storage_err)?;
+    let deleted = store.delete_session(&id).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
@@ -988,9 +1035,7 @@ async fn session_messages_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let messages = store
-        .load_messages(&id)
-        .map_err(storage_err)?;
+    let messages = store.load_messages(&id).map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1013,9 +1058,7 @@ async fn fork_session_handler(
         format!("fork-{id}-{ts}")
     });
 
-    store
-        .fork_session(&id, &new_id)
-        .map_err(storage_err)?;
+    store.fork_session(&id, &new_id).map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "source_session_id": id,
@@ -1029,9 +1072,7 @@ async fn update_session_title_handler(
     Json(request): Json<UpdateTitleRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let updated = store
-        .set_title(&id, &request.title)
-        .map_err(storage_err)?;
+    let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1052,15 +1093,9 @@ async fn export_session_handler(
 ) -> Result<Response, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
-    let session_title = store
-        .get_session(&id)
-        .ok()
-        .flatten()
-        .and_then(|s| s.title);
+    let session_title = store.get_session(&id).ok().flatten().and_then(|s| s.title);
 
-    let stored = store
-        .load_messages(&id)
-        .map_err(storage_err)?;
+    let stored = store.load_messages(&id).map_err(storage_err)?;
 
     if stored.is_empty() {
         return Err((
@@ -1080,33 +1115,36 @@ async fn export_session_handler(
         export_chatml, export_json, export_jsonl, export_markdown,
     };
 
-    let (content, content_type) = match format.as_str() {
-        "json" => (
-            export_json(&id, session_title.as_deref(), &messages),
-            "application/json",
-        ),
-        "markdown" | "md" => (
-            export_markdown(&id, session_title.as_deref(), &messages),
-            "text/markdown; charset=utf-8",
-        ),
-        "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
-        "jsonl" | "finetune" => (
-            export_jsonl(&messages),
-            "application/jsonl; charset=utf-8",
-        ),
-        _ => {
-            return Err((
+    let (content, content_type) =
+        match format.as_str() {
+            "json" => (
+                export_json(&id, session_title.as_deref(), &messages),
+                "application/json",
+            ),
+            "markdown" | "md" => (
+                export_markdown(&id, session_title.as_deref(), &messages),
+                "text/markdown; charset=utf-8",
+            ),
+            "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
+            "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
+            _ => return Err((
                 StatusCode::BAD_REQUEST,
-                format!("unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"),
-            ))
-        }
-    };
+                format!(
+                    "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
+                ),
+            )),
+        };
 
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(content))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to build response: {e}")))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build response: {e}"),
+            )
+        })
 }
 
 async fn purge_sessions_handler(
@@ -1129,9 +1167,7 @@ async fn get_session_tags_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let tags = store
-        .get_tags(&id)
-        .map_err(storage_err)?;
+    let tags = store.get_tags(&id).map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
 }
 
@@ -1147,10 +1183,10 @@ async fn set_session_tags_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
-    store
-        .set_tags(&id, &tag_refs)
-        .map_err(storage_err)?;
-    Ok(Json(serde_json::json!({ "session_id": id, "tags": request.tags })))
+    store.set_tags(&id, &tag_refs).map_err(storage_err)?;
+    Ok(Json(
+        serde_json::json!({ "session_id": id, "tags": request.tags }),
+    ))
 }
 
 async fn add_session_tag_handler(
@@ -1158,13 +1194,11 @@ async fn add_session_tag_handler(
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let added = store
-        .add_tag(&id, &tag)
-        .map_err(storage_err)?;
-    let tags = store
-        .get_tags(&id)
-        .map_err(storage_err)?;
-    Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags })))
+    let added = store.add_tag(&id, &tag).map_err(storage_err)?;
+    let tags = store.get_tags(&id).map_err(storage_err)?;
+    Ok(Json(
+        serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags }),
+    ))
 }
 
 async fn remove_session_tag_handler(
@@ -1172,13 +1206,11 @@ async fn remove_session_tag_handler(
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let removed = store
-        .remove_tag(&id, &tag)
-        .map_err(storage_err)?;
-    let tags = store
-        .get_tags(&id)
-        .map_err(storage_err)?;
-    Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags })))
+    let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
+    let tags = store.get_tags(&id).map_err(storage_err)?;
+    Ok(Json(
+        serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags }),
+    ))
 }
 
 async fn sessions_by_tag_handler(
@@ -1186,10 +1218,10 @@ async fn sessions_by_tag_handler(
     Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let sessions = store
-        .sessions_by_tag(&tag)
-        .map_err(storage_err)?;
-    Ok(Json(serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() })))
+    let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
+    Ok(Json(
+        serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1228,7 +1260,12 @@ async fn import_session_handler(
 
     store
         .import_session(&session_id, request.title.as_deref(), messages)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("import error: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("import error: {e}"),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
@@ -1258,9 +1295,7 @@ async fn bulk_export_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let limit = params.limit.unwrap_or(1000);
-    let sessions = store
-        .list_recent_sessions(limit)
-        .map_err(storage_err)?;
+    let sessions = store.list_recent_sessions(limit).map_err(storage_err)?;
 
     use genesis_tools::builtins::export::{export_json, export_jsonl};
 
@@ -1310,7 +1345,12 @@ async fn bulk_export_handler(
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(output))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to build response: {e}")))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build response: {e}"),
+            )
+        })
 }
 
 #[derive(Deserialize)]
@@ -1331,7 +1371,12 @@ async fn search_messages_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let results = store
         .search_messages(&params.q, params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search error: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("search error: {e}"),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({
         "query": params.q,
@@ -1345,24 +1390,29 @@ async fn insights_handler(
     axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let data = store
-        .insights(params.days)
-        .map_err(storage_err)?;
+    let data = store.insights(params.days).map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(data).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(data).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {e}"),
+        )
+    })?))
 }
 
 async fn usage_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let stats = store
-        .usage_stats()
-        .map_err(storage_err)?;
+    let stats = store.usage_stats().map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {e}"),
+        )
+    })?))
 }
-
 
 // ---------------------------------------------------------------------------
 // Skills endpoints
@@ -1390,9 +1440,7 @@ async fn list_skills_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store
-        .list_all()
-        .map_err(storage_err)?;
+    let skills = store.list_all().map_err(storage_err)?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1406,12 +1454,15 @@ async fn get_skill_handler(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skill = store
-        .get(&name)
-        .map_err(storage_err)?;
+    let skill = store.get(&name).map_err(storage_err)?;
 
     match skill {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?)),
         None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
     }
 }
@@ -1432,7 +1483,12 @@ async fn upsert_skill_handler(
         )
         .map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(skill).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(skill).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {e}"),
+        )
+    })?))
 }
 
 async fn delete_skill_handler(
@@ -1440,9 +1496,7 @@ async fn delete_skill_handler(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store
-        .delete(&name)
-        .map_err(storage_err)?;
+    let deleted = store.delete(&name).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "name": name})))
@@ -1456,9 +1510,7 @@ async fn search_skills_handler(
     axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store
-        .find_by_tag(&params.tag)
-        .map_err(storage_err)?;
+    let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1503,9 +1555,7 @@ async fn list_memories_handler(
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
-    let memories = store
-        .list(params.limit)
-        .map_err(storage_err)?;
+    let memories = store.list(params.limit).map_err(storage_err)?;
 
     let count = memories.len();
     Ok(Json(serde_json::json!({
@@ -1528,10 +1578,14 @@ async fn search_memories_handler(
     let provider = if mode != genesis_core::embedding::SearchMode::Keyword {
         match &state.loaded.config.embedding {
             Some(config) => {
-                let p = genesis_core::embedding::EmbeddingProvider::from_config(config)
-                    .map_err(|e| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, format!("embedding provider error: {e}"))
-                    })?;
+                let p = genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(
+                    |e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("embedding provider error: {e}"),
+                        )
+                    },
+                )?;
                 Some(p)
             }
             None => None,
@@ -1549,7 +1603,12 @@ async fn search_memories_handler(
         provider.as_ref(),
     )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("search error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("search error: {e}"),
+        )
+    })?;
 
     let count = results.len();
     let mode_str = match mode {
@@ -1579,9 +1638,7 @@ async fn delete_memory_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db_path = &state.loaded.config.storage.database_path;
     let store = MemoryStore::new(db_path);
-    let deleted = store
-        .delete(&id)
-        .map_err(storage_err)?;
+    let deleted = store.delete(&id).map_err(storage_err)?;
 
     if deleted {
         // Also clean up any associated embedding (best-effort)
@@ -1596,17 +1653,12 @@ async fn delete_memory_handler(
 async fn embed_memories_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config = state
-        .loaded
-        .config
-        .embedding
-        .as_ref()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no embedding provider configured; add an [embedding] section to config".to_owned(),
-            )
-        })?;
+    let config = state.loaded.config.embedding.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "no embedding provider configured; add an [embedding] section to config".to_owned(),
+        )
+    })?;
 
     let provider =
         genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
@@ -1620,19 +1672,14 @@ async fn embed_memories_handler(
     let memory_store = MemoryStore::new(db_path);
     let embedding_store = EmbeddingStore::new(db_path);
 
-    let memories = memory_store
-        .list(10000)
-        .map_err(storage_err)?;
+    let memories = memory_store.list(10000).map_err(storage_err)?;
 
     let mut embedded = 0usize;
     let mut skipped = 0usize;
     let mut errors = 0usize;
 
     for memory in &memories {
-        if embedding_store
-            .has_embedding(&memory.id)
-            .unwrap_or(false)
-        {
+        if embedding_store.has_embedding(&memory.id).unwrap_or(false) {
             skipped += 1;
             continue;
         }
@@ -1667,17 +1714,12 @@ async fn embed_single_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config = state
-        .loaded
-        .config
-        .embedding
-        .as_ref()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no embedding provider configured".to_owned(),
-            )
-        })?;
+    let config = state.loaded.config.embedding.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "no embedding provider configured".to_owned(),
+        )
+    })?;
 
     let provider =
         genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
@@ -1764,12 +1806,15 @@ async fn get_schedule_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedule = store
-        .get(&id)
-        .map_err(storage_err)?;
+    let schedule = store.get(&id).map_err(storage_err)?;
 
     match schedule {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?)),
         None => Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
     }
 }
@@ -1780,10 +1825,23 @@ async fn create_schedule_handler(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let schedule = store
-        .create(&request.id, &request.cron_expression, &request.destination, &request.prompt)
+        .create(
+            &request.id,
+            &request.cron_expression,
+            &request.destination,
+            &request.prompt,
+        )
         .map_err(storage_err)?;
 
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(schedule).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(schedule).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?),
+    ))
 }
 
 async fn delete_schedule_handler(
@@ -1791,9 +1849,7 @@ async fn delete_schedule_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store
-        .delete(&id)
-        .map_err(storage_err)?;
+    let deleted = store.delete(&id).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
@@ -1865,12 +1921,15 @@ async fn get_user_trait_handler(
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let user_trait = store
-        .get(&key)
-        .map_err(storage_err)?;
+    let user_trait = store.get(&key).map_err(storage_err)?;
 
     match user_trait {
-        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
+        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?)),
         None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
     }
 }
@@ -1889,7 +1948,15 @@ async fn observe_user_trait_handler(
         )
         .map_err(storage_err)?;
 
-    Ok((StatusCode::OK, Json(serde_json::to_value(observed).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::to_value(observed).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?),
+    ))
 }
 
 async fn delete_user_trait_handler(
@@ -1897,9 +1964,7 @@ async fn delete_user_trait_handler(
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store
-        .delete(&key)
-        .map_err(storage_err)?;
+    let deleted = store.delete(&key).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
@@ -1915,12 +1980,15 @@ async fn get_subagent_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
-    let subagent = store
-        .get(&id)
-        .map_err(storage_err)?;
+    let subagent = store.get(&id).map_err(storage_err)?;
 
     match subagent {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?)),
         None => Err((StatusCode::NOT_FOUND, format!("subagent '{id}' not found"))),
     }
 }
@@ -1930,9 +1998,7 @@ async fn list_session_subagents_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
-    let subagents = store
-        .list_by_parent(&id)
-        .map_err(storage_err)?;
+    let subagents = store.list_by_parent(&id).map_err(storage_err)?;
 
     let count = subagents.len();
     Ok(Json(serde_json::json!({
@@ -1959,11 +2025,14 @@ async fn skill_usage_stats_handler(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
-    let stats = store
-        .stats(&name)
-        .map_err(storage_err)?;
+    let stats = store.stats(&name).map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("serialization error: {e}"),
+        )
+    })?))
 }
 
 async fn skill_usage_recent_handler(
@@ -2033,9 +2102,7 @@ async fn list_tools_handler(
     })))
 }
 
-async fn config_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn config_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let config = &state.loaded.config;
     Json(serde_json::json!({
         "provider": {
@@ -2074,14 +2141,17 @@ async fn config_handler(
     }))
 }
 
-async fn cache_stats_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let cache = genesis_storage::ResponseCacheStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+async fn cache_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cache =
+        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
     let (entries, hits) = cache.stats().unwrap_or((0, 0));
-    let enabled = state.loaded.config.runtime.cache.as_ref().is_some_and(|c| c.enabled);
+    let enabled = state
+        .loaded
+        .config
+        .runtime
+        .cache
+        .as_ref()
+        .is_some_and(|c| c.enabled);
     Json(serde_json::json!({
         "enabled": enabled,
         "entries": entries,
@@ -2089,12 +2159,9 @@ async fn cache_stats_handler(
     }))
 }
 
-async fn cache_clear_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let cache = genesis_storage::ResponseCacheStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+async fn cache_clear_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cache =
+        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
     match cache.clear() {
         Ok(deleted) => Json(serde_json::json!({
             "cleared": deleted,
@@ -2119,9 +2186,7 @@ async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(50);
     let entries = if let Some(ref event_type) = params.event_type {
         store.by_event_type(event_type, limit).unwrap_or_default()
@@ -2134,12 +2199,8 @@ async fn audit_recent_handler(
     }))
 }
 
-async fn audit_stats_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+async fn audit_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats().unwrap_or_default();
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
     Json(serde_json::json!({
@@ -2155,9 +2216,7 @@ async fn audit_session_handler(
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
 ) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(100);
     let entries = store.by_session(&id, limit).unwrap_or_default();
     Json(serde_json::json!({
@@ -2176,9 +2235,7 @@ async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
 ) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = request.older_than_days.unwrap_or(90);
     match store.purge_older_than(days) {
         Ok(deleted) => Json(serde_json::json!({
@@ -2204,9 +2261,7 @@ async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.tool_analytics(days).unwrap_or_default();
     Json(serde_json::json!({
@@ -2219,9 +2274,7 @@ async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Json<serde_json::Value> {
-    let store = genesis_storage::AuditLogStore::new(
-        &state.loaded.config.storage.database_path,
-    );
+    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.llm_analytics(days).unwrap_or_default();
     Json(serde_json::json!({
@@ -2253,7 +2306,10 @@ async fn get_template_handler(
                 "formatted_prompt": prompt,
             })))
         }
-        None => Err((StatusCode::NOT_FOUND, format!("Template '{name}' not found"))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("Template '{name}' not found"),
+        )),
     }
 }
 
@@ -2264,15 +2320,12 @@ async fn get_template_handler(
 async fn workflow_validate_handler(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body
-        .get("yaml")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'yaml' field in request body".to_owned(),
-            )
-        })?;
+    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing 'yaml' field in request body".to_owned(),
+        )
+    })?;
 
     let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
         (
@@ -2294,19 +2347,13 @@ async fn workflow_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body
-        .get("yaml")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'yaml' field in request body".to_owned(),
-            )
-        })?;
-    let input = body
-        .get("input")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing 'yaml' field in request body".to_owned(),
+        )
+    })?;
+    let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
     let session_id = body
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -2345,9 +2392,7 @@ async fn workflow_run_handler(
 // Agent bus endpoints
 // ---------------------------------------------------------------------------
 
-async fn bus_channels_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn bus_channels_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let channels = state.agent_bus.channels().await;
     Json(serde_json::json!({
         "channels": channels,
@@ -2359,16 +2404,29 @@ async fn bus_publish_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let channel = body.get("channel").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'channel' field".to_owned())
-    })?;
+    let channel = body
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing 'channel' field".to_owned(),
+            )
+        })?;
     let sender = body.get("sender").and_then(|v| v.as_str()).unwrap_or("api");
-    let payload = body.get("payload").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'payload' field".to_owned())
-    })?;
+    let payload = body
+        .get("payload")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing 'payload' field".to_owned(),
+            )
+        })?;
     let kind_str = body.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     let kind: genesis_core::agent_bus::MessageKind =
-        serde_json::from_str(&format!("\"{kind_str}\"")).unwrap_or(genesis_core::agent_bus::MessageKind::Text);
+        serde_json::from_str(&format!("\"{kind_str}\""))
+            .unwrap_or(genesis_core::agent_bus::MessageKind::Text);
 
     let metadata: std::collections::HashMap<String, String> = body
         .get("metadata")
@@ -2408,7 +2466,10 @@ async fn bus_history_handler(
     Path(channel): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
     let messages = state.agent_bus.history(&channel, limit);
     Json(serde_json::json!({
         "channel": channel,
@@ -2417,9 +2478,7 @@ async fn bus_history_handler(
     }))
 }
 
-async fn bus_stats_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn bus_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let stats = state.agent_bus.stats();
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
     Json(serde_json::json!({
@@ -2437,12 +2496,16 @@ async fn bus_stats_handler(
 async fn eval_validate_handler(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned())
-    })?;
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
 
     let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("Failed to parse suite: {e}"))
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse suite: {e}"),
+        )
     })?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
@@ -2458,12 +2521,16 @@ async fn eval_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned())
-    })?;
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
 
     let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("Failed to parse suite: {e}"))
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse suite: {e}"),
+        )
     })?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
@@ -2492,10 +2559,14 @@ async fn eval_run_handler(
 async fn guardrails_check_handler(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let text = body.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Missing 'text' field".to_owned())
-    })?;
-    let direction = body.get("direction").and_then(|v| v.as_str()).unwrap_or("input");
+    let text = body
+        .get("text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'text' field".to_owned()))?;
+    let direction = body
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("input");
 
     // Parse config from request body, or use a sensible default
     let config: genesis_core::guardrails::GuardrailConfig = body
@@ -2519,9 +2590,7 @@ async fn guardrails_check_handler(
 // Webhook status endpoints
 // ---------------------------------------------------------------------------
 
-async fn webhooks_status_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn webhooks_status_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let (delivered, retried, failed) = state.webhooks.metrics();
     let dead_letter_count = state.webhooks.dead_letters().await.len();
     Json(serde_json::json!({
@@ -2627,7 +2696,10 @@ async fn chat_handler(
                     error = %e,
                     "chat request failed"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("execution error: {e}"))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("execution error: {e}"),
+                )
             })?;
         info!(
             request_id = request_id.as_str(),
@@ -2661,8 +2733,12 @@ async fn chat_handler(
         );
 
         // Record token metrics + duration histogram
-        metrics_state.input_tokens_total.fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
-        metrics_state.output_tokens_total.fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
+        metrics_state
+            .input_tokens_total
+            .fetch_add(outcome.result.total_input_tokens as u64, Ordering::Relaxed);
+        metrics_state
+            .output_tokens_total
+            .fetch_add(outcome.result.total_output_tokens as u64, Ordering::Relaxed);
         if let Ok(mut hist) = metrics_state.request_duration_histogram.lock() {
             hist.observe(request_started.elapsed().as_millis() as u64);
         }
@@ -2935,7 +3011,9 @@ async fn openai_streaming_response(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -2958,10 +3036,7 @@ async fn websocket_handler(
     ws.on_upgrade(move |socket| websocket_session(state, socket))
 }
 
-async fn websocket_session(
-    state: Arc<AppState>,
-    mut socket: axum::extract::ws::WebSocket,
-) {
+async fn websocket_session(state: Arc<AppState>, mut socket: axum::extract::ws::WebSocket) {
     use axum::extract::ws::Message;
 
     info!("WebSocket client connected");
@@ -3065,11 +3140,7 @@ async fn websocket_session(
 
         // Drain buffered events to the WebSocket
         while let Some(event_json) = rx.recv().await {
-            if socket
-                .send(Message::Text(event_json.into()))
-                .await
-                .is_err()
-            {
+            if socket.send(Message::Text(event_json.into())).await.is_err() {
                 return; // Client disconnected
             }
         }
@@ -3115,9 +3186,7 @@ async fn websocket_session(
 }
 
 /// OpenAI-compatible `/v1/models` endpoint.
-async fn openai_models_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn openai_models_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let config = &state.loaded.config;
     let model_id = format!("{}/{}", config.provider.backend, config.provider.model);
     Json(serde_json::json!({
@@ -3148,8 +3217,10 @@ struct OpenAiCompletionsRequest {
 async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
-{
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, String),
+> {
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     info!(
@@ -3182,37 +3253,37 @@ async fn chat_stream_handler(
         session_id = session_id_for_task.as_str(),
         platform = platform.as_str()
     );
-    tokio::spawn(async move {
-        let mut service = SessionExecutionService::new(&state_for_task.loaded);
-        if let Some(mcp) = &state_for_task.mcp {
-            service.set_mcp(std::sync::Arc::clone(mcp));
-        }
-        if let Some(system_prompt) = system_prompt {
-            service.set_system_prompt_override(system_prompt);
-        }
-        if let Some(response_format) = response_format {
-            service.set_response_format(response_format);
-        }
-        let initial_payload = serde_json::to_string(&serde_json::json!({
-            "session_id": session_id_for_task,
-        }));
+    tokio::spawn(
+        async move {
+            let mut service = SessionExecutionService::new(&state_for_task.loaded);
+            if let Some(mcp) = &state_for_task.mcp {
+                service.set_mcp(std::sync::Arc::clone(mcp));
+            }
+            if let Some(system_prompt) = system_prompt {
+                service.set_system_prompt_override(system_prompt);
+            }
+            if let Some(response_format) = response_format {
+                service.set_response_format(response_format);
+            }
+            let initial_payload = serde_json::to_string(&serde_json::json!({
+                "session_id": session_id_for_task,
+            }));
 
-        if let Ok(payload) = initial_payload {
-            let _ = tx.send(Ok(Event::default().event("session").data(payload)));
-        }
+            if let Ok(payload) = initial_payload {
+                let _ = tx.send(Ok(Event::default().event("session").data(payload)));
+            }
 
-        let run_result = service
-            .run_turn_streaming(
-                SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: &platform,
-                    delivery_platform: delivery_platform_from_str(&platform),
-                    prompt: &message,
-                    title: None,
-                    images,
-                },
-                |event| {
-                    match event {
+            let run_result = service
+                .run_turn_streaming(
+                    SessionTurnInput {
+                        session_id: &session_id,
+                        session_platform: &platform,
+                        delivery_platform: delivery_platform_from_str(&platform),
+                        prompt: &message,
+                        title: None,
+                        images,
+                    },
+                    |event| match event {
                         StreamEvent::Chunk(chunk) => {
                             if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
                                 session_id: session_id.clone(),
@@ -3226,7 +3297,8 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "tool": name,
                             })) {
-                                let _ = tx.send(Ok(Event::default().event("tool_call").data(payload)));
+                                let _ =
+                                    tx.send(Ok(Event::default().event("tool_call").data(payload)));
                             }
                         }
                         StreamEvent::ToolCallEnd { .. } => {}
@@ -3235,59 +3307,62 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "question": question,
                             })) {
-                                let _ = tx.send(Ok(Event::default().event("clarification").data(payload)));
+                                let _ = tx.send(Ok(Event::default()
+                                    .event("clarification")
+                                    .data(payload)));
                             }
                         }
+                    },
+                )
+                .await;
+
+            match run_result {
+                Ok(outcome) => {
+                    info!(
+                        request_id = request_id_for_task.as_str(),
+                        turns_used = outcome.result.turns_used,
+                        tool_calls_made = outcome.result.tool_calls_made,
+                        "streaming chat request completed"
+                    );
+
+                    // Append delivery mirror for cross-platform visibility.
+                    // Use the direct variant since we already have the session ID.
+                    mirror::append_delivery_mirror_to_session(
+                        &state_for_task.loaded.config.storage.database_path,
+                        &outcome.session_id,
+                        &outcome.result.response,
+                        "api",
+                    );
+
+                    if let Ok(payload) = serde_json::to_string(&StreamDoneResponse {
+                        session_id: outcome.session_id,
+                        response: outcome.result.response,
+                        turns_used: outcome.result.turns_used,
+                        tool_calls_made: outcome.result.tool_calls_made,
+                        estimated_cost: outcome.result.estimated_cost,
+                        total_input_tokens: outcome.result.total_input_tokens,
+                        total_output_tokens: outcome.result.total_output_tokens,
+                    }) {
+                        let _ = tx.send(Ok(Event::default().event("done").data(payload)));
                     }
-                },
-            )
-            .await;
-
-        match run_result {
-            Ok(outcome) => {
-                info!(
-                    request_id = request_id_for_task.as_str(),
-                    turns_used = outcome.result.turns_used,
-                    tool_calls_made = outcome.result.tool_calls_made,
-                    "streaming chat request completed"
-                );
-
-                // Append delivery mirror for cross-platform visibility.
-                // Use the direct variant since we already have the session ID.
-                mirror::append_delivery_mirror_to_session(
-                    &state_for_task.loaded.config.storage.database_path,
-                    &outcome.session_id,
-                    &outcome.result.response,
-                    "api",
-                );
-
-                if let Ok(payload) = serde_json::to_string(&StreamDoneResponse {
-                    session_id: outcome.session_id,
-                    response: outcome.result.response,
-                    turns_used: outcome.result.turns_used,
-                    tool_calls_made: outcome.result.tool_calls_made,
-                    estimated_cost: outcome.result.estimated_cost,
-                    total_input_tokens: outcome.result.total_input_tokens,
-                    total_output_tokens: outcome.result.total_output_tokens,
-                }) {
-                    let _ = tx.send(Ok(Event::default().event("done").data(payload)));
                 }
-            }
-            Err(error) => {
-                error!(
-                    request_id = request_id_for_task.as_str(),
-                    error = %error,
-                    "streaming chat request failed"
-                );
-                if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
-                    session_id,
-                    error: error.to_string(),
-                }) {
-                    let _ = tx.send(Ok(Event::default().event("error").data(payload)));
+                Err(error) => {
+                    error!(
+                        request_id = request_id_for_task.as_str(),
+                        error = %error,
+                        "streaming chat request failed"
+                    );
+                    if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
+                        session_id,
+                        error: error.to_string(),
+                    }) {
+                        let _ = tx.send(Ok(Event::default().event("error").data(payload)));
+                    }
                 }
             }
         }
-    }.instrument(spawn_span));
+        .instrument(spawn_span),
+    );
 
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
@@ -3366,7 +3441,10 @@ async fn chat_batch_handler(
     Json(request): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, (StatusCode, String)> {
     if request.items.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "batch must contain at least one item".to_owned()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "batch must contain at least one item".to_owned(),
+        ));
     }
     if request.items.len() > MAX_BATCH_SIZE {
         return Err((
@@ -3462,10 +3540,7 @@ async fn chat_batch_handler(
     let total_items = results.len();
     let successful = results.iter().filter(|r| r.error.is_none()).count();
     let failed = total_items - successful;
-    let total_estimated_cost: f64 = results
-        .iter()
-        .filter_map(|r| r.estimated_cost)
-        .sum();
+    let total_estimated_cost: f64 = results.iter().filter_map(|r| r.estimated_cost).sum();
 
     Ok(Json(BatchResponse {
         results,
@@ -3550,7 +3625,10 @@ async fn approve_pairing_handler(
             "approved": true,
             "user": user,
         }))),
-        None => Err((StatusCode::NOT_FOUND, "invalid or expired pairing code".to_owned())),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            "invalid or expired pairing code".to_owned(),
+        )),
     }
 }
 
@@ -3570,10 +3648,13 @@ async fn revoke_pairing_handler(
             "user_id": request.user_id,
         })))
     } else {
-        Err((StatusCode::NOT_FOUND, format!(
-            "no approved user '{}' on platform '{}'",
-            request.user_id, request.platform
-        )))
+        Err((
+            StatusCode::NOT_FOUND,
+            format!(
+                "no approved user '{}' on platform '{}'",
+                request.user_id, request.platform
+            ),
+        ))
     }
 }
 
@@ -3716,14 +3797,7 @@ mod tests {
     #[test]
     fn build_router_creates_routes() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = Arc::new(AppState::new(
-            loaded,
-            None,
-            false,
-            None,
-            None,
-            Vec::new(),
-        ));
+        let state = Arc::new(AppState::new(loaded, None, false, None, None, Vec::new()));
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
     }
@@ -3807,8 +3881,14 @@ mod tests {
     fn mcp_status_response_serializes_with_servers() {
         let resp = McpStatusResponse {
             servers: vec![
-                McpServerStatus { name: "filesystem".to_owned(), connected: true },
-                McpServerStatus { name: "github".to_owned(), connected: false },
+                McpServerStatus {
+                    name: "filesystem".to_owned(),
+                    connected: true,
+                },
+                McpServerStatus {
+                    name: "github".to_owned(),
+                    connected: false,
+                },
             ],
             total_tools: 5,
             total_resources: 3,
@@ -3837,7 +3917,8 @@ mod tests {
 
     #[test]
     fn upsert_skill_request_deserializes_minimal() {
-        let json = r#"{"name": "greet", "description": "Greet the user", "instructions": "Say hello"}"#;
+        let json =
+            r#"{"name": "greet", "description": "Greet the user", "instructions": "Say hello"}"#;
         let req: UpsertSkillRequest = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(req.name, "greet");
         assert_eq!(req.description, "Greet the user");
@@ -3906,7 +3987,10 @@ mod tests {
         }"#;
         let req: ChatRequest = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(req.message, "hello");
-        assert_eq!(req.system_prompt.as_deref(), Some("You are a helpful pirate."));
+        assert_eq!(
+            req.system_prompt.as_deref(),
+            Some("You are a helpful pirate.")
+        );
         assert!(req.response_format.is_none());
     }
 

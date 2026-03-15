@@ -2051,7 +2051,12 @@ async fn execute_tool_calls_parallel(
             let sem = Arc::clone(&semaphore);
             let tool_name = tc.function.name.clone();
             async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                let Ok(_permit) = sem.acquire().await else {
+                    return Ok((
+                        format!("Error: tool `{tool_name}` skipped — concurrency semaphore closed"),
+                        false,
+                    ));
+                };
                 match tokio::time::timeout(
                     timeout_duration,
                     execute_single_tool(tools, subagent_spawner, tc),

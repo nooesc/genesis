@@ -144,7 +144,11 @@ struct WhisperResponse {
 
 /// Download a file from Telegram by file_id, then transcribe via Whisper API.
 /// Returns the transcribed text, or an error description.
-async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_id: &str) -> Result<String, String> {
+async fn transcribe_telegram_audio(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<String, String> {
     // Step 1: Get the file path from Telegram.
     let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
@@ -187,14 +191,11 @@ async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_i
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY not set, cannot transcribe".to_owned())?;
 
-    let api_base = std::env::var("OPENAI_API_BASE")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+    let api_base =
+        std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
 
     // Determine file extension from file_path.
-    let ext = file_path
-        .rsplit('.')
-        .next()
-        .unwrap_or("ogg");
+    let ext = file_path.rsplit('.').next().unwrap_or("ogg");
     let mime = match ext {
         "ogg" | "oga" => "audio/ogg",
         "mp3" => "audio/mpeg",
@@ -305,9 +306,7 @@ async fn resolve_sticker_prompt(
 
 /// Format a sticker context string for the agent prompt.
 fn format_sticker_context(emoji: &str, set_name: &str, description: &str) -> String {
-    format!(
-        "[The user sent a sticker {emoji} from \"{set_name}\". It shows: \"{description}\"]"
-    )
+    format!("[The user sent a sticker {emoji} from \"{set_name}\". It shows: \"{description}\"]")
 }
 
 /// Download a sticker image from Telegram and analyze it with a vision LLM.
@@ -459,8 +458,15 @@ pub async fn webhook_handler(
     // Classify the incoming message into a typed input.
     enum MessageInput {
         Text(String),
-        Voice { file_id: String, duration: i64 },
-        Audio { file_id: String, duration: i64, file_name: String },
+        Voice {
+            file_id: String,
+            duration: i64,
+        },
+        Audio {
+            file_id: String,
+            duration: i64,
+            file_name: String,
+        },
         Sticker(TelegramSticker),
     }
 
@@ -487,7 +493,10 @@ pub async fn webhook_handler(
         MessageInput::Audio {
             file_id: audio.file_id.clone(),
             duration: audio.duration.unwrap_or(0),
-            file_name: audio.file_name.clone().unwrap_or_else(|| "audio".to_owned()),
+            file_name: audio
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "audio".to_owned()),
         }
     } else {
         return StatusCode::OK; // Ignore unsupported message types
@@ -540,7 +549,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send pairing reply");
                 }
             });
@@ -551,7 +562,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send capacity reply");
                 }
             });
@@ -571,7 +584,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send command reply");
                 }
             });
@@ -831,7 +846,7 @@ mod tests {
         // middle of a multi-byte character when using naive byte indexing.
         let emoji = "\u{1F600}"; // 4 bytes
         let text = emoji.repeat(30); // 120 bytes total
-        // max_len=50 would land inside an emoji at byte 50 if not handled.
+                                     // max_len=50 would land inside an emoji at byte 50 if not handled.
         let chunks = split_message(&text, 50);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
@@ -1103,7 +1118,8 @@ mod tests {
             .expect("cache set");
 
         let cached = cache.get("unique-123").unwrap().unwrap();
-        let context = format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
+        let context =
+            format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
         assert_eq!(
             context,
             "[The user sent a sticker 🐸 from \"FrogPack\". It shows: \"A happy frog jumping\"]"

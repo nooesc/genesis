@@ -141,7 +141,10 @@ pub async fn interactions_handler(
                 response_type: RESPONSE_PONG,
                 data: None,
             })
-            .unwrap(),
+            .map_err(|e| {
+                error!("failed to serialize interaction response: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
         ));
     }
 
@@ -149,10 +152,7 @@ pub async fn interactions_handler(
     if interaction.interaction_type == INTERACTION_APPLICATION_COMMAND
         || interaction.interaction_type == INTERACTION_MESSAGE_COMPONENT
     {
-        let interaction_token = interaction
-            .token
-            .clone()
-            .ok_or(StatusCode::BAD_REQUEST)?;
+        let interaction_token = interaction.token.clone().ok_or(StatusCode::BAD_REQUEST)?;
         let application_id = match interaction.application_id.clone() {
             Some(application_id) => application_id,
             None => {
@@ -171,7 +171,10 @@ pub async fn interactions_handler(
                         content: "Please provide a message.".to_owned(),
                     }),
                 })
-                .unwrap(),
+                .map_err(|e| {
+                    error!("failed to serialize interaction response: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
             ));
         }
 
@@ -204,7 +207,10 @@ pub async fn interactions_handler(
                         response_type: RESPONSE_CHANNEL_MESSAGE,
                         data: Some(InteractionResponseData { content: reply }),
                     })
-                    .unwrap(),
+                    .map_err(|e| {
+                        error!("failed to serialize interaction response: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
                 ));
             }
             Ok(super::PairingCheck::AtCapacity) => {
@@ -215,30 +221,29 @@ pub async fn interactions_handler(
                             content: super::pairing_capacity_reply().to_owned(),
                         }),
                     })
-                    .unwrap(),
+                    .map_err(|e| {
+                        error!("failed to serialize interaction response: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
                 ));
             }
             Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
         }
 
         // Handle gateway slash commands.
-        let store = genesis_storage::SessionStore::new(
-            &state.loaded.config.storage.database_path,
-        );
+        let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
         if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(
-                &message,
-                &session_id,
-                &store,
-                &state.loaded.config,
-            )
+            crate::commands::handle_command(&message, &session_id, &store, &state.loaded.config)
         {
             return Ok(Json(
                 serde_json::to_value(InteractionResponse {
                     response_type: RESPONSE_CHANNEL_MESSAGE,
                     data: Some(InteractionResponseData { content: reply }),
                 })
-                .unwrap(),
+                .map_err(|e| {
+                    error!("failed to serialize interaction response: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
             ));
         }
 
@@ -281,14 +286,13 @@ pub async fn interactions_handler(
                 };
 
                 // Edit the deferred response with the actual reply
-                if let Err(e) =
-                    edit_followup(
-                        &state.http_client,
-                        &application_id,
-                        &interaction_token,
-                        &reply_text,
-                    )
-                    .await
+                if let Err(e) = edit_followup(
+                    &state.http_client,
+                    &application_id,
+                    &interaction_token,
+                    &reply_text,
+                )
+                .await
                 {
                     error!(error = %e, "failed to send discord followup");
                 }
@@ -311,7 +315,10 @@ pub async fn interactions_handler(
                 response_type: RESPONSE_DEFERRED_CHANNEL_MESSAGE,
                 data: None,
             })
-            .unwrap(),
+            .map_err(|e| {
+                error!("failed to serialize interaction response: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
         ));
     }
 
@@ -416,7 +423,10 @@ mod tests {
             }
         }"#;
         let interaction: DiscordInteraction = serde_json::from_str(json).expect("should parse");
-        assert_eq!(interaction.interaction_type, INTERACTION_APPLICATION_COMMAND);
+        assert_eq!(
+            interaction.interaction_type,
+            INTERACTION_APPLICATION_COMMAND
+        );
 
         let msg = extract_message(&interaction);
         assert_eq!(msg.as_deref(), Some("Hello Eve"));

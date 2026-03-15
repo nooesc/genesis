@@ -71,7 +71,10 @@ impl ToolHandler for TodoTool {
                         argument: "text",
                     })?;
 
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let id = list.len() + 1;
                 list.push(TodoItem {
@@ -112,7 +115,10 @@ impl ToolHandler for TodoTool {
                     reason: e,
                 })?;
 
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let item = list.iter_mut().find(|item| item.id == id).ok_or_else(|| {
                     ToolError::ExecutionFailed {
@@ -131,7 +137,10 @@ impl ToolHandler for TodoTool {
                 })
             }
             "list" => {
-                let lists = TODO_LISTS.lock().unwrap();
+                let lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let empty = Vec::new();
                 let list = lists.get(session_id).unwrap_or(&empty);
                 if list.is_empty() {
@@ -173,7 +182,10 @@ impl ToolHandler for TodoTool {
                 })
             }
             "clear" => {
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let count = list.len();
                 list.clear();
