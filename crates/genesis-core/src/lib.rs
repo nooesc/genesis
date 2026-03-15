@@ -2,7 +2,8 @@ pub mod agent_bus;
 pub mod agent_loop;
 pub mod audit;
 pub mod compress;
-pub mod context_security;
+#[allow(dead_code)]
+pub(crate) mod context_security;
 pub mod dataset;
 pub mod embedding;
 pub mod cost;
@@ -21,7 +22,8 @@ pub mod skill_sync;
 pub mod skills;
 pub mod skills_hub;
 pub mod quality;
-pub mod redact;
+#[allow(dead_code)]
+pub(crate) mod redact;
 pub mod skill_manifest;
 pub mod skills_guard;
 pub mod personality;

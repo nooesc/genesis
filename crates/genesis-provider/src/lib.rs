@@ -3,7 +3,8 @@ mod api_types;
 mod client;
 mod error;
 mod gemini_types;
-pub mod model_metadata;
+#[allow(dead_code)]
+pub(crate) mod model_metadata;
 pub mod parsers;
 pub mod pricing;
 mod resolve;
