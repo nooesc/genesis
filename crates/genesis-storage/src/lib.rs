@@ -329,6 +329,32 @@ pub enum StorageError {
     UnknownImportStatus(String),
 }
 
+/// Collect mapped rows into a Vec, converting any SQLite error into a StorageError.
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+    database_path: &Path,
+) -> Result<Vec<T>, StorageError> {
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })
+}
+
+/// Check whether a column exists in a table (used for idempotent migrations).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
+        .is_ok()
+}
+
+/// Run a batch of SQL statements as a migration step.
+fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), StorageError> {
+    conn.execute_batch(sql).map_err(|source| StorageError::Sqlite {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent).map_err(|source| StorageError::CreateDirectory {
@@ -339,9 +365,10 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
 
     let connection = open(database_path)?;
 
-    connection
-        .execute_batch(
-            "
+    exec_migration(
+        &connection,
+        database_path,
+        "
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
@@ -386,6 +413,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_messages_session_id
+                ON messages(session_id);
             CREATE TABLE IF NOT EXISTS legacy_import_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 legacy_root TEXT NOT NULL,
@@ -522,11 +551,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 UNIQUE(backend, task_id)
             );
             ",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
+    )?;
 
     // Run migrations for existing databases.
     migrate_to_v2(&connection, database_path)?;
@@ -559,193 +584,137 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
 
 /// Migrate v1 → v2: add token tracking columns to sessions table.
 fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    // Check if columns already exist (idempotent).
-    let has_column: bool = connection
-        .prepare("SELECT total_input_tokens FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "total_input_tokens") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
+    )
 }
 
 /// Migrate v2 → v3: add parent_session_id for conversation forking.
 fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT parent_session_id FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "parent_session_id") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
+    )
 }
 
 /// Migrate v3 → v4: add tags column to sessions for categorization.
 fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT tags FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "tags") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
+    )
 }
 
 /// Migrate v4 → v5: add mirror columns to messages for delivery mirroring.
 fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT mirror FROM messages LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "messages", "mirror") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
+    )
 }
 
 /// Migrate v5 → v6: add response_cache and audit_log tables.
 fn migrate_to_v6(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS response_cache (
-                cache_key TEXT PRIMARY KEY,
-                model TEXT NOT NULL,
-                response TEXT NOT NULL,
-                tool_calls_json TEXT,
-                input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0,
-                hit_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                expires_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                event_type TEXT NOT NULL,
-                details TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_audit_log_session
-                ON audit_log(session_id);
-            CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
-                ON audit_log(event_type);
-            CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
-                ON audit_log(created_at);",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS response_cache (
+            cache_key TEXT PRIMARY KEY,
+            model TEXT NOT NULL,
+            response TEXT NOT NULL,
+            tool_calls_json TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            event_type TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_session
+            ON audit_log(session_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
+            ON audit_log(event_type);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
+            ON audit_log(created_at);",
+    )
 }
 
 /// Migrate v6 → v7: add channels table for platform channel caching.
 fn migrate_to_v7(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS channels (
-                platform TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
-                channel_name TEXT NOT NULL,
-                channel_type TEXT NOT NULL DEFAULT 'channel',
-                is_member INTEGER NOT NULL DEFAULT 0,
-                cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (platform, channel_id)
-            );",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS channels (
+            platform TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            channel_name TEXT NOT NULL,
+            channel_type TEXT NOT NULL DEFAULT 'channel',
+            is_member INTEGER NOT NULL DEFAULT 0,
+            cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (platform, channel_id)
+        );",
+    )
 }
 
 /// Migrate v7 → v8: add sticker_cache table for Telegram sticker descriptions.
 fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS sticker_cache (
-                file_unique_id TEXT PRIMARY KEY,
-                description TEXT NOT NULL,
-                emoji TEXT NOT NULL DEFAULT '',
-                sticker_set TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS sticker_cache (
+            file_unique_id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            emoji TEXT NOT NULL DEFAULT '',
+            sticker_set TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
 }
 
 /// Migrate v8 → v9: add sandboxes table for sandbox terminal backend persistence.
 fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS sandboxes (
-                id            TEXT PRIMARY KEY,
-                backend       TEXT NOT NULL,
-                task_id       TEXT NOT NULL,
-                snapshot_data TEXT,
-                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-                last_active   TEXT NOT NULL DEFAULT (datetime('now')),
-                UNIQUE(backend, task_id)
-            );",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS sandboxes (
+            id            TEXT PRIMARY KEY,
+            backend       TEXT NOT NULL,
+            task_id       TEXT NOT NULL,
+            snapshot_data TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            last_active   TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(backend, task_id)
+        );",
+    )
 }
 
 pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {
@@ -1290,18 +1259,13 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let summaries = stmt
+        let rows = stmt
             .query_map(params![pattern], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List all sessions that were forked from a given parent session.
@@ -1318,18 +1282,13 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let summaries = stmt
+        let rows = stmt
             .query_map(params![parent_id], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a session and all its messages and search index entries.
@@ -1493,7 +1452,7 @@ impl SessionStore {
                 source,
             })?;
 
-        let messages = stmt
+        let rows = stmt
             .query_map(params![session_id], |row| {
                 Ok(StoredMessage {
                     id: row.get(0)?,
@@ -1510,14 +1469,9 @@ impl SessionStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(messages)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete messages older than the N most recent for a session.
@@ -1606,19 +1560,14 @@ impl SessionStore {
                 source,
             })?;
 
-        let summaries = stmt
+        let rows = stmt
             .query_map(params![query], Self::row_to_session_summary)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Search message content across all sessions using FTS5.
@@ -1646,7 +1595,7 @@ impl SessionStore {
                 source,
             })?;
 
-        let results = stmt
+        let rows = stmt
             .query_map(params![query, max_results as i64], |row| {
                 Ok(MessageSearchResult {
                     session_id: row.get(0)?,
@@ -1659,14 +1608,9 @@ impl SessionStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(results)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Count total sessions.
@@ -1714,19 +1658,14 @@ impl SessionStore {
                 source,
             })?;
 
-        let sessions = stmt
+        let rows = stmt
             .query_map(params![limit as i64], Self::row_to_session_summary)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(sessions)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Aggregate token usage across all sessions.
@@ -2029,7 +1968,7 @@ impl ScheduleStore {
                 source,
             })?;
 
-        let schedules = stmt
+        let rows = stmt
             .query_map([], |row| {
                 Ok(StoredSchedule {
                     id: row.get(0)?,
@@ -2043,14 +1982,9 @@ impl ScheduleStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(schedules)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List all schedules (enabled and disabled).
@@ -2067,7 +2001,7 @@ impl ScheduleStore {
                 source,
             })?;
 
-        let schedules = stmt
+        let rows = stmt
             .query_map([], |row| {
                 Ok(StoredSchedule {
                     id: row.get(0)?,
@@ -2081,14 +2015,9 @@ impl ScheduleStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(schedules)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Enable or disable a schedule.
@@ -2243,19 +2172,14 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
+        let rows = stmt
             .query_map([], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List traits in a specific category.
@@ -2271,19 +2195,14 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
+        let rows = stmt
             .query_map(params![category], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Get high-confidence traits (>= threshold) for prompt injection.
@@ -2299,19 +2218,14 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
+        let rows = stmt
             .query_map(params![threshold], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a user trait.
@@ -2452,19 +2366,14 @@ impl SkillStore {
                 source,
             })?;
 
-        let skills = stmt
+        let rows = stmt
             .query_map([], Self::row_to_skill)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(skills)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Find skills matching any of the given tags.
@@ -2482,19 +2391,14 @@ impl SkillStore {
                 source,
             })?;
 
-        let skills = stmt
+        let rows = stmt
             .query_map(params![pattern], Self::row_to_skill)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(skills)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Find skills whose trigger hints, names, descriptions, or tags match the
@@ -2618,11 +2522,7 @@ impl SkillFileStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     pub fn delete_file(&self, skill_name: &str, file_path: &str) -> Result<bool, StorageError> {
@@ -2794,19 +2694,14 @@ impl SubagentStore {
                 source,
             })?;
 
-        let subagents = stmt
+        let rows = stmt
             .query_map(params![parent_session_id], Self::row_to_subagent)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(subagents)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Mark a subagent as running.
@@ -3006,19 +2901,14 @@ impl SkillUsageStore {
                 source,
             })?;
 
-        let usages = stmt
+        let rows = stmt
             .query_map(params![skill_name, limit as i64], Self::row_to_usage)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(usages)
+        collect_rows(rows, &self.database_path)
     }
 
     fn row_to_usage(row: &rusqlite::Row) -> Result<StoredSkillUsage, rusqlite::Error> {
@@ -3087,11 +2977,7 @@ impl MemoryStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Get a single memory by ID. Returns `None` if not found.
@@ -3116,16 +3002,13 @@ impl MemoryStore {
         let connection = open(&self.database_path)?;
 
         // Ensure FTS index exists (memory tools also create it, but this is defensive)
-        connection
-            .execute_batch(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
-                    memory_row_id UNINDEXED, kind, content
-                );",
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        exec_migration(
+            &connection,
+            &self.database_path,
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )?;
 
         let mut stmt = connection
             .prepare(
@@ -3146,11 +3029,7 @@ impl MemoryStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a memory by ID.
@@ -3228,11 +3107,7 @@ impl EmbeddingStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete an embedding by memory ID.
@@ -3467,11 +3342,8 @@ impl PairingStore {
                      ORDER BY approved_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map(params![p], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map(params![p], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3480,11 +3352,8 @@ impl PairingStore {
                      ORDER BY platform, approved_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map([], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map([], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         };
 
         Ok(users)
@@ -3682,11 +3551,8 @@ impl PairingStore {
                      ORDER BY created_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map(params![p], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map(params![p], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3695,11 +3561,8 @@ impl PairingStore {
                      ORDER BY platform, created_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map([], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map([], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         };
 
         Ok(pending)
@@ -3811,7 +3674,7 @@ impl ChannelStore {
             })
         };
 
-        let channels: Vec<CachedChannel> = if let Some(p) = param {
+        let mapped_rows = if let Some(p) = param {
             stmt.query_map(params![p], row_mapper)
         } else {
             stmt.query_map([], row_mapper)
@@ -3819,14 +3682,9 @@ impl ChannelStore {
         .map_err(|source| StorageError::Sqlite {
             path: self.database_path.clone(),
             source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
         })?;
 
-        Ok(channels)
+        collect_rows(mapped_rows, &self.database_path)
     }
 
     /// Upsert a batch of channels for a platform, replacing stale entries.
@@ -4000,11 +3858,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Query audit entries by event type.
@@ -4030,11 +3884,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Query recent audit entries across all sessions.
@@ -4059,11 +3909,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Count total audit entries and entries per event type.
@@ -4090,11 +3936,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Aggregate tool usage analytics from tool_call_end audit events.
@@ -4136,11 +3978,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Aggregate LLM usage analytics from llm_response audit events.
@@ -4181,11 +4019,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete audit entries older than the given number of days.
@@ -4595,7 +4429,7 @@ impl SandboxStore {
             })
         };
 
-        let rows: Vec<SandboxRow> = if let Some(b) = param {
+        let mapped_rows = if let Some(b) = param {
             stmt.query_map(params![b], row_mapper)
         } else {
             stmt.query_map([], row_mapper)
@@ -4603,14 +4437,9 @@ impl SandboxStore {
         .map_err(|source| StorageError::Sqlite {
             path: self.database_path.clone(),
             source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
         })?;
 
-        Ok(rows)
+        collect_rows(mapped_rows, &self.database_path)
     }
 
     /// Delete sandbox records that have not been active for more than `days` days.
