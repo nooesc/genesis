@@ -190,9 +190,9 @@ fn default_cache_context_messages() -> usize { 4 }
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            ttl_seconds: 3600,
-            max_context_messages: 4,
+            enabled: default_true(),
+            ttl_seconds: default_cache_ttl(),
+            max_context_messages: default_cache_context_messages(),
         }
     }
 }
@@ -660,47 +660,29 @@ pub fn load_from_map(
         .or_else(|| file_config.profile.clone())
         .unwrap_or_else(|| DEFAULT_PROFILE.to_owned());
 
+    let prov = file_config.provider.as_ref();
+
     let provider = ProviderConfig {
         backend: env
             .get("GENESIS_PROVIDER_BACKEND")
             .cloned()
-            .or_else(|| {
-                file_config
-                    .provider
-                    .as_ref()
-                    .and_then(|provider| provider.backend.clone())
-            })
+            .or_else(|| prov.and_then(|p| p.backend.clone()))
             .unwrap_or_else(|| DEFAULT_PROVIDER_BACKEND.to_owned()),
         model: env
             .get("GENESIS_MODEL")
             .cloned()
-            .or_else(|| {
-                file_config
-                    .provider
-                    .as_ref()
-                    .and_then(|provider| provider.model.clone())
-            })
+            .or_else(|| prov.and_then(|p| p.model.clone()))
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
-        base_url: env.get("GENESIS_PROVIDER_BASE_URL").cloned().or_else(|| {
-            file_config
-                .provider
-                .as_ref()
-                .and_then(|provider| provider.base_url.clone())
-        }),
-        api_key_env: env.get("GENESIS_PROVIDER_API_KEY_ENV").cloned().or_else(|| {
-            file_config
-                .provider
-                .as_ref()
-                .and_then(|provider| provider.api_key_env.clone())
-        }),
-        extra_body: file_config
-            .provider
-            .as_ref()
-            .and_then(|p| p.extra_body.clone()),
-        tool_call_parser: file_config
-            .provider
-            .as_ref()
-            .and_then(|p| p.tool_call_parser.clone()),
+        base_url: env
+            .get("GENESIS_PROVIDER_BASE_URL")
+            .cloned()
+            .or_else(|| prov.and_then(|p| p.base_url.clone())),
+        api_key_env: env
+            .get("GENESIS_PROVIDER_API_KEY_ENV")
+            .cloned()
+            .or_else(|| prov.and_then(|p| p.api_key_env.clone())),
+        extra_body: prov.and_then(|p| p.extra_body.clone()),
+        tool_call_parser: prov.and_then(|p| p.tool_call_parser.clone()),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -758,79 +740,37 @@ pub fn load_from_map(
         })
         .collect::<Vec<_>>();
 
+    let rt = file_config.runtime.as_ref();
+
     let runtime = RuntimeConfig {
         max_concurrency: parse_env(
             env,
             "GENESIS_MAX_CONCURRENCY",
-            file_config
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.max_concurrency)
-                .unwrap_or(4),
+            rt.and_then(|r| r.max_concurrency).unwrap_or(4),
         )?,
         allow_destructive_tools: parse_env(
             env,
             "GENESIS_ALLOW_DESTRUCTIVE_TOOLS",
-            file_config
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.allow_destructive_tools)
-                .unwrap_or(false),
+            rt.and_then(|r| r.allow_destructive_tools).unwrap_or(false),
         )?,
         max_turns: parse_env(
             env,
             "GENESIS_MAX_TURNS",
-            file_config
-                .runtime
-                .as_ref()
-                .and_then(|runtime| runtime.max_turns)
-                .unwrap_or(20),
+            rt.and_then(|r| r.max_turns).unwrap_or(20),
         )?,
-        max_context_messages: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.max_context_messages),
-        budget_limit: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.budget_limit),
-        terminal: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.terminal.clone()),
-        thinking_budget: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.thinking_budget),
-        max_context_tokens: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.max_context_tokens),
-        max_iterations: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.max_iterations),
-        context_security: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.context_security.clone())
+        max_context_messages: rt.and_then(|r| r.max_context_messages),
+        budget_limit: rt.and_then(|r| r.budget_limit),
+        terminal: rt.and_then(|r| r.terminal.clone()),
+        thinking_budget: rt.and_then(|r| r.thinking_budget),
+        max_context_tokens: rt.and_then(|r| r.max_context_tokens),
+        max_iterations: rt.and_then(|r| r.max_iterations),
+        context_security: rt
+            .and_then(|r| r.context_security.clone())
             .unwrap_or_default(),
-        reasoning_effort: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.reasoning_effort),
-        cache: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.cache.clone()),
-        tool_filter: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.tool_filter.clone()),
-        guardrails: file_config
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.guardrails.clone()),
+        reasoning_effort: rt.and_then(|r| r.reasoning_effort),
+        cache: rt.and_then(|r| r.cache.clone()),
+        tool_filter: rt.and_then(|r| r.tool_filter.clone()),
+        guardrails: rt.and_then(|r| r.guardrails.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -963,14 +903,29 @@ pub fn update_provider_in_file(
     write_file_config(config_path, &file_config)
 }
 
+/// Parse `value` into `$ty` and assign `Some(v)` to `$target`, or return a
+/// `ConfigError::InvalidEnvValue` on parse failure.
+macro_rules! parse_and_set {
+    ($value:expr, $key:expr, $ty:ty, $target:expr) => {{
+        let val = $value;
+        let v: $ty = val.parse().map_err(|_| ConfigError::InvalidEnvValue {
+            name: $key,
+            value: val.to_owned(),
+        })?;
+        $target = Some(v);
+    }};
+}
+
 /// Set a configuration value using dot-notation keys.
 ///
 /// Supported keys:
 ///   profile, provider.backend, provider.model, provider.base_url,
-///   provider.api_key_env, runtime.max_turns, runtime.max_concurrency,
+///   provider.api_key_env, provider.tool_call_parser,
+///   runtime.max_turns, runtime.max_concurrency,
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
 ///   runtime.thinking_budget, runtime.max_context_tokens, runtime.max_iterations,
-///   gateway.idle_timeout_minutes, gateway.daily_reset_hour
+///   runtime.reasoning_effort,
+///   gateway.idle_timeout_minutes, gateway.daily_reset_hour, gateway.rate_limit_rpm
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
 
@@ -1002,118 +957,40 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileProviderConfig::default)
                 .api_key_env = Some(value.to_owned());
         }
-        "runtime.max_turns" => {
-            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.max_turns",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .max_turns = Some(v);
-        }
-        "runtime.max_concurrency" => {
-            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.max_concurrency",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .max_concurrency = Some(v);
-        }
-        "runtime.allow_destructive_tools" => {
-            let v: bool = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.allow_destructive_tools",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .allow_destructive_tools = Some(v);
-        }
-        "runtime.max_context_messages" => {
-            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.max_context_messages",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .max_context_messages = Some(v);
-        }
-        "runtime.thinking_budget" => {
-            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.thinking_budget",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .thinking_budget = Some(v);
-        }
-        "runtime.max_context_tokens" => {
-            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.max_context_tokens",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .max_context_tokens = Some(v);
-        }
-        "runtime.max_iterations" => {
-            let v: usize = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "runtime.max_iterations",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .runtime
-                .get_or_insert_with(FileRuntimeConfig::default)
-                .max_iterations = Some(v);
-        }
-        "gateway.idle_timeout_minutes" => {
-            let v: u64 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "gateway.idle_timeout_minutes",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .gateway
-                .get_or_insert_with(GatewayConfig::default)
-                .idle_timeout_minutes = Some(v);
-        }
-        "gateway.daily_reset_hour" => {
-            let v: u8 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "gateway.daily_reset_hour",
-                value: value.to_owned(),
-            })?;
-            if v >= 24 {
-                return Err(ConfigError::InvalidEnvValue {
-                    name: "gateway.daily_reset_hour",
-                    value: value.to_owned(),
-                });
-            }
-            file_config
-                .gateway
-                .get_or_insert_with(GatewayConfig::default)
-                .daily_reset_hour = Some(v);
-        }
-        "gateway.rate_limit_rpm" => {
-            let v: u32 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
-                name: "gateway.rate_limit_rpm",
-                value: value.to_owned(),
-            })?;
-            file_config
-                .gateway
-                .get_or_insert_with(GatewayConfig::default)
-                .rate_limit_rpm = Some(v);
-        }
         "provider.tool_call_parser" => {
             file_config
                 .provider
                 .get_or_insert_with(FileProviderConfig::default)
                 .tool_call_parser = Some(value.to_owned());
         }
+        "runtime.max_turns" => parse_and_set!(
+            value, "runtime.max_turns", usize,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_turns
+        ),
+        "runtime.max_concurrency" => parse_and_set!(
+            value, "runtime.max_concurrency", usize,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_concurrency
+        ),
+        "runtime.allow_destructive_tools" => parse_and_set!(
+            value, "runtime.allow_destructive_tools", bool,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).allow_destructive_tools
+        ),
+        "runtime.max_context_messages" => parse_and_set!(
+            value, "runtime.max_context_messages", usize,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_context_messages
+        ),
+        "runtime.thinking_budget" => parse_and_set!(
+            value, "runtime.thinking_budget", u32,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).thinking_budget
+        ),
+        "runtime.max_context_tokens" => parse_and_set!(
+            value, "runtime.max_context_tokens", u32,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_context_tokens
+        ),
+        "runtime.max_iterations" => parse_and_set!(
+            value, "runtime.max_iterations", usize,
+            file_config.runtime.get_or_insert_with(FileRuntimeConfig::default).max_iterations
+        ),
         "runtime.reasoning_effort" => {
             let effort: ReasoningEffort = match value.to_ascii_lowercase().as_str() {
                 "high" => ReasoningEffort::High,
@@ -1131,6 +1008,27 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .reasoning_effort = Some(effort);
         }
+        "gateway.idle_timeout_minutes" => parse_and_set!(
+            value, "gateway.idle_timeout_minutes", u64,
+            file_config.gateway.get_or_insert_with(GatewayConfig::default).idle_timeout_minutes
+        ),
+        "gateway.daily_reset_hour" => {
+            parse_and_set!(
+                value, "gateway.daily_reset_hour", u8,
+                file_config.gateway.get_or_insert_with(GatewayConfig::default).daily_reset_hour
+            );
+            // Extra validation: hour must be 0..=23.
+            if file_config.gateway.as_ref().expect("just set above").daily_reset_hour.expect("just set above") >= 24 {
+                return Err(ConfigError::InvalidEnvValue {
+                    name: "gateway.daily_reset_hour",
+                    value: value.to_owned(),
+                });
+            }
+        }
+        "gateway.rate_limit_rpm" => parse_and_set!(
+            value, "gateway.rate_limit_rpm", u32,
+            file_config.gateway.get_or_insert_with(GatewayConfig::default).rate_limit_rpm
+        ),
         _ => {
             return Err(ConfigError::InvalidEnvValue {
                 name: "key",
