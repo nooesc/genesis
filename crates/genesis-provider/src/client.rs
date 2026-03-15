@@ -433,10 +433,6 @@ impl ChatClient {
             endpoint = self.endpoint.as_str(),
             model = request.model.as_str(),
             elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens = 0u32,
-            completion_tokens = 0u32,
-            total_tokens = 0u32,
-            token_counts_available = false,
             "streaming chat completion request accepted"
         );
 
@@ -467,10 +463,6 @@ impl ChatClient {
                                 endpoint = endpoint.as_str(),
                                 model = model.as_str(),
                                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
-                                prompt_tokens = 0u32,
-                                completion_tokens = 0u32,
-                                total_tokens = 0u32,
-                                token_counts_available = false,
                                 chunk_count,
                                 "streaming chat completion finished"
                             );
@@ -491,10 +483,6 @@ impl ChatClient {
                 endpoint = endpoint.as_str(),
                 model = model.as_str(),
                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
-                prompt_tokens = 0u32,
-                completion_tokens = 0u32,
-                total_tokens = 0u32,
-                token_counts_available = false,
                 chunk_count,
                 "streaming chat completion stream closed"
             );
@@ -519,10 +507,6 @@ impl ChatClient {
             endpoint = self.endpoint.as_str(),
             model = request.model.as_str(),
             elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens = 0u32,
-            completion_tokens = 0u32,
-            total_tokens = 0u32,
-            token_counts_available = false,
             "anthropic streaming request accepted"
         );
 
