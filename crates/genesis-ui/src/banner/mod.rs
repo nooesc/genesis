@@ -70,26 +70,22 @@ pub fn show_banner(ui: &UiContext, info: &BannerInfo) {
     }
 }
 
-/// Full banner: animated art with session info to the right.
+/// Full banner: half-block pixel art with row-by-row reveal.
 fn show_full(info: &BannerInfo) {
-    let art_frames = frames::full_frames();
-
-    // Play the animation.
-    animate::play_animation(&art_frames);
-
-    // Now we need to print session info. For the full variant we move the
-    // cursor back up and print info to the right of the art. However,
-    // since the art lines already contain trailing spaces and ANSI codes,
-    // it's cleaner to print info below with a separator.
+    let art = frames::full_art();
+    // Note: reveal_animation uses thread::sleep for timing. This is
+    // intentional — the banner runs during startup before the chat loop,
+    // so blocking the executor here has no impact on responsiveness.
+    animate::reveal_animation(&art);
     println!();
     print_session_info(info);
     println!();
 }
 
-/// Compact banner: animated art with session info below.
+/// Compact banner: half-block pixel art with reveal, info below.
 fn show_compact(info: &BannerInfo) {
-    let art_frames = frames::compact_frames();
-    animate::play_animation(&art_frames);
+    let art = frames::compact_art();
+    animate::reveal_animation(&art);
     println!();
     print_session_info(info);
     println!();

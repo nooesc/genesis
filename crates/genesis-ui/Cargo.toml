@@ -10,5 +10,6 @@ owo-colors.workspace = true
 unicode-width.workspace = true
 termimad.workspace = true
 syntect.workspace = true
+image.workspace = true
 
 [dev-dependencies]

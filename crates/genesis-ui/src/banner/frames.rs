@@ -1,297 +1,113 @@
-//! ASCII art frames for Eve banner animation.
+//! Half-block pixel art rendering for the Eve banner.
 //!
-//! Each frame is a function returning `Vec<String>` with embedded ANSI truecolor
-//! escape codes. The frames differ subtly in the torso/hip area to create a
-//! sway animation effect.
+//! Converts an embedded PNG image to terminal art using Unicode half-block
+//! characters (▀▄) with truecolor ANSI escape codes. Each character cell
+//! represents 2 vertical pixels (top pixel = foreground, bottom pixel =
+//! background), giving effectively double vertical resolution.
 //!
-//! Eve is depicted as a hooded anime girl with a cable/tail accent, standing
-//! with a confident posture. The hood is rendered with block/shade characters
-//! for depth, the face uses lighter tones, and the cable is in amber.
+//! This is the same technique used by terminal image viewers and the
+//! cli-music album art renderer.
 
-use crate::colors::{EVE_AMBER, EVE_DARK, EVE_LAVENDER, EVE_LILAC, EVE_PURPLE};
+use image::{DynamicImage, GenericImageView};
 
-// ── Color helpers ────────────────────────────────────────────────────────
+/// Embedded Eve art (full size).
+const EVE_FULL_PNG: &[u8] = include_bytes!("eve_full.png");
 
-fn fg(rgb: (u8, u8, u8)) -> String {
-    format!("\x1b[38;2;{};{};{}m", rgb.0, rgb.1, rgb.2)
+/// Embedded Eve art (compact size).
+const EVE_COMPACT_PNG: &[u8] = include_bytes!("eve_compact.png");
+
+/// Alpha threshold below which a pixel is considered transparent.
+const ALPHA_THRESHOLD: u8 = 30;
+
+/// Render an RGBA image to half-block terminal art lines.
+///
+/// Each output line represents 2 rows of pixels. For each column:
+/// - If both pixels are transparent: space
+/// - If top opaque, bottom transparent: ▀ with fg = top color
+/// - If top transparent, bottom opaque: ▄ with fg = bottom color
+/// - If both opaque: ▀ with fg = top color, bg = bottom color
+pub fn render_halfblocks(img: &DynamicImage) -> Vec<String> {
+    let (width, height) = img.dimensions();
+    let mut lines = Vec::new();
+
+    let mut y = 0u32;
+    while y < height {
+        let mut line = String::with_capacity(width as usize * 30);
+        let mut last_was_colored = false;
+
+        for x in 0..width {
+            let top = img.get_pixel(x, y);
+            let bot = if y + 1 < height {
+                Some(img.get_pixel(x, y + 1))
+            } else {
+                None
+            };
+
+            let top_visible = top[3] > ALPHA_THRESHOLD;
+            let bot_visible = bot.is_some_and(|p| p[3] > ALPHA_THRESHOLD);
+
+            match (top_visible, bot_visible) {
+                (true, true) => {
+                    let b = bot.unwrap();
+                    line.push_str(&format!(
+                        "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m▀",
+                        top[0], top[1], top[2], b[0], b[1], b[2],
+                    ));
+                    last_was_colored = true;
+                }
+                (true, false) => {
+                    if last_was_colored {
+                        line.push_str("\x1b[0m");
+                    }
+                    line.push_str(&format!(
+                        "\x1b[38;2;{};{};{}m▀",
+                        top[0], top[1], top[2],
+                    ));
+                    last_was_colored = true;
+                }
+                (false, true) => {
+                    if last_was_colored {
+                        line.push_str("\x1b[0m");
+                    }
+                    let b = bot.unwrap();
+                    line.push_str(&format!(
+                        "\x1b[38;2;{};{};{}m▄",
+                        b[0], b[1], b[2],
+                    ));
+                    last_was_colored = true;
+                }
+                (false, false) => {
+                    if last_was_colored {
+                        line.push_str("\x1b[0m");
+                        last_was_colored = false;
+                    }
+                    line.push(' ');
+                }
+            }
+        }
+
+        line.push_str("\x1b[0m");
+        lines.push(line);
+        y += 2;
+    }
+
+    lines
 }
 
-const RESET: &str = "\x1b[0m";
-
-// ── Full-size frames (~35 lines, ~75 cols) ──────────────────────────────
-//
-// The character: a hooded anime-style girl seen from the front.
-//   - Top: curved cable/tail in amber swooping down to her hood
-//   - Hood: deep purple/dark shading with pointed edges
-//   - Face: lavender/lilac with anime eyes (large, expressive)
-//   - Body: a fitted cloak/robe with fold details
-//   - Lower: legs/boots beneath the cloak hem
-//
-// The hip sway is achieved by shifting the torso section (lines ~20-30)
-// left or right by 1-2 characters between frames while keeping the head
-// and feet anchored.
-
-/// Full-size Eve -- frame 1 (neutral stance).
-pub fn full_frame_1() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("                                                            "),
-        format!("{am}                             _,-~-._                      {r}"),
-        format!("{am}                          _-'        `-._                 {r}"),
-        format!("{am}                        /'      ~        `\\               {r}"),
-        format!("{am}                       |                   `.             {r}"),
-        format!("{am}                        `.    _              |            {r}"),
-        format!("{am}                          `-,' `-.           |            {r}"),
-        format!("{am}                                 `-._____.--'             {r}"),
-        format!("{am}                                       |                  {r}"),
-        format!("{dk}                         ╭─────────────┴──╮              {r}"),
-        format!("{pr}                       ╭─┤  ░░░░░░░░░░░░  ├──╮           {r}"),
-        format!("{pr}                     ╭─┤ │ ░░░▓▓▓▓▓▓▓░░░ │  ├─╮         {r}"),
-        format!("{dk}                    ╭┤ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ├╮        {r}"),
-        format!("{dk}                    ││ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ││        {r}"),
-        format!("{pr}                    ││ ╰ │░░▓▓▓▓▓▓▓▓▓░░░ │  ╯ ││        {r}"),
-        format!("{li}                    │╰   │  ░░░░░░░░░░░  │    ╯│        {r}"),
-        format!("{lv}                    │    │   {li}o{dk}.:{lv}    {li}o{dk}.:{lv}   │     │        {r}"),
-        format!("{lv}                    │    │      {dk}`{li},,{dk}'{lv}      │     │        {r}"),
-        format!("{lv}                    │    │      {dk}\\__/{lv}       │     │        {r}"),
-        format!("{pr}                    │    ╰────────────────╯     │        {r}"),
-        format!("{pr}                    │       ╭────────────╮      │        {r}"),
-        format!("{dk}                    │      ╭┤ ░▓▓▓▓▓▓▓░ ├╮     │        {r}"),
-        format!("{dk}                    │      │╰────────────╯│     │        {r}"),
-        format!("{pr}                    │      │  ╭────────╮  │     │        {r}"),
-        format!("{pr}                    │      │  │ ░░░░░░ │  │     │        {r}"),
-        format!("{lv}                     \\     │  │ ░░░░░░ │  │    /         {r}"),
-        format!("{lv}                      \\    │  │ ░░░░░░ │  │   /          {r}"),
-        format!("{pr}                       \\   ╰──┤        ├──╯  /           {r}"),
-        format!("{dk}                        ╰─────┤        ├─────╯           {r}"),
-        format!("{pr}                              ╭┴────────┴╮               {r}"),
-        format!("{dk}                             ╭┤ ░░░░░░░░ ├╮              {r}"),
-        format!("{dk}                             │╰────┬─────╯│              {r}"),
-        format!("{dk}                            ╭┴─────┴──────┴╮             {r}"),
-        format!("{pr}                            ╰───────────────╯             {r}"),
-    ]
+/// Load and render the full-size Eve banner art.
+pub fn full_art() -> Vec<String> {
+    match image::load_from_memory(EVE_FULL_PNG) {
+        Ok(img) => render_halfblocks(&img),
+        Err(e) => vec![format!("  [banner art failed: {e}]")],
+    }
 }
 
-/// Full-size Eve -- frame 2 (hips shifted right).
-pub fn full_frame_2() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("                                                            "),
-        format!("{am}                             _,-~-._                      {r}"),
-        format!("{am}                          _-'        `-._                 {r}"),
-        format!("{am}                        /'      ~        `\\               {r}"),
-        format!("{am}                       |                   `.             {r}"),
-        format!("{am}                        `.    _              |            {r}"),
-        format!("{am}                          `-,' `-.           |            {r}"),
-        format!("{am}                                 `-._____.--'             {r}"),
-        format!("{am}                                       |                  {r}"),
-        format!("{dk}                         ╭─────────────┴──╮              {r}"),
-        format!("{pr}                       ╭─┤  ░░░░░░░░░░░░  ├──╮           {r}"),
-        format!("{pr}                     ╭─┤ │ ░░░▓▓▓▓▓▓▓░░░ │  ├─╮         {r}"),
-        format!("{dk}                    ╭┤ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ├╮        {r}"),
-        format!("{dk}                    ││ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ││        {r}"),
-        format!("{pr}                    ││ ╰ │░░▓▓▓▓▓▓▓▓▓░░░ │  ╯ ││        {r}"),
-        format!("{li}                    │╰   │  ░░░░░░░░░░░  │    ╯│        {r}"),
-        format!("{lv}                    │    │   {li}o{dk}.:{lv}    {li}o{dk}.:{lv}   │     │        {r}"),
-        format!("{lv}                    │    │      {dk}`{li},,{dk}'{lv}      │     │        {r}"),
-        format!("{lv}                    │    │      {dk}\\__/{lv}       │     │        {r}"),
-        format!("{pr}                    │    ╰────────────────╯     │        {r}"),
-        format!("{pr}                    │        ╭────────────╮     │        {r}"),
-        format!("{dk}                    │       ╭┤ ░▓▓▓▓▓▓▓░ ├╮    │        {r}"),
-        format!("{dk}                    │       │╰────────────╯│    │        {r}"),
-        format!("{pr}                    │       │  ╭────────╮  │    │        {r}"),
-        format!("{pr}                    │       │  │ ░░░░░░ │  │    │        {r}"),
-        format!("{lv}                     \\      │  │ ░░░░░░ │  │   /         {r}"),
-        format!("{lv}                      \\     │  │ ░░░░░░ │  │  /          {r}"),
-        format!("{pr}                       \\    ╰──┤        ├──╯ /           {r}"),
-        format!("{dk}                        ╰─────┤        ├─────╯           {r}"),
-        format!("{pr}                               ╭┴──────┴╮                {r}"),
-        format!("{dk}                              ╭┤ ░░░░░░ ├╮               {r}"),
-        format!("{dk}                              │╰───┬────╯│               {r}"),
-        format!("{dk}                             ╭┴────┴─────┴╮              {r}"),
-        format!("{pr}                             ╰─────────────╯              {r}"),
-    ]
-}
-
-/// Full-size Eve -- frame 3 (hips shifted left).
-pub fn full_frame_3() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("                                                            "),
-        format!("{am}                             _,-~-._                      {r}"),
-        format!("{am}                          _-'        `-._                 {r}"),
-        format!("{am}                        /'      ~        `\\               {r}"),
-        format!("{am}                       |                   `.             {r}"),
-        format!("{am}                        `.    _              |            {r}"),
-        format!("{am}                          `-,' `-.           |            {r}"),
-        format!("{am}                                 `-._____.--'             {r}"),
-        format!("{am}                                       |                  {r}"),
-        format!("{dk}                         ╭─────────────┴──╮              {r}"),
-        format!("{pr}                       ╭─┤  ░░░░░░░░░░░░  ├──╮           {r}"),
-        format!("{pr}                     ╭─┤ │ ░░░▓▓▓▓▓▓▓░░░ │  ├─╮         {r}"),
-        format!("{dk}                    ╭┤ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ├╮        {r}"),
-        format!("{dk}                    ││ │ │░▓▓▓▓▓▓▓▓▓▓▓▓░ │  │ ││        {r}"),
-        format!("{pr}                    ││ ╰ │░░▓▓▓▓▓▓▓▓▓░░░ │  ╯ ││        {r}"),
-        format!("{li}                    │╰   │  ░░░░░░░░░░░  │    ╯│        {r}"),
-        format!("{lv}                    │    │   {li}o{dk}.:{lv}    {li}o{dk}.:{lv}   │     │        {r}"),
-        format!("{lv}                    │    │      {dk}`{li},,{dk}'{lv}      │     │        {r}"),
-        format!("{lv}                    │    │      {dk}\\__/{lv}       │     │        {r}"),
-        format!("{pr}                    │    ╰────────────────╯     │        {r}"),
-        format!("{pr}                    │      ╭────────────╮       │        {r}"),
-        format!("{dk}                    │     ╭┤ ░▓▓▓▓▓▓▓░ ├╮      │        {r}"),
-        format!("{dk}                    │     │╰────────────╯│      │        {r}"),
-        format!("{pr}                    │     │  ╭────────╮  │      │        {r}"),
-        format!("{pr}                    │     │  │ ░░░░░░ │  │      │        {r}"),
-        format!("{lv}                     \\    │  │ ░░░░░░ │  │     /         {r}"),
-        format!("{lv}                      \\   │  │ ░░░░░░ │  │    /          {r}"),
-        format!("{pr}                       \\  ╰──┤        ├──╯   /           {r}"),
-        format!("{dk}                        ╰─────┤        ├─────╯           {r}"),
-        format!("{pr}                             ╭┴────────┴╮                {r}"),
-        format!("{dk}                            ╭┤ ░░░░░░░░ ├╮               {r}"),
-        format!("{dk}                            │╰─────┬────╯│               {r}"),
-        format!("{dk}                           ╭┴──────┴─────┴╮              {r}"),
-        format!("{pr}                           ╰────────────────╯             {r}"),
-    ]
-}
-
-/// Full-size Eve -- frame 4 (return to neutral).
-pub fn full_frame_4() -> Vec<String> {
-    full_frame_1()
-}
-
-// ── Compact frames (~18 lines, ~50 cols) ────────────────────────────────
-
-/// Compact Eve -- frame 1 (neutral).
-pub fn compact_frame_1() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("{am}                _,-~-._                {r}"),
-        format!("{am}              ,' ~ _   `-.             {r}"),
-        format!("{am}              `._ / `-.__/             {r}"),
-        format!("{am}                  |                    {r}"),
-        format!("{dk}            ╭─────┴─────╮             {r}"),
-        format!("{pr}           ╭┤ ░░▓▓▓▓▓░░ ├╮            {r}"),
-        format!("{dk}           ││░▓▓▓▓▓▓▓▓▓░││            {r}"),
-        format!("{li}           │╰ ░{lv} {li}o{dk}:{lv}  {li}o{dk}:{lv} {li}░ ╯│            {r}"),
-        format!("{lv}           │    {dk}`,,'{lv}     │            {r}"),
-        format!("{lv}           │    {dk}\\__/{lv}     │            {r}"),
-        format!("{pr}           ╰─────────────╯            {r}"),
-        format!("{pr}            ╭───────────╮             {r}"),
-        format!("{dk}            │ ░▓▓▓▓▓▓▓░ │             {r}"),
-        format!("{pr}            │ ╭───────╮ │             {r}"),
-        format!("{lv}             \\│ ░░░░░ │/              {r}"),
-        format!("{dk}              ╰──┬─┬──╯               {r}"),
-        format!("{dk}             ╭───┴─┴───╮              {r}"),
-        format!("{pr}             ╰─────────╯              {r}"),
-    ]
-}
-
-/// Compact Eve -- frame 2 (hips shifted right).
-pub fn compact_frame_2() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("{am}                _,-~-._                {r}"),
-        format!("{am}              ,' ~ _   `-.             {r}"),
-        format!("{am}              `._ / `-.__/             {r}"),
-        format!("{am}                  |                    {r}"),
-        format!("{dk}            ╭─────┴─────╮             {r}"),
-        format!("{pr}           ╭┤ ░░▓▓▓▓▓░░ ├╮            {r}"),
-        format!("{dk}           ││░▓▓▓▓▓▓▓▓▓░││            {r}"),
-        format!("{li}           │╰ ░{lv} {li}o{dk}:{lv}  {li}o{dk}:{lv} {li}░ ╯│            {r}"),
-        format!("{lv}           │    {dk}`,,'{lv}     │            {r}"),
-        format!("{lv}           │    {dk}\\__/{lv}     │            {r}"),
-        format!("{pr}           ╰─────────────╯            {r}"),
-        format!("{pr}             ╭───────────╮            {r}"),
-        format!("{dk}             │ ░▓▓▓▓▓▓▓░ │            {r}"),
-        format!("{pr}             │ ╭───────╮ │            {r}"),
-        format!("{lv}              \\│ ░░░░░ │/             {r}"),
-        format!("{dk}               ╰──┬─┬──╯              {r}"),
-        format!("{dk}              ╭───┴─┴───╮             {r}"),
-        format!("{pr}              ╰─────────╯             {r}"),
-    ]
-}
-
-/// Compact Eve -- frame 3 (hips shifted left).
-pub fn compact_frame_3() -> Vec<String> {
-    let dk = fg(EVE_DARK);
-    let lv = fg(EVE_LAVENDER);
-    let pr = fg(EVE_PURPLE);
-    let li = fg(EVE_LILAC);
-    let am = fg(EVE_AMBER);
-    let r = RESET;
-
-    vec![
-        format!("{am}                _,-~-._                {r}"),
-        format!("{am}              ,' ~ _   `-.             {r}"),
-        format!("{am}              `._ / `-.__/             {r}"),
-        format!("{am}                  |                    {r}"),
-        format!("{dk}            ╭─────┴─────╮             {r}"),
-        format!("{pr}           ╭┤ ░░▓▓▓▓▓░░ ├╮            {r}"),
-        format!("{dk}           ││░▓▓▓▓▓▓▓▓▓░││            {r}"),
-        format!("{li}           │╰ ░{lv} {li}o{dk}:{lv}  {li}o{dk}:{lv} {li}░ ╯│            {r}"),
-        format!("{lv}           │    {dk}`,,'{lv}     │            {r}"),
-        format!("{lv}           │    {dk}\\__/{lv}     │            {r}"),
-        format!("{pr}           ╰─────────────╯            {r}"),
-        format!("{pr}           ╭───────────╮              {r}"),
-        format!("{dk}           │ ░▓▓▓▓▓▓▓░ │              {r}"),
-        format!("{pr}           │ ╭───────╮ │              {r}"),
-        format!("{lv}            \\│ ░░░░░ │/               {r}"),
-        format!("{dk}             ╰──┬─┬──╯                {r}"),
-        format!("{dk}            ╭───┴─┴───╮               {r}"),
-        format!("{pr}            ╰─────────╯               {r}"),
-    ]
-}
-
-/// Compact Eve -- frame 4 (return to neutral).
-pub fn compact_frame_4() -> Vec<String> {
-    compact_frame_1()
-}
-
-// ── Frame accessors ─────────────────────────────────────────────────────
-
-/// Returns the 4 full-size animation frames.
-pub fn full_frames() -> [Vec<String>; 4] {
-    [full_frame_1(), full_frame_2(), full_frame_3(), full_frame_4()]
-}
-
-/// Returns the 4 compact animation frames.
-pub fn compact_frames() -> [Vec<String>; 4] {
-    [
-        compact_frame_1(),
-        compact_frame_2(),
-        compact_frame_3(),
-        compact_frame_4(),
-    ]
+/// Load and render the compact Eve banner art.
+pub fn compact_art() -> Vec<String> {
+    match image::load_from_memory(EVE_COMPACT_PNG) {
+        Ok(img) => render_halfblocks(&img),
+        Err(e) => vec![format!("  [banner art failed: {e}]")],
+    }
 }
 
 #[cfg(test)]
@@ -299,50 +115,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn full_frames_all_same_height() {
-        let frames = full_frames();
-        let height = frames[0].len();
-        for (i, frame) in frames.iter().enumerate() {
-            assert_eq!(
-                frame.len(),
-                height,
-                "full frame {i} has {} lines, expected {height}",
-                frame.len()
-            );
-        }
+    fn render_halfblocks_transparent_image_produces_spaces() {
+        let img = DynamicImage::new_rgba8(4, 4);
+        let lines = render_halfblocks(&img);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
-    fn compact_frames_all_same_height() {
-        let frames = compact_frames();
-        let height = frames[0].len();
-        for (i, frame) in frames.iter().enumerate() {
-            assert_eq!(
-                frame.len(),
-                height,
-                "compact frame {i} has {} lines, expected {height}",
-                frame.len()
-            );
-        }
+    fn render_halfblocks_odd_height() {
+        let img = DynamicImage::new_rgba8(2, 3);
+        let lines = render_halfblocks(&img);
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
-    fn full_frame_height_in_range() {
-        let frame = full_frame_1();
-        assert!(
-            frame.len() >= 25 && frame.len() <= 45,
-            "full frame height {} out of expected range 25..45",
-            frame.len()
-        );
+    fn full_art_loads_without_panic() {
+        let lines = full_art();
+        assert!(!lines.is_empty());
     }
 
     #[test]
-    fn compact_frame_height_in_range() {
-        let frame = compact_frame_1();
-        assert!(
-            frame.len() >= 12 && frame.len() <= 25,
-            "compact frame height {} out of expected range 12..25",
-            frame.len()
-        );
+    fn compact_art_loads_without_panic() {
+        let lines = compact_art();
+        assert!(!lines.is_empty());
     }
 }

@@ -59,6 +59,7 @@ libc = "0.2"
 crossterm = "0.28"
 owo-colors = "4"
 unicode-width = "0.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 termimad = "0.30"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 which = "6"
