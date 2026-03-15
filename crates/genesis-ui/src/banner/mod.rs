@@ -55,7 +55,7 @@ impl BannerSize {
 pub fn show_banner(ui: &UiContext, info: &BannerInfo) {
     if !ui.colors_enabled {
         // When colors are off, just print a plain text header.
-        println!("Eve v0.1.0");
+        println!("Eve v{}", env!("CARGO_PKG_VERSION"));
         print_session_info_plain(info);
         return;
     }
@@ -99,7 +99,7 @@ fn show_compact(info: &BannerInfo) {
 fn show_text_only() {
     let accent = format!("\x1b[38;2;{};{};{}m", UI_ACCENT.0, UI_ACCENT.1, UI_ACCENT.2);
     let reset = "\x1b[0m";
-    println!("{accent}Eve v0.1.0{reset}");
+    println!("{accent}Eve v{}{reset}", env!("CARGO_PKG_VERSION"));
     println!();
 }
 

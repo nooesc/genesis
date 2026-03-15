@@ -51,44 +51,32 @@ impl UiContext {
         }
     }
 
-    pub fn format_metadata(&self, text: &str) -> String {
+    fn apply_style(&self, text: &str, style: owo_colors::Style) -> String {
         if self.colors_enabled {
-            text.style(self.styles.dim).to_string()
+            text.style(style).to_string()
         } else {
             text.to_string()
         }
+    }
+
+    pub fn format_metadata(&self, text: &str) -> String {
+        self.apply_style(text, self.styles.dim)
     }
 
     pub fn format_error(&self, text: &str) -> String {
-        if self.colors_enabled {
-            text.style(self.styles.error).to_string()
-        } else {
-            text.to_string()
-        }
+        self.apply_style(text, self.styles.error)
     }
 
     pub fn format_success(&self, text: &str) -> String {
-        if self.colors_enabled {
-            text.style(self.styles.success).to_string()
-        } else {
-            text.to_string()
-        }
+        self.apply_style(text, self.styles.success)
     }
 
     pub fn format_warning(&self, text: &str) -> String {
-        if self.colors_enabled {
-            text.style(self.styles.warning).to_string()
-        } else {
-            text.to_string()
-        }
+        self.apply_style(text, self.styles.warning)
     }
 
     pub fn format_accent(&self, text: &str) -> String {
-        if self.colors_enabled {
-            text.style(self.styles.accent).to_string()
-        } else {
-            text.to_string()
-        }
+        self.apply_style(text, self.styles.accent)
     }
 }
 

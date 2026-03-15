@@ -115,8 +115,9 @@ impl StatusBar {
         let Some(ref state) = self.state else {
             return;
         };
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let cols = cols as usize;
+        let term_size = crate::terminal::TerminalSize::detect();
+        let cols = term_size.cols as usize;
+        let rows = term_size.rows;
 
         let elapsed = self.started_at.map(|s| s.elapsed()).unwrap_or_default();
         let elapsed_str = if elapsed.as_secs() >= 60 {
@@ -212,10 +213,10 @@ impl StatusBar {
         if !self.colors_enabled {
             return;
         }
-        let (_, rows) = terminal::size().unwrap_or((80, 24));
+        let term_size = crate::terminal::TerminalSize::detect();
         let mut stdout = io::stdout();
         let _ = stdout.execute(cursor::SavePosition);
-        let _ = stdout.execute(cursor::MoveTo(0, rows - 1));
+        let _ = stdout.execute(cursor::MoveTo(0, term_size.rows - 1));
         let _ = stdout.execute(terminal::Clear(terminal::ClearType::CurrentLine));
         let _ = stdout.execute(cursor::RestorePosition);
         let _ = stdout.flush();

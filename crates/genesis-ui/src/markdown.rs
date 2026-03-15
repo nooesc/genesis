@@ -7,6 +7,8 @@
 //!
 //! On `finish()`, any incomplete buffered content is flushed as plain text.
 
+use std::sync::OnceLock;
+
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -15,12 +17,21 @@ use termimad::MadSkin;
 
 use crate::colors::*;
 
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+fn get_syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn get_theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
 /// Renders complete markdown blocks (non-streaming).
 pub struct MarkdownRenderer {
     skin: MadSkin,
-    syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
-    colors_enabled: bool,
+    pub(crate) colors_enabled: bool,
 }
 
 impl MarkdownRenderer {
@@ -47,8 +58,6 @@ impl MarkdownRenderer {
         }
         Self {
             skin,
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
             colors_enabled,
         }
     }
@@ -73,11 +82,12 @@ impl MarkdownRenderer {
             return result;
         }
 
-        let theme = &self.theme_set.themes["base16-ocean.dark"];
-        let syntax = self
-            .syntax_set
+        let syntax_set = get_syntax_set();
+        let theme_set = get_theme_set();
+        let theme = &theme_set.themes["base16-ocean.dark"];
+        let syntax = syntax_set
             .find_syntax_by_token(language)
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
 
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut result = String::new();
@@ -97,7 +107,7 @@ impl MarkdownRenderer {
         // Highlighted code lines
         for line in code.lines() {
             let ranges = highlighter
-                .highlight_line(line, &self.syntax_set)
+                .highlight_line(line, syntax_set)
                 .unwrap_or_default();
             let escaped = as_24_bit_terminal_escaped(&ranges, false);
             result.push_str(&format!("{dim}  \u{2502}{reset} {escaped}\x1b[0m\n"));
@@ -138,7 +148,6 @@ pub struct StreamMarkdown {
     /// Accumulated table lines (only used in InTable state).
     table_buf: String,
     renderer: MarkdownRenderer,
-    colors_enabled: bool,
 }
 
 impl StreamMarkdown {
@@ -150,7 +159,6 @@ impl StreamMarkdown {
             code_lang: String::new(),
             table_buf: String::new(),
             renderer: MarkdownRenderer::new(colors_enabled),
-            colors_enabled,
         }
     }
 
@@ -159,7 +167,7 @@ impl StreamMarkdown {
     /// May return an empty string if the chunk is being buffered (e.g.,
     /// inside a code fence that hasn't closed yet).
     pub fn push(&mut self, chunk: &str) -> String {
-        if !self.colors_enabled {
+        if !self.renderer.colors_enabled {
             return chunk.to_string();
         }
 

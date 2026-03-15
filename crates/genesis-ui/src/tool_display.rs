@@ -93,10 +93,10 @@ impl ToolCallBuffer {
         }
 
         let result = match self.mode {
-            ToolDisplayMode::Off => None,
             ToolDisplayMode::Summary => Some(self.render_summary(ui)),
             ToolDisplayMode::Grouped => Some(self.render_grouped(ui, false)),
             ToolDisplayMode::Verbose => Some(self.render_grouped(ui, true)),
+            ToolDisplayMode::Off => unreachable!("Off mode is handled by early return above"),
         };
 
         self.calls.clear();

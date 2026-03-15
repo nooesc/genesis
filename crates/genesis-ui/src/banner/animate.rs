@@ -31,7 +31,7 @@ pub fn play_animation(frames: &[Vec<String>]) {
     }
 
     let mut stdout = io::stdout();
-    let is_tty = io::stdout().is_terminal();
+    let is_tty = stdout.is_terminal();
 
     if !is_tty || frames.len() < 3 {
         // Not a terminal or not enough frames — just print the resting frame.
