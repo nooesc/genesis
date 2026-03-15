@@ -888,9 +888,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 // Legacy rustyline path
                 chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
             } else {
-                // TUI path — fall through to legacy until TUI is functional
-                // TODO(TUI): genesis_tui::run_tui(&config, &service, &session_id).await.map_err(|e| CliError::Tui(e.to_string()))?;
-                chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
+                // Ratatui TUI path
+                chat::run_chat_tui(cli.config, session_id, resume, prompt, system, last, worktree).await
             }
         }
         Command::Doctor { bootstrap_storage, verify } => {

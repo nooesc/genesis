@@ -63,6 +63,61 @@ pub(crate) async fn build_session_service<'a>(
     Ok(service)
 }
 
+/// Run the ratatui TUI chat interface.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_chat_tui(
+    config_path: Option<PathBuf>,
+    session_id: Option<String>,
+    resume: Option<String>,
+    _initial_prompt: Option<String>,
+    system_override: Option<String>,
+    last: bool,
+    worktree: bool,
+) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    bootstrap(&loaded.config.storage.database_path)?;
+    let strict_startup = mcp_startup_strict(&loaded)?;
+    let mut service = build_session_service(&loaded, strict_startup, true).await?;
+    if let Some(ref sys) = system_override {
+        service.set_system_prompt_override(sys.clone());
+    }
+
+    let _worktree_guard = if worktree {
+        let guard = create_worktree()?;
+        service.set_default_working_dir(guard.path.clone());
+        Some(guard)
+    } else {
+        None
+    };
+
+    let store = SessionStore::new(&loaded.config.storage.database_path);
+    let session_id = if last {
+        let sessions = store.list_recent_sessions(1)?;
+        match sessions.first() {
+            Some(s) => s.id.clone(),
+            None => return Err(CliError::Other("no previous sessions found".to_owned())),
+        }
+    } else {
+        match resume {
+            Some(resume_id) => {
+                let session = store
+                    .get_session(&resume_id)?
+                    .ok_or_else(|| CliError::SessionNotFound(resume_id.clone()))?;
+                session.id
+            }
+            None => session_id.unwrap_or_else(default_session_id),
+        }
+    };
+
+    service.ensure_session(&session_id, "cli", None)?;
+
+    genesis_tui::run_tui(&loaded.config, &service, &session_id)
+        .await
+        .map_err(|e| CliError::Tui(e.to_string()))?;
+
+    Ok(String::new())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_chat(
     config_path: Option<PathBuf>,
