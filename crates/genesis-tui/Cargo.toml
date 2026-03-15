@@ -10,7 +10,7 @@ genesis-core.path = "../genesis-core"
 genesis-types.path = "../genesis-types"
 genesis-config.path = "../genesis-config"
 ratatui.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
 syntect.workspace = true
 image.workspace = true

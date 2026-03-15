@@ -5,24 +5,239 @@
 //! conversation turns are pushed into terminal scrollback via DECSTBM
 //! scroll regions.
 
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::app::App;
+use crate::events::{AgentEvent, AppEvent, Submission, TuiEvent};
+use crate::frame_requester::FrameRequester;
+
+use crossterm::event::{Event as CrosstermEvent, EventStream};
+use futures_util::StreamExt;
+use genesis_config::GenesisConfig;
+use genesis_core::agent_loop::StreamEvent;
+use genesis_core::execution::{
+    SessionExecutionError, SessionExecutionService, SessionTurnInput, SessionTurnOutcome,
+};
+use genesis_types::DeliveryPlatform;
+use tokio::sync::{broadcast, mpsc};
+
+pub mod app;
 pub mod custom_terminal;
 pub mod events;
 pub mod frame_requester;
 pub mod insert_history;
 pub mod terminal;
 
-use genesis_config::GenesisConfig;
-use genesis_core::execution::SessionExecutionService;
+type TurnResult = Result<SessionTurnOutcome, SessionExecutionError>;
+
+/// Build a pinned future that runs a single agent turn.
+///
+/// The key trick: `text` is moved *into* the returned async block, so the
+/// `&str` borrow inside `SessionTurnInput` points at data owned by the
+/// future itself. This avoids any cross-variable borrow issues in the
+/// caller's `select!` loop.
+fn make_turn_future<'a>(
+    service: &'a SessionExecutionService<'a>,
+    session_id: &'a str,
+    text: String,
+    agent_tx: mpsc::UnboundedSender<AgentEvent>,
+) -> Pin<Box<dyn Future<Output = TurnResult> + 'a>> {
+    Box::pin(async move {
+        let input = SessionTurnInput {
+            session_id,
+            session_platform: "cli",
+            delivery_platform: DeliveryPlatform::Cli,
+            prompt: &text,
+            title: None,
+            images: vec![],
+        };
+
+        service
+            .run_turn_streaming(input, move |event| match event {
+                StreamEvent::Chunk(c) => {
+                    let _ = agent_tx.send(AgentEvent::TextDelta(c.to_string()));
+                }
+                StreamEvent::ToolCallStart {
+                    name,
+                    call_id,
+                    args_summary,
+                } => {
+                    let _ = agent_tx.send(AgentEvent::ToolCallStart {
+                        call_id: call_id.to_string(),
+                        tool_name: name.to_string(),
+                        args_summary,
+                    });
+                }
+                StreamEvent::ToolCallEnd {
+                    call_id,
+                    success,
+                    duration_ms,
+                    ..
+                } => {
+                    let _ = agent_tx.send(AgentEvent::ToolCallEnd {
+                        call_id: call_id.to_string(),
+                        success,
+                        duration: std::time::Duration::from_millis(duration_ms),
+                    });
+                }
+                StreamEvent::ClarificationNeeded { question } => {
+                    let _ =
+                        agent_tx.send(AgentEvent::ClarificationNeeded(question.to_string()));
+                }
+                StreamEvent::TurnStarted
+                | StreamEvent::TokenUsage { .. }
+                | StreamEvent::Warning(_) => {}
+            })
+            .await
+    })
+}
 
 /// Entry point for the ratatui TUI.
 ///
 /// Called from `genesis chat --tui` (the default).
+///
+/// ## Lifetime design
+///
+/// `SessionExecutionService<'a>` borrows `&'a LoadedConfig`, so we cannot
+/// `tokio::spawn` the turn future (it would require `'static`). Instead we
+/// keep it as `Option<Pin<Box<dyn Future + '_>>>` and poll it inside
+/// `tokio::select!`. The `'_` ties the future to `service`'s lifetime,
+/// which lives for the entire function call.
+///
+/// The user's prompt text is moved into the future via [`make_turn_future`],
+/// so there is no separate `pending_text` variable that would create
+/// cross-borrow issues in the `select!` macro expansion.
 pub async fn run_tui(
     _config: &GenesisConfig,
-    _service: &SessionExecutionService<'_>,
-    _session_id: &str,
+    service: &SessionExecutionService<'_>,
+    session_id: &str,
 ) -> Result<(), TuiError> {
-    todo!("TUI implementation")
+    terminal::init()?;
+
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (submission_tx, mut submission_rx) = mpsc::unbounded_channel::<Submission>();
+    let (draw_tx, mut draw_rx) = broadcast::channel::<()>(16);
+
+    let frame_requester = FrameRequester::new(draw_tx);
+
+    let mut app = App {
+        submission_tx,
+        app_tx,
+        frame_requester,
+        turn_running: false,
+        should_exit: false,
+    };
+
+    let mut crossterm_events = EventStream::new();
+
+    // The turn future borrows `service` (lifetime 'a) so it can't be spawned.
+    // It lives here as an Option and gets polled in select!.
+    let mut turn_future: Option<Pin<Box<dyn Future<Output = TurnResult> + '_>>> = None;
+
+    loop {
+        tokio::select! {
+            // ── Terminal events — always active ──────────────────────
+            ct_event = crossterm_events.next() => {
+                if let Some(Ok(event)) = ct_event {
+                    if let Some(tui_event) = translate_crossterm(event) {
+                        app.handle_tui_event(tui_event);
+                    }
+                }
+            }
+
+            // ── Accept submissions ONLY when no turn is running ─────
+            submission = submission_rx.recv(), if turn_future.is_none() => {
+                match submission {
+                    Some(Submission::UserMessage { text, .. }) => {
+                        let tx = agent_tx.clone();
+                        let _ = tx.send(AgentEvent::TurnStarted);
+
+                        turn_future = Some(make_turn_future(
+                            service,
+                            session_id,
+                            text,
+                            tx,
+                        ));
+                    }
+                    Some(Submission::Interrupt) => {
+                        // Drop the turn future to cancel
+                        turn_future = None;
+                    }
+                    Some(Submission::Compact) => {
+                        // TODO: trigger context compression
+                    }
+                    None => break,
+                }
+            }
+
+            // ── Poll the running turn future ────────────────────────
+            result = async {
+                match turn_future.as_mut() {
+                    Some(fut) => fut.as_mut().await,
+                    None => std::future::pending::<TurnResult>().await,
+                }
+            }, if turn_future.is_some() => {
+                turn_future = None;
+                match result {
+                    Ok(outcome) => {
+                        let _ = agent_tx.send(AgentEvent::TurnComplete {
+                            response: outcome.result.response,
+                            input_tokens: outcome.result.total_input_tokens,
+                            output_tokens: outcome.result.total_output_tokens,
+                            turns_used: outcome.result.turns_used,
+                            tool_calls_made: outcome.result.tool_calls_made,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = agent_tx.send(AgentEvent::Error(e.to_string()));
+                    }
+                }
+            }
+
+            // ── Agent events (from streaming callback via channel) ──
+            agent_event = agent_rx.recv() => {
+                if let Some(event) = agent_event {
+                    app.handle_agent_event(event);
+                }
+            }
+
+            // ── Internal app events ─────────────────────────────────
+            app_event = app_rx.recv() => {
+                if let Some(event) = app_event {
+                    app.handle_app_event(event);
+                }
+            }
+
+            // ── Frame draw timer ────────────────────────────────────
+            _ = draw_rx.recv() => {
+                // TODO(Task 14): render_frame()
+            }
+        }
+
+        if app.should_exit {
+            break;
+        }
+    }
+
+    terminal::restore()?;
+    Ok(())
+}
+
+/// Convert crossterm events to TUI events.
+pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
+    match event {
+        CrosstermEvent::Key(key) => Some(TuiEvent::Key(key)),
+        CrosstermEvent::Paste(text) => Some(TuiEvent::Paste(text)),
+        CrosstermEvent::Resize(w, h) => Some(TuiEvent::Resize {
+            width: w,
+            height: h,
+        }),
+        CrosstermEvent::FocusGained => Some(TuiEvent::FocusGained),
+        CrosstermEvent::FocusLost => Some(TuiEvent::FocusLost),
+        _ => None,
+    }
 }
 
 /// Errors that can occur in the TUI.
@@ -33,4 +248,64 @@ pub enum TuiError {
 
     #[error("agent error: {0}")]
     Agent(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translate_key_event() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let ct = CrosstermEvent::Key(key);
+        match translate_crossterm(ct) {
+            Some(TuiEvent::Key(k)) => assert_eq!(k.code, KeyCode::Char('a')),
+            other => panic!("expected TuiEvent::Key, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translate_paste_event() {
+        let ct = CrosstermEvent::Paste("hello".into());
+        match translate_crossterm(ct) {
+            Some(TuiEvent::Paste(text)) => assert_eq!(text, "hello"),
+            other => panic!("expected TuiEvent::Paste, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translate_resize_event() {
+        let ct = CrosstermEvent::Resize(80, 24);
+        match translate_crossterm(ct) {
+            Some(TuiEvent::Resize { width, height }) => {
+                assert_eq!(width, 80);
+                assert_eq!(height, 24);
+            }
+            other => panic!("expected TuiEvent::Resize, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translate_focus_events() {
+        assert!(matches!(
+            translate_crossterm(CrosstermEvent::FocusGained),
+            Some(TuiEvent::FocusGained)
+        ));
+        assert!(matches!(
+            translate_crossterm(CrosstermEvent::FocusLost),
+            Some(TuiEvent::FocusLost)
+        ));
+    }
+
+    #[test]
+    fn translate_mouse_returns_none() {
+        let ct = CrosstermEvent::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(translate_crossterm(ct).is_none());
+    }
 }

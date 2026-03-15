@@ -6,6 +6,7 @@ use crossterm::event::KeyEvent;
 use std::time::Duration;
 
 /// Events from the terminal (keyboard, paste, resize, draw timer).
+#[derive(Debug)]
 pub enum TuiEvent {
     /// Keyboard input.
     Key(KeyEvent),
@@ -22,6 +23,7 @@ pub enum TuiEvent {
 }
 
 /// Events from the agent loop (streaming responses, tool calls).
+#[derive(Debug)]
 pub enum AgentEvent {
     /// New turn has started.
     TurnStarted,
@@ -56,6 +58,7 @@ pub enum AgentEvent {
 }
 
 /// Internal TUI events (state changes triggered by the app itself).
+#[derive(Debug)]
 pub enum AppEvent {
     /// Commit completed cells to terminal scrollback.
     CommitHistory,
@@ -72,6 +75,7 @@ pub enum AppEvent {
 }
 
 /// Status bar states.
+#[derive(Debug)]
 pub enum StatusState {
     Idle,
     Thinking,
@@ -80,11 +84,13 @@ pub enum StatusState {
 }
 
 /// Overlay kinds for fullscreen views.
+#[derive(Debug)]
 pub enum OverlayKind {
     Transcript,
 }
 
 /// User actions sent to the agent.
+#[derive(Debug)]
 pub enum Submission {
     /// Send a message to the agent.
     UserMessage {
