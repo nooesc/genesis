@@ -4,7 +4,7 @@ use genesis_types::ToolDefinition;
 
 /// Prompt version — increment when behavioral instructions or prompt structure changes.
 /// Logged with every LLM call to correlate prompt versions with quality metrics.
-pub const PROMPT_VERSION: &str = "1.0.0";
+pub(crate) const PROMPT_VERSION: &str = "1.0.0";
 
 const DEFAULT_AGENT_NAME: &str = "Eve";
 const DEFAULT_AGENT_IDENTITY: &str = "\
@@ -854,5 +854,11 @@ mod tests {
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("## Personality"));
         assert!(prompt.contains("calmly"));
+    }
+
+    #[test]
+    fn build_includes_prompt_version_tag() {
+        let prompt = SystemPromptBuilder::new("default", &[]).build();
+        assert!(prompt.contains(&format!("[prompt_version: {}]", PROMPT_VERSION)));
     }
 }
