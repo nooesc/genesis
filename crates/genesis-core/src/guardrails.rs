@@ -428,7 +428,12 @@ impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
         let pii_action = match cfg.pii_action.as_str() {
             "block" => ViolationAction::Block,
             "warn" => ViolationAction::Warn,
-            _ => ViolationAction::Redact,
+            other => {
+                if other != "redact" {
+                    tracing::warn!(pii_action = other, "unrecognized pii_action in guardrails config, defaulting to redact");
+                }
+                ViolationAction::Redact
+            }
         };
         let custom_rules = cfg.custom_rules.iter().map(|r| {
             let applies_to = match r.applies_to.as_str() {
