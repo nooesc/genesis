@@ -4,6 +4,7 @@
 //! and exponential backoff. Failed deliveries after all retries are logged as
 //! dead-letter entries for later inspection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -72,7 +73,7 @@ pub struct WebhookMetrics {
 pub struct WebhookDispatcher {
     client: Client,
     configs: Vec<WebhookConfig>,
-    dead_letters: Arc<Mutex<Vec<DeadLetterEntry>>>,
+    dead_letters: Arc<Mutex<VecDeque<DeadLetterEntry>>>,
     metrics: Arc<WebhookMetrics>,
 }
 
@@ -86,7 +87,7 @@ impl WebhookDispatcher {
         Self {
             client,
             configs,
-            dead_letters: Arc::new(Mutex::new(Vec::new())),
+            dead_letters: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(WebhookMetrics::default()),
         }
     }
@@ -107,7 +108,7 @@ impl WebhookDispatcher {
 
     /// Return a snapshot of the dead-letter queue.
     pub async fn dead_letters(&self) -> Vec<DeadLetterEntry> {
-        self.dead_letters.lock().await.clone()
+        Vec::from(self.dead_letters.lock().await.clone())
     }
 
     /// Clear the dead-letter queue, returning how many entries were removed.
@@ -232,9 +233,9 @@ impl WebhookDispatcher {
                 let mut dl = dead_letters.lock().await;
                 // Cap the dead-letter queue at 1000 entries
                 if dl.len() >= 1000 {
-                    dl.remove(0);
+                    dl.pop_front();
                 }
-                dl.push(entry);
+                dl.push_back(entry);
             });
         }
     }
@@ -363,7 +364,7 @@ mod tests {
         // Add a dead letter manually for testing
         {
             let mut dl = dispatcher.dead_letters.lock().await;
-            dl.push(DeadLetterEntry {
+            dl.push_back(DeadLetterEntry {
                 url: "http://example.com".into(),
                 event_type: "test".into(),
                 payload: "{}".into(),
