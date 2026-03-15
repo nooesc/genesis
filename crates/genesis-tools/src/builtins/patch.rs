@@ -337,7 +337,17 @@ fn line_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// Classic Levenshtein edit distance, O(n*m) time and O(min(n,m)) space.
+///
+/// When both inputs are pure ASCII, delegates to [`levenshtein_bytes`] which
+/// operates directly on byte slices, avoiding the two `Vec<char>` heap
+/// allocations that the general path requires.
 fn levenshtein(a: &str, b: &str) -> usize {
+    // Fast path: skip Vec<char> allocations for ASCII-only strings.
+    if a.is_ascii() && b.is_ascii() {
+        return levenshtein_bytes(a.as_bytes(), b.as_bytes());
+    }
+
+    // General path for non-ASCII (multi-byte chars need char-level indexing).
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     let n = a_chars.len();
@@ -370,6 +380,38 @@ fn levenshtein(a: &str, b: &str) -> usize {
     }
 
     prev[m]
+}
+
+/// Levenshtein edit distance on raw byte slices (ASCII fast path).
+///
+/// Identical algorithm to the char-based version but avoids heap-allocating
+/// `Vec<char>` since each byte maps 1:1 to a character for ASCII input.
+fn levenshtein_bytes(a: &[u8], b: &[u8]) -> usize {
+    let m = a.len();
+    let n = b.len();
+
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
 }
 
 /// Build a compact diff hint showing differences between expected and actual text.
