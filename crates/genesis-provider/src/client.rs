@@ -6,7 +6,9 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
 
-use crate::api_types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
+use crate::api_types::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatUsage,
+};
 use crate::error::ProviderError;
 use crate::resolve::ResolvedProvider;
 
@@ -273,26 +275,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|usage| {
-                (
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    usage.total_tokens,
-                )
-            })
-            .unwrap_or((0, 0, 0));
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = completion.usage.is_some(),
-            "chat completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "chat completion request succeeded",
         );
 
         Ok(completion)
@@ -341,21 +329,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
-
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = true,
-            "anthropic completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "anthropic completion request succeeded",
         );
 
         Ok(completion)
@@ -407,21 +386,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
-
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = completion.usage.is_some(),
-            "gemini completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "gemini completion request succeeded",
         );
 
         Ok(completion)
@@ -698,6 +668,29 @@ impl ChatClient {
     pub fn backend(&self) -> &str {
         &self.backend
     }
+}
+
+/// Log a successful (non-streaming) completion with token usage stats.
+fn log_completion_success(
+    endpoint: &str,
+    model: &str,
+    elapsed_ms: u64,
+    usage: Option<&ChatUsage>,
+    label: &str,
+) {
+    let (prompt_tokens, completion_tokens, total_tokens) = usage
+        .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+        .unwrap_or((0, 0, 0));
+    info!(
+        endpoint,
+        model,
+        elapsed_ms,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        token_counts_available = usage.is_some(),
+        "{label}"
+    );
 }
 
 /// Backends that support Anthropic-style prompt caching via cache_control.

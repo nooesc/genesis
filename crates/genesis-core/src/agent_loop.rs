@@ -2146,20 +2146,20 @@ fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentErro
 /// Suggest tool names similar to `name` using edit distance.
 /// Returns up to 3 suggestions sorted by similarity.
 fn suggest_similar_tools(name: &str, tools: &ToolRuntime) -> Vec<String> {
+    let name_lower = name.to_lowercase();
     let mut scored: Vec<(String, usize)> = tools
         .definitions()
         .iter()
         .filter_map(|def| {
-            let dist = edit_distance(&name.to_lowercase(), &def.name.to_lowercase());
+            let def_lower = def.name.to_lowercase();
+            let dist = edit_distance(&name_lower, &def_lower);
             let max_len = name.len().max(def.name.len());
             // Only suggest if within 40% edit distance
             if max_len > 0 && dist <= max_len * 2 / 5 {
                 Some((def.name.clone(), dist))
             } else {
                 // Also match if one is a substring of the other
-                let nl = name.to_lowercase();
-                let dl = def.name.to_lowercase();
-                if dl.contains(&nl) || nl.contains(&dl) {
+                if def_lower.contains(&name_lower) || name_lower.contains(&def_lower) {
                     Some((def.name.clone(), dist))
                 } else {
                     None

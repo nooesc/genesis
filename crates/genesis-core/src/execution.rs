@@ -266,7 +266,7 @@ impl<'a> SessionExecutionService<'a> {
 
     pub async fn run_turn(
         &self,
-        input: SessionTurnInput<'_>,
+        mut input: SessionTurnInput<'_>,
     ) -> Result<SessionTurnOutcome, SessionExecutionError> {
         let span = info_span!(
             "session.run_turn",
@@ -277,7 +277,7 @@ impl<'a> SessionExecutionService<'a> {
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
-        let images = input.images.clone();
+        let images = std::mem::take(&mut input.images);
 
         let outcome = self.run_turn_with_runner(input, |history| async move {
             let mut agent = self
@@ -301,7 +301,7 @@ impl<'a> SessionExecutionService<'a> {
 
     pub async fn run_turn_streaming<F>(
         &self,
-        input: SessionTurnInput<'_>,
+        mut input: SessionTurnInput<'_>,
         on_chunk: F,
     ) -> Result<SessionTurnOutcome, SessionExecutionError>
     where
@@ -316,7 +316,7 @@ impl<'a> SessionExecutionService<'a> {
         let session_id = input.session_id.to_owned();
         let platform = input.delivery_platform.clone();
         let prompt = input.prompt.to_owned();
-        let images = input.images.clone();
+        let images = std::mem::take(&mut input.images);
 
         let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
             let mut agent = self
@@ -422,18 +422,13 @@ impl<'a> SessionExecutionService<'a> {
 
         // Apply tool filter (allowlist/denylist)
         if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
-            let all_tools: Vec<String> = if filter.allow.is_empty() {
+            let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
                 tool_runtime
                     .definitions_async()
                     .await
                     .into_iter()
                     .map(|d| d.name)
                     .collect()
-            } else {
-                filter.allow.to_vec()
-            };
-            let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
-                all_tools.into_iter().collect()
             } else {
                 filter.allow.iter().cloned().collect()
             };
