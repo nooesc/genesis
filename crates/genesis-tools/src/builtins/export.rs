@@ -65,12 +65,14 @@ impl ToolHandler for SessionExportTool {
             "markdown" | "md" => export_markdown(&session_id, session_title.as_deref(), &messages),
             "chatml" => export_chatml(&messages),
             "jsonl" | "finetune" => export_jsonl(&messages),
-            _ => return Err(ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!(
+            _ => {
+                return Err(ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!(
                     "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
                 ),
-            }),
+                })
+            }
         };
 
         // Write to file or return inline
