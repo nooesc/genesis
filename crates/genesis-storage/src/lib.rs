@@ -1434,38 +1434,52 @@ impl SessionStore {
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
         let connection = open(&self.database_path)?;
         let cutoff = format!("-{days} days");
-        // Gather session IDs to purge
-        let mut stmt = connection
-            .prepare("SELECT id FROM sessions WHERE created_at < datetime('now', ?1)")
+
+        // Enable foreign keys so ON DELETE CASCADE removes messages automatically.
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let ids: Vec<String> = stmt
-            .query_map(params![cutoff], |row| row.get(0))
+
+        let tx = connection
+            .unchecked_transaction()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+            })?;
 
-        for id in &ids {
-            let _ = connection.execute(
-                "DELETE FROM session_search WHERE session_id = ?1",
-                params![id],
-            );
-            let _ = connection.execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![id],
-            );
-            let _ = connection.execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                params![id],
-            );
-        }
+        // Remove FTS entries (virtual table, no FK support).
+        tx.execute(
+            "DELETE FROM session_search WHERE session_id IN (
+                 SELECT id FROM sessions WHERE created_at < datetime('now', ?1)
+             )",
+            params![cutoff],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
 
-        Ok(ids.len() as u64)
+        // Delete sessions; ON DELETE CASCADE handles messages.
+        tx.execute(
+            "DELETE FROM sessions WHERE created_at < datetime('now', ?1)",
+            params![cutoff],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        let deleted = tx.changes() as u64;
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        Ok(deleted)
     }
 
     /// Load all messages for a session in chronological order.
@@ -1751,17 +1765,6 @@ impl SessionStore {
             })?;
 
         Ok(sessions)
-    }
-
-    pub fn count_sessions(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
-        let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        Ok(count as u64)
     }
 
     /// Aggregate token usage across all sessions.
@@ -2387,6 +2390,26 @@ impl SkillStore {
         }
     }
 
+    fn row_to_skill(row: &rusqlite::Row) -> Result<StoredSkill, rusqlite::Error> {
+        let tags_str: String = row.get(4)?;
+        let tags = if tags_str.is_empty() {
+            Vec::new()
+        } else {
+            tags_str.split(',').map(|s| s.to_owned()).collect()
+        };
+
+        Ok(StoredSkill {
+            name: row.get(0)?,
+            description: row.get(1)?,
+            instructions: row.get(2)?,
+            trigger_hint: row.get(3)?,
+            tags,
+            version: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
     /// Create or update a skill. If the skill already exists, its version is bumped.
     pub fn upsert(
         &self,
@@ -2432,25 +2455,7 @@ impl SkillStore {
                 "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
                  FROM skills WHERE name = ?1",
                 params![name],
-                |row| {
-                    let tags_str: String = row.get(4)?;
-                    let tags = if tags_str.is_empty() {
-                        Vec::new()
-                    } else {
-                        tags_str.split(',').map(|s| s.to_owned()).collect()
-                    };
-
-                    Ok(StoredSkill {
-                        name: row.get(0)?,
-                        description: row.get(1)?,
-                        instructions: row.get(2)?,
-                        trigger_hint: row.get(3)?,
-                        tags,
-                        version: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
+                Self::row_to_skill,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -2473,25 +2478,7 @@ impl SkillStore {
             })?;
 
         let skills = stmt
-            .query_map([], |row| {
-                let tags_str: String = row.get(4)?;
-                let tags = if tags_str.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_str.split(',').map(|s| s.to_owned()).collect()
-                };
-
-                Ok(StoredSkill {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    instructions: row.get(2)?,
-                    trigger_hint: row.get(3)?,
-                    tags,
-                    version: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map([], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -2521,25 +2508,7 @@ impl SkillStore {
             })?;
 
         let skills = stmt
-            .query_map(params![pattern], |row| {
-                let tags_str: String = row.get(4)?;
-                let tags = if tags_str.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_str.split(',').map(|s| s.to_owned()).collect()
-                };
-
-                Ok(StoredSkill {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    instructions: row.get(2)?,
-                    trigger_hint: row.get(3)?,
-                    tags,
-                    version: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![pattern], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3148,31 +3117,26 @@ impl MemoryStore {
     /// Get a single memory by ID. Returns `None` if not found.
     pub fn get(&self, id: &str) -> Result<Option<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
-        let mut stmt = connection
-            .prepare(
+        connection
+            .query_row(
                 "SELECT id, session_id, kind, content, created_at
                  FROM memories WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(StoredMemory {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        content: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
             )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        let result = stmt
-            .query_row(params![id], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
             .optional()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?;
-        Ok(result)
+            })
     }
 
     /// Full-text search across stored memories.
@@ -4058,14 +4022,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Query audit entries by event type.
@@ -4099,14 +4060,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Query recent audit entries across all sessions.
@@ -4139,14 +4097,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Count total audit entries and entries per event type.
@@ -4173,14 +4128,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut stats = Vec::new();
-        for row in rows {
-            stats.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(stats)
+            })
     }
 
     /// Aggregate tool usage analytics from tool_call_end audit events.
@@ -4222,14 +4174,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut analytics = Vec::new();
-        for row in rows {
-            analytics.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(analytics)
+            })
     }
 
     /// Aggregate LLM usage analytics from llm_response audit events.
@@ -4270,14 +4219,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut analytics = Vec::new();
-        for row in rows {
-            analytics.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(analytics)
+            })
     }
 
     /// Delete audit entries older than the given number of days.
@@ -4358,7 +4304,7 @@ impl ResponseCacheStore {
                 source,
             })?;
 
-        if let Some(ref _e) = entry {
+        if entry.is_some() {
             let _ = connection.execute(
                 "UPDATE response_cache SET hit_count = hit_count + 1 WHERE cache_key = ?1",
                 params![cache_key],

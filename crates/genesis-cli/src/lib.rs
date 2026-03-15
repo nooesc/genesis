@@ -6568,7 +6568,7 @@ fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<String, CliError
     let tool_count = genesis_core::default_tool_count();
 
     let session_count = SessionStore::new(db_path)
-        .count_sessions()
+        .session_count()
         .unwrap_or(0);
 
     let skill_count = SkillStore::new(db_path)
