@@ -27,7 +27,14 @@ skills capture durable patterns — not one-off details.";
 /// then composes a prompt that asks the agent to reflect and consolidate.
 pub fn build_nudge_prompt(loaded: &LoadedConfig) -> String {
     let db_path = &loaded.config.storage.database_path;
-    let _ = bootstrap(db_path);
+    if let Err(e) = bootstrap(db_path) {
+        tracing::warn!(error = %e, "failed to bootstrap database for nudge prompt");
+        return String::from(
+            "Perform a self-reflection on your accumulated knowledge.\n\n\
+             No accumulated knowledge yet. This is normal for early sessions. \
+             Focus on learning about the user and their needs as you interact.\n",
+        );
+    }
 
     let memories_section = load_memories_section(db_path);
     let user_model_section = load_user_model_section(db_path);
