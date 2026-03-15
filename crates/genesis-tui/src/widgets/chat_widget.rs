@@ -15,7 +15,7 @@ use ratatui::{
 use crate::history::agent_cell::AgentCell;
 use crate::history::cell::HistoryCell;
 use crate::history::{render_prefixed_lines, rgb};
-use crate::history::tool_cell::ToolCell;
+use crate::history::tool_cell::{ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
 use crate::widgets::input_widget::InputWidget;
 
@@ -158,13 +158,16 @@ impl ChatWidget {
         for tc in cell.tool_calls {
             let success = tc.success.unwrap_or(false);
             let duration = tc.duration.unwrap_or(std::time::Duration::ZERO);
-            new_cells.push(HistoryCell::Tool(ToolCell::new(
-                tc.tool_name,
-                tc.call_id,
-                tc.args_summary,
-                success,
-                duration,
-            )));
+            new_cells.push(HistoryCell::Tool(
+                ToolCell::new(
+                    tc.tool_name,
+                    tc.call_id,
+                    tc.args_summary,
+                    success,
+                    duration,
+                )
+                .with_display_mode(ToolDisplayMode::Grouped),
+            ));
         }
 
         self.committed_cells.extend(new_cells.clone());

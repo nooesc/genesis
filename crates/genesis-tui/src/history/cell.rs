@@ -70,7 +70,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_cell_height_always_one_via_enum() {
+    fn tool_cell_height_via_enum_grouped_default() {
+        // Default display mode is Grouped (4 lines).
         let cell = HistoryCell::Tool(ToolCell::new(
             "shell",
             "c1",
@@ -78,8 +79,8 @@ mod tests {
             true,
             Duration::from_millis(500),
         ));
-        assert_eq!(cell.height(80), 1);
-        assert_eq!(cell.height(20), 1);
+        assert_eq!(cell.height(80), 4);
+        assert_eq!(cell.height(20), 4);
     }
 
     #[test]
@@ -97,7 +98,8 @@ mod tests {
     }
 
     #[test]
-    fn scrollback_lines_tool() {
+    fn scrollback_lines_tool_grouped_default() {
+        // Default display mode is Grouped — produces 4 lines.
         let cell = HistoryCell::Tool(ToolCell::new(
             "read_file",
             "c2",
@@ -106,7 +108,7 @@ mod tests {
             Duration::from_millis(300),
         ));
         let lines = cell.to_scrollback_lines(80);
-        assert_eq!(lines.len(), 1);
+        assert_eq!(lines.len(), 4);
     }
 
     #[test]
