@@ -43,11 +43,9 @@ fn ha_config() -> (String, String) {
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("genesis-agent/0.1")
-            .build()
-            .expect("failed to build HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| {
+            b.user_agent("genesis-agent/0.1")
+        })
     })
 }
 
