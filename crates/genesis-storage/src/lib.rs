@@ -3399,6 +3399,25 @@ impl PairingStore {
         }
     }
 
+    /// Delete pending pairing codes that have exceeded their TTL.
+    fn cleanup_expired_codes(
+        connection: &Connection,
+        database_path: &Path,
+        expiry: &str,
+    ) -> Result<(), StorageError> {
+        connection
+            .execute(
+                "DELETE FROM pairing_pending
+                 WHERE created_at < datetime('now', ?1)",
+                params![expiry],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: database_path.to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Check if a user is approved (paired) on a platform.
     pub fn is_approved(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3477,16 +3496,11 @@ impl PairingStore {
         let connection = open(&self.database_path)?;
 
         // Clean up expired codes
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         // Check if we've hit the max pending for this platform
         let pending_count: i64 = connection
@@ -3533,16 +3547,11 @@ impl PairingStore {
         let connection = open(&self.database_path)?;
 
         // Clean up expired codes first
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         // Find the pending code
         let pending = connection
@@ -3625,13 +3634,11 @@ impl PairingStore {
         let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
 
         // Clean up expired first
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(me)?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<PendingPairing> {
             Ok(PendingPairing {
