@@ -22,7 +22,7 @@ use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
-use crate::verify::verify_homeassistant_signature;
+use crate::verify::verify_secret_token;
 use crate::AppState;
 
 // --- Types ---
@@ -89,7 +89,7 @@ pub async fn webhook_handler(
         }
     };
 
-    if !verify_homeassistant_signature(&expected_token, extract_provided_token(&headers)) {
+    if !verify_secret_token(&expected_token, extract_provided_token(&headers)) {
         warn!("homeassistant webhook token verification failed");
         return Err((StatusCode::UNAUTHORIZED, "invalid homeassistant token".to_owned()));
     }
