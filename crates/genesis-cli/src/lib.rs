@@ -939,7 +939,7 @@ pub enum CliError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Execution(#[from] SessionExecutionError),
-    #[error("{0}")]
+    #[error(transparent)]
     Auth(#[from] genesis_auth::AuthError),
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -1037,7 +1037,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let mut warnings: Vec<String> = Vec::new();
 
             // Check provider
-            let valid_backends = ["openai", "anthropic", "google", "openrouter", "custom"];
+            let valid_backends = ["openai", "anthropic", "google", "openrouter", "custom", "openai-codex", "gemini", "vllm", "ollama"];
             if !valid_backends.contains(&loaded.config.provider.backend.as_str()) {
                 warnings.push(format!(
                     "Unknown provider backend '{}' (known: {})",
@@ -1053,7 +1053,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let api_key_env = loaded.config.provider.api_key_env.as_deref()
                 .unwrap_or(match loaded.config.provider.backend.as_str() {
                     "anthropic" => "ANTHROPIC_API_KEY",
-                    "google" => "GOOGLE_API_KEY",
+                    "google" | "gemini" => "GOOGLE_API_KEY",
+                    "openrouter" => "OPENROUTER_API_KEY",
                     _ => "OPENAI_API_KEY",
                 });
             if std::env::var(api_key_env).is_err() {

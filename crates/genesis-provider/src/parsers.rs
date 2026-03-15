@@ -281,7 +281,7 @@ impl ToolCallParser for LlamaParser {
                         first_match_pos = Some(i);
                     }
 
-                    let name = val["name"].as_str().unwrap().to_owned();
+                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
                     let arguments = val
                         .get("arguments")
                         .or_else(|| val.get("parameters"))
