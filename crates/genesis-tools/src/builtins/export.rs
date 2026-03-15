@@ -25,7 +25,7 @@ impl ToolHandler for SessionExportTool {
 
         let output_path = call.arguments.get("path");
 
-        let db_path = Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
         let store = SessionStore::new(&db_path);
 

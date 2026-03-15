@@ -17,7 +17,7 @@ impl ToolHandler for SessionSearchTool {
                 argument: "query",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
         let store = SessionStore::new(&db_path);
 
@@ -83,7 +83,7 @@ impl ToolHandler for SessionHistoryTool {
             .transpose()?
             .unwrap_or(20);
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
         let store = SessionStore::new(&db_path);
 

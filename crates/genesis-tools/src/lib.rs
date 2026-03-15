@@ -3,6 +3,7 @@ pub mod http;
 pub mod url_safety;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use genesis_types::ToolDefinition;
@@ -105,6 +106,13 @@ impl PartialEq for ToolContext {
             && self.terminal_backend == other.terminal_backend
             && self.default_working_dir == other.default_working_dir
         // sandbox_manager intentionally excluded from equality comparison
+    }
+}
+
+impl ToolContext {
+    /// Return the path to the SQLite database for this context's data directory.
+    pub fn db_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join("genesis.db")
     }
 }
 

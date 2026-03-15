@@ -5,7 +5,7 @@ use genesis_storage::{bootstrap, SkillFileStore};
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 fn file_store(context: &ToolContext) -> SkillFileStore {
-    let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+    let db_path = context.db_path();
     let _ = bootstrap(&db_path);
     SkillFileStore::new(&db_path)
 }
