@@ -1393,8 +1393,7 @@ impl ToolHandler for BrowserVision {
             tool: call.name.clone(),
             reason: "OPENAI_API_KEY environment variable not set".to_owned(),
         })?;
-        let model =
-            std::env::var("AUXILIARY_VISION_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
+        let model = std::env::var("AUXILIARY_VISION_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
 
         // Build vision API request
         let vision_url = format!("{api_base}/chat/completions");
