@@ -747,11 +747,16 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        // Try to find a newline within the limit
-        let split_at = remaining[..max_len]
+        // Walk back to a char boundary so we never slice inside a multi-byte
+        // character (e.g. emoji). `floor_char_boundary` returns the largest
+        // byte index <= max_len that sits on a UTF-8 char boundary.
+        let safe_end = remaining.floor_char_boundary(max_len);
+
+        // Try to find a newline within the limit, then a space
+        let split_at = remaining[..safe_end]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..safe_end].rfind(' '))
+            .unwrap_or(safe_end);
 
         chunks.push(remaining[..split_at].to_owned());
         remaining = remaining[split_at..].trim_start();

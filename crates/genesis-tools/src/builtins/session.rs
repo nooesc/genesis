@@ -119,7 +119,8 @@ impl ToolHandler for SessionHistoryTool {
         for msg in recent {
             let content = msg.content.as_deref().unwrap_or("[tool call]");
             let truncated = if content.len() > 300 {
-                format!("{}...", &content[..300])
+                let end = content.floor_char_boundary(300);
+                format!("{}...", &content[..end])
             } else {
                 content.to_owned()
             };
