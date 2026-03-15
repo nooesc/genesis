@@ -49,13 +49,14 @@ impl ScanResult {
 pub fn scan_context_file(path: &Path, content: &str) -> ScanResult {
     let source = path.display().to_string();
     let mut threats = Vec::new();
+    let lower = content.to_lowercase();
 
     scan_invisible_unicode(content, &mut threats);
-    scan_instruction_overrides(content, &mut threats);
-    scan_data_exfiltration(content, &mut threats);
-    scan_role_manipulation(content, &mut threats);
+    scan_instruction_overrides(&lower, &mut threats);
+    scan_data_exfiltration(&lower, &mut threats);
+    scan_role_manipulation(&lower, &mut threats);
     scan_hidden_content(content, &mut threats);
-    scan_tool_abuse(content, &mut threats);
+    scan_tool_abuse(&lower, &mut threats);
 
     ScanResult { source, threats }
 }
@@ -64,13 +65,14 @@ pub fn scan_context_file(path: &Path, content: &str) -> ScanResult {
 pub fn scan_text(label: &str, content: &str) -> ScanResult {
     let source = label.to_owned();
     let mut threats = Vec::new();
+    let lower = content.to_lowercase();
 
     scan_invisible_unicode(content, &mut threats);
-    scan_instruction_overrides(content, &mut threats);
-    scan_data_exfiltration(content, &mut threats);
-    scan_role_manipulation(content, &mut threats);
+    scan_instruction_overrides(&lower, &mut threats);
+    scan_data_exfiltration(&lower, &mut threats);
+    scan_role_manipulation(&lower, &mut threats);
     scan_hidden_content(content, &mut threats);
-    scan_tool_abuse(content, &mut threats);
+    scan_tool_abuse(&lower, &mut threats);
 
     ScanResult { source, threats }
 }
@@ -107,8 +109,8 @@ const SUSPICIOUS_CHARS: &[(char, &str)] = &[
 fn scan_invisible_unicode(content: &str, threats: &mut Vec<Threat>) {
     for (line_num, line) in content.lines().enumerate() {
         for &(ch, name) in SUSPICIOUS_CHARS {
-            if line.contains(ch) {
-                let count = line.matches(ch).count();
+            let count = line.chars().filter(|&c| c == ch).count();
+            if count > 0 {
                 threats.push(Threat {
                     category: "invisible_unicode",
                     description: format!(
@@ -154,8 +156,7 @@ const INSTRUCTION_OVERRIDE_PATTERNS: &[(&str, &str)] = &[
     ("bypass your", "attempts to circumvent restrictions"),
 ];
 
-fn scan_instruction_overrides(content: &str, threats: &mut Vec<Threat>) {
-    let lower = content.to_lowercase();
+fn scan_instruction_overrides(lower: &str, threats: &mut Vec<Threat>) {
     for (line_num, line) in lower.lines().enumerate() {
         for &(pattern, desc) in INSTRUCTION_OVERRIDE_PATTERNS {
             if line.contains(pattern) {
@@ -187,8 +188,7 @@ const EXFIL_PATTERNS: &[(&str, &str)] = &[
     ("encode and send", "obfuscated data exfiltration"),
 ];
 
-fn scan_data_exfiltration(content: &str, threats: &mut Vec<Threat>) {
-    let lower = content.to_lowercase();
+fn scan_data_exfiltration(lower: &str, threats: &mut Vec<Threat>) {
     for (line_num, line) in lower.lines().enumerate() {
         for &(pattern, desc) in EXFIL_PATTERNS {
             if line.contains(pattern) {
@@ -221,8 +221,7 @@ const ROLE_PATTERNS: &[(&str, &str)] = &[
     ("always obey", "guardrail removal"),
 ];
 
-fn scan_role_manipulation(content: &str, threats: &mut Vec<Threat>) {
-    let lower = content.to_lowercase();
+fn scan_role_manipulation(lower: &str, threats: &mut Vec<Threat>) {
     for (line_num, line) in lower.lines().enumerate() {
         for &(pattern, desc) in ROLE_PATTERNS {
             if line.contains(pattern) {
@@ -313,8 +312,7 @@ const TOOL_ABUSE_PATTERNS: &[(&str, &str)] = &[
     ("/etc/passwd", "system file access"),
 ];
 
-fn scan_tool_abuse(content: &str, threats: &mut Vec<Threat>) {
-    let lower = content.to_lowercase();
+fn scan_tool_abuse(lower: &str, threats: &mut Vec<Threat>) {
     for (line_num, line) in lower.lines().enumerate() {
         for &(pattern, desc) in TOOL_ABUSE_PATTERNS {
             if line.contains(pattern) {

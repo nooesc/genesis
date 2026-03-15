@@ -153,9 +153,14 @@ impl ToolHandler for TodoTool {
                     })
                     .collect();
 
-                let pending = list.iter().filter(|i| i.status == TodoStatus::Pending).count();
-                let in_progress = list.iter().filter(|i| i.status == TodoStatus::InProgress).count();
-                let done = list.iter().filter(|i| i.status == TodoStatus::Done).count();
+                let (mut pending, mut in_progress, mut done) = (0, 0, 0);
+                for item in list {
+                    match item.status {
+                        TodoStatus::Pending => pending += 1,
+                        TodoStatus::InProgress => in_progress += 1,
+                        TodoStatus::Done => done += 1,
+                    }
+                }
 
                 let summary = format!("\n({pending} pending, {in_progress} in progress, {done} done)");
 
