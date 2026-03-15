@@ -234,7 +234,7 @@ impl CommandPopup {
         // Popup dimensions: 2 border rows + 1 row per item.
         let popup_height = (items as u16 + 2).min(area.height);
         // Width: up to the full area width minus a small indent, capped to 60.
-        let popup_width = area.width.saturating_sub(4).min(60).max(20);
+        let popup_width = area.width.saturating_sub(4).clamp(20, 60);
 
         // Position: just above the last row of area.
         let popup_x = area.x + 2;

@@ -35,6 +35,17 @@ pub mod widgets;
 
 type TurnResult = Result<SessionTurnOutcome, SessionExecutionError>;
 
+/// Return the recommended log file path for TUI mode: `~/.genesis/logs/tui.log`.
+///
+/// The caller (typically `main.rs` or the CLI `chat` command) should redirect
+/// the global `tracing` subscriber to this file **before** calling [`run_tui`]
+/// so that log output does not interfere with the ratatui viewport.
+///
+/// Returns `None` if the home directory cannot be determined.
+pub fn tui_log_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".genesis/logs/tui.log"))
+}
+
 /// Build a pinned future that runs a single agent turn.
 ///
 /// The key trick: `text` is moved *into* the returned async block, so the
@@ -463,5 +474,14 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
         assert!(translate_crossterm(ct).is_none());
+    }
+
+    #[test]
+    fn tui_log_path_returns_some() {
+        let path = tui_log_path();
+        assert!(path.is_some(), "tui_log_path() should return Some on a system with a home dir");
+        let p = path.unwrap();
+        assert!(p.ends_with("tui.log"));
+        assert!(p.to_string_lossy().contains(".genesis/logs"));
     }
 }

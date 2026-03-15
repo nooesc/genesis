@@ -138,7 +138,16 @@ impl App {
             }
             AppEvent::SlashCommand(cmd) => match cmd.as_str() {
                 "/exit" | "/quit" => self.should_exit = true,
-                _ => {} // TODO(Task 23): handle other commands
+                "/compact" => {
+                    let _ = self.submission_tx.send(Submission::Compact);
+                }
+                "/clear" => {
+                    // Clear committed cells (history will be lost from the viewport,
+                    // though it remains in terminal scrollback).
+                    self.chat = ChatWidget::new();
+                    self.frame_requester.schedule_frame();
+                }
+                _ => {}
             },
             AppEvent::ModelChanged(_) => {}
         }
@@ -219,8 +228,7 @@ impl App {
                 // at position 0 (sole character or first char). If so, show
                 // the popup and sync the query portion (everything after `/`).
                 let input_text = self.chat.input.text().to_owned();
-                if input_text.starts_with('/') {
-                    let query = &input_text[1..]; // everything after '/'
+                if let Some(query) = input_text.strip_prefix('/') {
                     if !self.command_popup.is_visible() {
                         self.command_popup.show();
                     }

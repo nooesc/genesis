@@ -12,15 +12,11 @@ use ratatui::{
     widgets::Widget as _,
 };
 
-use crate::history::agent_cell::AgentCell;
+use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
-use crate::history::{render_prefixed_lines, rgb};
 use crate::history::tool_cell::{ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
 use crate::widgets::input_widget::InputWidget;
-
-/// The active streaming cell prefix.
-const ACTIVE_PREFIX: &str = "eve> ";
 
 /// A single in-flight tool call tracked during a streaming turn.
 pub struct ActiveToolCall {
@@ -286,17 +282,12 @@ impl Default for ChatWidget {
     }
 }
 
-/// Build the word-wrapped [`Line`]s for the active streaming cell.
+/// Build the markdown-rendered [`Line`]s for the active streaming cell.
 ///
-/// Uses the same `eve> ` prefix/indent pattern as [`AgentCell`].
-fn active_cell_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    render_prefixed_lines(
-        text,
-        width,
-        ACTIVE_PREFIX,
-        rgb(genesis_ui::colors::EVE_LAVENDER),
-        rgb(genesis_ui::colors::UI_TEXT),
-    )
+/// Uses the same `eve> ` prefix/indent pattern as [`AgentCell`], with
+/// markdown formatting applied so styles appear live as the agent types.
+fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
+    prefix_markdown_lines(text)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

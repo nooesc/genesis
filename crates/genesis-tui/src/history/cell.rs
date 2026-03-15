@@ -120,10 +120,10 @@ mod tests {
     }
 
     #[test]
-    fn wrapping_increases_height_agent() {
-        let long_text = "word ".repeat(30);
-        let cell = HistoryCell::Agent(AgentCell::new(long_text.trim()));
-        let h = cell.height(30);
-        assert!(h > 1, "expected wrapped height > 1, got {h}");
+    fn multiline_agent_cell_has_correct_height() {
+        // Agent cells use markdown rendering (line-per-source-line, no word-wrap).
+        let cell = HistoryCell::Agent(AgentCell::new("line one\nline two\nline three"));
+        let h = cell.height(80);
+        assert_eq!(h, 3, "expected 3 lines for 3-line markdown text, got {h}");
     }
 }
