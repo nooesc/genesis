@@ -8,6 +8,7 @@ use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
 use genesis_ui::UiContext;
+use genesis_ui::status_bar::{BarState, StatusBar};
 use genesis_ui::tool_display::{ToolCallBuffer, ToolDisplayMode};
 
 use crate::clipboard;
@@ -979,6 +980,13 @@ pub(crate) async fn run_streaming_turn(
     let eve_prompt = ui.eve_prompt();
     let streamed = AtomicBool::new(false);
     let tool_buffer = Mutex::new(ToolCallBuffer::new(tool_mode));
+    let status_bar = Mutex::new(StatusBar::new(session_id, ui.colors_enabled));
+
+    // Start with Thinking state
+    if let Ok(mut bar) = status_bar.lock() {
+        bar.set_state(BarState::Thinking);
+    }
+
     let turn_future = service.run_turn_streaming(
         SessionTurnInput {
             session_id,
@@ -990,6 +998,14 @@ pub(crate) async fn run_streaming_turn(
         },
         |event| match event {
             StreamEvent::Chunk(chunk) => {
+                // Transition to Streaming on first chunk
+                if let Ok(mut bar) = status_bar.lock() {
+                    if bar.state() != Some(&BarState::Streaming) {
+                        bar.set_state(BarState::Streaming);
+                    } else {
+                        bar.tick();
+                    }
+                }
                 // Flush any pending tool calls before printing text
                 if let Ok(mut buf) = tool_buffer.lock() {
                     if let Some(block) = buf.flush(ui) {
@@ -1006,6 +1022,11 @@ pub(crate) async fn run_streaming_turn(
                 if streamed.load(Ordering::Relaxed) {
                     println!();
                 }
+                if let Ok(mut bar) = status_bar.lock() {
+                    bar.set_state(BarState::ToolRunning {
+                        name: name.to_string(),
+                    });
+                }
                 if let Ok(mut buf) = tool_buffer.lock() {
                     buf.on_tool_start(name, &args_summary);
                 }
@@ -1016,6 +1037,10 @@ pub(crate) async fn run_streaming_turn(
                 streamed.store(false, Ordering::Relaxed);
             }
             StreamEvent::ToolCallEnd { name, duration, success } => {
+                // Go back to Thinking while waiting for next LLM response
+                if let Ok(mut bar) = status_bar.lock() {
+                    bar.set_state(BarState::Thinking);
+                }
                 if let Ok(mut buf) = tool_buffer.lock() {
                     buf.on_tool_end(name, duration, success);
                 }
@@ -1028,6 +1053,10 @@ pub(crate) async fn run_streaming_turn(
 
     tokio::select! {
         result = turn_future => {
+            // Clear the status bar on turn completion
+            if let Ok(mut bar) = status_bar.lock() {
+                bar.clear();
+            }
             // Flush any remaining buffered tool calls
             if let Ok(mut buf) = tool_buffer.lock() {
                 if let Some(block) = buf.flush(ui) {
@@ -1070,6 +1099,10 @@ pub(crate) async fn run_streaming_turn(
             }
         }
         _ = tokio::signal::ctrl_c() => {
+            // Clear the status bar on interrupt
+            if let Ok(mut bar) = status_bar.lock() {
+                bar.clear();
+            }
             if streamed.load(Ordering::Relaxed) {
                 println!();
             }

@@ -5,6 +5,7 @@
 
 pub mod banner;
 pub mod colors;
+pub mod status_bar;
 pub mod terminal;
 pub mod tool_display;
 
