@@ -713,6 +713,10 @@ custom_rules:
     #[traced_test]
     #[test]
     fn unrecognized_pii_action_logs_warning() {
+        // Explicit construction is intentional: GuardrailsConfig (genesis-config)
+        // does not derive Default, and adding one solely for this test is not
+        // warranted. If a Default impl is added upstream, switch to
+        // `GuardrailsConfig { field: val, ..Default::default() }`.
         let cfg = genesis_config::GuardrailsConfig {
             detect_pii: true,
             pii_action: "banish".to_owned(),
