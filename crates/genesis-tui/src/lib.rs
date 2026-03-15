@@ -26,8 +26,10 @@ pub mod app;
 pub mod custom_terminal;
 pub mod events;
 pub mod frame_requester;
+pub mod history;
 pub mod insert_history;
 pub mod terminal;
+pub mod widgets;
 
 type TurnResult = Result<SessionTurnOutcome, SessionExecutionError>;
 
