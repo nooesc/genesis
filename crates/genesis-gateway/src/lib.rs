@@ -42,7 +42,7 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// Stale entries (older than 2 minutes) are purged on every check to
 /// prevent unbounded memory growth.
 #[derive(Debug)]
-pub struct RateLimiter {
+pub(crate) struct RateLimiter {
     /// Max requests per 60-second window.  Stored here so the middleware
     /// doesn't need to re-read `AppState`.
     max_rpm: u32,
@@ -103,7 +103,7 @@ impl RateLimiter {
 }
 
 /// Prometheus-style histogram with fixed bucket boundaries.
-pub struct HistogramBuckets {
+pub(crate) struct HistogramBuckets {
     /// Bucket boundaries in milliseconds.
     boundaries: &'static [u64],
     /// Count of observations in each bucket (cumulative).
@@ -171,7 +171,7 @@ pub struct AppState {
     /// Shared HTTP client for outbound platform API calls (connection pooling).
     pub http_client: reqwest::Client,
     /// Optional per-IP rate limiter.
-    pub rate_limiter: Option<RateLimiter>,
+    pub(crate) rate_limiter: Option<RateLimiter>,
     /// Trusted reverse proxy IPs allowed to supply forwarded headers.
     pub trusted_proxies: Vec<IpAddr>,
     /// Webhook event dispatcher for external notifications.
@@ -190,7 +190,7 @@ pub struct AppState {
     /// Total streaming requests.
     pub stream_requests_total: AtomicU64,
     /// Request duration histogram buckets (in ms): [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, +Inf]
-    pub request_duration_histogram: Mutex<HistogramBuckets>,
+    pub(crate) request_duration_histogram: Mutex<HistogramBuckets>,
     /// Agent message bus for inter-agent communication.
     pub agent_bus: genesis_core::agent_bus::AgentBus,
 }
