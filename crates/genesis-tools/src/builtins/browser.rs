@@ -84,7 +84,11 @@ impl BrowserManager {
     ) -> Result<(String, Option<String>), ToolError> {
         // Fast path: session already exists
         {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions =
+                self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: "browser".to_string(),
+                    reason: "browser session lock poisoned".to_string(),
+                })?;
             if let Some(info) = sessions.get(session_id) {
                 return Ok((info.session_name.clone(), info.cdp_url.clone()));
             }
@@ -98,7 +102,11 @@ impl BrowserManager {
         };
 
         // Re-acquire and insert, handling TOCTOU race
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions =
+            self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+                tool: "browser".to_string(),
+                reason: "browser session lock poisoned".to_string(),
+            })?;
         if let Some(existing) = sessions.get(session_id) {
             // Another thread created a session in the meantime
             let result = (existing.session_name.clone(), existing.cdp_url.clone());
@@ -117,7 +125,9 @@ impl BrowserManager {
     /// Update the last_activity timestamp for a session and cleanup stale ones.
     pub fn touch_session(&self, session_id: &str) {
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return;
+            };
             if let Some(info) = sessions.get_mut(session_id) {
                 info.last_activity = Instant::now();
             }
@@ -133,7 +143,11 @@ impl BrowserManager {
         tool_name: &str,
     ) -> Result<(String, Option<String>), ToolError> {
         let info = {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions =
+                self.sessions.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: tool_name.to_owned(),
+                    reason: "browser session lock poisoned".to_string(),
+                })?;
             sessions
                 .get(session_id)
                 .map(|info| (info.session_name.clone(), info.cdp_url.clone()))
@@ -148,7 +162,9 @@ impl BrowserManager {
 
     /// Mark first_nav as false and return (was_first_nav, features).
     pub fn consume_first_nav(&self, session_id: &str) -> (bool, BTreeMap<String, bool>) {
-        let mut sessions = self.sessions.lock().unwrap();
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return (false, BTreeMap::new());
+        };
         if let Some(info) = sessions.get_mut(session_id) {
             let was_first = info.first_nav;
             info.first_nav = false;
@@ -162,7 +178,9 @@ impl BrowserManager {
     /// applicable and cleans up daemon/socket files.
     pub fn close_session(&self, session_id: &str) {
         let removed = {
-            let mut sessions = self.sessions.lock().unwrap();
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return;
+            };
             sessions.remove(session_id)
         };
 
@@ -189,7 +207,9 @@ impl BrowserManager {
     /// Close all active sessions.
     fn close_all_sessions(&self) {
         let all: Vec<String> = {
-            let sessions = self.sessions.lock().unwrap();
+            let Ok(sessions) = self.sessions.lock() else {
+                return;
+            };
             sessions.keys().cloned().collect()
         };
         for session_id in all {
@@ -200,7 +220,9 @@ impl BrowserManager {
     /// Remove sessions that have been inactive longer than the timeout.
     fn cleanup_stale_sessions(&self) {
         let stale: Vec<String> = {
-            let sessions = self.sessions.lock().unwrap();
+            let Ok(sessions) = self.sessions.lock() else {
+                return;
+            };
             sessions
                 .iter()
                 .filter(|(_, info)| info.last_activity.elapsed() > self.inactivity_timeout)
