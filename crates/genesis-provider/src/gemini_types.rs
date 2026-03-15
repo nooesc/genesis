@@ -211,7 +211,10 @@ pub(crate) fn to_gemini_request(req: &ChatCompletionRequest) -> GeminiRequest {
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
                         let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(arguments = %tc.function.arguments, error = %e, "invalid JSON in tool call arguments, using empty object");
+                                Value::Object(serde_json::Map::new())
+                            });
                         parts.push(GeminiPart::FunctionCall {
                             function_call: GeminiFunctionCall {
                                 name: tc.function.name.clone(),
