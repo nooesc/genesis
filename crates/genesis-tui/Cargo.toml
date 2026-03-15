@@ -1,0 +1,23 @@
+[package]
+name = "genesis-tui"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+genesis-ui.path = "../genesis-ui"
+genesis-core.path = "../genesis-core"
+genesis-types.path = "../genesis-types"
+genesis-config.path = "../genesis-config"
+ratatui.workspace = true
+crossterm.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+syntect.workspace = true
+image.workspace = true
+unicode-width.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+
+[dev-dependencies]

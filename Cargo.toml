@@ -12,6 +12,7 @@ members = [
   "crates/genesis-types",
   "crates/genesis-auth",
   "crates/genesis-ui",
+  "crates/genesis-tui",
 ]
 resolver = "2"
 
@@ -63,6 +64,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 termimad = "0.30"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 which = "6"
+ratatui = { version = "0.29", features = ["unstable-backend-writer"] }
 
 [profile.release]
 lto = true
