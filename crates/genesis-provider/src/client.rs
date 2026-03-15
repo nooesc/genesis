@@ -690,12 +690,15 @@ impl ChatClient {
     pub async fn warmup(&self) {
         let url = &self.endpoint;
         match self.http.head(url).send().await {
-            Ok(_) => {
-                tracing::debug!(backend = %self.backend, "connection warmed");
+            Ok(r) => {
+                // Any response (even 405 Method Not Allowed) means the TCP+TLS
+                // connection has been established, which is the actual goal.
+                tracing::debug!(endpoint = %self.endpoint, status = %r.status(), "connection pre-established");
             }
             Err(e) => {
-                // Not critical — the first real request will establish the connection.
-                tracing::debug!(backend = %self.backend, error = %e, "connection warmup failed (non-critical)");
+                // Connection-level failure (DNS, TCP, TLS) — not critical,
+                // the first real request will establish the connection.
+                tracing::debug!(endpoint = %self.endpoint, error = %e, "connection warmup failed");
             }
         }
     }
