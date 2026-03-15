@@ -142,7 +142,7 @@ pub async fn interactions_handler(
                 data: None,
             })
             .map_err(|e| {
-                error!("failed to serialize interaction response: {e}");
+                error!(error = %e, "failed to serialize interaction response");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?,
         ));
@@ -172,7 +172,7 @@ pub async fn interactions_handler(
                     }),
                 })
                 .map_err(|e| {
-                    error!("failed to serialize interaction response: {e}");
+                    error!(error = %e, "failed to serialize interaction response");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?,
             ));
@@ -208,7 +208,7 @@ pub async fn interactions_handler(
                         data: Some(InteractionResponseData { content: reply }),
                     })
                     .map_err(|e| {
-                        error!("failed to serialize interaction response: {e}");
+                        error!(error = %e, "failed to serialize interaction response");
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?,
                 ));
@@ -222,7 +222,7 @@ pub async fn interactions_handler(
                         }),
                     })
                     .map_err(|e| {
-                        error!("failed to serialize interaction response: {e}");
+                        error!(error = %e, "failed to serialize interaction response");
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?,
                 ));
@@ -241,7 +241,7 @@ pub async fn interactions_handler(
                     data: Some(InteractionResponseData { content: reply }),
                 })
                 .map_err(|e| {
-                    error!("failed to serialize interaction response: {e}");
+                    error!(error = %e, "failed to serialize interaction response");
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?,
             ));
@@ -316,7 +316,7 @@ pub async fn interactions_handler(
                 data: None,
             })
             .map_err(|e| {
-                error!("failed to serialize interaction response: {e}");
+                error!(error = %e, "failed to serialize interaction response");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?,
         ));

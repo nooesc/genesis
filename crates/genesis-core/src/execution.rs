@@ -1215,7 +1215,7 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             let sb = match SingularitySandbox::new() {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("singularity backend unavailable: {e}");
+                    warn!(error = %e, backend = "singularity", "sandbox backend unavailable");
                     return None;
                 }
             };
@@ -1246,7 +1246,7 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             let sb = match ModalSandbox::new(&data_dir) {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("modal backend unavailable: {e}");
+                    warn!(error = %e, backend = "modal", "sandbox backend unavailable");
                     return None;
                 }
             };
@@ -1279,7 +1279,7 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             let sb = match DaytonaSandbox::new() {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("daytona backend unavailable: {e}");
+                    warn!(error = %e, backend = "daytona", "sandbox backend unavailable");
                     return None;
                 }
             };

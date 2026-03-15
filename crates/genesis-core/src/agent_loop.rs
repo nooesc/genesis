@@ -1620,7 +1620,8 @@ impl AgentLoop {
             let count = self.tool_failure_counts[tool];
             warn!(
                 tool_name = tool.as_str(),
-                "tool has failed {count} consecutive times, injecting stuck-loop nudge",
+                failure_count = count,
+                "tool has repeated failures, injecting stuck-loop nudge",
             );
             self.hooks.on_stuck_loop(&hook_session, tool, count);
             // Reset the counter so we don't spam nudges

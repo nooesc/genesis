@@ -136,7 +136,7 @@ impl McpManager {
             None => return false,
         };
 
-        warn!(server = server_name, "attempting MCP server reconnection");
+        info!(server = server_name, "attempting MCP server reconnection");
 
         match McpClient::connect(config).await {
             Ok(client) => {
