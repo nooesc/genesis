@@ -51,6 +51,9 @@ pub struct GenesisConfig {
     /// Display and UI settings for the CLI.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// TUI (terminal user interface) settings.
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 /// Display and UI settings for the CLI.
@@ -74,6 +77,76 @@ pub enum ToolDisplayMode {
     Grouped,
     /// Show full tool call details.
     Verbose,
+}
+
+/// TUI (terminal user interface) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TuiConfig {
+    /// Whether TUI mode is enabled (default: true, --no-tui overrides).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Enable animations (Eve sway, status bar sprites).
+    #[serde(default = "default_true")]
+    pub animations: bool,
+    /// Alternate screen mode for overlays.
+    #[serde(default)]
+    pub alt_screen: AltScreenMode,
+    /// Show Eve welcome screen on launch.
+    #[serde(default = "default_true")]
+    pub welcome_screen: bool,
+    /// Display settings.
+    #[serde(default)]
+    pub display: TuiDisplayConfig,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            animations: true,
+            alt_screen: AltScreenMode::default(),
+            welcome_screen: true,
+            display: TuiDisplayConfig::default(),
+        }
+    }
+}
+
+/// TUI display settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TuiDisplayConfig {
+    /// How tool calls are displayed.
+    #[serde(default)]
+    pub tool_mode: ToolDisplayMode,
+    /// How file diffs are displayed.
+    #[serde(default)]
+    pub diff_mode: DiffMode,
+}
+
+/// How file diffs are rendered in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffMode {
+    /// Auto-detect based on terminal width (side-by-side >= 120, unified otherwise).
+    #[default]
+    Auto,
+    /// Unified diff format.
+    Unified,
+    /// Side-by-side diff format.
+    SideBySide,
+}
+
+/// Alternate screen mode controlling whether the TUI uses the terminal's
+/// alternate screen buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AltScreenMode {
+    /// Auto-detect (disabled in Zellij, enabled elsewhere).
+    #[default]
+    Auto,
+    /// Always use alternate screen.
+    Always,
+    /// Never use alternate screen.
+    Never,
 }
 
 /// Configuration for a single MCP server.
@@ -506,6 +579,8 @@ struct FileConfig {
     embedding: Option<EmbeddingConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display: Option<DisplayConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tui: Option<TuiConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -651,6 +726,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         personality: None,
         embedding: None,
         display: DisplayConfig::default(),
+        tui: TuiConfig::default(),
     })
 }
 
@@ -822,6 +898,7 @@ pub fn load_from_map(
             personality: file_config.personality,
             embedding: file_config.embedding,
             display: file_config.display.unwrap_or_default(),
+            tui: file_config.tui.unwrap_or_default(),
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -1578,6 +1655,86 @@ toolsets:
                 assert_eq!(*disk_mb, 10240);
             }
             _ => panic!("expected Daytona"),
+        }
+    }
+
+    #[test]
+    fn tui_config_defaults() {
+        let config: super::TuiConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.enabled);
+        assert!(config.animations);
+        assert!(config.welcome_screen);
+        assert!(matches!(config.display.tool_mode, super::ToolDisplayMode::Grouped));
+        assert!(matches!(config.alt_screen, super::AltScreenMode::Auto));
+        assert!(matches!(config.display.diff_mode, super::DiffMode::Auto));
+    }
+
+    #[test]
+    fn tui_config_deserializes_from_toml() {
+        let toml = r#"
+[tui]
+enabled = false
+animations = false
+[tui.display]
+tool_mode = "verbose"
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            tui: super::TuiConfig,
+        }
+        let wrapper: Wrapper = toml::from_str(toml).unwrap();
+        let config = wrapper.tui;
+        assert!(!config.enabled);
+        assert!(!config.animations);
+        assert!(matches!(config.display.tool_mode, super::ToolDisplayMode::Verbose));
+    }
+
+    #[test]
+    fn tool_display_mode_round_trips() {
+        use super::ToolDisplayMode;
+        let variants = [
+            (ToolDisplayMode::Off, "\"off\""),
+            (ToolDisplayMode::Summary, "\"summary\""),
+            (ToolDisplayMode::Grouped, "\"grouped\""),
+            (ToolDisplayMode::Verbose, "\"verbose\""),
+        ];
+        for (variant, expected_json) in variants {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, expected_json);
+            let deserialized: ToolDisplayMode = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn diff_mode_round_trips() {
+        use super::DiffMode;
+        let variants = [
+            (DiffMode::Auto, "\"auto\""),
+            (DiffMode::Unified, "\"unified\""),
+            (DiffMode::SideBySide, "\"side_by_side\""),
+        ];
+        for (variant, expected_json) in variants {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, expected_json);
+            let deserialized: DiffMode = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn alt_screen_mode_round_trips() {
+        use super::AltScreenMode;
+        let variants = [
+            (AltScreenMode::Auto, "\"auto\""),
+            (AltScreenMode::Always, "\"always\""),
+            (AltScreenMode::Never, "\"never\""),
+        ];
+        for (variant, expected_json) in variants {
+            let serialized = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialized, expected_json);
+            let deserialized: AltScreenMode = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, variant);
         }
     }
 }
