@@ -157,11 +157,7 @@ fn load_skills_performance_section(db_path: &std::path::Path) -> Option<String> 
             }
         };
 
-        let failure_rate = if uses > 0 {
-            (failures as f64 / uses as f64) * 100.0
-        } else {
-            0.0
-        };
+        let failure_rate = (failures as f64 / uses as f64) * 100.0;
 
         let flag = if failure_rate > 30.0 {
             " [NEEDS IMPROVEMENT]"
