@@ -428,7 +428,12 @@ impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
         let pii_action = match cfg.pii_action.as_str() {
             "block" => ViolationAction::Block,
             "warn" => ViolationAction::Warn,
-            _ => ViolationAction::Redact,
+            other => {
+                if other != "redact" {
+                    tracing::warn!(pii_action = other, "unrecognized pii_action in guardrails config, defaulting to redact");
+                }
+                ViolationAction::Redact
+            }
         };
         let custom_rules = cfg.custom_rules.iter().map(|r| {
             let applies_to = match r.applies_to.as_str() {
@@ -465,6 +470,7 @@ impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     fn pii_config() -> GuardrailConfig {
         GuardrailConfig {
@@ -702,5 +708,29 @@ custom_rules:
             serde_json::to_string(&ViolationAction::Redact).unwrap(),
             "\"redact\""
         );
+    }
+
+    #[traced_test]
+    #[test]
+    fn unrecognized_pii_action_logs_warning() {
+        // Explicit construction is intentional: GuardrailsConfig (genesis-config)
+        // does not derive Default, and adding one solely for this test is not
+        // warranted. If a Default impl is added upstream, switch to
+        // `GuardrailsConfig { field: val, ..Default::default() }`.
+        let cfg = genesis_config::GuardrailsConfig {
+            detect_pii: true,
+            pii_action: "banish".to_owned(),
+            max_response_length: 0,
+            forbidden_input_patterns: vec![],
+            forbidden_output_patterns: vec![],
+            require_json_output: false,
+            max_tokens_per_turn: 0,
+            custom_rules: vec![],
+        };
+        let converted = GuardrailConfig::from(&cfg);
+        // Unrecognized action should default to Redact
+        assert_eq!(converted.pii_action, ViolationAction::Redact);
+        // Verify warning was logged about the unrecognized value
+        assert!(logs_contain("unrecognized pii_action in guardrails config"));
     }
 }

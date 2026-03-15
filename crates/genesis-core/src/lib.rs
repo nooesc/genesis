@@ -30,6 +30,7 @@ pub mod templates;
 pub mod toolset;
 pub mod workflow;
 pub mod trajectory;
+pub mod sandbox;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -199,6 +200,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             allow_destructive_tools: execution_context.allow_destructive_tools,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         },
         mcp: None,
     }
@@ -376,7 +378,7 @@ fn check_tool_registry() -> DoctorCheck {
 
 /// Gather storage statistics: session, skill, and schedule counts.
 fn check_storage_stats(db_path: &Path) -> DoctorCheck {
-    let sessions = SessionStore::new(db_path).count_sessions().unwrap_or(0);
+    let sessions = SessionStore::new(db_path).session_count().unwrap_or(0);
 
     // Use direct COUNT(*) queries to avoid loading full rows
     let (skills, schedules) = match rusqlite::Connection::open(db_path) {
@@ -907,6 +909,11 @@ impl ToolRuntime {
         self.context.terminal_backend = Some(backend);
     }
 
+    /// Set the sandbox executor for lifecycle-managed backends.
+    pub fn set_sandbox_manager(&mut self, executor: Arc<dyn genesis_tools::SandboxExecutor>) {
+        self.context.sandbox_manager = Some(executor);
+    }
+
     /// Create a new ToolRuntime with a different session ID.
     /// Used when spawning subagent workstreams.
     pub fn with_session_id(&self, session_id: impl Into<String>) -> Self {
@@ -928,7 +935,7 @@ pub fn default_tool_count() -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         build_default_tool_runtime, build_execution_context_from_loaded, CheckStatus, SessionPlan,
     };
@@ -939,6 +946,59 @@ mod tests {
     use genesis_types::{DeliveryPlatform, ModelProviderKind, RuntimeEvent};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    /// Shared test helper: build a minimal `LoadedConfig` with caller-specified paths.
+    ///
+    /// Re-used across `execution`, `nudge`, and `lib` test modules to avoid duplication.
+    pub(crate) fn test_loaded_config(data_dir: PathBuf, database_path: PathBuf) -> LoadedConfig {
+        LoadedConfig {
+            config: GenesisConfig {
+                schema_version: 1,
+                profile: "operator".to_owned(),
+                provider: ProviderConfig {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1-mini".to_owned(),
+                    base_url: Some("http://localhost:8000/v1".to_owned()),
+                    api_key_env: None,
+                    extra_body: None,
+                    tool_call_parser: None,
+                },
+                tool_provider: None,
+                fallback_providers: Vec::new(),
+                mcp_servers: std::collections::HashMap::new(),
+                storage: StorageConfig {
+                    data_dir: data_dir.clone(),
+                    database_path: database_path.clone(),
+                },
+                runtime: RuntimeConfig {
+                    max_concurrency: 4,
+                    allow_destructive_tools: false,
+                    max_turns: 20,
+                    max_context_messages: None,
+                    budget_limit: None,
+                    terminal: None,
+                    thinking_budget: None,
+                    max_context_tokens: None,
+                    max_iterations: None,
+                    context_security: genesis_config::ContextSecurityPolicy::default(),
+                    reasoning_effort: None,
+                    cache: None,
+                    tool_filter: None,
+                    guardrails: None,
+                },
+                gateway: None,
+                toolsets: std::collections::HashMap::new(),
+                personality: None,
+                embedding: None,
+                display: genesis_config::DisplayConfig::default(),
+            },
+            paths: AppPaths {
+                config_path: PathBuf::from("/tmp/genesis/config.yaml"),
+                data_dir,
+                database_path,
+            },
+        }
+    }
 
     fn sample_loaded_config() -> LoadedConfig {
         LoadedConfig {

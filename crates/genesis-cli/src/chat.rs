@@ -119,17 +119,22 @@ pub(crate) async fn run_chat(
     }
 
     // Show the Eve banner with animation and session info.
+    //
+    // Note: show_banner uses thread::sleep for animation timing. This is
+    // intentional — the banner runs during startup before the chat loop,
+    // so blocking the executor here has no impact on responsiveness.
     {
         use genesis_ui::banner::{show_banner, BannerInfo};
 
+        let (builtin_count, mcp_count) = service.tool_counts().await;
         let info = BannerInfo {
             session_id: session_id.clone(),
             model: loaded.config.provider.model.clone(),
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "unknown".into()),
-            builtin_tools: 60,
-            mcp_tools: 0,
+            builtin_tools: builtin_count,
+            mcp_tools: mcp_count,
         };
         show_banner(ui, &info);
     }
@@ -151,7 +156,7 @@ pub(crate) async fn run_chat(
     let history_path = loaded.config.storage.data_dir.join("chat_history.txt");
     let _ = rl.load_history(&history_path);
 
-    let model = &loaded.config.provider.model;
+    let mut model = loaded.config.provider.model.clone();
     let mut session_id = session_id;
 
     // Extract clipboard image if --clipboard was passed
@@ -174,7 +179,7 @@ pub(crate) async fn run_chat(
     if let Some(initial) = initial_prompt {
         println!("{}{}",  ui.you_prompt(), initial);
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, &initial, model, images, ui, tool_mode).await?;
+        run_streaming_turn(&service, &session_id, &initial, &model, images, ui, tool_mode).await?;
     }
 
     while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
@@ -208,7 +213,7 @@ pub(crate) async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new(), ui, tool_mode).await?;
+                        run_streaming_turn(&service, &session_id, &prompt_text, &model, Vec::new(), ui, tool_mode).await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -605,11 +610,13 @@ pub(crate) async fn run_chat(
                 println!("Set with: /model <backend>/<model>  (e.g. /model anthropic/claude-sonnet-4-20250514)");
             } else if let Some((backend, new_model)) = arg.split_once('/') {
                 service.set_model_override(backend.to_owned(), new_model.to_owned());
+                model = new_model.to_owned();
                 println!("Model switched to {backend}/{new_model}. Takes effect on next turn.");
             } else {
                 // Assume same backend, just changing model name
                 let backend = &loaded.config.provider.backend;
                 service.set_model_override(backend.clone(), arg.to_owned());
+                model = arg.to_owned();
                 println!("Model switched to {backend}/{arg}. Takes effect on next turn.");
             }
             continue;
@@ -648,7 +655,7 @@ pub(crate) async fn run_chat(
         }
 
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, trimmed, model, images, ui, tool_mode).await?;
+        run_streaming_turn(&service, &session_id, trimmed, &model, images, ui, tool_mode).await?;
     }
 
     // Save readline history for next session
@@ -976,18 +983,33 @@ pub(crate) async fn run_streaming_turn(
     tool_mode: ToolDisplayMode,
 ) -> Result<(), CliError> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     let eve_prompt = ui.eve_prompt();
     let streamed = AtomicBool::new(false);
     let tool_buffer = Mutex::new(ToolCallBuffer::new(tool_mode));
-    let status_bar = Mutex::new(StatusBar::new(session_id, ui.colors_enabled));
+    let status_bar = Arc::new(Mutex::new(StatusBar::new(session_id, ui.colors_enabled)));
     let stream_md = Mutex::new(StreamMarkdown::new(ui.colors_enabled));
 
     // Start with Thinking state
     if let Ok(mut bar) = status_bar.lock() {
         bar.set_state(BarState::Thinking);
     }
+
+    // Spawn a background ticker that updates the status bar elapsed time.
+    let ticker_bar = Arc::clone(&status_bar);
+    let ticker_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+        loop {
+            interval.tick().await;
+            if let Ok(mut bar) = ticker_bar.lock() {
+                if bar.state().is_none() {
+                    break;
+                }
+                bar.tick();
+            }
+        }
+    });
 
     let turn_future = service.run_turn_streaming(
         SessionTurnInput {
@@ -1063,7 +1085,8 @@ pub(crate) async fn run_streaming_turn(
 
     tokio::select! {
         result = turn_future => {
-            // Clear the status bar on turn completion
+            // Stop the background ticker and clear the status bar.
+            ticker_handle.abort();
             if let Ok(mut bar) = status_bar.lock() {
                 bar.clear();
             }
@@ -1120,7 +1143,8 @@ pub(crate) async fn run_streaming_turn(
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            // Clear the status bar on interrupt
+            // Stop the background ticker and clear the status bar on interrupt.
+            ticker_handle.abort();
             if let Ok(mut bar) = status_bar.lock() {
                 bar.clear();
             }

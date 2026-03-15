@@ -219,7 +219,11 @@ fn send_discord(
 
     // Discord has a 2000 character limit
     let truncated = if content.len() > 2000 {
-        format!("{}...", &content[..1997])
+        let mut end = 1997;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &content[..end])
     } else {
         content.to_owned()
     };
@@ -285,7 +289,11 @@ fn send_whatsapp(
 
     // WhatsApp has a 4096 character limit
     let truncated = if text.len() > 4096 {
-        format!("{}...", &text[..4093])
+        let mut end = 4093;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
     } else {
         text.to_owned()
     };
@@ -412,6 +420,7 @@ fn send_homeassistant(
 
 /// Split a message into chunks respecting a max length.
 /// Tries to split on newlines, then word boundaries.
+/// All slicing uses char-boundary-aware positions to avoid UTF-8 panics.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_owned()];
@@ -426,10 +435,31 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        let split_at = remaining[..max_len]
+        // Find a safe UTF-8 split point at or before max_len.
+        // Walk char_indices lazily (stops early once past max_len).
+        let safe_end = remaining
+            .char_indices()
+            .map(|(i, c)| i + c.len_utf8())
+            .take_while(|&pos| pos <= max_len)
+            .last()
+            .unwrap_or_else(|| {
+                // First char is wider than max_len; take it to avoid infinite loop.
+                remaining
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0)
+            });
+
+        let safe_slice = &remaining[..safe_end];
+
+        let split_at = safe_slice
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| safe_slice.rfind(' '))
+            .unwrap_or(safe_end);
+
+        // Ensure we always make progress to avoid infinite loops.
+        let split_at = if split_at == 0 { safe_end } else { split_at };
 
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk.to_owned());
@@ -451,6 +481,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
@@ -606,6 +637,33 @@ mod tests {
         let chunks = split_message(text, 12);
         assert_eq!(chunks[0], "hello world");
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn split_message_multibyte_utf8_does_not_panic() {
+        // Each emoji is 4 bytes. With max_len=5, a naive byte slice at position 5
+        // would land in the middle of the second emoji and panic.
+        let text = "\u{1F600}\u{1F601}\u{1F602}\u{1F603}"; // 16 bytes total
+        let chunks = split_message(text, 5);
+        // First chunk should contain only the first emoji (4 bytes) since
+        // the second emoji starts at byte 4 and ends at byte 8.
+        assert_eq!(chunks[0], "\u{1F600}");
+        // All chunks together should reconstruct the original text
+        let reassembled: String = chunks.into_iter().collect();
+        assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn split_message_multibyte_with_spaces() {
+        // Mix of multi-byte chars and spaces to test word-boundary splitting.
+        // Each \u{00E9} is 2 bytes. Text is: "ee ee ee" (12 bytes).
+        let text = "\u{00E9}\u{00E9} \u{00E9}\u{00E9} \u{00E9}\u{00E9}";
+        let chunks = split_message(text, 6);
+        assert!(!chunks.is_empty());
+        // Should not panic on multi-byte chars near boundaries.
+        // All original content should be preserved across chunks.
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
     }
 
     #[test]

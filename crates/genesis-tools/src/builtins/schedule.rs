@@ -42,7 +42,7 @@ impl ToolHandler for ScheduleCreateTool {
         }
 
         let id = format!("sched-{}", &uuid_v4()[..8]);
-        let store = ScheduleStore::new(&std::path::Path::new(&context.data_dir).join("genesis.db"));
+        let store = ScheduleStore::new(&context.db_path());
         let schedule = store
             .create(&id, cron, destination, prompt)
             .map_err(|e| ToolError::ExecutionFailed {
@@ -68,7 +68,7 @@ pub struct ScheduleListTool;
 
 impl ToolHandler for ScheduleListTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let store = ScheduleStore::new(&std::path::Path::new(&context.data_dir).join("genesis.db"));
+        let store = ScheduleStore::new(&context.db_path());
         let schedules = store
             .list_all()
             .map_err(|e| ToolError::ExecutionFailed {
@@ -115,7 +115,7 @@ impl ToolHandler for ScheduleDeleteTool {
                 argument: "id",
             })?;
 
-        let store = ScheduleStore::new(&std::path::Path::new(&context.data_dir).join("genesis.db"));
+        let store = ScheduleStore::new(&context.db_path());
         let deleted = store
             .delete(id)
             .map_err(|e| ToolError::ExecutionFailed {
@@ -167,6 +167,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

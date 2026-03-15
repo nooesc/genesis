@@ -33,7 +33,7 @@ impl ToolHandler for UserObserveTool {
                 argument: "value",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
         let store = UserModelStore::new(&db_path);
 
@@ -67,7 +67,7 @@ pub struct UserModelTool;
 
 impl ToolHandler for UserModelTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = UserModelStore::new(&db_path);
 
         let category = call.arguments.get("category");
@@ -122,6 +122,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

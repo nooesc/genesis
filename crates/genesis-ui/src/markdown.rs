@@ -128,8 +128,33 @@ enum StreamState {
     Normal,
     /// Inside a code fence; buffering lines until the closing fence.
     InCodeFence,
-    /// Inside a table; buffering lines until a blank line.
+    /// Saw a potential table header (`|...|`); waiting for a separator row
+    /// (`|---|---|`) on the next line to confirm it is actually a table.
+    PendingTable,
+    /// Inside a confirmed table; buffering lines until a blank line.
     InTable,
+}
+
+/// Check if a line is a markdown table separator row (e.g. `|---|---|`).
+///
+/// Requires the line to start and end with `|` and every cell between pipes
+/// to consist of only dashes, colons, and spaces (for alignment markers like
+/// `:---:`, `---:`, `:---`).
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return false;
+    }
+    // Strip the leading and trailing `|`
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.is_empty() {
+        return false;
+    }
+    // Every cell between `|` must match the separator pattern
+    inner.split('|').all(|cell| {
+        let cell = cell.trim();
+        !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':' || c == ' ')
+    })
 }
 
 /// A streaming markdown processor.
@@ -196,13 +221,29 @@ impl StreamMarkdown {
                         && line.trim().starts_with('|')
                         && line.trim().ends_with('|')
                     {
-                        // Start of a table
+                        // Potential table header — wait for separator row
                         self.table_buf.clear();
+                        self.table_buf.push_str(&line);
+                        self.table_buf.push('\n');
+                        self.state = StreamState::PendingTable;
+                    } else {
+                        // Regular text — pass through
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
+                }
+                StreamState::PendingTable => {
+                    if is_table_separator(&line) {
+                        // Confirmed table — the pending header + this separator
                         self.table_buf.push_str(&line);
                         self.table_buf.push('\n');
                         self.state = StreamState::InTable;
                     } else {
-                        // Regular text — pass through
+                        // Not a table — flush the pending header as normal text
+                        output.push_str(&self.table_buf);
+                        self.table_buf.clear();
+                        self.state = StreamState::Normal;
+                        // Re-process the current line as Normal text
                         output.push_str(&line);
                         output.push('\n');
                     }
@@ -258,7 +299,7 @@ impl StreamMarkdown {
                 StreamState::InCodeFence => {
                     self.code_buf.push_str(&self.line_buf);
                 }
-                StreamState::InTable => {
+                StreamState::PendingTable | StreamState::InTable => {
                     self.table_buf.push_str(&self.line_buf);
                 }
             }
@@ -276,6 +317,10 @@ impl StreamMarkdown {
                     output.push_str("```\n");
                 }
                 output.push_str(&self.code_buf);
+            }
+            StreamState::PendingTable => {
+                // Never got a separator row — emit pending header as plain text
+                output.push_str(&self.table_buf);
             }
             StreamState::InTable => {
                 // Incomplete table — emit as plain text
@@ -423,6 +468,35 @@ mod tests {
         let o4 = stream.push("\n");
         // termimad should produce some output
         assert!(!o4.is_empty());
+    }
+
+    #[test]
+    fn pipe_line_without_separator_is_not_a_table() {
+        let mut stream = StreamMarkdown::new(true);
+        // A line with pipes but no separator row on the next line
+        let o1 = stream.push("| this is just text with pipes |\n");
+        assert_eq!(o1, ""); // pending — waiting for separator
+        // Next line is regular text, not a separator
+        let o2 = stream.push("some normal text\n");
+        // Should flush the pending line as normal text, plus the current line
+        assert!(o2.contains("| this is just text with pipes |"));
+        assert!(o2.contains("some normal text"));
+    }
+
+    #[test]
+    fn is_table_separator_detects_valid_separators() {
+        assert!(super::is_table_separator("|---|---|"));
+        assert!(super::is_table_separator("| --- | --- |"));
+        assert!(super::is_table_separator("|:---:|---:|"));
+        assert!(super::is_table_separator("| :--- | ---: |"));
+    }
+
+    #[test]
+    fn is_table_separator_rejects_non_separators() {
+        assert!(!super::is_table_separator("| hello | world |"));
+        assert!(!super::is_table_separator("not a table"));
+        assert!(!super::is_table_separator("||")); // empty cells
+        assert!(!super::is_table_separator("| abc | 123 |"));
     }
 
     #[test]

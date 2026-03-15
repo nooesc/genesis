@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -232,7 +232,7 @@ impl AppState {
 
 /// Request body for the `/chat` endpoint.
 #[derive(Debug, Deserialize)]
-pub struct ChatRequest {
+pub(crate) struct ChatRequest {
     pub message: String,
     #[serde(default = "default_platform")]
     pub platform: String,
@@ -254,7 +254,7 @@ pub struct ChatRequest {
 
 /// An image input for multimodal chat requests.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ImageInput {
+pub(crate) struct ImageInput {
     /// Image URL (http/https) or base64 data URI.
     pub url: String,
     /// Optional detail level: "low", "high", or "auto" (default).
@@ -289,9 +289,14 @@ fn default_request_id() -> String {
     format!("req-{next}")
 }
 
+/// Map a storage error into an HTTP 500 response pair.
+fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}"))
+}
+
 /// Response body from the `/chat` endpoint.
 #[derive(Debug, Serialize)]
-pub struct ChatResponse {
+pub(crate) struct ChatResponse {
     pub session_id: String,
     pub response: String,
     pub turns_used: usize,
@@ -307,14 +312,14 @@ pub struct ChatResponse {
 
 /// SSE payload for a streamed token chunk.
 #[derive(Debug, Serialize)]
-pub struct StreamChunkResponse {
+pub(crate) struct StreamChunkResponse {
     pub session_id: String,
     pub content: String,
 }
 
 /// SSE payload signaling final completion.
 #[derive(Debug, Serialize)]
-pub struct StreamDoneResponse {
+pub(crate) struct StreamDoneResponse {
     pub session_id: String,
     pub response: String,
     pub turns_used: usize,
@@ -327,14 +332,14 @@ pub struct StreamDoneResponse {
 
 /// SSE payload signaling an execution failure.
 #[derive(Debug, Serialize)]
-pub struct StreamErrorResponse {
+pub(crate) struct StreamErrorResponse {
     pub session_id: String,
     pub error: String,
 }
 
 /// Health check response.
 #[derive(Debug, Serialize)]
-pub struct HealthResponse {
+pub(crate) struct HealthResponse {
     pub status: String,
     pub version: String,
     pub uptime_seconds: u64,
@@ -347,7 +352,7 @@ pub struct HealthResponse {
 
 /// Detailed MCP server status response.
 #[derive(Debug, Serialize)]
-pub struct McpStatusResponse {
+pub(crate) struct McpStatusResponse {
     pub servers: Vec<McpServerStatus>,
     pub total_tools: usize,
     pub total_resources: usize,
@@ -356,7 +361,7 @@ pub struct McpStatusResponse {
 
 /// Status of a single MCP server.
 #[derive(Debug, Serialize)]
-pub struct McpServerStatus {
+pub(crate) struct McpServerStatus {
     pub name: String,
     pub connected: bool,
 }
@@ -533,6 +538,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        .route("/.well-known/agent.json", get(agent_card_handler))
         .merge(rate_limited)
         .layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
@@ -726,6 +732,46 @@ async fn mcp_status_handler(
     }
 }
 
+/// A2A Agent Card — describes this agent's capabilities for discovery.
+/// See: <https://github.com/a2aproject/A2A>
+async fn agent_card_handler(headers: HeaderMap) -> impl IntoResponse {
+    // Derive the A2A service URL from the Host header per the A2A spec
+    // (the `url` field must point to the A2A endpoint, not the source repo).
+    let url = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|host| format!("https://{host}/.well-known/agent.json"))
+        .unwrap_or_else(|| "https://localhost/.well-known/agent.json".to_string());
+
+    Json(serde_json::json!({
+        "name": "Eve",
+        "description": "Genesis AI agent — a high-performance Rust-based agent harness with 60+ tools, multi-provider LLM support, and cross-platform integration.",
+        "url": url,
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "streaming": true,
+            "tools": true,
+            "multimodal": true,
+            "webhooks": ["telegram", "discord", "slack", "whatsapp", "homeassistant", "signal"],
+            "mcp": true
+        },
+        "defaultInputModes": ["text/plain", "image/png", "image/jpeg"],
+        "defaultOutputModes": ["text/plain", "application/json"],
+        "skills": [
+            {
+                "id": "chat",
+                "name": "General Chat",
+                "description": "Multi-turn conversation with tool use"
+            },
+            {
+                "id": "coding",
+                "name": "Code Assistant",
+                "description": "Code generation, review, debugging, and refactoring"
+            }
+        ]
+    }))
+}
+
 /// Prometheus-compatible metrics endpoint.
 ///
 /// Returns metrics in Prometheus text exposition format (text/plain).
@@ -865,7 +911,7 @@ async fn list_sessions_handler(
     } else {
         store.list_recent_sessions(params.limit)
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "sessions": sessions,
@@ -880,7 +926,7 @@ async fn get_session_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let session = store
         .get_session(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match session {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
@@ -895,7 +941,7 @@ async fn delete_session_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let deleted = store
         .delete_session(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
@@ -950,7 +996,7 @@ async fn session_messages_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let messages = store
         .load_messages(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -975,7 +1021,7 @@ async fn fork_session_handler(
 
     store
         .fork_session(&id, &new_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "source_session_id": id,
@@ -991,7 +1037,7 @@ async fn update_session_title_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let updated = store
         .set_title(&id, &request.title)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1020,7 +1066,7 @@ async fn export_session_handler(
 
     let stored = store
         .load_messages(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if stored.is_empty() {
         return Err((
@@ -1076,7 +1122,7 @@ async fn purge_sessions_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let purged = store
         .purge_older_than(params.older_than_days)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "purged": purged,
@@ -1091,7 +1137,7 @@ async fn get_session_tags_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tags = store
         .get_tags(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
 }
 
@@ -1109,7 +1155,7 @@ async fn set_session_tags_handler(
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
     store
         .set_tags(&id, &tag_refs)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": request.tags })))
 }
 
@@ -1120,10 +1166,10 @@ async fn add_session_tag_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let added = store
         .add_tag(&id, &tag)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     let tags = store
         .get_tags(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags })))
 }
 
@@ -1134,10 +1180,10 @@ async fn remove_session_tag_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let removed = store
         .remove_tag(&id, &tag)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     let tags = store
         .get_tags(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags })))
 }
 
@@ -1148,7 +1194,7 @@ async fn sessions_by_tag_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let sessions = store
         .sessions_by_tag(&tag)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() })))
 }
 
@@ -1220,7 +1266,7 @@ async fn bulk_export_handler(
     let limit = params.limit.unwrap_or(1000);
     let sessions = store
         .list_recent_sessions(limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     use genesis_tools::builtins::export::{export_json, export_jsonl};
 
@@ -1307,7 +1353,7 @@ async fn insights_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let data = store
         .insights(params.days)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(data).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
@@ -1318,7 +1364,7 @@ async fn usage_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let stats = store
         .usage_stats()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
@@ -1330,7 +1376,7 @@ async fn usage_handler(
 
 /// Request body for creating/updating a skill.
 #[derive(Debug, Deserialize)]
-pub struct UpsertSkillRequest {
+pub(crate) struct UpsertSkillRequest {
     pub name: String,
     pub description: String,
     pub instructions: String,
@@ -1352,7 +1398,7 @@ async fn list_skills_handler(
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skills = store
         .list_all()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1368,7 +1414,7 @@ async fn get_skill_handler(
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skill = store
         .get(&name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match skill {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
@@ -1390,7 +1436,7 @@ async fn upsert_skill_handler(
             request.trigger_hint.as_deref(),
             &tag_refs,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(skill).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
@@ -1402,7 +1448,7 @@ async fn delete_skill_handler(
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let deleted = store
         .delete(&name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "name": name})))
@@ -1418,7 +1464,7 @@ async fn search_skills_handler(
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skills = store
         .find_by_tag(&params.tag)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1465,7 +1511,7 @@ async fn list_memories_handler(
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
     let memories = store
         .list(params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let count = memories.len();
     Ok(Json(serde_json::json!({
@@ -1541,7 +1587,7 @@ async fn delete_memory_handler(
     let store = MemoryStore::new(db_path);
     let deleted = store
         .delete(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if deleted {
         // Also clean up any associated embedding (best-effort)
@@ -1582,7 +1628,7 @@ async fn embed_memories_handler(
 
     let memories = memory_store
         .list(10000)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let mut embedded = 0usize;
     let mut skipped = 0usize;
@@ -1654,7 +1700,7 @@ async fn embed_single_memory_handler(
     // Find the memory by direct ID lookup
     let memory = memory_store
         .get(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?
+        .map_err(storage_err)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
 
     genesis_core::embedding::embed_and_store(
@@ -1710,7 +1756,7 @@ async fn list_schedules_handler(
     } else {
         store.list_all()
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    .map_err(storage_err)?;
 
     let count = schedules.len();
     Ok(Json(serde_json::json!({
@@ -1726,7 +1772,7 @@ async fn get_schedule_handler(
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let schedule = store
         .get(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match schedule {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
@@ -1741,7 +1787,7 @@ async fn create_schedule_handler(
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let schedule = store
         .create(&request.id, &request.cron_expression, &request.destination, &request.prompt)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok((StatusCode::CREATED, Json(serde_json::to_value(schedule).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
 }
@@ -1753,7 +1799,7 @@ async fn delete_schedule_handler(
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let deleted = store
         .delete(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
@@ -1770,7 +1816,7 @@ async fn set_schedule_enabled_handler(
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let updated = store
         .set_enabled(&id, request.enabled)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if updated {
         Ok(Json(serde_json::json!({
@@ -1811,7 +1857,7 @@ async fn list_user_traits_handler(
     } else {
         store.list_all()
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+    .map_err(storage_err)?;
 
     let count = traits.len();
     Ok(Json(serde_json::json!({
@@ -1827,7 +1873,7 @@ async fn get_user_trait_handler(
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let user_trait = store
         .get(&key)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match user_trait {
         Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
@@ -1847,7 +1893,7 @@ async fn observe_user_trait_handler(
             &request.value,
             request.source_session.as_deref(),
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok((StatusCode::OK, Json(serde_json::to_value(observed).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)))
 }
@@ -1859,7 +1905,7 @@ async fn delete_user_trait_handler(
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let deleted = store
         .delete(&key)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
@@ -1877,7 +1923,7 @@ async fn get_subagent_handler(
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
     let subagent = store
         .get(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match subagent {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?)),
@@ -1892,7 +1938,7 @@ async fn list_session_subagents_handler(
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
     let subagents = store
         .list_by_parent(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let count = subagents.len();
     Ok(Json(serde_json::json!({
@@ -1921,7 +1967,7 @@ async fn skill_usage_stats_handler(
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let stats = store
         .stats(&name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?))
 }
@@ -1934,7 +1980,7 @@ async fn skill_usage_recent_handler(
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let usages = store
         .recent_usages(&name, params.limit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     let count = usages.len();
     Ok(Json(serde_json::json!({
@@ -3264,7 +3310,7 @@ async fn chat_stream_handler(
 
 /// A single prompt within a batch request.
 #[derive(Debug, Deserialize)]
-pub struct BatchItem {
+pub(crate) struct BatchItem {
     pub message: String,
     #[serde(default = "default_platform")]
     pub platform: String,
@@ -3279,7 +3325,7 @@ pub struct BatchItem {
 
 /// Request body for the `/chat/batch` endpoint.
 #[derive(Debug, Deserialize)]
-pub struct BatchRequest {
+pub(crate) struct BatchRequest {
     pub items: Vec<BatchItem>,
     /// Maximum concurrent executions (default: 4, max: 16).
     #[serde(default = "default_batch_concurrency")]
@@ -3292,7 +3338,7 @@ fn default_batch_concurrency() -> usize {
 
 /// Result of a single item in a batch.
 #[derive(Debug, Serialize)]
-pub struct BatchItemResult {
+pub(crate) struct BatchItemResult {
     pub index: usize,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3309,7 +3355,7 @@ pub struct BatchItemResult {
 
 /// Response body for the `/chat/batch` endpoint.
 #[derive(Debug, Serialize)]
-pub struct BatchResponse {
+pub(crate) struct BatchResponse {
     pub results: Vec<BatchItemResult>,
     pub total_items: usize,
     pub successful: usize,
@@ -3473,7 +3519,7 @@ async fn list_approved_handler(
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let users = store
         .list_approved(params.platform.as_deref())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "approved": users,
@@ -3488,7 +3534,7 @@ async fn list_pending_handler(
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let pending = store
         .list_pending(params.platform.as_deref())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "pending": pending,
@@ -3503,7 +3549,7 @@ async fn approve_pairing_handler(
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let approved = store
         .approve_code(&request.platform, &request.code)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     match approved {
         Some(user) => Ok(Json(serde_json::json!({
@@ -3521,7 +3567,7 @@ async fn revoke_pairing_handler(
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let revoked = store
         .revoke(&request.platform, &request.user_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     if revoked {
         Ok(Json(serde_json::json!({
@@ -3544,7 +3590,7 @@ async fn clear_pending_handler(
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let cleared = store
         .clear_pending(request.platform.as_deref())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {e}")))?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "cleared": cleared,

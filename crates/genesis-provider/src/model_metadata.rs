@@ -1,6 +1,7 @@
 //! Well-known model metadata for context limits and capability detection.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Metadata describing a model's capabilities and limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,19 +214,21 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
     models.into_iter().map(|m| (m.model, m)).collect()
 }
 
+/// Lazily-initialized metadata table built once on first access.
+static KNOWN_METADATA: LazyLock<HashMap<&'static str, ModelMetadata>> =
+    LazyLock::new(known_metadata);
+
 /// Look up metadata for a specific model name.
 /// Falls back to a fuzzy match if the exact name isn't found
 /// (e.g. "gpt-4.1" matches "gpt-4.1" even when passed as "gpt-4.1-2025xxxx").
 pub fn lookup(model: &str) -> Option<ModelMetadata> {
-    let db = known_metadata();
-
     // Exact match first
-    if let Some(m) = db.get(model) {
+    if let Some(m) = KNOWN_METADATA.get(model) {
         return Some(m.clone());
     }
 
     // Try prefix match (for versioned model names like "claude-sonnet-4-20250514-v2")
-    for (name, meta) in &db {
+    for (name, meta) in KNOWN_METADATA.iter() {
         if model.starts_with(name) {
             return Some(meta.clone());
         }

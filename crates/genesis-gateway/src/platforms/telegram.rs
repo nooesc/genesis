@@ -23,7 +23,7 @@ use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::verify::verify_telegram_webhook_secret;
+use crate::verify::verify_secret_token;
 use crate::AppState;
 
 /// Telegram Bot API token, loaded from environment.
@@ -441,7 +441,7 @@ pub async fn webhook_handler(
         .get("x-telegram-bot-api-secret-token")
         .and_then(|value| value.to_str().ok());
 
-    if !verify_telegram_webhook_secret(&expected_webhook_secret, provided_webhook_secret) {
+    if !verify_secret_token(&expected_webhook_secret, provided_webhook_secret) {
         warn!("telegram webhook secret verification failed");
         return StatusCode::UNAUTHORIZED;
     }

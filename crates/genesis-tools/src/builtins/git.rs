@@ -141,11 +141,9 @@ impl ToolHandler for GitDiffTool {
             args.push(range);
         }
 
-        // Owned string needed for the separator; keep it alive across the call.
-        let separator = "--".to_owned();
         let file_list: Vec<&str>;
         if let Some(paths) = file_paths {
-            args.push(&separator);
+            args.push("--");
             file_list = paths.split_whitespace().collect();
             args.extend(&file_list);
         }
@@ -209,9 +207,8 @@ impl ToolHandler for GitLogTool {
             args.push(&until_flag);
         }
 
-        let separator = "--".to_owned();
         if let Some(fp) = file_path {
-            args.push(&separator);
+            args.push("--");
             args.push(fp);
         }
 
@@ -435,6 +432,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

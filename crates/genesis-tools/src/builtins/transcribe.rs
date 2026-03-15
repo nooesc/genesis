@@ -50,10 +50,6 @@ impl ToolHandler for TranscribeTool {
         let api_base = call
             .arguments
             .get("api_base")
-            .or({
-                // Fall back to environment variable.
-                None // Handled below via env
-            })
             .cloned()
             .or_else(|| std::env::var("OPENAI_API_BASE").ok())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
@@ -195,6 +191,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

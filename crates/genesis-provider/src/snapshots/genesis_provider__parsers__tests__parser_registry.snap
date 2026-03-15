@@ -1,0 +1,53 @@
+---
+source: crates/genesis-provider/src/parsers.rs
+assertion_line: 1232
+expression: results
+---
+- - deepseek-v3
+  - true
+- - deepseek-v3.1
+  - true
+- - deepseek-v31
+  - true
+- - deepseek_v3
+  - true
+- - deepseek_v3.1
+  - true
+- - deepseek_v31
+  - true
+- - glm-4.5
+  - true
+- - glm-4.7
+  - true
+- - glm4.5
+  - true
+- - glm4.7
+  - true
+- - glm45
+  - true
+- - glm47
+  - true
+- - hermes
+  - true
+- - kimi-k2
+  - true
+- - kimi_k2
+  - true
+- - llama
+  - true
+- - llama3
+  - true
+- - llama4
+  - true
+- - longcat
+  - true
+- - mistral
+  - true
+- - qwen
+  - true
+- - qwen25
+  - true
+- - qwen3-coder
+  - true
+- - qwen3_coder
+  - true

@@ -34,7 +34,9 @@ pub trait ToolCallParser: Send + Sync {
 
 /// Generate a unique tool call ID.
 fn gen_call_id() -> String {
-    format!("call_{}", &Uuid::new_v4().simple().to_string()[..8])
+    let mut buf = [0u8; 32];
+    Uuid::new_v4().simple().encode_lower(&mut buf);
+    format!("call_{}", std::str::from_utf8(&buf[..8]).expect("encode_lower writes valid ASCII"))
 }
 
 /// Build a [`ToolCallEntry`] from name and arguments JSON string.
@@ -279,7 +281,7 @@ impl ToolCallParser for LlamaParser {
                         first_match_pos = Some(i);
                     }
 
-                    let name = val["name"].as_str().unwrap().to_owned();
+                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
                     let arguments = val
                         .get("arguments")
                         .or_else(|| val.get("parameters"))
@@ -878,6 +880,7 @@ pub fn normalize_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     // -- Hermes --
 
@@ -1192,6 +1195,45 @@ mod tests {
         );
     }
 
+    // -- Snapshot tests (insta) --
+
+    #[test]
+    fn snapshot_parser_registry() {
+        // Verify all known parser name aliases are stable and resolve correctly.
+        let known_parsers = [
+            "hermes",
+            "qwen",
+            "qwen25",
+            "longcat",
+            "mistral",
+            "llama",
+            "llama3",
+            "llama4",
+            "deepseek_v3",
+            "deepseek-v3",
+            "deepseek_v31",
+            "deepseek-v31",
+            "deepseek_v3.1",
+            "deepseek-v3.1",
+            "kimi_k2",
+            "kimi-k2",
+            "glm45",
+            "glm-4.5",
+            "glm4.5",
+            "glm47",
+            "glm-4.7",
+            "glm4.7",
+            "qwen3_coder",
+            "qwen3-coder",
+        ];
+        let mut results: Vec<(&str, bool)> = known_parsers
+            .iter()
+            .map(|name| (*name, get_parser(name).is_some()))
+            .collect();
+        results.sort_by_key(|(name, _)| *name);
+        insta::assert_yaml_snapshot!("parser_registry", results);
+    }
+
     #[test]
     fn normalize_response_skips_when_native_tool_calls_present() {
         use crate::api_types::*;
@@ -1229,5 +1271,43 @@ mod tests {
         let tc = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0].id, "existing");
+    }
+
+    // -- tracing-test log assertions --
+
+    #[traced_test]
+    #[test]
+    fn malformed_json_in_hermes_tag_logs_warning() {
+        let parser = HermesParser;
+        let text = r#"<tool_call>this is not json</tool_call>"#;
+        let result = parser.parse(text);
+        // Parser should return None because no valid tool calls were found
+        assert!(result.is_none());
+        // Verify the warning was emitted
+        assert!(logs_contain("failed to parse tool call JSON"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn malformed_json_in_longcat_tag_logs_warning() {
+        let parser = LongcatParser;
+        let text = r#"<longcat_tool_call>{invalid json here</longcat_tool_call>"#;
+        let result = parser.parse(text);
+        assert!(result.is_none());
+        assert!(logs_contain("failed to parse tool call JSON"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn hermes_partial_valid_logs_warning_for_bad_entries() {
+        let parser = HermesParser;
+        // First tool call is valid, second is malformed JSON
+        let text = r#"<tool_call>{"name": "search", "arguments": {"q": "test"}}</tool_call>
+<tool_call>NOT VALID JSON</tool_call>"#;
+        let result = parser.parse(text).expect("should parse the valid call");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].function.name, "search");
+        // The malformed entry should have logged a warning
+        assert!(logs_contain("failed to parse tool call JSON"));
     }
 }

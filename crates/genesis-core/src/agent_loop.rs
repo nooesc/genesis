@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use genesis_provider::{
-    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent,
-    ProviderError, ToolCallEntry,
+    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, ContentPart,
+    MessageContent, ProviderError, ToolCallEntry,
 };
 use genesis_tools::{ToolCall, ToolError};
 use serde::{Deserialize, Serialize};
@@ -658,14 +658,10 @@ impl AgentLoop {
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
             let result = cg.check_input(user_message);
             if !result.passed {
-                let blocked_reasons: Vec<&str> = result.violations.iter()
-                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                    .map(|v| v.message.as_str())
-                    .collect();
                 let agent_result = AgentResult {
                     response: format!(
                         "Your input was blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     ),
                     turns_used: 0,
                     tool_calls_made: 0,
@@ -771,7 +767,7 @@ impl AgentLoop {
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
+            debug!(turn = turns_used, mode = "blocking", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -1041,13 +1037,9 @@ impl AgentLoop {
             if let Some(ref cg) = self.compiled_guardrails {
                 let result = cg.check_output(&response_text);
                 if !result.passed {
-                    let blocked_reasons: Vec<&str> = result.violations.iter()
-                        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                        .map(|v| v.message.as_str())
-                        .collect();
                     response_text = format!(
                         "Response blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     );
                 } else {
                     response_text = result.content;
@@ -1117,14 +1109,10 @@ impl AgentLoop {
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
             let result = cg.check_input(user_message);
             if !result.passed {
-                let blocked_reasons: Vec<&str> = result.violations.iter()
-                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                    .map(|v| v.message.as_str())
-                    .collect();
                 let agent_result = AgentResult {
                     response: format!(
                         "Your input was blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     ),
                     turns_used: 0,
                     tool_calls_made: 0,
@@ -1233,7 +1221,7 @@ impl AgentLoop {
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
+            debug!(turn = turns_used, mode = "streaming", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -1623,13 +1611,9 @@ impl AgentLoop {
                     if let Some(ref cg) = self.compiled_guardrails {
                         let gr = cg.check_output(&response_text);
                         if !gr.passed {
-                            let blocked_reasons: Vec<&str> = gr.violations.iter()
-                                .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                                .map(|v| v.message.as_str())
-                                .collect();
                             response_text = format!(
                                 "Response blocked by guardrails: {}",
-                                blocked_reasons.join("; ")
+                                format_blocked_reasons(&gr)
                             );
                         } else {
                             response_text = gr.content;
@@ -1829,6 +1813,67 @@ impl AgentLoop {
         }
     }
 
+    /// Replace old tool result content with a compact placeholder to reduce
+    /// token usage without an LLM call. Preserves tool call (assistant)
+    /// messages so the reasoning chain remains intact.
+    ///
+    /// Based on "The Complexity Trap" (NeurIPS 2025): observation masking
+    /// achieves ~52% cost reduction while maintaining or improving solve rate.
+    fn mask_old_tool_outputs(&mut self) {
+        /// Number of recent messages to protect from masking (approximately
+        /// the last 4 assistant + tool result pairs).
+        const PROTECT_RECENT: usize = 8;
+        /// Only mask tool outputs longer than this many bytes.
+        const MIN_CONTENT_LEN: usize = 200;
+
+        let has_system = self.messages.first().is_some_and(|m| m.role == "system");
+        let start = if has_system { 1 } else { 0 };
+        let end = self.messages.len().saturating_sub(PROTECT_RECENT);
+
+        if end <= start {
+            return;
+        }
+
+        let mut masked_count = 0u32;
+        for msg in &mut self.messages[start..end] {
+            if msg.role == "tool" {
+                if let Some(ref content) = msg.content {
+                    let text_len = match content {
+                        MessageContent::Text(t) => t.len(),
+                        MessageContent::Parts(parts) => {
+                            // Skip masking if any part is non-text (e.g. images)
+                            // to avoid silently discarding non-text content.
+                            let all_text = parts
+                                .iter()
+                                .all(|p| matches!(p, ContentPart::Text { .. }));
+                            if !all_text {
+                                continue;
+                            }
+                            parts
+                                .iter()
+                                .map(|p| match p {
+                                    ContentPart::Text { text } => text.len(),
+                                    _ => 0,
+                                })
+                                .sum()
+                        }
+                    };
+                    if text_len > MIN_CONTENT_LEN {
+                        msg.content = Some(MessageContent::Text(
+                            "[Tool output masked — see preceding tool call for context]"
+                                .to_owned(),
+                        ));
+                        masked_count += 1;
+                    }
+                }
+            }
+        }
+
+        if masked_count > 0 {
+            info!(masked_count, "masked old tool outputs to reduce context tokens");
+        }
+    }
+
     /// Prune messages to stay within context limits, preserving the system
     /// prompt at index 0 (if present) and the most recent messages.
     ///
@@ -1855,6 +1900,10 @@ impl AgentLoop {
         if drop_count == 0 {
             return;
         }
+
+        // Lightweight first pass: mask old tool outputs (no LLM call).
+        // Only runs when context is actually under pressure (drop_count > 0).
+        self.mask_old_tool_outputs();
 
         // Extract the messages we're about to drop and summarize them.
         let to_drop: Vec<ChatMessage> =
@@ -2250,20 +2299,20 @@ fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentErro
 /// Suggest tool names similar to `name` using edit distance.
 /// Returns up to 3 suggestions sorted by similarity.
 fn suggest_similar_tools(name: &str, tools: &ToolRuntime) -> Vec<String> {
+    let name_lower = name.to_lowercase();
     let mut scored: Vec<(String, usize)> = tools
         .definitions()
         .iter()
         .filter_map(|def| {
-            let dist = edit_distance(&name.to_lowercase(), &def.name.to_lowercase());
+            let def_lower = def.name.to_lowercase();
+            let dist = edit_distance(&name_lower, &def_lower);
             let max_len = name.len().max(def.name.len());
             // Only suggest if within 40% edit distance
             if max_len > 0 && dist <= max_len * 2 / 5 {
                 Some((def.name.clone(), dist))
             } else {
                 // Also match if one is a substring of the other
-                let nl = name.to_lowercase();
-                let dl = def.name.to_lowercase();
-                if dl.contains(&nl) || nl.contains(&dl) {
+                if def_lower.contains(&name_lower) || name_lower.contains(&def_lower) {
                     Some((def.name.clone(), dist))
                 } else {
                     None
@@ -2292,6 +2341,16 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[n]
+}
+
+fn format_blocked_reasons(result: &crate::guardrails::GuardrailResult) -> String {
+    result
+        .violations
+        .iter()
+        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+        .map(|v| v.message.as_str())
+        .collect::<Vec<&str>>()
+        .join("; ")
 }
 
 #[cfg(test)]
@@ -3439,5 +3498,124 @@ mod tests {
         let args = "not json";
         let summary = summarize_args(args);
         assert_eq!(summary, "not json");
+    }
+
+    #[test]
+    fn mask_old_tool_outputs_replaces_long_content() {
+        let mut agent = test_agent();
+
+        let long_output = "x".repeat(300);
+        let short_output = "short result";
+
+        // Build a conversation with tool results:
+        // [0] system
+        // [1] user
+        // [2] assistant (tool call)
+        // [3] tool result (long — should be masked)
+        // [4] assistant
+        // [5] user
+        // [6] assistant (tool call)
+        // [7] tool result (short — should NOT be masked even though old)
+        // [8] assistant
+        // --- last 8 messages boundary: messages 9..16 are protected ---
+        // [9] user
+        // [10] assistant (tool call)
+        // [11] tool result (long — protected, should NOT be masked)
+        // [12] assistant
+        // [13] user
+        // [14] assistant (tool call)
+        // [15] tool result (long — protected, should NOT be masked)
+        // [16] assistant
+
+        // Old region (will be checked for masking)
+        agent.messages.push(ChatMessage::user("do something"));
+        agent.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![ToolCallEntry {
+                id: "tc1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "shell".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }],
+        ));
+        agent.messages.push(ChatMessage::tool_result("tc1", &long_output));
+        agent.messages.push(ChatMessage::assistant("got it"));
+        agent.messages.push(ChatMessage::user("more"));
+        agent.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![ToolCallEntry {
+                id: "tc2".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "shell".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }],
+        ));
+        agent.messages.push(ChatMessage::tool_result("tc2", short_output));
+        agent.messages.push(ChatMessage::assistant("ok"));
+
+        // Protected region (last 8 messages)
+        agent.messages.push(ChatMessage::user("recent"));
+        agent.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![ToolCallEntry {
+                id: "tc3".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "shell".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }],
+        ));
+        agent.messages.push(ChatMessage::tool_result("tc3", &long_output));
+        agent.messages.push(ChatMessage::assistant("noted"));
+        agent.messages.push(ChatMessage::user("last one"));
+        agent.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![ToolCallEntry {
+                id: "tc4".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "shell".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            }],
+        ));
+        agent.messages.push(ChatMessage::tool_result("tc4", &long_output));
+        agent.messages.push(ChatMessage::assistant("done"));
+
+        assert_eq!(agent.messages().len(), 17); // 1 system + 16
+
+        agent.mask_old_tool_outputs();
+
+        // Message [3] (tool, long, old) → masked
+        assert_eq!(
+            agent.messages()[3].content_text().unwrap(),
+            "[Tool output masked — see preceding tool call for context]"
+        );
+
+        // Message [7] (tool, short, old) → NOT masked (below threshold)
+        assert_eq!(
+            agent.messages()[7].content_text().unwrap(),
+            short_output,
+        );
+
+        // Message [11] (tool, long, recent/protected) → NOT masked
+        assert_eq!(
+            agent.messages()[11].content_text().unwrap(),
+            long_output.as_str(),
+        );
+
+        // Message [15] (tool, long, recent/protected) → NOT masked
+        assert_eq!(
+            agent.messages()[15].content_text().unwrap(),
+            long_output.as_str(),
+        );
+
+        // System prompt untouched
+        assert_eq!(agent.messages()[0].role, "system");
     }
 }

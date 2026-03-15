@@ -40,7 +40,7 @@ impl ToolHandler for SpawnSubagentTool {
             .cloned()
             .unwrap_or_else(|| "subagent".to_owned());
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
 
         let subagent_id = generate_subagent_id(&context.session_id);
@@ -97,7 +97,7 @@ impl ToolHandler for CheckSubagentTool {
                 argument: "subagent_id",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = SubagentStore::new(&db_path);
 
         let subagent = store
@@ -141,7 +141,7 @@ pub struct ListSubagentsTool;
 
 impl ToolHandler for ListSubagentsTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = SubagentStore::new(&db_path);
 
         let subagents = store
@@ -206,6 +206,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

@@ -3,6 +3,7 @@ pub mod http;
 pub mod url_safety;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use genesis_types::ToolDefinition;
@@ -61,7 +62,7 @@ pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ToolContext {
     pub session_id: String,
     pub profile: String,
@@ -75,10 +76,62 @@ pub struct ToolContext {
     /// tool call's `working_dir` argument. Used by worktree isolation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_working_dir: Option<String>,
+    /// Sandbox executor for lifecycle-managed backends (Singularity, Modal, Daytona).
+    /// When set, the shell tool delegates command execution to this instead of
+    /// spawning CLI processes directly.
+    #[serde(skip)]
+    pub sandbox_manager: Option<Arc<dyn SandboxExecutor>>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("session_id", &self.session_id)
+            .field("profile", &self.profile)
+            .field("data_dir", &self.data_dir)
+            .field("allow_destructive_tools", &self.allow_destructive_tools)
+            .field("terminal_backend", &self.terminal_backend)
+            .field("default_working_dir", &self.default_working_dir)
+            .field("sandbox_manager", &self.sandbox_manager.as_ref().map(|_| ".."))
+            .finish()
+    }
+}
+
+impl PartialEq for ToolContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.profile == other.profile
+            && self.data_dir == other.data_dir
+            && self.allow_destructive_tools == other.allow_destructive_tools
+            && self.terminal_backend == other.terminal_backend
+            && self.default_working_dir == other.default_working_dir
+        // sandbox_manager intentionally excluded from equality comparison
+    }
+}
+
+impl ToolContext {
+    /// Return the path to the SQLite database for this context's data directory.
+    pub fn db_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join("genesis.db")
+    }
+}
+
+/// Trait for lifecycle-managed sandbox command execution.
+///
+/// Implemented in genesis-core to bridge the async `SandboxManager` into the
+/// sync `ToolHandler` interface. When present in `ToolContext`, the shell tool
+/// delegates to this instead of spawning CLI processes directly.
+pub trait SandboxExecutor: Send + Sync {
+    fn execute_in_sandbox(
+        &self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<(String, i32), String>;
 }
 
 /// Configurable terminal backend for shell command execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum TerminalBackend {
     /// Execute inside a Docker container.
@@ -105,6 +158,9 @@ pub enum TerminalBackend {
     #[serde(rename = "singularity")]
     Singularity {
         image: String,
+        cpu: f32,
+        memory_mb: u32,
+        persistent: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         bind: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,27 +169,40 @@ pub enum TerminalBackend {
     /// Execute via Modal cloud sandbox (`modal shell --cmd ...`).
     #[serde(rename = "modal")]
     Modal {
-        /// Modal app or sandbox name.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        app: Option<String>,
-        /// GPU type to request (e.g. "T4", "A10G").
-        #[serde(skip_serializing_if = "Option::is_none")]
-        gpu: Option<String>,
         /// Docker image to use for the sandbox.
         #[serde(skip_serializing_if = "Option::is_none")]
         image: Option<String>,
-        /// Timeout in seconds for the sandbox.
+        cpu: f32,
+        memory_mb: u32,
+        disk_mb: u32,
+        persistent: bool,
+        /// GPU type to request (e.g. "T4", "A10G").
         #[serde(skip_serializing_if = "Option::is_none")]
-        timeout: Option<u64>,
+        gpu: Option<String>,
+        /// Modal app or sandbox name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
     /// Execute in a Daytona workspace (`daytona exec ...`).
     #[serde(rename = "daytona")]
     Daytona {
-        /// Workspace ID or name.
-        workspace: String,
-        /// Project within the workspace.
+        /// Docker image to use for the workspace.
         #[serde(skip_serializing_if = "Option::is_none")]
-        project: Option<String>,
+        image: Option<String>,
+        cpu: f32,
+        memory_mb: u32,
+        disk_mb: u32,
+        persistent: bool,
+        /// Daytona target (runner/region).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Daytona API URL override.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
 }
 
@@ -1614,6 +1683,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
@@ -1785,7 +1855,11 @@ mod tests {
             app: Some("my-app".to_owned()),
             gpu: Some("A10G".to_owned()),
             image: None,
-            timeout: Some(300),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         };
         let json = serde_json::to_string(&backend).expect("serialize");
         assert!(json.contains("\"type\":\"modal\""));
@@ -1796,8 +1870,14 @@ mod tests {
     #[test]
     fn terminal_backend_daytona_round_trips() {
         let backend = super::TerminalBackend::Daytona {
-            workspace: "ws-123".to_owned(),
-            project: Some("main".to_owned()),
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: Some("us".to_owned()),
+            api_url: None,
+            working_dir: None,
         };
         let json = serde_json::to_string(&backend).expect("serialize");
         assert!(json.contains("\"type\":\"daytona\""));

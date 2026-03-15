@@ -512,6 +512,15 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS sandboxes (
+                id            TEXT PRIMARY KEY,
+                backend       TEXT NOT NULL,
+                task_id       TEXT NOT NULL,
+                snapshot_data TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                last_active   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(backend, task_id)
+            );
             ",
         )
         .map_err(|source| StorageError::Sqlite {
@@ -718,21 +727,37 @@ fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), St
     Ok(())
 }
 
-/// Migrate v8 → v9: add provider_metadata column to messages table.
+/// Migrate v8 → v9: add provider_metadata column and sandboxes table.
 fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    // Check if column already exists (idempotent).
+    // Add provider_metadata column (idempotent).
     let has_column: bool = connection
         .prepare("SELECT provider_metadata FROM messages LIMIT 0")
         .is_ok();
 
-    if has_column {
-        return Ok(());
+    if !has_column {
+        connection
+            .execute(
+                "ALTER TABLE messages ADD COLUMN provider_metadata TEXT",
+                [],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: database_path.to_path_buf(),
+                source,
+            })?;
     }
 
+    // Add sandboxes table for sandbox terminal backend persistence.
     connection
-        .execute(
-            "ALTER TABLE messages ADD COLUMN provider_metadata TEXT",
-            [],
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS sandboxes (
+                id            TEXT PRIMARY KEY,
+                backend       TEXT NOT NULL,
+                task_id       TEXT NOT NULL,
+                snapshot_data TEXT,
+                created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                last_active   TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(backend, task_id)
+            );",
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -1432,38 +1457,52 @@ impl SessionStore {
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
         let connection = open(&self.database_path)?;
         let cutoff = format!("-{days} days");
-        // Gather session IDs to purge
-        let mut stmt = connection
-            .prepare("SELECT id FROM sessions WHERE created_at < datetime('now', ?1)")
+
+        // Enable foreign keys so ON DELETE CASCADE removes messages automatically.
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let ids: Vec<String> = stmt
-            .query_map(params![cutoff], |row| row.get(0))
+
+        let tx = connection
+            .unchecked_transaction()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+            })?;
 
-        for id in &ids {
-            let _ = connection.execute(
-                "DELETE FROM session_search WHERE session_id = ?1",
-                params![id],
-            );
-            let _ = connection.execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![id],
-            );
-            let _ = connection.execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                params![id],
-            );
-        }
+        // Remove FTS entries (virtual table, no FK support).
+        tx.execute(
+            "DELETE FROM session_search WHERE session_id IN (
+                 SELECT id FROM sessions WHERE created_at < datetime('now', ?1)
+             )",
+            params![cutoff],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
 
-        Ok(ids.len() as u64)
+        // Delete sessions; ON DELETE CASCADE handles messages.
+        tx.execute(
+            "DELETE FROM sessions WHERE created_at < datetime('now', ?1)",
+            params![cutoff],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        let deleted = tx.changes() as u64;
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        Ok(deleted)
     }
 
     /// Load all messages for a session in chronological order.
@@ -1752,6 +1791,7 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// Count total number of sessions.
     pub fn count_sessions(&self) -> Result<u64, StorageError> {
         let connection = open(&self.database_path)?;
         let count: i64 = connection
@@ -2386,6 +2426,26 @@ impl SkillStore {
         }
     }
 
+    fn row_to_skill(row: &rusqlite::Row) -> Result<StoredSkill, rusqlite::Error> {
+        let tags_str: String = row.get(4)?;
+        let tags = if tags_str.is_empty() {
+            Vec::new()
+        } else {
+            tags_str.split(',').map(|s| s.to_owned()).collect()
+        };
+
+        Ok(StoredSkill {
+            name: row.get(0)?,
+            description: row.get(1)?,
+            instructions: row.get(2)?,
+            trigger_hint: row.get(3)?,
+            tags,
+            version: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
     /// Create or update a skill. If the skill already exists, its version is bumped.
     pub fn upsert(
         &self,
@@ -2431,25 +2491,7 @@ impl SkillStore {
                 "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
                  FROM skills WHERE name = ?1",
                 params![name],
-                |row| {
-                    let tags_str: String = row.get(4)?;
-                    let tags = if tags_str.is_empty() {
-                        Vec::new()
-                    } else {
-                        tags_str.split(',').map(|s| s.to_owned()).collect()
-                    };
-
-                    Ok(StoredSkill {
-                        name: row.get(0)?,
-                        description: row.get(1)?,
-                        instructions: row.get(2)?,
-                        trigger_hint: row.get(3)?,
-                        tags,
-                        version: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
+                Self::row_to_skill,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -2472,25 +2514,7 @@ impl SkillStore {
             })?;
 
         let skills = stmt
-            .query_map([], |row| {
-                let tags_str: String = row.get(4)?;
-                let tags = if tags_str.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_str.split(',').map(|s| s.to_owned()).collect()
-                };
-
-                Ok(StoredSkill {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    instructions: row.get(2)?,
-                    trigger_hint: row.get(3)?,
-                    tags,
-                    version: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map([], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -2520,25 +2544,7 @@ impl SkillStore {
             })?;
 
         let skills = stmt
-            .query_map(params![pattern], |row| {
-                let tags_str: String = row.get(4)?;
-                let tags = if tags_str.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_str.split(',').map(|s| s.to_owned()).collect()
-                };
-
-                Ok(StoredSkill {
-                    name: row.get(0)?,
-                    description: row.get(1)?,
-                    instructions: row.get(2)?,
-                    trigger_hint: row.get(3)?,
-                    tags,
-                    version: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
+            .query_map(params![pattern], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3147,31 +3153,26 @@ impl MemoryStore {
     /// Get a single memory by ID. Returns `None` if not found.
     pub fn get(&self, id: &str) -> Result<Option<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
-        let mut stmt = connection
-            .prepare(
+        connection
+            .query_row(
                 "SELECT id, session_id, kind, content, created_at
                  FROM memories WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(StoredMemory {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        content: row.get(3)?,
+                        created_at: row.get(4)?,
+                    })
+                },
             )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        let result = stmt
-            .query_row(params![id], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
             .optional()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?;
-        Ok(result)
+            })
     }
 
     /// Full-text search across stored memories.
@@ -3371,10 +3372,26 @@ fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
 }
 
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
-    Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
+    let conn = Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
         source,
-    })
+    })?;
+
+    // Performance PRAGMAs — WAL mode enables concurrent readers + single writer,
+    // NORMAL sync is crash-safe in WAL mode, busy_timeout prevents SQLITE_BUSY
+    // under concurrent access from gateway + CLI.
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|source| StorageError::OpenDatabase {
+        path: database_path.to_path_buf(),
+        source,
+    })?;
+
+    Ok(conn)
 }
 
 impl ImportStatus {
@@ -3505,7 +3522,16 @@ impl PairingStore {
         let db = &self.database_path;
         let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
 
-        if let Some(p) = platform {
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<ApprovedUser> {
+            Ok(ApprovedUser {
+                platform: row.get(0)?,
+                user_id: row.get(1)?,
+                user_name: row.get(2)?,
+                approved_at: row.get(3)?,
+            })
+        };
+
+        let users = if let Some(p) = platform {
             let mut stmt = connection
                 .prepare(
                     "SELECT platform, user_id, user_name, approved_at
@@ -3513,19 +3539,11 @@ impl PairingStore {
                      ORDER BY approved_at DESC",
                 )
                 .map_err(me)?;
-            let users = stmt
-                .query_map(params![p], |row| {
-                    Ok(ApprovedUser {
-                        platform: row.get(0)?,
-                        user_id: row.get(1)?,
-                        user_name: row.get(2)?,
-                        approved_at: row.get(3)?,
-                    })
-                })
+            let rows = stmt.query_map(params![p], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(users)
+            rows
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3534,20 +3552,14 @@ impl PairingStore {
                      ORDER BY platform, approved_at DESC",
                 )
                 .map_err(me)?;
-            let users = stmt
-                .query_map([], |row| {
-                    Ok(ApprovedUser {
-                        platform: row.get(0)?,
-                        user_id: row.get(1)?,
-                        user_name: row.get(2)?,
-                        approved_at: row.get(3)?,
-                    })
-                })
+            let rows = stmt.query_map([], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(users)
-        }
+            rows
+        };
+
+        Ok(users)
     }
 
     /// Generate a pairing code for a new user.
@@ -3734,7 +3746,7 @@ impl PairingStore {
             })
         };
 
-        if let Some(p) = platform {
+        let pending = if let Some(p) = platform {
             let mut stmt = connection
                 .prepare(
                     "SELECT platform, code, user_id, user_name, created_at
@@ -3742,12 +3754,11 @@ impl PairingStore {
                      ORDER BY created_at DESC",
                 )
                 .map_err(me)?;
-            let pending = stmt
-                .query_map(params![p], map_row)
+            let rows = stmt.query_map(params![p], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(pending)
+            rows
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3756,13 +3767,14 @@ impl PairingStore {
                      ORDER BY platform, created_at DESC",
                 )
                 .map_err(me)?;
-            let pending = stmt
-                .query_map([], map_row)
+            let rows = stmt.query_map([], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(pending)
-        }
+            rows
+        };
+
+        Ok(pending)
     }
 
     /// Revoke an approved user's access.
@@ -3908,7 +3920,6 @@ impl ChannelStore {
                 source,
             })?;
 
-        let mut count = 0usize;
         for ch in channels {
             connection
                 .execute(
@@ -3926,10 +3937,9 @@ impl ChannelStore {
                     path: self.database_path.clone(),
                     source,
                 })?;
-            count += 1;
         }
 
-        Ok(count)
+        Ok(channels.len())
     }
 
     /// Check if channels for a platform are cached and fresh (within max_age_secs).
@@ -4057,14 +4067,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Query audit entries by event type.
@@ -4098,14 +4105,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Query recent audit entries across all sessions.
@@ -4138,14 +4142,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(entries)
+            })
     }
 
     /// Count total audit entries and entries per event type.
@@ -4172,14 +4173,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut stats = Vec::new();
-        for row in rows {
-            stats.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(stats)
+            })
     }
 
     /// Aggregate tool usage analytics from tool_call_end audit events.
@@ -4221,14 +4219,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut analytics = Vec::new();
-        for row in rows {
-            analytics.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(analytics)
+            })
     }
 
     /// Aggregate LLM usage analytics from llm_response audit events.
@@ -4269,14 +4264,11 @@ impl AuditLogStore {
                 source,
             })?;
 
-        let mut analytics = Vec::new();
-        for row in rows {
-            analytics.push(row.map_err(|source| StorageError::Sqlite {
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?);
-        }
-        Ok(analytics)
+            })
     }
 
     /// Delete audit entries older than the given number of days.
@@ -4357,7 +4349,7 @@ impl ResponseCacheStore {
                 source,
             })?;
 
-        if let Some(ref _e) = entry {
+        if entry.is_some() {
             let _ = connection.execute(
                 "UPDATE response_cache SET hit_count = hit_count + 1 WHERE cache_key = ?1",
                 params![cache_key],
@@ -4542,6 +4534,321 @@ impl StickerCacheStore {
                 source,
             })?;
         Ok(count as u64)
+    }
+}
+
+/// A sandbox instance record persisted to SQLite.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxRow {
+    pub id: String,
+    pub backend: String,
+    pub task_id: String,
+    pub snapshot_data: Option<String>,
+    pub created_at: String,
+    pub last_active: String,
+}
+
+/// SQLite-backed store for sandbox terminal backend records.
+pub struct SandboxStore {
+    database_path: PathBuf,
+}
+
+impl SandboxStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Insert or replace a sandbox record, keyed on (backend, task_id).
+    pub fn upsert(
+        &self,
+        id: &str,
+        backend: &str,
+        task_id: &str,
+        snapshot_data: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO sandboxes (id, backend, task_id, snapshot_data, created_at, last_active)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))
+                 ON CONFLICT(backend, task_id) DO UPDATE SET
+                     id = excluded.id,
+                     snapshot_data = excluded.snapshot_data,
+                     last_active = datetime('now')",
+                params![id, backend, task_id, snapshot_data],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Find a sandbox by (backend, task_id).
+    pub fn find_by_task(
+        &self,
+        backend: &str,
+        task_id: &str,
+    ) -> Result<Option<SandboxRow>, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT id, backend, task_id, snapshot_data, created_at, last_active
+                 FROM sandboxes WHERE backend = ?1 AND task_id = ?2",
+                params![backend, task_id],
+                |row| {
+                    Ok(SandboxRow {
+                        id: row.get(0)?,
+                        backend: row.get(1)?,
+                        task_id: row.get(2)?,
+                        snapshot_data: row.get(3)?,
+                        created_at: row.get(4)?,
+                        last_active: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    /// Update the last_active timestamp for a sandbox by id.
+    pub fn update_activity(&self, id: &str) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "UPDATE sandboxes SET last_active = datetime('now') WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Delete a sandbox record by id.
+    pub fn delete(&self, id: &str) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute("DELETE FROM sandboxes WHERE id = ?1", params![id])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// List all sandbox records, optionally filtered by backend.
+    pub fn list(&self, backend: Option<&str>) -> Result<Vec<SandboxRow>, StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let (sql, param): (&str, Option<&str>) = if backend.is_some() {
+            (
+                "SELECT id, backend, task_id, snapshot_data, created_at, last_active
+                 FROM sandboxes WHERE backend = ?1
+                 ORDER BY last_active DESC",
+                backend,
+            )
+        } else {
+            (
+                "SELECT id, backend, task_id, snapshot_data, created_at, last_active
+                 FROM sandboxes ORDER BY last_active DESC",
+                None,
+            )
+        };
+
+        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        let row_mapper = |row: &rusqlite::Row| {
+            Ok(SandboxRow {
+                id: row.get(0)?,
+                backend: row.get(1)?,
+                task_id: row.get(2)?,
+                snapshot_data: row.get(3)?,
+                created_at: row.get(4)?,
+                last_active: row.get(5)?,
+            })
+        };
+
+        let rows: Vec<SandboxRow> = if let Some(b) = param {
+            stmt.query_map(params![b], row_mapper)
+        } else {
+            stmt.query_map([], row_mapper)
+        }
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        Ok(rows)
+    }
+
+    /// Delete sandbox records that have not been active for more than `days` days.
+    /// Returns the number of records deleted.
+    pub fn cleanup_older_than(&self, days: u32) -> Result<usize, StorageError> {
+        let connection = open(&self.database_path)?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM sandboxes WHERE last_active < datetime('now', '-' || ?1 || ' days')",
+                params![days],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod sandbox_store_tests {
+    use super::{bootstrap, migrate_to_v9, open, SandboxStore};
+    use rusqlite::params;
+    use tempfile::tempdir;
+
+    #[test]
+    fn sandbox_store_upserts_and_finds_by_task() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        let store = SandboxStore::new(&db_path);
+        store
+            .upsert("sb-1", "singularity", "task-abc", Some(r#"{"key":"val"}"#))
+            .expect("upsert should succeed");
+
+        let row = store
+            .find_by_task("singularity", "task-abc")
+            .expect("find_by_task should succeed")
+            .expect("row should exist");
+
+        assert_eq!(row.id, "sb-1");
+        assert_eq!(row.backend, "singularity");
+        assert_eq!(row.task_id, "task-abc");
+        assert_eq!(row.snapshot_data.as_deref(), Some(r#"{"key":"val"}"#));
+        assert!(!row.created_at.is_empty());
+        assert!(!row.last_active.is_empty());
+    }
+
+    #[test]
+    fn sandbox_store_upsert_replaces_existing() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        let store = SandboxStore::new(&db_path);
+        store
+            .upsert("sb-old", "modal", "task-1", None)
+            .expect("first upsert");
+        store
+            .upsert("sb-new", "modal", "task-1", Some("updated"))
+            .expect("second upsert replaces by UNIQUE(backend, task_id)");
+
+        let row = store
+            .find_by_task("modal", "task-1")
+            .expect("find_by_task should succeed")
+            .expect("row should exist");
+
+        assert_eq!(row.id, "sb-new");
+        assert_eq!(row.snapshot_data.as_deref(), Some("updated"));
+    }
+
+    #[test]
+    fn sandbox_store_delete_removes_record() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        let store = SandboxStore::new(&db_path);
+        store
+            .upsert("sb-del", "daytona", "task-del", None)
+            .expect("upsert should succeed");
+
+        store.delete("sb-del").expect("delete should succeed");
+
+        let row = store
+            .find_by_task("daytona", "task-del")
+            .expect("find_by_task should succeed");
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn sandbox_store_list_filters_by_backend() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        let store = SandboxStore::new(&db_path);
+        store.upsert("sb-a1", "singularity", "task-a1", None).expect("upsert a1");
+        store.upsert("sb-a2", "singularity", "task-a2", None).expect("upsert a2");
+        store.upsert("sb-b1", "modal", "task-b1", None).expect("upsert b1");
+
+        let singularity_rows = store
+            .list(Some("singularity"))
+            .expect("list singularity should succeed");
+        assert_eq!(singularity_rows.len(), 2);
+        assert!(singularity_rows.iter().all(|r| r.backend == "singularity"));
+
+        let all_rows = store.list(None).expect("list all should succeed");
+        assert_eq!(all_rows.len(), 3);
+    }
+
+    #[test]
+    fn sandbox_store_cleanup_older_than_removes_stale() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        let store = SandboxStore::new(&db_path);
+        store.upsert("sb-fresh", "singularity", "task-fresh", None).expect("upsert fresh");
+        store.upsert("sb-stale", "singularity", "task-stale", None).expect("upsert stale");
+
+        // Backdate the stale record's last_active by 10 days.
+        let connection = open(&db_path).expect("open should succeed");
+        connection
+            .execute(
+                "UPDATE sandboxes SET last_active = datetime('now', '-10 days') WHERE id = ?1",
+                params!["sb-stale"],
+            )
+            .expect("backdate should succeed");
+        drop(connection);
+
+        let deleted = store.cleanup_older_than(5).expect("cleanup should succeed");
+        assert_eq!(deleted, 1);
+
+        let remaining = store.list(None).expect("list should succeed");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "sb-fresh");
+    }
+
+    #[test]
+    fn migrate_to_v9_creates_sandboxes_table() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap should succeed");
+
+        // Running migrate_to_v9 again must be idempotent (CREATE TABLE IF NOT EXISTS).
+        let connection = open(&db_path).expect("open should succeed");
+        migrate_to_v9(&connection, &db_path).expect("migrate_to_v9 should be idempotent");
+
+        // Confirm the table exists by querying it.
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sandboxes", [], |row| row.get(0))
+            .expect("sandboxes table should exist");
+        assert_eq!(count, 0);
     }
 }
 
@@ -4781,6 +5088,18 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "s-3");
+    }
+
+    #[test]
+    fn session_store_count_sessions() {
+        let (_dir, store) = bootstrapped_store();
+        assert_eq!(store.count_sessions().unwrap(), 0);
+
+        store.create_session("s-count-1", "cli", None).unwrap();
+        assert_eq!(store.count_sessions().unwrap(), 1);
+
+        store.create_session("s-count-2", "api", None).unwrap();
+        assert_eq!(store.count_sessions().unwrap(), 2);
     }
 
     #[test]

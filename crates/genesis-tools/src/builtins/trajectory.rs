@@ -280,7 +280,7 @@ impl TrajectoryTool {
         };
 
         let mut trajectory = load_trajectory(context, &call.name)?;
-        trajectory.outcome = Some(outcome_value.clone());
+        trajectory.outcome = Some(outcome_value);
         save_trajectory(context, &call.name, &trajectory)?;
 
         Ok(ToolOutput {
@@ -400,6 +400,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

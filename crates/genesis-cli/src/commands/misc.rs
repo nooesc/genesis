@@ -117,6 +117,7 @@ pub(crate) async fn run_mcp(
                 allow_destructive_tools: false,
                 terminal_backend: None,
                 default_working_dir: None,
+                sandbox_manager: None,
             };
 
             let backend = std::sync::Arc::new(RegistryMcpBackend { registry, context });

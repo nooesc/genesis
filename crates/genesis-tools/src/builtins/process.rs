@@ -132,14 +132,6 @@ impl ToolHandler for ListProcessesTool {
 /// Expected columns (space-separated, command is the remainder):
 ///   USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND
 fn parse_ps_line(line: &str) -> Option<PsEntry> {
-    let parts: Vec<&str> = line.splitn(11, char::is_whitespace).collect();
-    // We need at least 11 fields; the last field is the full command.
-    if parts.len() < 11 {
-        return None;
-    }
-
-    // Skip empty tokens produced by consecutive whitespace. We re-parse
-    // more carefully by collecting non-empty segments.
     let tokens: Vec<&str> = line.split_whitespace().collect();
     if tokens.len() < 11 {
         return None;
@@ -313,7 +305,7 @@ fn run_cmd(program: &str, args: &[&str]) -> String {
         .args(args)
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_else(|| "(command failed)".to_owned())
 }
 
@@ -415,7 +407,10 @@ fn extract_vm_stat_value(line: &str, key: &str) -> Option<u64> {
 }
 
 fn get_memory_info_linux() -> String {
-    let meminfo = run_cmd("cat", &["/proc/meminfo"]);
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to read /proc/meminfo");
+        String::new()
+    });
     let mut total_kb: u64 = 0;
     let mut available_kb: u64 = 0;
     let mut free_kb: u64 = 0;
@@ -554,6 +549,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

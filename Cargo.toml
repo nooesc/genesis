@@ -22,6 +22,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 async-stream = "0.3.6"
+async-trait = "0.1"
 base64 = "0.22"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4.40", features = ["clock"] }
@@ -51,6 +52,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
+tracing-test = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
@@ -59,3 +61,10 @@ owo-colors = "4"
 unicode-width = "0.2"
 termimad = "0.30"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+which = "6"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+opt-level = "s"

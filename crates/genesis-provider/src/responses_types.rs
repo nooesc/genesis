@@ -563,6 +563,7 @@ mod tests {
                         "properties": {"query": {"type": "string"}},
                         "required": ["query"]
                     })),
+                    strict: Some(true),
                 },
             },
             ChatTool {
@@ -571,6 +572,7 @@ mod tests {
                     name: "echo".to_owned(),
                     description: "Echo text".to_owned(),
                     parameters: None,
+                    strict: Some(true),
                 },
             },
         ];

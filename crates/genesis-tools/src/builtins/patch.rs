@@ -337,9 +337,27 @@ fn line_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// Classic Levenshtein edit distance, O(n*m) time and O(min(n,m)) space.
+///
+/// When both inputs are pure ASCII, delegates to [`levenshtein_bytes`] which
+/// operates directly on byte slices, avoiding the two `Vec<char>` heap
+/// allocations that the general path requires.
 fn levenshtein(a: &str, b: &str) -> usize {
+    // Fast path: skip Vec<char> allocations for ASCII-only strings.
+    if a.is_ascii() && b.is_ascii() {
+        return levenshtein_bytes(a.as_bytes(), b.as_bytes());
+    }
+
+    // General path for non-ASCII (multi-byte chars need char-level indexing).
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
+
+    // Ensure the DP row is sized by the shorter string to minimize space.
+    let (a_chars, b_chars) = if a_chars.len() < b_chars.len() {
+        (b_chars, a_chars)
+    } else {
+        (a_chars, b_chars)
+    };
+
     let n = a_chars.len();
     let m = b_chars.len();
 
@@ -365,6 +383,41 @@ fn levenshtein(a: &str, b: &str) -> usize {
             curr[j] = (prev[j] + 1) // deletion
                 .min(curr[j - 1] + 1) // insertion
                 .min(prev[j - 1] + cost); // substitution
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[m]
+}
+
+/// Levenshtein edit distance on raw byte slices (ASCII fast path).
+///
+/// Identical algorithm to the char-based version but avoids heap-allocating
+/// `Vec<char>` since each byte maps 1:1 to a character for ASCII input.
+fn levenshtein_bytes(a: &[u8], b: &[u8]) -> usize {
+    // Ensure the DP row is sized by the shorter slice to minimize space.
+    let (a, b) = if a.len() < b.len() { (b, a) } else { (a, b) };
+
+    let n = a.len();
+    let m = b.len();
+
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0usize; m + 1];
+
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -414,6 +467,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

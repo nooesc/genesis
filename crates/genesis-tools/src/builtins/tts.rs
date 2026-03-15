@@ -41,13 +41,18 @@ impl ToolHandler for TextToSpeechTool {
             }
         }
 
-        let output = Command::new("edge-tts")
-            .args(build_edge_tts_args(text, voice, output_path, rate))
-            .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to spawn edge-tts: {e}"),
-            })?;
+        let mut cmd = Command::new("edge-tts");
+        cmd.arg("--text").arg(text);
+        cmd.arg("--voice").arg(voice);
+        cmd.arg("--write-media").arg(output_path);
+        if let Some(r) = rate {
+            cmd.arg("--rate").arg(r);
+        }
+
+        let output = cmd.output().map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("failed to spawn edge-tts: {e}"),
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -72,29 +77,6 @@ impl ToolHandler for TextToSpeechTool {
     }
 }
 
-fn build_edge_tts_args(
-    text: &str,
-    voice: &str,
-    output_path: &str,
-    rate: Option<&str>,
-) -> Vec<String> {
-    let mut args = vec![
-        "--text".to_owned(),
-        text.to_owned(),
-        "--voice".to_owned(),
-        voice.to_owned(),
-        "--write-media".to_owned(),
-        output_path.to_owned(),
-    ];
-
-    if let Some(rate) = rate {
-        args.push("--rate".to_owned());
-        args.push(rate.to_owned());
-    }
-
-    args
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +89,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
@@ -144,39 +127,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn build_edge_tts_args_uses_defaults() {
-        let args = build_edge_tts_args("hello", DEFAULT_VOICE, "out.mp3", None);
-        assert_eq!(
-            args,
-            vec![
-                "--text",
-                "hello",
-                "--voice",
-                DEFAULT_VOICE,
-                "--write-media",
-                "out.mp3",
-            ]
-        );
-    }
-
-    #[test]
-    fn build_edge_tts_args_includes_rate_when_present() {
-        let args = build_edge_tts_args("hello", "en-GB-SoniaNeural", "out.mp3", Some("+20%"));
-        assert_eq!(
-            args,
-            vec![
-                "--text",
-                "hello",
-                "--voice",
-                "en-GB-SoniaNeural",
-                "--write-media",
-                "out.mp3",
-                "--rate",
-                "+20%",
-            ]
-        );
     }
 }

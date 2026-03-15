@@ -136,6 +136,7 @@ pub fn build_command(
             image,
             bind,
             working_dir: default_dir,
+            ..
         }) => {
             // Singularity/Apptainer: `singularity exec [--bind ...] [--pwd ...] image sh -c cmd`
             let mut cmd = Command::new("singularity");
@@ -155,9 +156,9 @@ pub fn build_command(
             app,
             gpu,
             image,
-            timeout,
+            ..
         }) => {
-            // Modal cloud sandbox: `modal shell [--gpu ...] [--image ...] [--timeout ...] --cmd 'command'`
+            // Modal cloud sandbox: `modal shell [--app ...] [--gpu ...] [--image ...] --cmd 'command'`
             let mut cmd = Command::new("modal");
             cmd.arg("shell");
             if let Some(a) = app {
@@ -169,27 +170,20 @@ pub fn build_command(
             if let Some(img) = image {
                 cmd.arg("--image").arg(img);
             }
-            if let Some(t) = timeout {
-                cmd.arg("--timeout").arg(t.to_string());
-            }
             cmd.arg("--cmd").arg(command);
             cmd
         }
         Some(crate::TerminalBackend::Daytona {
-            workspace,
-            project,
+            working_dir: default_dir,
+            ..
         }) => {
-            // Daytona workspace: `daytona exec [--project ...] workspace -- sh -c 'command'`
+            // Daytona workspace: `daytona exec -- sh -c 'command'`
             let mut cmd = Command::new("daytona");
-            cmd.arg("exec");
-            if let Some(p) = project {
-                cmd.arg("--project").arg(p);
+            cmd.arg("exec").arg("--").arg("sh").arg("-c").arg(command);
+            let dir = working_dir.or(default_dir.as_ref());
+            if let Some(d) = dir {
+                cmd.current_dir(d);
             }
-            cmd.arg(workspace)
-                .arg("--")
-                .arg("sh")
-                .arg("-c")
-                .arg(command);
             cmd
         }
         None => {
@@ -201,6 +195,19 @@ pub fn build_command(
             cmd
         }
     }
+}
+
+/// Returns true if the backend is a sandboxed container environment.
+/// Sandboxed backends provide their own security boundary, so host-level
+/// dangerous command checks can be skipped — the container is the guard.
+pub fn is_sandboxed_backend(backend: &Option<crate::TerminalBackend>) -> bool {
+    matches!(
+        backend,
+        Some(crate::TerminalBackend::Docker { .. })
+            | Some(crate::TerminalBackend::Singularity { .. })
+            | Some(crate::TerminalBackend::Modal { .. })
+            | Some(crate::TerminalBackend::Daytona { .. })
+    )
 }
 
 pub struct ShellExecTool;
@@ -215,19 +222,21 @@ impl ToolHandler for ShellExecTool {
                 argument: "command",
             })?;
 
-        // Check for dangerous patterns before executing
-        if let Some(danger) = check_dangerous(command) {
-            return Err(ToolError::ApprovalDenied {
-                tool: call.name.clone(),
-                reason: format!(
-                    "command blocked: {danger}. Command: `{}`",
-                    if command.len() > 80 {
-                        format!("{}...", &command[..77])
-                    } else {
-                        command.clone()
-                    }
-                ),
-            });
+        // Skip dangerous command checks for sandboxed backends — the container is the security boundary
+        if !is_sandboxed_backend(&context.terminal_backend) {
+            if let Some(danger) = check_dangerous(command) {
+                return Err(ToolError::ApprovalDenied {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "command blocked: {danger}. Command: `{}`",
+                        if command.len() > 80 {
+                            format!("{}...", &command[..77])
+                        } else {
+                            command.clone()
+                        }
+                    ),
+                });
+            }
         }
 
         let working_dir = call
@@ -239,6 +248,34 @@ impl ToolHandler for ShellExecTool {
             .get("timeout")
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
+        // Use lifecycle-managed sandbox execution when available
+        if let Some(ref executor) = context.sandbox_manager {
+            let (output, exit_code) = executor
+                .execute_in_sandbox(
+                    command,
+                    working_dir.map(|s| s.as_str()),
+                    timeout_secs,
+                )
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e,
+                })?;
+
+            let content = if output.is_empty() {
+                format!("(no output, exit code {exit_code})")
+            } else {
+                crate::truncate_output(&output)
+            };
+
+            return Ok(ToolOutput {
+                content,
+                metadata: BTreeMap::from([
+                    ("tool".to_owned(), call.name.clone()),
+                    ("exit_code".to_owned(), exit_code.to_string()),
+                ]),
+            });
+        }
 
         let mut cmd = build_command(command, working_dir, &context.terminal_backend);
 
@@ -353,9 +390,7 @@ impl ToolHandler for ShellExecTool {
         let exit_code = status.code().unwrap_or(-1);
 
         let mut content = String::new();
-        if !stdout.is_empty() {
-            content.push_str(&stdout);
-        }
+        content.push_str(&stdout);
         if !stderr.is_empty() {
             if !content.is_empty() {
                 content.push('\n');
@@ -394,6 +429,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 
@@ -474,6 +510,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: Some("/tmp".to_owned()),
+            sandbox_manager: None,
         };
 
         let output = tool.run(&call, &context).expect("should succeed");
@@ -502,6 +539,7 @@ mod tests {
             allow_destructive_tools: true,
             terminal_backend: None,
             default_working_dir: Some("/tmp".to_owned()),
+            sandbox_manager: None,
         };
 
         let output = tool.run(&call, &context).expect("should succeed");
@@ -657,6 +695,9 @@ mod tests {
     fn build_command_singularity_backend() {
         let backend = Some(crate::TerminalBackend::Singularity {
             image: "ubuntu.sif".to_owned(),
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: true,
             bind: Some(vec!["/data:/data".to_owned(), "/scratch:/scratch".to_owned()]),
             working_dir: Some("/workspace".to_owned()),
         });
@@ -676,6 +717,9 @@ mod tests {
     fn build_command_singularity_minimal() {
         let backend = Some(crate::TerminalBackend::Singularity {
             image: "pytorch.sif".to_owned(),
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: true,
             bind: None,
             working_dir: None,
         });
@@ -692,7 +736,11 @@ mod tests {
             app: Some("my-sandbox".to_owned()),
             gpu: Some("T4".to_owned()),
             image: Some("python:3.11".to_owned()),
-            timeout: Some(600),
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         });
         let cmd = build_command("python train.py", None, &backend);
         let prog = cmd.get_program();
@@ -705,8 +753,6 @@ mod tests {
         assert!(args.contains(&std::ffi::OsStr::new("T4")));
         assert!(args.contains(&std::ffi::OsStr::new("--image")));
         assert!(args.contains(&std::ffi::OsStr::new("python:3.11")));
-        assert!(args.contains(&std::ffi::OsStr::new("--timeout")));
-        assert!(args.contains(&std::ffi::OsStr::new("600")));
         assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
         assert!(args.contains(&std::ffi::OsStr::new("python train.py")));
     }
@@ -717,7 +763,11 @@ mod tests {
             app: None,
             gpu: None,
             image: None,
-            timeout: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: true,
+            working_dir: None,
         });
         let cmd = build_command("echo hi", None, &backend);
         let args: Vec<_> = cmd.get_args().collect();
@@ -730,30 +780,39 @@ mod tests {
     #[test]
     fn build_command_daytona_backend() {
         let backend = Some(crate::TerminalBackend::Daytona {
-            workspace: "ws-abc123".to_owned(),
-            project: Some("my-project".to_owned()),
+            image: None,
+            cpu: 2.0,
+            memory_mb: 8192,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
         });
         let cmd = build_command("npm test", None, &backend);
         let prog = cmd.get_program();
         assert_eq!(prog, "daytona");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("exec")));
-        assert!(args.contains(&std::ffi::OsStr::new("--project")));
-        assert!(args.contains(&std::ffi::OsStr::new("my-project")));
-        assert!(args.contains(&std::ffi::OsStr::new("ws-abc123")));
         assert!(args.contains(&std::ffi::OsStr::new("npm test")));
     }
 
     #[test]
     fn build_command_daytona_minimal() {
         let backend = Some(crate::TerminalBackend::Daytona {
-            workspace: "dev-ws".to_owned(),
-            project: None,
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: true,
+            target: None,
+            api_url: None,
+            working_dir: None,
         });
         let cmd = build_command("ls", None, &backend);
         let args: Vec<_> = cmd.get_args().collect();
-        assert!(!args.contains(&std::ffi::OsStr::new("--project")));
-        assert!(args.contains(&std::ffi::OsStr::new("dev-ws")));
+        assert!(args.contains(&std::ffi::OsStr::new("exec")));
+        assert!(args.contains(&std::ffi::OsStr::new("ls")));
     }
 
     #[test]
@@ -768,5 +827,49 @@ mod tests {
         let args: Vec<_> = cmd.get_args().collect();
         // The explicit working dir should be used
         assert!(args.contains(&std::ffi::OsStr::new("explicit")));
+    }
+
+    #[test]
+    fn is_sandboxed_backend_classification() {
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Singularity {
+            image: "test.sif".to_owned(),
+            bind: None,
+            working_dir: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            persistent: false,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Docker {
+            container: "test".to_owned(),
+            user: None,
+            working_dir: None,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Modal {
+            app: None,
+            gpu: None,
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 51200,
+            persistent: false,
+            working_dir: None,
+        })));
+        assert!(is_sandboxed_backend(&Some(crate::TerminalBackend::Daytona {
+            image: None,
+            cpu: 1.0,
+            memory_mb: 5120,
+            disk_mb: 10240,
+            persistent: false,
+            target: None,
+            api_url: None,
+            working_dir: None,
+        })));
+        assert!(!is_sandboxed_backend(&None));
+        assert!(!is_sandboxed_backend(&Some(crate::TerminalBackend::Ssh {
+            host: "test".to_owned(),
+            user: None,
+            port: None,
+            identity_file: None,
+        })));
     }
 }

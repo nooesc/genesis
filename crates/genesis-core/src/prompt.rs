@@ -2,6 +2,10 @@ use std::path::Path;
 
 use genesis_types::ToolDefinition;
 
+/// Prompt version — increment when behavioral instructions or prompt structure changes.
+/// Logged with every LLM call to correlate prompt versions with quality metrics.
+pub(crate) const PROMPT_VERSION: &str = "1.0.0";
+
 const DEFAULT_AGENT_NAME: &str = "Eve";
 const DEFAULT_AGENT_IDENTITY: &str = "\
 You are Eve, an intelligent AI agent built on the Genesis framework. You are \
@@ -212,6 +216,8 @@ impl<'a> SystemPromptBuilder<'a> {
         parts.push(format!(
             "Current time: {timestamp}. Platform: {os_platform}/{arch}."
         ));
+
+        parts.push(format!("[prompt_version: {}]", PROMPT_VERSION));
 
         parts.join("\n\n")
     }
@@ -848,5 +854,42 @@ mod tests {
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("## Personality"));
         assert!(prompt.contains("calmly"));
+    }
+
+    #[test]
+    fn build_includes_prompt_version_tag() {
+        let prompt = SystemPromptBuilder::new("default", &[]).build();
+        assert!(prompt.contains(&format!("[prompt_version: {}]", PROMPT_VERSION)));
+    }
+
+    // -- Snapshot tests (insta) --
+
+    /// Redact the dynamic timestamp and platform line that changes between runs.
+    fn redact_dynamic_lines(prompt: &str) -> String {
+        let mut lines: Vec<&str> = prompt.lines().collect();
+        for line in &mut lines {
+            if line.starts_with("Current time: ") {
+                *line = "Current time: [TIMESTAMP]. Platform: [OS]/[ARCH].";
+            }
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn snapshot_default_system_prompt() {
+        let tools = vec![];
+        let prompt = SystemPromptBuilder::new("default", &tools).build();
+        let stable = redact_dynamic_lines(&prompt);
+        insta::assert_snapshot!("default_system_prompt", stable);
+    }
+
+    #[test]
+    fn snapshot_system_prompt_with_platform() {
+        let tools = vec![];
+        let prompt = SystemPromptBuilder::new("default", &tools)
+            .delivery_platform("telegram")
+            .build();
+        let stable = redact_dynamic_lines(&prompt);
+        insta::assert_snapshot!("telegram_system_prompt", stable);
     }
 }

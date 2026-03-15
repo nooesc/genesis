@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use crate::{truncate_output, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const MAX_RESULTS: usize = 100;
+const MAX_RESULTS_STR: &str = "100";
 
 static RG_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -108,7 +108,7 @@ fn run_ripgrep(
 ) -> Result<std::process::Output, String> {
     let mut cmd = Command::new("rg");
     cmd.args(["--line-number", "--no-heading", "--color", "never"]);
-    cmd.args(["--max-count", &MAX_RESULTS.to_string()]);
+    cmd.args(["--max-count", MAX_RESULTS_STR]);
 
     if case_insensitive {
         cmd.arg("--ignore-case");
@@ -139,7 +139,7 @@ fn run_grep(
 ) -> Result<std::process::Output, String> {
     let mut cmd = Command::new("grep");
     cmd.args(["-rn", "--include=*"]);
-    cmd.args(["-m", &MAX_RESULTS.to_string()]);
+    cmd.args(["-m", MAX_RESULTS_STR]);
 
     if case_insensitive {
         cmd.arg("-i");
@@ -174,6 +174,7 @@ mod tests {
             allow_destructive_tools: false,
             terminal_backend: None,
             default_working_dir: None,
+            sandbox_manager: None,
         }
     }
 

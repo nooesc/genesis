@@ -203,7 +203,7 @@ pub async fn poll_for_authorization(
             403 | 404 => continue,
             status => {
                 return Err(AuthError::DeviceCodeRequest {
-                    message: format!("poll returned status {status}"),
+                    message: format!("device code poll returned unexpected status {status}"),
                 });
             }
         }

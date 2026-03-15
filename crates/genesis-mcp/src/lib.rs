@@ -14,12 +14,47 @@ use std::time::Duration;
 
 use genesis_types::ToolDefinition;
 use thiserror::Error;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 pub use client::{McpClient, McpServerConfig};
 pub use protocol::{McpPromptDef, McpResourceDef, PromptGetResult, ResourceReadResult};
 pub use server::{McpServeConfig, McpToolBackend, McpServerToolDef, run_stdio_server};
+
+/// Read a single newline-delimited line from an async reader, enforcing a
+/// maximum byte limit. Returns `Ok(None)` on EOF.
+///
+/// Uses the `take(max_bytes + 1)` trick so that an oversized frame that
+/// never sends a newline is detected without buffering unbounded data.
+pub(crate) async fn read_limited_stdin_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<String>, McpError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut limited = reader.take((max_bytes as u64).saturating_add(1));
+    let bytes_read = limited
+        .read_until(b'\n', &mut line)
+        .await
+        .map_err(|e| McpError::Transport(format!("line read error: {e}")))?;
+
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+
+    if !line.ends_with(b"\n") && bytes_read > max_bytes {
+        return Err(McpError::Protocol(format!(
+            "incoming frame exceeds {max_bytes} bytes"
+        )));
+    }
+
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| McpError::Protocol(format!("incoming frame was not valid UTF-8: {error}")))
+}
 
 #[derive(Debug, Error)]
 pub enum McpError {

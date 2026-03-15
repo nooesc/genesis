@@ -15,21 +15,11 @@ type HmacSha256 = Hmac<Sha256>;
 const WEBHOOK_TIMESTAMP_TOLERANCE_SECS: i64 = 300;
 
 /// Verify a simple token-style shared-secret header/value.
-pub fn verify_secret_token(secret: &str, provided: Option<&str>) -> bool {
+pub(crate) fn verify_secret_token(secret: &str, provided: Option<&str>) -> bool {
     match provided {
         Some(candidate) => constant_time_eq(secret.as_bytes(), candidate.as_bytes()),
         None => false,
     }
-}
-
-/// Verify a Home Assistant webhook secret token.
-pub fn verify_homeassistant_signature(secret: &str, provided: Option<&str>) -> bool {
-    verify_secret_token(secret, provided)
-}
-
-/// Verify a Telegram webhook secret token.
-pub fn verify_telegram_webhook_secret(secret: &str, provided: Option<&str>) -> bool {
-    verify_secret_token(secret, provided)
 }
 
 /// Verify whether a timestamp is inside the replay tolerance window.
@@ -57,7 +47,7 @@ fn timestamp_within_window(timestamp: &str, tolerance_secs: i64) -> bool {
 /// signing secret as key.
 ///
 /// Returns `true` if the signature is valid.
-pub fn verify_slack_signature(
+pub(crate) fn verify_slack_signature(
     signing_secret: &str,
     timestamp: &str,
     body: &[u8],
@@ -97,7 +87,7 @@ pub fn verify_slack_signature(
 ///
 /// The signature is computed over `{timestamp}{body}` using the
 /// application's public key.
-pub fn verify_discord_signature(
+pub(crate) fn verify_discord_signature(
     public_key_hex: &str,
     timestamp: &str,
     body: &[u8],
@@ -150,7 +140,7 @@ pub fn verify_discord_signature(
 /// WhatsApp includes an `x-hub-signature-256` header with the form:
 /// `sha256=<hex_hmac_sha256>`, where the HMAC is computed over the raw
 /// request body with the app secret as key.
-pub fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[u8]) -> bool {
+pub(crate) fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[u8]) -> bool {
     let signature = match signature.and_then(|sig| sig.strip_prefix("sha256=")) {
         Some(value) => value,
         None => return false,
@@ -167,7 +157,7 @@ pub fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[
 }
 
 /// Constant-time comparison to prevent timing attacks.
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -247,12 +237,6 @@ mod tests {
         assert!(verify_secret_token("webhook-secret", Some("webhook-secret")));
         assert!(!verify_secret_token("webhook-secret", Some("other")));
         assert!(!verify_secret_token("webhook-secret", None));
-    }
-
-    #[test]
-    fn telegram_signature_token_matches_expected() {
-        assert!(verify_telegram_webhook_secret("secret", Some("secret")));
-        assert!(!verify_telegram_webhook_secret("secret", Some("wrong")));
     }
 
     #[test]

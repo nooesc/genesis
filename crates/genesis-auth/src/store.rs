@@ -127,16 +127,16 @@ pub fn save_codex_tokens(path: &Path, tokens: CodexTokens, source: CredentialSou
     let mut store = read_store(path)?;
     store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
     let now = chrono::Utc::now().to_rfc3339();
-    store.updated_at = now.clone();
     store.providers.insert(
         CODEX_PROVIDER_ID.to_owned(),
         ProviderState::Codex(CodexState {
             tokens,
-            last_refresh: Some(now),
+            last_refresh: Some(now.clone()),
             auth_mode: AuthMode::Chatgpt,
             source,
         }),
     );
+    store.updated_at = now;
     write_store(path, &store)
 }
 

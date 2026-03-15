@@ -6,7 +6,9 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
 
-use crate::api_types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
+use crate::api_types::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatUsage,
+};
 use crate::error::ProviderError;
 use crate::resolve::ResolvedProvider;
 
@@ -61,6 +63,15 @@ impl ChatClient {
             headers.insert(
                 "anthropic-version",
                 HeaderValue::from_static("2023-06-01"),
+            );
+            // token-efficient-tools applies to all requests;
+            // fine-grained-tool-streaming only affects streaming calls
+            // but is harmless for non-streaming (Anthropic ignores it).
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(
+                    "token-efficient-tools-2025-02-19,fine-grained-tool-streaming-2025-05-14",
+                ),
             );
         } else if !is_gemini && !provider.api_key.is_empty() {
             let auth_value = format!("Bearer {}", provider.api_key);
@@ -281,26 +292,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|usage| {
-                (
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    usage.total_tokens,
-                )
-            })
-            .unwrap_or((0, 0, 0));
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = completion.usage.is_some(),
-            "chat completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "chat completion request succeeded",
         );
 
         Ok(completion)
@@ -349,21 +346,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
-
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = true,
-            "anthropic completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "anthropic completion request succeeded",
         );
 
         Ok(completion)
@@ -415,21 +403,12 @@ impl ChatClient {
             return Err(ProviderError::EmptyChoices);
         }
 
-        let (prompt_tokens, completion_tokens, total_tokens) = completion
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
-            .unwrap_or((0, 0, 0));
-
-        info!(
-            endpoint = self.endpoint.as_str(),
-            model = request.model.as_str(),
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            token_counts_available = completion.usage.is_some(),
-            "gemini completion request succeeded"
+        log_completion_success(
+            &self.endpoint,
+            &request.model,
+            started_at.elapsed().as_millis() as u64,
+            completion.usage.as_ref(),
+            "gemini completion request succeeded",
         );
 
         Ok(completion)
@@ -900,6 +879,54 @@ impl ChatClient {
             })
         }
     }
+
+    /// Pre-establish TCP+TLS connection to the provider endpoint.
+    ///
+    /// Fires a lightweight HEAD request to the base URL so that the underlying
+    /// connection pool completes DNS resolution, TCP handshake, and TLS
+    /// negotiation before the first real LLM request. This eliminates
+    /// cold-start latency that would otherwise be added to the first
+    /// `complete()` or `complete_stream()` call.
+    ///
+    /// Errors are silently ignored — warmup is best-effort.
+    pub async fn warmup(&self) {
+        let url = &self.endpoint;
+        match self.http.head(url).send().await {
+            Ok(r) => {
+                // Any response (even 405 Method Not Allowed) means the TCP+TLS
+                // connection has been established, which is the actual goal.
+                tracing::debug!(endpoint = %self.endpoint, status = %r.status(), "connection pre-established");
+            }
+            Err(e) => {
+                // Connection-level failure (DNS, TCP, TLS) — not critical,
+                // the first real request will establish the connection.
+                tracing::debug!(endpoint = %self.endpoint, error = %e, "connection warmup failed");
+            }
+        }
+    }
+}
+
+/// Log a successful (non-streaming) completion with token usage stats.
+fn log_completion_success(
+    endpoint: &str,
+    model: &str,
+    elapsed_ms: u64,
+    usage: Option<&ChatUsage>,
+    label: &str,
+) {
+    let (prompt_tokens, completion_tokens, total_tokens) = usage
+        .map(|u| (u.prompt_tokens, u.completion_tokens, u.total_tokens))
+        .unwrap_or((0, 0, 0));
+    info!(
+        endpoint,
+        model,
+        elapsed_ms,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        token_counts_available = usage.is_some(),
+        "{label}"
+    );
 }
 
 /// Backends that support Anthropic-style prompt caching via cache_control.
@@ -996,16 +1023,14 @@ async fn read_response_body_bytes(
     max_bytes: usize,
 ) -> Result<Vec<u8>, ProviderError> {
     let mut bytes = Vec::new();
-    let mut downloaded = 0usize;
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(ProviderError::Http)?;
-        if downloaded.saturating_add(chunk.len()) > max_bytes {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(ProviderError::ResponseTooLarge { max_bytes });
         }
 
-        downloaded = downloaded.saturating_add(chunk.len());
         bytes.extend_from_slice(&chunk);
     }
 
@@ -1031,13 +1056,17 @@ async fn read_json_with_limit<T: DeserializeOwned>(
 }
 
 fn take_next_sse_event(buffer: &mut String) -> Option<String> {
-    let normalized = buffer.replace("\r\n", "\n");
-    if let Some(index) = normalized.find("\n\n") {
-        let event = normalized[..index].to_owned();
-        *buffer = normalized[index + 2..].to_owned();
+    // Fast path: skip the replace allocation when no \r\n is present (common case).
+    // On the rare \r\n path we scan twice (contains + replace) instead of once,
+    // but avoid an unnecessary String allocation on every call.
+    if buffer.contains("\r\n") {
+        *buffer = buffer.replace("\r\n", "\n");
+    }
+    if let Some(index) = buffer.find("\n\n") {
+        let event = buffer[..index].to_owned();
+        *buffer = buffer[index + 2..].to_owned();
         Some(event)
     } else {
-        *buffer = normalized;
         None
     }
 }
