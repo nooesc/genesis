@@ -13,6 +13,9 @@
 //!   N,M,P - matches any listed value (items can be exact, range, or step)
 //! ```
 
+use chrono::Datelike;
+use chrono::Timelike;
+
 /// A parsed cron expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronExpr {
@@ -292,9 +295,6 @@ impl SchedulerRuntime {
         }
     }
 }
-
-use chrono::Timelike;
-use chrono::Datelike;
 
 #[cfg(test)]
 mod tests {

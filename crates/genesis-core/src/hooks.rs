@@ -61,10 +61,6 @@ impl HookRunner {
     }
 }
 
-pub fn load_hooks(config: Vec<HookConfig>) -> HookRunner {
-    HookRunner::new(config)
-}
-
 fn run_hook(config: &HookConfig, context: &serde_json::Value) -> HookResult {
     let started = Instant::now();
     let mut command = shell_command(&config.command);
@@ -153,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_hooks_builds_runner() {
+    fn hook_runner_new_builds_runner() {
         let hooks = vec![HookConfig {
             event: HookEvent::PreTurn,
             command: "true".to_owned(),
@@ -161,7 +157,7 @@ mod tests {
             enabled: true,
         }];
 
-        let runner = load_hooks(hooks.clone());
+        let runner = HookRunner::new(hooks.clone());
         assert_eq!(runner.hooks(), hooks.as_slice());
     }
 

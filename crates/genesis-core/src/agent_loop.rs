@@ -619,14 +619,10 @@ impl AgentLoop {
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
             let result = cg.check_input(user_message);
             if !result.passed {
-                let blocked_reasons: Vec<&str> = result.violations.iter()
-                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                    .map(|v| v.message.as_str())
-                    .collect();
                 let agent_result = AgentResult {
                     response: format!(
                         "Your input was blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     ),
                     turns_used: 0,
                     tool_calls_made: 0,
@@ -998,13 +994,9 @@ impl AgentLoop {
             if let Some(ref cg) = self.compiled_guardrails {
                 let result = cg.check_output(&response_text);
                 if !result.passed {
-                    let blocked_reasons: Vec<&str> = result.violations.iter()
-                        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                        .map(|v| v.message.as_str())
-                        .collect();
                     response_text = format!(
                         "Response blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     );
                 } else {
                     response_text = result.content;
@@ -1069,14 +1061,10 @@ impl AgentLoop {
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
             let result = cg.check_input(user_message);
             if !result.passed {
-                let blocked_reasons: Vec<&str> = result.violations.iter()
-                    .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                    .map(|v| v.message.as_str())
-                    .collect();
                 let agent_result = AgentResult {
                     response: format!(
                         "Your input was blocked by guardrails: {}",
-                        blocked_reasons.join("; ")
+                        format_blocked_reasons(&result)
                     ),
                     turns_used: 0,
                     tool_calls_made: 0,
@@ -1551,13 +1539,9 @@ impl AgentLoop {
                     if let Some(ref cg) = self.compiled_guardrails {
                         let gr = cg.check_output(&response_text);
                         if !gr.passed {
-                            let blocked_reasons: Vec<&str> = gr.violations.iter()
-                                .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-                                .map(|v| v.message.as_str())
-                                .collect();
                             response_text = format!(
                                 "Response blocked by guardrails: {}",
-                                blocked_reasons.join("; ")
+                                format_blocked_reasons(&gr)
                             );
                         } else {
                             response_text = gr.content;
@@ -2188,6 +2172,16 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[n]
+}
+
+fn format_blocked_reasons(result: &crate::guardrails::GuardrailResult) -> String {
+    result
+        .violations
+        .iter()
+        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
+        .map(|v| v.message.as_str())
+        .collect::<Vec<&str>>()
+        .join("; ")
 }
 
 #[cfg(test)]
