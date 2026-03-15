@@ -41,9 +41,13 @@ pub struct ChatClient {
 
 impl ChatClient {
     /// Create a new client from a resolved provider.
+    ///
+    /// The backend string is normalized to lowercase so all downstream
+    /// comparisons can use simple `==`.
     pub fn new(provider: &ResolvedProvider) -> Result<Self, ProviderError> {
-        let is_anthropic = provider.backend == "anthropic";
-        let is_gemini = matches!(provider.backend.as_str(), "gemini" | "google");
+        let backend = provider.backend.to_ascii_lowercase();
+        let is_anthropic = backend == "anthropic";
+        let is_gemini = matches!(backend.as_str(), "gemini" | "google");
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -111,7 +115,7 @@ impl ChatClient {
             http,
             endpoint,
             model: provider.model.clone(),
-            backend: provider.backend.clone(),
+            backend,
             api_key,
         })
     }

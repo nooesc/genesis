@@ -33,8 +33,11 @@ pub async fn client_from_config(
     base_url: Option<&str>,
     api_key_env: Option<&str>,
 ) -> Result<ChatClient, ProviderError> {
+    let backend = backend.trim().to_ascii_lowercase();
+    let backend = backend.as_str();
+
     // For openai-codex backend, try OAuth credentials first
-    if backend.trim().eq_ignore_ascii_case("openai-codex") {
+    if backend == "openai-codex" {
         match genesis_auth::default_auth_path() {
             Ok(auth_path) => {
                 match genesis_auth::codex::resolve_credentials(&auth_path).await {
