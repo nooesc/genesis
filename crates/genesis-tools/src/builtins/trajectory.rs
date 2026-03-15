@@ -395,12 +395,8 @@ mod tests {
     fn ctx(data_dir: &str) -> ToolContext {
         ToolContext {
             session_id: "session-42".to_owned(),
-            profile: "operator".to_owned(),
             data_dir: data_dir.to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx()
         }
     }
 

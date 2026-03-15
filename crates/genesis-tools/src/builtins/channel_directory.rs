@@ -437,13 +437,8 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         genesis_storage::bootstrap(&dir.join("genesis.db")).ok();
         ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
             data_dir: dir.to_string_lossy().to_string(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx()
         }
     }
 

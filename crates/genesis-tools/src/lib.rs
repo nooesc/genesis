@@ -1652,6 +1652,35 @@ impl ToolHandler for SessionInfoTool {
 }
 
 #[cfg(test)]
+pub mod test_utils {
+    use super::ToolContext;
+
+    /// Create a test `ToolContext` with standard defaults.
+    ///
+    /// Uses `allow_destructive_tools: false`. For tests requiring destructive
+    /// tool access, use [`test_ctx_destructive`] instead.
+    pub fn test_ctx() -> ToolContext {
+        ToolContext {
+            session_id: "test".to_owned(),
+            profile: "test".to_owned(),
+            data_dir: "/tmp".to_owned(),
+            allow_destructive_tools: false,
+            terminal_backend: None,
+            default_working_dir: None,
+            sandbox_manager: None,
+        }
+    }
+
+    /// Create a test `ToolContext` with destructive tool access enabled.
+    pub fn test_ctx_destructive() -> ToolContext {
+        ToolContext {
+            allow_destructive_tools: true,
+            ..test_ctx()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
@@ -1676,15 +1705,7 @@ mod tests {
     }
 
     fn sample_context() -> ToolContext {
-        ToolContext {
-            session_id: "session-42".to_owned(),
-            profile: "operator".to_owned(),
-            data_dir: "/tmp/genesis".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     #[test]
