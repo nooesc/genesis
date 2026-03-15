@@ -5,6 +5,7 @@ use genesis_storage::{
     bootstrap, InsightsData, MemoryStore, SessionStore, SessionSummary, SkillStore,
     StoredSchedule, UsageStats,
 };
+use genesis_ui::UiContext;
 
 use crate::{CliError, HubCommand, TapCommand};
 
@@ -25,7 +26,7 @@ pub(crate) fn context_template() -> &'static str {
 "
 }
 
-pub(crate) fn format_session_list(sessions: &[SessionSummary]) -> String {
+pub(crate) fn format_session_list(sessions: &[SessionSummary], ui: &UiContext) -> String {
     if sessions.is_empty() {
         return "no saved sessions".to_owned();
     }
@@ -34,7 +35,7 @@ pub(crate) fn format_session_list(sessions: &[SessionSummary]) -> String {
     for session in sessions {
         let tokens = session.total_input_tokens + session.total_output_tokens;
         let token_info = if tokens > 0 {
-            format!("  {}tok", tokens)
+            ui.format_metadata(&format!("  {}tok", tokens))
         } else {
             String::new()
         };
@@ -44,8 +45,9 @@ pub(crate) fn format_session_list(sessions: &[SessionSummary]) -> String {
             .map(|t| format!("  \"{t}\""))
             .unwrap_or_default();
         lines.push(format!(
-            "{}  {}  {}{title_info}{token_info}",
-            session.id, session.platform, session.created_at
+            "{}  {}",
+            ui.format_accent(&session.id),
+            ui.format_metadata(&format!("{}  {}{title_info}{token_info}", session.platform, session.created_at))
         ));
     }
     lines.join("\n")
@@ -144,28 +146,31 @@ pub(crate) fn format_memory_list(memories: &[genesis_storage::StoredMemory]) -> 
     lines.join("\n")
 }
 
-pub(crate) fn build_status_text(loaded: &LoadedConfig) -> String {
+pub(crate) fn build_status_text(loaded: &LoadedConfig, ui: &UiContext) -> String {
     let mut lines = vec!["genesis status".to_owned()];
     lines.push(String::new());
 
     // Config
     let config_exists = loaded.paths.config_path.exists();
     lines.push(format!(
-        "  config:    {} ({})",
+        "{}  {} ({})",
+        ui.format_metadata("  config:   "),
         loaded.paths.config_path.display(),
         if config_exists { "found" } else { "not found" }
     ));
 
     // Provider
     lines.push(format!(
-        "  provider:  {} / {}",
+        "{}  {} / {}",
+        ui.format_metadata("  provider: "),
         loaded.config.provider.backend, loaded.config.provider.model
     ));
 
     // Database
     let db_exists = loaded.config.storage.database_path.exists();
     lines.push(format!(
-        "  database:  {} ({})",
+        "{}  {} ({})",
+        ui.format_metadata("  database: "),
         loaded.config.storage.database_path.display(),
         if db_exists { "found" } else { "not found" }
     ));
@@ -180,28 +185,29 @@ pub(crate) fn build_status_text(loaded: &LoadedConfig) -> String {
             MemoryStore::new(&loaded.config.storage.database_path);
 
         if let Ok(stats) = session_store.usage_stats() {
-            lines.push(format!("  sessions:  {}", stats.total_sessions));
+            lines.push(format!("{}  {}", ui.format_metadata("  sessions: "), stats.total_sessions));
             let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
-            lines.push(format!("  tokens:    {total_tokens} total"));
+            lines.push(format!("{}  {total_tokens} total", ui.format_metadata("  tokens:   ")));
         }
         if let Ok(skills) = skill_store.list_all() {
-            lines.push(format!("  skills:    {}", skills.len()));
+            lines.push(format!("{}  {}", ui.format_metadata("  skills:   "), skills.len()));
         }
         if let Ok(schedules) = schedule_store.list_all() {
-            lines.push(format!("  schedules: {}", schedules.len()));
+            lines.push(format!("{}  {}", ui.format_metadata("  schedules:"), schedules.len()));
         }
         if let Ok(memories) = memory_store.list(usize::MAX) {
-            lines.push(format!("  memories:  {}", memories.len()));
+            lines.push(format!("{}  {}", ui.format_metadata("  memories: "), memories.len()));
         }
     }
 
     // MCP servers
     let mcp_count = loaded.config.mcp_servers.len();
-    lines.push(format!("  mcp:       {mcp_count} server(s) configured"));
+    lines.push(format!("{}  {mcp_count} server(s) configured", ui.format_metadata("  mcp:      ")));
 
     // Runtime
     lines.push(format!(
-        "  runtime:   max_turns={}, destructive={}",
+        "{}  max_turns={}, destructive={}",
+        ui.format_metadata("  runtime:  "),
         loaded.config.runtime.max_turns, loaded.config.runtime.allow_destructive_tools
     ));
 
@@ -816,7 +822,7 @@ pub(crate) fn format_schedule_list(schedules: &[StoredSchedule]) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn format_doctor_report(report: &genesis_core::DoctorReport) -> String {
+pub(crate) fn format_doctor_report(report: &genesis_core::DoctorReport, ui: &UiContext) -> String {
     let mut lines = vec![
         "genesis doctor".to_owned(),
         format!("profile: {}", report.profile),
@@ -829,7 +835,7 @@ pub(crate) fn format_doctor_report(report: &genesis_core::DoctorReport) -> Strin
     for check in &report.checks {
         lines.push(format!(
             "- [{}] {}: {}",
-            status_marker(&check.status),
+            status_marker(&check.status, ui),
             check.name,
             check.detail
         ));
@@ -844,15 +850,15 @@ pub(crate) fn format_doctor_report(report: &genesis_core::DoctorReport) -> Strin
     lines.join("\n")
 }
 
-pub(crate) fn status_marker(status: &genesis_core::CheckStatus) -> &'static str {
+pub(crate) fn status_marker(status: &genesis_core::CheckStatus, ui: &UiContext) -> String {
     match status {
-        genesis_core::CheckStatus::Pass => "ok",
-        genesis_core::CheckStatus::Warn => "warn",
-        genesis_core::CheckStatus::Fail => "fail",
+        genesis_core::CheckStatus::Pass => ui.format_success("ok"),
+        genesis_core::CheckStatus::Warn => ui.format_warning("warn"),
+        genesis_core::CheckStatus::Fail => ui.format_error("FAIL"),
     }
 }
 
-pub(crate) fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> String {
+pub(crate) fn format_bootstrap_report(report: &genesis_core::DoctorReport, ui: &UiContext) -> String {
     let mut lines = vec![
         "genesis storage bootstrap".to_owned(),
         format!("database: {}", report.database_path),
@@ -862,7 +868,7 @@ pub(crate) fn format_bootstrap_report(report: &genesis_core::DoctorReport) -> St
     for check in &report.checks {
         lines.push(format!(
             "- [{}] {}: {}",
-            status_marker(&check.status),
+            status_marker(&check.status, ui),
             check.name,
             check.detail
         ));

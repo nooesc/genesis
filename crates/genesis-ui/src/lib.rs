@@ -78,6 +78,14 @@ impl UiContext {
             text.to_string()
         }
     }
+
+    pub fn format_accent(&self, text: &str) -> String {
+        if self.colors_enabled {
+            text.style(self.styles.accent).to_string()
+        } else {
+            text.to_string()
+        }
+    }
 }
 
 #[cfg(test)]

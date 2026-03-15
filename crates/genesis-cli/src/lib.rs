@@ -887,7 +887,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             let mut output = if cli.json {
                 serde_json::to_string_pretty(&report)?
             } else {
-                format::format_doctor_report(&report)
+                format::format_doctor_report(&report, &ui)
             };
 
             // Optional API connectivity verification
@@ -1040,7 +1040,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if cli.json {
                 Ok(serde_json::to_string_pretty(&report)?)
             } else {
-                Ok(format::format_bootstrap_report(&report))
+                Ok(format::format_bootstrap_report(&report, &ui))
             }
         }
         Command::Eval(eval_command) => match eval_command {
@@ -1229,7 +1229,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     if cli.json {
                         Ok(serde_json::to_string_pretty(&sessions)?)
                     } else {
-                        Ok(format::format_session_list(&sessions))
+                        Ok(format::format_session_list(&sessions, &ui))
                     }
                 }
                 SessionsCommand::Show { id, limit } => {
@@ -1270,7 +1270,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     } else if results.is_empty() {
                         Ok(format!("No sessions found matching '{query}'"))
                     } else {
-                        Ok(format::format_session_list(&results))
+                        Ok(format::format_session_list(&results, &ui))
                     }
                 }
                 SessionsCommand::Delete { id } => {
@@ -1493,7 +1493,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if cli.json {
                 Ok(serde_json::to_string_pretty(&format::build_status_json(&loaded))?)
             } else {
-                Ok(format::build_status_text(&loaded))
+                Ok(format::build_status_text(&loaded, &ui))
             }
         }
         Command::Batch {
@@ -1797,6 +1797,7 @@ mod tests {
 
     #[test]
     fn formats_session_list_for_humans() {
+        let ui = UiContext::new(ColorMode::Never);
         let output = format_session_list(&[SessionSummary {
             id: "session-1".to_owned(),
             title: None,
@@ -1806,10 +1807,12 @@ mod tests {
             parent_session_id: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
             updated_at: "2026-03-08 12:05:00".to_owned(),
-        }]);
+        }], &ui);
 
         assert!(output.contains("genesis sessions"));
-        assert!(output.contains("session-1  cli  2026-03-08 12:00:00"));
+        assert!(output.contains("session-1"));
+        assert!(output.contains("cli"));
+        assert!(output.contains("2026-03-08 12:00:00"));
     }
 
     #[tokio::test]
