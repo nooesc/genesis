@@ -194,19 +194,8 @@ pub enum Command {
         #[arg(long, default_value = "30", help = "Number of days to analyze (default: 30)")]
         days: u32,
     },
-    #[command(about = "Initialize Genesis — interactive setup wizard (or pass flags for non-interactive)")]
+    #[command(alias = "setup", about = "Initialize Genesis — interactive setup wizard (or pass flags for non-interactive)")]
     Init {
-        #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
-        backend: Option<String>,
-        #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
-        model: Option<String>,
-        #[arg(long, help = "Base URL for the provider API")]
-        base_url: Option<String>,
-        #[arg(long, help = "Environment variable holding the API key")]
-        api_key_env: Option<String>,
-    },
-    #[command(about = "Run the interactive setup wizard (alias for `init`)", hide = true)]
-    Setup {
         #[arg(long, help = "LLM provider backend (e.g. openai, openrouter, anthropic)")]
         backend: Option<String>,
         #[arg(long, help = "Model name (e.g. gpt-4.1-mini, claude-sonnet-4-6)")]
@@ -1551,12 +1540,6 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Init {
-            backend,
-            model,
-            base_url,
-            api_key_env,
-        }
-        | Command::Setup {
             backend,
             model,
             base_url,
