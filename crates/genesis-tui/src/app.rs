@@ -1,10 +1,12 @@
 //! Application state and event dispatch.
 
-use crate::events::{AgentEvent, AppEvent, StatusState, Submission, TuiEvent};
+use crate::events::{AgentEvent, AppEvent, OverlayKind, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
+use crate::widgets::command_popup::{CommandAction, CommandPopup};
 use crate::widgets::input_widget::InputAction;
 use crate::widgets::status_bar::StatusBarWidget;
+use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -37,6 +39,12 @@ pub struct App {
     pub chat: ChatWidget,
     /// Single-row status bar rendered at the bottom of the viewport.
     pub status_bar: StatusBarWidget,
+    /// Active fullscreen overlay, if any.
+    pub overlay: Option<TranscriptOverlay>,
+    /// Last known viewport height (used to pass visible_rows to the overlay).
+    pub viewport_height: u16,
+    /// Slash command popup (shown when input starts with `/`).
+    pub command_popup: CommandPopup,
 }
 
 impl App {
@@ -45,10 +53,16 @@ impl App {
         match event {
             TuiEvent::Key(key) => self.handle_key(key),
             TuiEvent::Paste(text) => {
-                self.chat.input.handle_paste(&text);
+                // Paste is ignored while an overlay is active.
+                if self.overlay.is_none() {
+                    self.chat.input.handle_paste(&text);
+                }
                 self.frame_requester.schedule_frame();
             }
-            TuiEvent::Resize { .. } => self.frame_requester.schedule_frame(),
+            TuiEvent::Resize { height, .. } => {
+                self.viewport_height = height;
+                self.frame_requester.schedule_frame();
+            }
             TuiEvent::Draw | TuiEvent::FocusGained | TuiEvent::FocusLost => {}
         }
     }
@@ -111,11 +125,16 @@ impl App {
             AppEvent::UpdateStatus(state) => {
                 self.status_bar.set_state(state);
             }
-            AppEvent::ShowOverlay(_kind) => {
-                // TODO(Task 24): enter alt screen + overlay
+            AppEvent::ShowOverlay(OverlayKind::Transcript) => {
+                self.overlay = Some(TranscriptOverlay::from_cells(
+                    self.chat.committed_cells(),
+                    80, // will be updated on next resize; 80 is a reasonable default
+                ));
+                self.frame_requester.schedule_frame();
             }
             AppEvent::CloseOverlay => {
-                // TODO(Task 24): leave alt screen
+                self.overlay = None;
+                self.frame_requester.schedule_frame();
             }
             AppEvent::SlashCommand(cmd) => match cmd.as_str() {
                 "/exit" | "/quit" => self.should_exit = true,
@@ -141,6 +160,46 @@ impl App {
             return;
         }
 
+        // When an overlay is active, route all keys to it.
+        if let Some(overlay) = &mut self.overlay {
+            // visible rows = viewport height minus header row inside the overlay
+            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
+            let action = overlay.handle_key(key, visible_rows);
+            if matches!(action, TranscriptAction::Close) {
+                self.overlay = None;
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        // Ctrl+T — toggle transcript overlay.
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.overlay = Some(TranscriptOverlay::from_cells(
+                self.chat.committed_cells(),
+                80,
+            ));
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        // When the command popup is visible, route keys to it first.
+        if self.command_popup.is_visible() {
+            match self.command_popup.handle_key(key) {
+                CommandAction::Select(cmd) => {
+                    // Clear the input (which contained the typed slash command).
+                    self.chat.input.clear();
+                    let _ = self.app_tx.send(AppEvent::SlashCommand(cmd));
+                }
+                CommandAction::Dismiss => {
+                    // Clear the slash prefix from the input as well.
+                    self.chat.input.clear();
+                }
+                CommandAction::None => {}
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -156,6 +215,19 @@ impl App {
             }
             _ => {
                 let action = self.chat.input.handle_key(key);
+                // After any key, check whether the input now starts with `/`
+                // at position 0 (sole character or first char). If so, show
+                // the popup and sync the query portion (everything after `/`).
+                let input_text = self.chat.input.text().to_owned();
+                if input_text.starts_with('/') {
+                    let query = &input_text[1..]; // everything after '/'
+                    if !self.command_popup.is_visible() {
+                        self.command_popup.show();
+                    }
+                    self.command_popup.update_query(query);
+                } else if self.command_popup.is_visible() {
+                    self.command_popup.hide();
+                }
                 match action {
                     InputAction::Submit(text) => self.submit_text(text),
                     InputAction::Exit => self.should_exit = true,
@@ -218,6 +290,9 @@ mod tests {
             welcome,
             chat: ChatWidget::new(),
             status_bar: StatusBarWidget::new("test".to_string()),
+            overlay: None,
+            viewport_height: 24,
+            command_popup: CommandPopup::new(),
         };
         (app, submission_rx, app_rx)
     }

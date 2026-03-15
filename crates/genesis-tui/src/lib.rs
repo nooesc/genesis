@@ -156,6 +156,9 @@ pub async fn run_tui(
         status_bar: crate::widgets::status_bar::StatusBarWidget::new(
             "default".to_string(), // TODO: get from config
         ),
+        overlay: None,
+        viewport_height: size.1,
+        command_popup: crate::widgets::command_popup::CommandPopup::new(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -283,8 +286,8 @@ pub async fn run_tui(
 
 /// Render one frame: draw the active screen into the terminal's buffer and flush.
 ///
-/// Layout: the chat widget occupies all rows except the last (reserved for a
-/// future status bar).  The status bar row is left blank for now.
+/// When an overlay is active it occupies the full viewport (no status bar).
+/// Otherwise, the chat widget and status bar share the viewport as usual.
 fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
@@ -294,6 +297,15 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
     let buf = term.current_buffer_mut();
     // Clear the buffer before drawing so stale content doesn't linger.
     buf.reset();
+
+    // ── Overlay (Transcript) takes over the full viewport ─────────────────
+    if let Some(overlay) = &app.overlay {
+        overlay.render(area, buf);
+        let _ = term.draw_diff();
+        term.swap_buffers();
+        let _ = term.flush();
+        return;
+    }
 
     match app.screen {
         AppScreen::Welcome => {
@@ -321,6 +333,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
             }
 
             app.chat.render(chat_area, buf);
+
+            // Render the slash command popup on top of the chat area when visible.
+            if app.command_popup.is_visible() {
+                app.command_popup.render(area, buf);
+            }
         }
     }
 
