@@ -15,6 +15,7 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
+use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::prompt::{SystemPromptBuilder, load_context_file};
 use crate::sandbox::{
     BackendSpecific, SandboxBackend, SandboxConfig,
@@ -363,9 +364,10 @@ impl<'a> SessionExecutionService<'a> {
             return None;
         }
 
+        use std::fmt::Write;
         let mut section = String::new();
         for mem in &memories {
-            section.push_str(&format!("- [{}] {}\n", mem.kind, mem.content));
+            let _ = writeln!(section, "- [{}] {}", mem.kind, mem.content);
         }
         Some(section)
     }
@@ -757,19 +759,18 @@ impl<'a> SessionExecutionService<'a> {
 
             let outcome = self.run_turn(turn_input).await?;
 
-            let step_output = outcome.result.response.clone();
+            let step_output = outcome.result.response;  // move, not clone
             total_input_tokens += outcome.result.total_input_tokens;
             total_output_tokens += outcome.result.total_output_tokens;
 
             step_outputs.insert(step.name.clone(), step_output.clone());
+            final_output = step_output.clone();
             step_results.push(StepResult {
                 step_name: step.name.clone(),
-                output: step_output.clone(),
+                output: step_output,  // move last use
                 input_tokens: outcome.result.total_input_tokens,
                 output_tokens: outcome.result.total_output_tokens,
             });
-
-            final_output = step_output;
 
             info!(
                 step = i + 1,
@@ -1112,16 +1113,6 @@ const SKILL_NUDGE_TOOL_THRESHOLD: usize = 5;
 /// Minimum turns used before injecting a skill creation nudge.
 const SKILL_NUDGE_TURN_THRESHOLD: usize = 3;
 
-/// Nudge message injected after complex turns to encourage autonomous skill
-/// creation. Stored as a system message in the session so the agent sees it
-/// at the start of the next turn.
-const SKILL_CREATION_NUDGE: &str = "\
-[Skill creation opportunity] The task you just completed was multi-step and \
-complex. Consider whether the approach you used could be distilled into a \
-reusable skill. If so, call `skill_create` with a descriptive name, clear \
-instructions for how to handle this type of task, and relevant tags. Good \
-skills capture durable patterns — not one-off details.";
-
 /// After a complex turn (many tool calls, multiple turns), inject a system
 /// message nudging the agent to create a skill from the pattern. The nudge
 /// is persisted so it appears when the next turn loads history.
@@ -1157,7 +1148,13 @@ fn maybe_inject_skill_nudge(
 fn generate_session_title(prompt: &str) -> String {
     const MAX_LEN: usize = 60;
 
-    let normalized: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = prompt.split_whitespace().fold(String::new(), |mut acc, w| {
+        if !acc.is_empty() {
+            acc.push(' ');
+        }
+        acc.push_str(w);
+        acc
+    });
 
     let truncated: String = normalized.chars().take(MAX_LEN).collect();
 

@@ -9,6 +9,16 @@ use genesis_storage::{bootstrap, format_user_traits, SessionStore, SkillStore, S
 
 use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTurnInput};
 
+/// The skill creation nudge message injected as a system message after complex
+/// turns. Shared between the agent loop (in-flight nudge) and execution service
+/// (persisted nudge for the next turn).
+pub const SKILL_CREATION_NUDGE: &str = "\
+[Skill creation opportunity] The task you just completed was multi-step and \
+complex. Consider whether the approach you used could be distilled into a \
+reusable skill. If so, call `skill_create` with a descriptive name, clear \
+instructions for how to handle this type of task, and relevant tags. Good \
+skills capture durable patterns — not one-off details.";
+
 /// Build a reflection prompt from the agent's current knowledge state.
 ///
 /// This loads memories, user model traits, and recent sessions from storage,

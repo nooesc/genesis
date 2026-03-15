@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::cost::{BudgetStatus, SessionCost};
 use crate::hooks::{HookEvent, HookResult, HookRunner};
+use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
@@ -126,14 +127,6 @@ would be valuable in future sessions — not session-specific details.";
 
 /// Number of tool calls in a single turn that triggers a skill creation nudge.
 const SKILL_CREATION_THRESHOLD: usize = 8;
-
-/// The skill creation nudge message injected as a system message.
-const SKILL_CREATION_NUDGE: &str = "\
-[Skill creation opportunity] The task you just completed was multi-step and \
-complex. Consider whether the approach you used could be distilled into a \
-reusable skill. If so, call `skill_create` with a descriptive name, clear \
-instructions for how to handle this type of task, and relevant tags. Good \
-skills capture durable patterns — not one-off details.";
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
@@ -291,6 +284,11 @@ impl AgentLoop {
         hook_runner: HookRunner,
     ) -> Self {
         Self::with_history(client, tools, config, hook_runner, Vec::new())
+    }
+
+    /// Return the session ID as a `&str`, defaulting to `""` when unset.
+    fn session_id_str(&self) -> &str {
+        self.config.session_id.as_deref().unwrap_or_default()
     }
 
     pub fn with_history(
@@ -605,7 +603,7 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.fire_shell_hooks(
             HookEvent::PreTurn,
             serde_json::json!({
@@ -1046,7 +1044,7 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.fire_shell_hooks(
             HookEvent::PreTurn,
             serde_json::json!({
@@ -1615,7 +1613,7 @@ impl AgentLoop {
             return;
         }
 
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         for tool in &stuck_tools {
             let count = self.tool_failure_counts[tool];
             warn!(
@@ -1853,7 +1851,7 @@ impl AgentLoop {
             self.messages.insert(drop_start, summary_msg);
         }
 
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.hooks
             .on_context_prune(&hook_session, messages_before, self.messages.len());
     }
