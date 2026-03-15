@@ -5,7 +5,7 @@ mod format;
 mod slash;
 
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,6 +56,8 @@ pub enum Command {
         worktree: bool,
         #[arg(long, help = "Attach the clipboard image to the first message")]
         clipboard: bool,
+        #[arg(long, help = "Disable the TUI, use legacy readline mode")]
+        no_tui: bool,
     },
     #[command(about = "Inspect local config and storage readiness")]
     Doctor {
@@ -861,6 +863,8 @@ pub enum CliError {
     Json(#[from] serde_json::Error),
     #[error("failed to encode yaml output: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("TUI error: {0}")]
+    Tui(String),
     #[error("{0}")]
     Other(String),
 }
@@ -879,8 +883,15 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
     let ui = UiContext::new(color_mode);
 
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard } => {
-            chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
+        Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard, no_tui } => {
+            if no_tui || !std::io::stdout().is_terminal() {
+                // Legacy rustyline path
+                chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
+            } else {
+                // TUI path — fall through to legacy until TUI is functional
+                // TODO(TUI): genesis_tui::run_tui(&config, &service, &session_id).await.map_err(|e| CliError::Tui(e.to_string()))?;
+                chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
+            }
         }
         Command::Doctor { bootstrap_storage, verify } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;

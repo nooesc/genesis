@@ -1078,6 +1078,7 @@ dependencies = [
  "genesis-provider",
  "genesis-storage",
  "genesis-tools",
+ "genesis-tui",
  "genesis-types",
  "genesis-ui",
  "rand",
