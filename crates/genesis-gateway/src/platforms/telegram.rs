@@ -140,16 +140,17 @@ struct WhisperResponse {
     text: String,
 }
 
-// --- Voice/Audio transcription helpers ---
+// --- Telegram file download helper ---
 
-/// Download a file from Telegram by file_id, then transcribe via Whisper API.
-/// Returns the transcribed text, or an error description.
-async fn transcribe_telegram_audio(
+/// Call the Telegram `getFile` API and download the file bytes.
+///
+/// This is shared between voice/audio transcription and sticker image analysis
+/// to avoid duplicating the two-step getFile + download flow.
+async fn telegram_fetch_file(
     client: &reqwest::Client,
     token: &str,
     file_id: &str,
-) -> Result<String, String> {
-    // Step 1: Get the file path from Telegram.
+) -> Result<(Vec<u8>, String), String> {
     let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
         .post(&get_file_url)
@@ -172,22 +173,31 @@ async fn transcribe_telegram_audio(
         .and_then(|r| r.file_path)
         .ok_or_else(|| "no file_path in getFile response".to_owned())?;
 
-    // Step 2: Download the actual audio file.
     let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-    let audio_bytes = client
+    let file_bytes = client
         .get(&download_url)
         .send()
         .await
         .map_err(|e| format!("file download failed: {e}"))?
         .bytes()
         .await
-        .map_err(|e| format!("failed to read audio bytes: {e}"))?;
+        .map_err(|e| format!("failed to read file bytes: {e}"))?;
 
-    if audio_bytes.is_empty() {
-        return Err("downloaded audio file is empty".to_owned());
+    if file_bytes.is_empty() {
+        return Err("downloaded file is empty".to_owned());
     }
 
-    // Step 3: Transcribe via Whisper API.
+    Ok((file_bytes.to_vec(), file_path))
+}
+
+// --- Voice/Audio transcription helpers ---
+
+/// Download a file from Telegram by file_id, then transcribe via Whisper API.
+/// Returns the transcribed text, or an error description.
+async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_id: &str) -> Result<String, String> {
+    let (audio_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
+
+    // Transcribe via Whisper API.
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY not set, cannot transcribe".to_owned())?;
 
@@ -316,43 +326,7 @@ async fn analyze_sticker_image(
     file_id: &str,
     config: &genesis_config::GenesisConfig,
 ) -> Result<String, String> {
-    // Step 1: Get the file path from Telegram.
-    let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
-    let resp = client
-        .post(&get_file_url)
-        .json(&serde_json::json!({ "file_id": file_id }))
-        .send()
-        .await
-        .map_err(|e| format!("getFile request failed: {e}"))?;
-
-    let file_resp: GetFileResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse getFile response: {e}"))?;
-
-    if !file_resp.ok {
-        return Err("Telegram getFile returned not ok".to_owned());
-    }
-
-    let file_path = file_resp
-        .result
-        .and_then(|r| r.file_path)
-        .ok_or_else(|| "no file_path in getFile response".to_owned())?;
-
-    // Step 2: Download the sticker image.
-    let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-    let image_bytes = client
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| format!("sticker download failed: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("failed to read sticker bytes: {e}"))?;
-
-    if image_bytes.is_empty() {
-        return Err("downloaded sticker file is empty".to_owned());
-    }
+    let (image_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Determine MIME type from file extension.
     let ext = file_path.rsplit('.').next().unwrap_or("webp");
@@ -667,20 +641,7 @@ pub async fn webhook_handler(
                 })
                 .await;
 
-            let reply_text = match result {
-                Ok(outcome) => {
-                    info!(
-                        turns_used = outcome.result.turns_used,
-                        tool_calls_made = outcome.result.tool_calls_made,
-                        "telegram turn completed"
-                    );
-                    outcome.result.response
-                }
-                Err(e) => {
-                    error!(error = %e, "telegram turn failed");
-                    format!("Sorry, I encountered an error: {e}")
-                }
-            };
+            let reply_text = super::extract_reply(result, "telegram");
 
             if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply_text, Some(message_id)).await {
                 error!(error = %e, "failed to send telegram reply");
