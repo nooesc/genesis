@@ -232,7 +232,7 @@ impl AppState {
 
 /// Request body for the `/chat` endpoint.
 #[derive(Debug, Deserialize)]
-pub struct ChatRequest {
+pub(crate) struct ChatRequest {
     pub message: String,
     #[serde(default = "default_platform")]
     pub platform: String,
@@ -254,7 +254,7 @@ pub struct ChatRequest {
 
 /// An image input for multimodal chat requests.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ImageInput {
+pub(crate) struct ImageInput {
     /// Image URL (http/https) or base64 data URI.
     pub url: String,
     /// Optional detail level: "low", "high", or "auto" (default).
@@ -296,7 +296,7 @@ fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
 
 /// Response body from the `/chat` endpoint.
 #[derive(Debug, Serialize)]
-pub struct ChatResponse {
+pub(crate) struct ChatResponse {
     pub session_id: String,
     pub response: String,
     pub turns_used: usize,
@@ -312,14 +312,14 @@ pub struct ChatResponse {
 
 /// SSE payload for a streamed token chunk.
 #[derive(Debug, Serialize)]
-pub struct StreamChunkResponse {
+pub(crate) struct StreamChunkResponse {
     pub session_id: String,
     pub content: String,
 }
 
 /// SSE payload signaling final completion.
 #[derive(Debug, Serialize)]
-pub struct StreamDoneResponse {
+pub(crate) struct StreamDoneResponse {
     pub session_id: String,
     pub response: String,
     pub turns_used: usize,
@@ -332,14 +332,14 @@ pub struct StreamDoneResponse {
 
 /// SSE payload signaling an execution failure.
 #[derive(Debug, Serialize)]
-pub struct StreamErrorResponse {
+pub(crate) struct StreamErrorResponse {
     pub session_id: String,
     pub error: String,
 }
 
 /// Health check response.
 #[derive(Debug, Serialize)]
-pub struct HealthResponse {
+pub(crate) struct HealthResponse {
     pub status: String,
     pub version: String,
     pub uptime_seconds: u64,
@@ -352,7 +352,7 @@ pub struct HealthResponse {
 
 /// Detailed MCP server status response.
 #[derive(Debug, Serialize)]
-pub struct McpStatusResponse {
+pub(crate) struct McpStatusResponse {
     pub servers: Vec<McpServerStatus>,
     pub total_tools: usize,
     pub total_resources: usize,
@@ -361,7 +361,7 @@ pub struct McpStatusResponse {
 
 /// Status of a single MCP server.
 #[derive(Debug, Serialize)]
-pub struct McpServerStatus {
+pub(crate) struct McpServerStatus {
     pub name: String,
     pub connected: bool,
 }
@@ -1335,7 +1335,7 @@ async fn usage_handler(
 
 /// Request body for creating/updating a skill.
 #[derive(Debug, Deserialize)]
-pub struct UpsertSkillRequest {
+pub(crate) struct UpsertSkillRequest {
     pub name: String,
     pub description: String,
     pub instructions: String,
@@ -3269,7 +3269,7 @@ async fn chat_stream_handler(
 
 /// A single prompt within a batch request.
 #[derive(Debug, Deserialize)]
-pub struct BatchItem {
+pub(crate) struct BatchItem {
     pub message: String,
     #[serde(default = "default_platform")]
     pub platform: String,
@@ -3284,7 +3284,7 @@ pub struct BatchItem {
 
 /// Request body for the `/chat/batch` endpoint.
 #[derive(Debug, Deserialize)]
-pub struct BatchRequest {
+pub(crate) struct BatchRequest {
     pub items: Vec<BatchItem>,
     /// Maximum concurrent executions (default: 4, max: 16).
     #[serde(default = "default_batch_concurrency")]
@@ -3297,7 +3297,7 @@ fn default_batch_concurrency() -> usize {
 
 /// Result of a single item in a batch.
 #[derive(Debug, Serialize)]
-pub struct BatchItemResult {
+pub(crate) struct BatchItemResult {
     pub index: usize,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3314,7 +3314,7 @@ pub struct BatchItemResult {
 
 /// Response body for the `/chat/batch` endpoint.
 #[derive(Debug, Serialize)]
-pub struct BatchResponse {
+pub(crate) struct BatchResponse {
     pub results: Vec<BatchItemResult>,
     pub total_items: usize,
     pub successful: usize,

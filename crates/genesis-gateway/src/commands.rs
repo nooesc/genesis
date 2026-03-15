@@ -10,7 +10,7 @@ use genesis_storage::SessionStore;
 use tracing::{info, warn};
 
 /// Result of processing a gateway command.
-pub enum CommandResult {
+pub(crate) enum CommandResult {
     /// Command was handled; send this reply to the user.
     Reply(String),
     /// Not a command; pass the message through to the agent.
@@ -25,7 +25,7 @@ pub enum CommandResult {
 /// - `/stop` — acknowledge stop
 /// - `/id` — show the current session ID
 /// - `/config` — show current model and session info
-pub fn handle_command(
+pub(crate) fn handle_command(
     text: &str,
     session_id: &str,
     store: &SessionStore,
@@ -142,7 +142,7 @@ pub fn handle_command(
 /// Returns `true` if the session was expired and deleted (caller should
 /// treat this as a fresh session). Returns `false` if the session is
 /// still valid or doesn't exist.
-pub fn check_session_expiry(
+pub(crate) fn check_session_expiry(
     session_id: &str,
     store: &SessionStore,
     gateway: Option<&GatewayConfig>,
