@@ -148,7 +148,6 @@ impl ToolHandler for SessionHistoryTool {
 mod tests {
     use super::*;
     use genesis_storage::{bootstrap, SessionStore};
-    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     fn ctx_with_dir(data_dir: &str) -> ToolContext {

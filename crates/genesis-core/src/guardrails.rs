@@ -418,11 +418,6 @@ fn detect_pii(text: &str) -> Vec<(&'static str, String)> {
     found
 }
 
-/// Parse guardrail config from YAML.
-pub fn parse_config(yaml: &str) -> Result<GuardrailConfig, serde_yaml::Error> {
-    serde_yaml::from_str(yaml)
-}
-
 impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
     fn from(cfg: &genesis_config::GuardrailsConfig) -> Self {
         let pii_action = match cfg.pii_action.as_str() {
@@ -478,6 +473,11 @@ mod tests {
             pii_action: ViolationAction::Redact,
             ..GuardrailConfig::default()
         }
+    }
+
+    /// Parse guardrail config from YAML (test-only helper).
+    fn parse_config(yaml: &str) -> Result<GuardrailConfig, serde_yaml::Error> {
+        serde_yaml::from_str(yaml)
     }
 
     #[test]
