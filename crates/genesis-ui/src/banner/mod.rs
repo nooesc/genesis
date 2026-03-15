@@ -13,7 +13,7 @@ mod animate;
 mod frames;
 
 // Re-export art generation functions for use by the TUI welcome widget.
-pub use frames::{compact_art, full_art};
+pub use frames::{compact_art, compact_image, full_art, full_image, render_halfblocks};
 
 use crate::colors::{UI_ACCENT, UI_DIM, UI_TEXT};
 use crate::terminal::TerminalSize;

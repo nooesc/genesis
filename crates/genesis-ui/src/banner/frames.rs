@@ -94,6 +94,20 @@ pub fn render_halfblocks(img: &DynamicImage) -> Vec<String> {
     lines
 }
 
+/// Load the full-size Eve banner image as a `DynamicImage`.
+///
+/// Returns `None` if the embedded PNG fails to decode.
+pub fn full_image() -> Option<DynamicImage> {
+    image::load_from_memory(EVE_FULL_PNG).ok()
+}
+
+/// Load the compact Eve banner image as a `DynamicImage`.
+///
+/// Returns `None` if the embedded PNG fails to decode.
+pub fn compact_image() -> Option<DynamicImage> {
+    image::load_from_memory(EVE_COMPACT_PNG).ok()
+}
+
 /// Load and render the full-size Eve banner art.
 pub fn full_art() -> Vec<String> {
     match image::load_from_memory(EVE_FULL_PNG) {
@@ -126,6 +140,16 @@ mod tests {
         let img = DynamicImage::new_rgba8(2, 3);
         let lines = render_halfblocks(&img);
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn full_image_loads() {
+        assert!(full_image().is_some());
+    }
+
+    #[test]
+    fn compact_image_loads() {
+        assert!(compact_image().is_some());
     }
 
     #[test]
