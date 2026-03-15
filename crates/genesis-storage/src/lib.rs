@@ -3384,10 +3384,7 @@ fn open(database_path: &Path) -> Result<Connection, StorageError> {
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;
-         PRAGMA cache_size = -16000;
-         PRAGMA mmap_size = 268435456;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA optimize;",
+         PRAGMA temp_store = MEMORY;",
     )
     .map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
