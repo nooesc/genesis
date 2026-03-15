@@ -832,7 +832,7 @@ fn take_next_sse_event(buffer: &mut String) -> Option<String> {
     // Fast path: skip the replace allocation when no \r\n is present (common case).
     // On the rare \r\n path we scan twice (contains + replace) instead of once,
     // but avoid an unnecessary String allocation on every call.
-    if buffer.contains('\r') {
+    if buffer.contains("\r\n") {
         *buffer = buffer.replace("\r\n", "\n");
     }
     if let Some(index) = buffer.find("\n\n") {
