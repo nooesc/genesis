@@ -1433,7 +1433,7 @@ impl SessionStore {
     /// Delete a session and all its messages and search index entries.
     pub fn delete_session(&self, session_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
-        // Delete FTS entries
+        // Delete FTS entries (virtual table — no ON DELETE CASCADE support).
         connection
             .execute(
                 "DELETE FROM session_search WHERE session_id = ?1",
@@ -1443,17 +1443,7 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        // Delete messages
-        connection
-            .execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![session_id],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        // Delete session
+        // Delete session; ON DELETE CASCADE removes associated messages.
         let deleted = connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
             .map_err(|source| StorageError::Sqlite {
@@ -1524,14 +1514,6 @@ impl SessionStore {
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
         let connection = open(&self.database_path)?;
         let cutoff = format!("-{days} days");
-
-        // Enable foreign keys so ON DELETE CASCADE removes messages automatically.
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON")
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
 
         let tx = connection
             .unchecked_transaction()
@@ -3321,11 +3303,13 @@ fn open(database_path: &Path) -> Result<Connection, StorageError> {
     // Performance PRAGMAs — WAL mode enables concurrent readers + single writer,
     // NORMAL sync is crash-safe in WAL mode, busy_timeout prevents SQLITE_BUSY
     // under concurrent access from gateway + CLI.
+    // foreign_keys enables ON DELETE CASCADE for all connections (required per-connection).
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;
-         PRAGMA temp_store = MEMORY;",
+         PRAGMA temp_store = MEMORY;
+         PRAGMA foreign_keys = ON;",
     )
     .map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
