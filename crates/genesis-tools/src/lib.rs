@@ -21,6 +21,22 @@ pub const NOISE_DIRS: &[&str] = &[
 /// Maximum output size for tool results (64 KiB).
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Truncate a string to at most `limit` bytes on a valid UTF-8 boundary,
+/// appending `suffix` if truncation occurred.
+pub fn truncate_at(s: &str, limit: usize, suffix: &str) -> String {
+    if s.len() <= limit {
+        return s.to_owned();
+    }
+    // Walk back to char boundary
+    let mut end = limit;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = s[..end].to_owned();
+    result.push_str(suffix);
+    result
+}
+
 /// Truncate output to MAX_OUTPUT_BYTES, cutting at a newline boundary
 /// and ensuring safe UTF-8 boundaries.
 pub fn truncate_output(output: &str) -> String {
@@ -49,17 +65,7 @@ pub fn truncate_output(output: &str) -> String {
 /// character boundaries.
 pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut end = MAX_OUTPUT_BYTES;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut truncated = s[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    } else {
-        s.into_owned()
-    }
+    truncate_at(&s, MAX_OUTPUT_BYTES, "\n... (output truncated)")
 }
 
 #[derive(Clone, Serialize, Deserialize)]

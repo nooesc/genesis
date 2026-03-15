@@ -110,18 +110,8 @@ impl ToolHandler for WebRequestTool {
             reason: format!("failed to read response body: {e}"),
         })?;
 
-        let truncated = if response_body.len() > MAX_RESPONSE_BYTES {
-            // Find the nearest char boundary at or before the byte limit
-            let mut end = MAX_RESPONSE_BYTES;
-            while end > 0 && !response_body.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut t = response_body[..end].to_string();
-            t.push_str("\n... (response truncated)");
-            t
-        } else {
-            response_body
-        };
+        let truncated =
+            crate::truncate_at(&response_body, MAX_RESPONSE_BYTES, "\n... (response truncated)");
 
         let mut content = format!("HTTP {status}\n");
         for header in &headers {
