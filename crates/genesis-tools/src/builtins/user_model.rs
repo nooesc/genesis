@@ -34,7 +34,10 @@ impl ToolHandler for UserObserveTool {
             })?;
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = UserModelStore::new(&db_path);
 
         let trait_record = store

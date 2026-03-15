@@ -26,7 +26,10 @@ impl ToolHandler for SessionExportTool {
         let output_path = call.arguments.get("path");
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         // Load session title

@@ -4,10 +4,13 @@ use genesis_storage::{bootstrap, SkillFileStore};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-fn file_store(context: &ToolContext) -> SkillFileStore {
+fn file_store(context: &ToolContext, tool_name: &str) -> Result<SkillFileStore, ToolError> {
     let db_path = context.db_path();
-    let _ = bootstrap(&db_path);
-    SkillFileStore::new(&db_path)
+    bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("database initialization failed: {e}"),
+    })?;
+    Ok(SkillFileStore::new(&db_path))
 }
 
 /// Tool that returns the content of a supporting file attached to a skill.
@@ -31,7 +34,7 @@ impl ToolHandler for SkillViewFileTool {
                 argument: "file_path",
             })?;
 
-        let store = file_store(context);
+        let store = file_store(context, &call.name)?;
 
         let content = store
             .get_file(skill_name, file_path)
@@ -86,7 +89,7 @@ impl ToolHandler for SkillStoreFileTool {
                 argument: "content",
             })?;
 
-        let store = file_store(context);
+        let store = file_store(context, &call.name)?;
 
         store
             .store_file(skill_name, file_path, content)
@@ -119,7 +122,7 @@ impl ToolHandler for SkillListFilesTool {
                 argument: "skill_name",
             })?;
 
-        let store = file_store(context);
+        let store = file_store(context, &call.name)?;
 
         let files = store
             .list_files(skill_name)
@@ -171,7 +174,7 @@ impl ToolHandler for SkillDeleteFileTool {
                 argument: "file_path",
             })?;
 
-        let store = file_store(context);
+        let store = file_store(context, &call.name)?;
 
         let deleted = store
             .delete_file(skill_name, file_path)

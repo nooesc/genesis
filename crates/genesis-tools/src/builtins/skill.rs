@@ -42,7 +42,10 @@ impl ToolHandler for SkillCreateTool {
             .unwrap_or_default();
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SkillStore::new(&db_path);
 
         let skill = store
@@ -232,7 +235,10 @@ impl ToolHandler for SkillRecordUsageTool {
         let feedback = call.arguments.get("feedback").map(|s| s.as_str());
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
 
         // Verify the skill exists
         let skill_store = SkillStore::new(&db_path);
