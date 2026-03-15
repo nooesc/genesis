@@ -55,3 +55,9 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
 which = "6"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+opt-level = "s"

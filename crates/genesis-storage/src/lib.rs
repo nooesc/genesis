@@ -3336,10 +3336,26 @@ fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
 }
 
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
-    Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
+    let conn = Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
         source,
-    })
+    })?;
+
+    // Performance PRAGMAs — WAL mode enables concurrent readers + single writer,
+    // NORMAL sync is crash-safe in WAL mode, busy_timeout prevents SQLITE_BUSY
+    // under concurrent access from gateway + CLI.
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .map_err(|source| StorageError::OpenDatabase {
+        path: database_path.to_path_buf(),
+        source,
+    })?;
+
+    Ok(conn)
 }
 
 impl ImportStatus {
