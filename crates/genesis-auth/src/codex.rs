@@ -13,7 +13,7 @@ use crate::provider::{
 use crate::store::{self, CodexTokens};
 
 const DEVICE_CODE_POLL_INTERVAL_SECS: u64 = 5;
-const DEVICE_CODE_TIMEOUT_MINS: u32 = 15;
+const DEVICE_CODE_TIMEOUT_MINS: u64 = 15;
 const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
 const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
 const CACHE_TTL_SECS: u64 = 60;
@@ -73,18 +73,11 @@ pub fn is_remote_session() -> bool {
 /// Try to import tokens from the Codex CLI auth store (~/.codex/auth.json).
 /// Uses `CODEX_HOME` env var or defaults to `~/.codex`.
 pub fn import_codex_cli_tokens() -> Option<CodexTokens> {
-    let codex_home = std::env::var("CODEX_HOME")
-        .ok()
+    let codex_dir = std::env::var_os("CODEX_HOME")
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join(".codex").to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
-    if codex_home.is_empty() {
-        return None;
-    }
-    import_codex_cli_tokens_from(&PathBuf::from(&codex_home))
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;
+    import_codex_cli_tokens_from(&codex_dir)
 }
 
 /// Try to import tokens from a specific Codex CLI directory.
@@ -118,7 +111,7 @@ pub async fn request_device_code(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::DeviceCodeRequest {
             message: format!("status {status}: {body}"),
         });
@@ -160,12 +153,12 @@ pub async fn poll_for_authorization(
     user_code: &str,
     poll_interval: u64,
 ) -> Result<(String, String), AuthError> {
-    let max_wait = std::time::Duration::from_secs(DEVICE_CODE_TIMEOUT_MINS as u64 * 60);
+    let max_wait = std::time::Duration::from_secs(DEVICE_CODE_TIMEOUT_MINS * 60);
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() >= max_wait {
             return Err(AuthError::LoginTimeout {
-                minutes: DEVICE_CODE_TIMEOUT_MINS,
+                minutes: DEVICE_CODE_TIMEOUT_MINS as u32,
             });
         }
         tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
@@ -232,7 +225,7 @@ pub async fn exchange_code_for_tokens(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::TokenExchange {
             message: format!("status {status}: {body}"),
         });
@@ -283,7 +276,7 @@ pub async fn refresh_access_token(
         })?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_else(|e| format!("<failed to read body: {e}>"));
         return Err(AuthError::TokenRefresh {
             message: format!("status {status}: {body}"),
         });
