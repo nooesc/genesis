@@ -34,3 +34,4 @@ which.workspace = true
 [dev-dependencies]
 insta = "1"
 tempfile.workspace = true
+tracing-test.workspace = true

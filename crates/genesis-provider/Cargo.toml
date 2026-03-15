@@ -22,3 +22,4 @@ uuid.workspace = true
 insta = { version = "1", features = ["yaml"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing-test.workspace = true

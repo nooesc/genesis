@@ -470,6 +470,7 @@ impl From<&genesis_config::GuardrailsConfig> for GuardrailConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     fn pii_config() -> GuardrailConfig {
         GuardrailConfig {
@@ -707,5 +708,29 @@ custom_rules:
             serde_json::to_string(&ViolationAction::Redact).unwrap(),
             "\"redact\""
         );
+    }
+
+    #[traced_test]
+    #[test]
+    fn unrecognized_pii_action_logs_warning() {
+        // Explicit construction is intentional: GuardrailsConfig (genesis-config)
+        // does not derive Default, and adding one solely for this test is not
+        // warranted. If a Default impl is added upstream, switch to
+        // `GuardrailsConfig { field: val, ..Default::default() }`.
+        let cfg = genesis_config::GuardrailsConfig {
+            detect_pii: true,
+            pii_action: "banish".to_owned(),
+            max_response_length: 0,
+            forbidden_input_patterns: vec![],
+            forbidden_output_patterns: vec![],
+            require_json_output: false,
+            max_tokens_per_turn: 0,
+            custom_rules: vec![],
+        };
+        let converted = GuardrailConfig::from(&cfg);
+        // Unrecognized action should default to Redact
+        assert_eq!(converted.pii_action, ViolationAction::Redact);
+        // Verify warning was logged about the unrecognized value
+        assert!(logs_contain("unrecognized pii_action in guardrails config"));
     }
 }

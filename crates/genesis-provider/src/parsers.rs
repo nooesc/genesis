@@ -880,6 +880,7 @@ pub fn normalize_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     // -- Hermes --
 
@@ -1268,5 +1269,43 @@ mod tests {
         let tc = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tc.len(), 1);
         assert_eq!(tc[0].id, "existing");
+    }
+
+    // -- tracing-test log assertions --
+
+    #[traced_test]
+    #[test]
+    fn malformed_json_in_hermes_tag_logs_warning() {
+        let parser = HermesParser;
+        let text = r#"<tool_call>this is not json</tool_call>"#;
+        let result = parser.parse(text);
+        // Parser should return None because no valid tool calls were found
+        assert!(result.is_none());
+        // Verify the warning was emitted
+        assert!(logs_contain("failed to parse tool call JSON"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn malformed_json_in_longcat_tag_logs_warning() {
+        let parser = LongcatParser;
+        let text = r#"<longcat_tool_call>{invalid json here</longcat_tool_call>"#;
+        let result = parser.parse(text);
+        assert!(result.is_none());
+        assert!(logs_contain("failed to parse tool call JSON"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn hermes_partial_valid_logs_warning_for_bad_entries() {
+        let parser = HermesParser;
+        // First tool call is valid, second is malformed JSON
+        let text = r#"<tool_call>{"name": "search", "arguments": {"q": "test"}}</tool_call>
+<tool_call>NOT VALID JSON</tool_call>"#;
+        let result = parser.parse(text).expect("should parse the valid call");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].function.name, "search");
+        // The malformed entry should have logged a warning
+        assert!(logs_contain("failed to parse tool call JSON"));
     }
 }
