@@ -677,6 +677,31 @@ impl ChatClient {
     pub fn backend(&self) -> &str {
         &self.backend
     }
+
+    /// Pre-establish TCP+TLS connection to the provider endpoint.
+    ///
+    /// Fires a lightweight HEAD request to the base URL so that the underlying
+    /// connection pool completes DNS resolution, TCP handshake, and TLS
+    /// negotiation before the first real LLM request. This eliminates
+    /// cold-start latency that would otherwise be added to the first
+    /// `complete()` or `complete_stream()` call.
+    ///
+    /// Errors are silently ignored — warmup is best-effort.
+    pub async fn warmup(&self) {
+        let url = &self.endpoint;
+        match self.http.head(url).send().await {
+            Ok(r) => {
+                // Any response (even 405 Method Not Allowed) means the TCP+TLS
+                // connection has been established, which is the actual goal.
+                tracing::debug!(endpoint = %self.endpoint, status = %r.status(), "connection pre-established");
+            }
+            Err(e) => {
+                // Connection-level failure (DNS, TCP, TLS) — not critical,
+                // the first real request will establish the connection.
+                tracing::debug!(endpoint = %self.endpoint, error = %e, "connection warmup failed");
+            }
+        }
+    }
 }
 
 /// Log a successful (non-streaming) completion with token usage stats.

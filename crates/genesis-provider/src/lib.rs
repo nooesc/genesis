@@ -45,7 +45,9 @@ pub async fn client_from_config(
                             model: model.to_owned(),
                             backend: "openai-codex".to_owned(),
                         };
-                        return ChatClient::new(&provider);
+                        let client = ChatClient::new(&provider)?;
+                        spawn_warmup(&client);
+                        return Ok(client);
                     }
                     Err(genesis_auth::AuthError::NotLoggedIn) => {
                         tracing::debug!("no OAuth session for openai-codex, falling back to env vars");
@@ -63,7 +65,32 @@ pub async fn client_from_config(
 
     let env: BTreeMap<String, String> = std::env::vars().collect();
     let provider = resolve(backend, model, base_url, api_key_env, &env);
-    ChatClient::new(&provider)
+    let client = ChatClient::new(&provider)?;
+    spawn_warmup(&client);
+    Ok(client)
+}
+
+/// Spawn a background task to pre-establish the TCP+TLS connection.
+///
+/// This runs concurrently with other initialization work (system prompt
+/// building, tool registration, etc.) so the connection is likely ready
+/// by the time the first real LLM request is made.
+///
+/// Skipped when running tests (`cfg!(test)`) or when the endpoint points
+/// to a local address, to avoid firing real network requests in test suites.
+fn spawn_warmup(client: &ChatClient) {
+    if cfg!(test) {
+        return;
+    }
+
+    let endpoint = client.endpoint();
+    if endpoint.contains("localhost") || endpoint.contains("127.0.0.1") || endpoint.contains("[::1]") {
+        tracing::debug!(endpoint = %endpoint, "skipping connection warmup for local endpoint");
+        return;
+    }
+
+    let client = client.clone();
+    tokio::spawn(async move { client.warmup().await });
 }
 
 #[cfg(test)]
