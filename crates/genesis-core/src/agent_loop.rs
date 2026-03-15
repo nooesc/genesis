@@ -728,7 +728,7 @@ impl AgentLoop {
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "blocking", "starting agent turn iteration");
+            debug!(turn = turns_used, mode = "blocking", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
@@ -1173,7 +1173,7 @@ impl AgentLoop {
             }
             self.iterations_used += 1;
 
-            debug!(turn = turns_used, mode = "streaming", "starting agent turn iteration");
+            debug!(turn = turns_used, mode = "streaming", prompt_version = crate::prompt::PROMPT_VERSION, "starting agent turn iteration");
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());

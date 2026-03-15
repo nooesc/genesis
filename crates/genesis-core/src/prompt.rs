@@ -2,6 +2,10 @@ use std::path::Path;
 
 use genesis_types::ToolDefinition;
 
+/// Prompt version — increment when behavioral instructions or prompt structure changes.
+/// Logged with every LLM call to correlate prompt versions with quality metrics.
+pub(crate) const PROMPT_VERSION: &str = "1.0.0";
+
 const DEFAULT_AGENT_NAME: &str = "Eve";
 const DEFAULT_AGENT_IDENTITY: &str = "\
 You are Eve, an intelligent AI agent built on the Genesis framework. You are \
@@ -212,6 +216,8 @@ impl<'a> SystemPromptBuilder<'a> {
         parts.push(format!(
             "Current time: {timestamp}. Platform: {os_platform}/{arch}."
         ));
+
+        parts.push(format!("[prompt_version: {}]", PROMPT_VERSION));
 
         parts.join("\n\n")
     }
@@ -848,5 +854,11 @@ mod tests {
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("## Personality"));
         assert!(prompt.contains("calmly"));
+    }
+
+    #[test]
+    fn build_includes_prompt_version_tag() {
+        let prompt = SystemPromptBuilder::new("default", &[]).build();
+        assert!(prompt.contains(&format!("[prompt_version: {}]", PROMPT_VERSION)));
     }
 }
