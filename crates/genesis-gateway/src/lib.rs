@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -538,6 +538,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        .route("/.well-known/agent.json", get(agent_card_handler))
         .merge(rate_limited)
         .layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
@@ -729,6 +730,46 @@ async fn mcp_status_handler(
             total_prompts: 0,
         }),
     }
+}
+
+/// A2A Agent Card — describes this agent's capabilities for discovery.
+/// See: <https://github.com/a2aproject/A2A>
+async fn agent_card_handler(headers: HeaderMap) -> impl IntoResponse {
+    // Derive the A2A service URL from the Host header per the A2A spec
+    // (the `url` field must point to the A2A endpoint, not the source repo).
+    let url = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|host| format!("https://{host}/.well-known/agent.json"))
+        .unwrap_or_else(|| "https://localhost/.well-known/agent.json".to_string());
+
+    Json(serde_json::json!({
+        "name": "Eve",
+        "description": "Genesis AI agent — a high-performance Rust-based agent harness with 60+ tools, multi-provider LLM support, and cross-platform integration.",
+        "url": url,
+        "version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "streaming": true,
+            "tools": true,
+            "multimodal": true,
+            "webhooks": ["telegram", "discord", "slack", "whatsapp", "homeassistant", "signal"],
+            "mcp": true
+        },
+        "defaultInputModes": ["text/plain", "image/png", "image/jpeg"],
+        "defaultOutputModes": ["text/plain", "application/json"],
+        "skills": [
+            {
+                "id": "chat",
+                "name": "General Chat",
+                "description": "Multi-turn conversation with tool use"
+            },
+            {
+                "id": "coding",
+                "name": "Code Assistant",
+                "description": "Code generation, review, debugging, and refactoring"
+            }
+        ]
+    }))
 }
 
 /// Prometheus-compatible metrics endpoint.
