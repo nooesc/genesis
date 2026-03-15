@@ -82,7 +82,7 @@ impl ToolHandler for WebRequestTool {
             if !has_content_type {
                 request = request.header("Content-Type", "application/json");
             }
-            request = request.body(body_content.clone());
+            request = request.body(body_content.to_owned());
         }
 
         let response = request.send().map_err(|e| ToolError::ExecutionFailed {

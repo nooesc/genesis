@@ -219,7 +219,11 @@ fn send_discord(
 
     // Discord has a 2000 character limit
     let truncated = if content.len() > 2000 {
-        format!("{}...", &content[..1997])
+        let mut end = 1997;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &content[..end])
     } else {
         content.to_owned()
     };
@@ -285,7 +289,11 @@ fn send_whatsapp(
 
     // WhatsApp has a 4096 character limit
     let truncated = if text.len() > 4096 {
-        format!("{}...", &text[..4093])
+        let mut end = 4093;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
     } else {
         text.to_owned()
     };
