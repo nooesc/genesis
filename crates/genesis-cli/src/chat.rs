@@ -8,6 +8,7 @@ use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
 use genesis_ui::UiContext;
+use genesis_ui::markdown::StreamMarkdown;
 use genesis_ui::status_bar::{BarState, StatusBar};
 use genesis_ui::tool_display::{ToolCallBuffer, ToolDisplayMode};
 
@@ -981,6 +982,7 @@ pub(crate) async fn run_streaming_turn(
     let streamed = AtomicBool::new(false);
     let tool_buffer = Mutex::new(ToolCallBuffer::new(tool_mode));
     let status_bar = Mutex::new(StatusBar::new(session_id, ui.colors_enabled));
+    let stream_md = Mutex::new(StreamMarkdown::new(ui.colors_enabled));
 
     // Start with Thinking state
     if let Ok(mut bar) = status_bar.lock() {
@@ -1012,11 +1014,19 @@ pub(crate) async fn run_streaming_turn(
                         println!("{block}");
                     }
                 }
-                if !streamed.swap(true, Ordering::Relaxed) {
-                    print!("{eve_prompt}");
+                // Feed chunk through streaming markdown renderer
+                let rendered = if let Ok(mut md) = stream_md.lock() {
+                    md.push(chunk)
+                } else {
+                    chunk.to_string()
+                };
+                if !rendered.is_empty() {
+                    if !streamed.swap(true, Ordering::Relaxed) {
+                        print!("{eve_prompt}");
+                    }
+                    print!("{rendered}");
+                    let _ = io::stdout().flush();
                 }
-                print!("{chunk}");
-                let _ = io::stdout().flush();
             }
             StreamEvent::ToolCallStart { name, args_summary } => {
                 if streamed.load(Ordering::Relaxed) {
@@ -1056,6 +1066,17 @@ pub(crate) async fn run_streaming_turn(
             // Clear the status bar on turn completion
             if let Ok(mut bar) = status_bar.lock() {
                 bar.clear();
+            }
+            // Flush any remaining markdown content (incomplete code fences, etc.)
+            if let Ok(mut md) = stream_md.lock() {
+                let remaining = md.finish();
+                if !remaining.is_empty() {
+                    if !streamed.swap(true, Ordering::Relaxed) {
+                        print!("{eve_prompt}");
+                    }
+                    print!("{remaining}");
+                    let _ = io::stdout().flush();
+                }
             }
             // Flush any remaining buffered tool calls
             if let Ok(mut buf) = tool_buffer.lock() {

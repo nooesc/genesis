@@ -8,5 +8,7 @@ version.workspace = true
 crossterm.workspace = true
 owo-colors.workspace = true
 unicode-width.workspace = true
+termimad.workspace = true
+syntect.workspace = true
 
 [dev-dependencies]

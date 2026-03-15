@@ -57,3 +57,5 @@ libc = "0.2"
 crossterm = "0.28"
 owo-colors = "4"
 unicode-width = "0.2"
+termimad = "0.30"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
