@@ -11,6 +11,7 @@ members = [
   "crates/genesis-tools",
   "crates/genesis-types",
   "crates/genesis-auth",
+  "crates/genesis-ui",
 ]
 resolver = "2"
 
@@ -53,3 +54,6 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "jso
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
+crossterm = "0.28"
+owo-colors = "4"
+unicode-width = "0.2"
