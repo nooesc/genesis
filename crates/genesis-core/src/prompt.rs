@@ -861,4 +861,35 @@ mod tests {
         let prompt = SystemPromptBuilder::new("default", &[]).build();
         assert!(prompt.contains(&format!("[prompt_version: {}]", PROMPT_VERSION)));
     }
+
+    // -- Snapshot tests (insta) --
+
+    /// Redact the dynamic timestamp and platform line that changes between runs.
+    fn redact_dynamic_lines(prompt: &str) -> String {
+        let mut lines: Vec<&str> = prompt.lines().collect();
+        for line in &mut lines {
+            if line.starts_with("Current time: ") {
+                *line = "Current time: [TIMESTAMP]. Platform: [OS]/[ARCH].";
+            }
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn snapshot_default_system_prompt() {
+        let tools = vec![];
+        let prompt = SystemPromptBuilder::new("default", &tools).build();
+        let stable = redact_dynamic_lines(&prompt);
+        insta::assert_snapshot!("default_system_prompt", stable);
+    }
+
+    #[test]
+    fn snapshot_system_prompt_with_platform() {
+        let tools = vec![];
+        let prompt = SystemPromptBuilder::new("default", &tools)
+            .delivery_platform("telegram")
+            .build();
+        let stable = redact_dynamic_lines(&prompt);
+        insta::assert_snapshot!("telegram_system_prompt", stable);
+    }
 }
