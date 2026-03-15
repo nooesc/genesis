@@ -188,24 +188,15 @@ fn collect_json_files(
     Ok(files)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DatasetError {
+    #[error("no trajectory files in {0}")]
     EmptyDirectory(String),
+    #[error("{0}")]
     Io(String),
+    #[error("{0}")]
     Parse(String),
 }
-
-impl std::fmt::Display for DatasetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyDirectory(d) => write!(f, "no trajectory files in {d}"),
-            Self::Io(msg) => write!(f, "{msg}"),
-            Self::Parse(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for DatasetError {}
 
 #[cfg(test)]
 mod tests {

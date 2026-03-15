@@ -5,6 +5,21 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 
+/// Errors from URL validation.
+#[derive(Debug, thiserror::Error)]
+pub enum UrlValidationError {
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+    #[error("scheme '{0}' not allowed, only http/https")]
+    DisallowedScheme(String),
+    #[error("access to '{0}' is blocked (internal host)")]
+    BlockedHost(String),
+    #[error("access to private/internal IP {0} is blocked")]
+    BlockedIp(IpAddr),
+    #[error("URL must have a host")]
+    MissingHost,
+}
+
 /// Validate that a URL is safe for outbound requests.
 ///
 /// Blocks:
@@ -14,18 +29,19 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 /// - Link-local addresses (169.254.x.x)
 /// - Cloud metadata endpoints (169.254.169.254)
 /// - IPv6 loopback and unique-local addresses
-pub fn validate_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+pub fn validate_url(url: &str) -> Result<(), UrlValidationError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| UrlValidationError::InvalidUrl(e.to_string()))?;
 
     // Only allow HTTP and HTTPS
     match parsed.scheme() {
         "http" | "https" => {}
-        other => return Err(format!("scheme '{other}' not allowed, only http/https")),
+        other => return Err(UrlValidationError::DisallowedScheme(other.to_owned())),
     }
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| "URL must have a host".to_owned())?;
+        .ok_or_else(|| UrlValidationError::MissingHost)?;
 
     // Block well-known localhost hostnames
     let lower = host.to_ascii_lowercase();
@@ -34,7 +50,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         || lower.ends_with(".localhost")
         || lower == "metadata.google.internal"
     {
-        return Err(format!("access to '{host}' is blocked (internal host)"));
+        return Err(UrlValidationError::BlockedHost(host.to_owned()));
     }
 
     // If the host is a literal IP, check directly
@@ -64,14 +80,14 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 }
 
 /// Check whether an IP address is private/internal.
-fn check_ip(ip: IpAddr) -> Result<(), String> {
+fn check_ip(ip: IpAddr) -> Result<(), UrlValidationError> {
     match ip {
         IpAddr::V4(v4) => check_ipv4(v4),
         IpAddr::V6(v6) => check_ipv6(v6),
     }
 }
 
-fn check_ipv4(ip: Ipv4Addr) -> Result<(), String> {
+fn check_ipv4(ip: Ipv4Addr) -> Result<(), UrlValidationError> {
     if ip.is_loopback()            // 127.0.0.0/8
         || ip.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
         || ip.is_link_local()      // 169.254.0.0/16 (includes cloud metadata)
@@ -80,18 +96,18 @@ fn check_ipv4(ip: Ipv4Addr) -> Result<(), String> {
         || (ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127) // CGN 100.64.0.0/10
         || (ip.octets()[0] == 198 && ip.octets()[1] >= 18 && ip.octets()[1] <= 19) // benchmarking 198.18.0.0/15
     {
-        return Err(format!("access to private/internal IP {ip} is blocked"));
+        return Err(UrlValidationError::BlockedIp(IpAddr::V4(ip)));
     }
     Ok(())
 }
 
-fn check_ipv6(ip: Ipv6Addr) -> Result<(), String> {
+fn check_ipv6(ip: Ipv6Addr) -> Result<(), UrlValidationError> {
     if ip.is_loopback()        // ::1
         || ip.is_unspecified() // ::
         || is_ipv6_unique_local(&ip)  // fc00::/7
         || is_ipv6_link_local(&ip)    // fe80::/10
     {
-        return Err(format!("access to private/internal IP {ip} is blocked"));
+        return Err(UrlValidationError::BlockedIp(IpAddr::V6(ip)));
     }
 
     // Check IPv4-mapped/compatible addresses (e.g. ::ffff:127.0.0.1)
