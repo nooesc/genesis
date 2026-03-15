@@ -27,7 +27,7 @@ sha2.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 
 [dev-dependencies]
 tempfile.workspace = true

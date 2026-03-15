@@ -14,6 +14,3 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "process", "io-util", "io-std", "sync", "time"] }
 tracing = { workspace = true }
-
-[dev-dependencies]
-serde_yaml = { workspace = true }
