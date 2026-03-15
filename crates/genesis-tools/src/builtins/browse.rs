@@ -69,17 +69,8 @@ impl ToolHandler for BrowseTool {
         };
 
         // Truncate at char boundary
-        let truncated = if text.len() > MAX_RESPONSE_BYTES {
-            let mut end = MAX_RESPONSE_BYTES;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut t = text[..end].to_string();
-            t.push_str("\n... (content truncated)");
-            t
-        } else {
-            text
-        };
+        let truncated =
+            crate::truncate_at(&text, MAX_RESPONSE_BYTES, "\n... (content truncated)");
 
         let content = {
             let raw = format!("URL: {url}\nHTTP {status}\n\n{truncated}");

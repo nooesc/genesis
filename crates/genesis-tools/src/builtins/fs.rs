@@ -23,18 +23,8 @@ impl ToolHandler for ReadFileTool {
             reason: format!("failed to read `{path}`: {e}"),
         })?;
 
-        let content = if content.len() > MAX_READ_BYTES {
-            // Walk back from MAX_READ_BYTES to find a valid UTF-8 char boundary
-            let mut end = MAX_READ_BYTES;
-            while end > 0 && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut truncated = content[..end].to_string();
-            truncated.push_str("\n... (file truncated)");
-            truncated
-        } else {
-            content
-        };
+        let content =
+            crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
 
         Ok(ToolOutput {
             content,
