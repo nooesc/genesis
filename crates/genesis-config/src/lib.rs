@@ -1130,6 +1130,18 @@ mod tests {
     }
 
     #[test]
+    fn none_config_path_resolves_to_platform_default() {
+        let config =
+            load_from_map(None, &BTreeMap::new()).expect("config should load with None path");
+
+        assert!(
+            config.paths.config_path.ends_with("genesis/config.yaml"),
+            "expected config_path to end with genesis/config.yaml, got {:?}",
+            config.paths.config_path
+        );
+    }
+
+    #[test]
     fn merges_yaml_config_with_env_overrides() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");

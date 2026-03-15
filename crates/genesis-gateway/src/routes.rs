@@ -6,28 +6,28 @@ use axum::Router;
 
 use crate::{
     add_session_tag_handler, approve_pairing_handler, audit_purge_handler, audit_recent_handler,
-    audit_session_handler, audit_stats_handler, auth_middleware, bus_channels_handler,
-    bus_history_handler, bus_publish_handler, bus_stats_handler, cache_clear_handler,
-    cache_stats_handler, chat_batch_handler, chat_handler, chat_stream_handler,
-    clear_pending_handler, config_handler, create_schedule_handler, delete_memory_handler,
-    delete_schedule_handler, delete_session_handler, delete_skill_handler,
+    audit_session_handler, audit_stats_handler, auth_middleware, bulk_export_handler,
+    bus_channels_handler, bus_history_handler, bus_publish_handler, bus_stats_handler,
+    cache_clear_handler, cache_stats_handler, chat_batch_handler, chat_handler,
+    chat_stream_handler, clear_pending_handler, config_handler, create_schedule_handler,
+    delete_memory_handler, delete_schedule_handler, delete_session_handler, delete_skill_handler,
     delete_user_trait_handler, embed_memories_handler, embed_single_memory_handler,
     eval_run_handler, eval_validate_handler, export_session_handler, fork_session_handler,
     get_schedule_handler, get_session_handler, get_session_tags_handler, get_skill_handler,
     get_subagent_handler, get_template_handler, get_user_trait_handler, guardrails_check_handler,
-    import_session_handler, insights_handler, list_approved_handler, list_memories_handler,
-    list_pending_handler, list_schedules_handler, list_session_subagents_handler,
-    list_sessions_handler, list_skills_handler, list_templates_handler, list_tools_handler,
-    list_user_traits_handler, mcp_status_handler, openai_chat_completions_handler,
-    openai_models_handler, observe_user_trait_handler, platforms, prometheus_metrics_handler,
-    purge_sessions_handler, rate_limit_middleware, remove_session_tag_handler,
-    revoke_pairing_handler, search_memories_handler, search_messages_handler,
-    search_skills_handler, session_messages_handler, sessions_by_tag_handler,
-    set_schedule_enabled_handler, set_session_tags_handler, skill_usage_recent_handler,
-    skill_usage_stats_handler, tool_analytics_handler, update_session_title_handler, usage_handler,
+    health_handler, import_session_handler, insights_handler, list_approved_handler,
+    list_memories_handler, list_pending_handler, list_schedules_handler,
+    list_session_subagents_handler, list_sessions_handler, list_skills_handler,
+    list_templates_handler, list_tools_handler, list_user_traits_handler, llm_analytics_handler,
+    mcp_status_handler, observe_user_trait_handler, openai_chat_completions_handler,
+    openai_models_handler, platforms, prometheus_metrics_handler, purge_sessions_handler,
+    rate_limit_middleware, remove_session_tag_handler, revoke_pairing_handler,
+    search_memories_handler, search_messages_handler, search_skills_handler,
+    session_messages_handler, sessions_by_tag_handler, set_schedule_enabled_handler,
+    set_session_tags_handler, skill_usage_recent_handler, skill_usage_stats_handler,
+    tool_analytics_handler, update_session_title_handler, upsert_skill_handler, usage_handler,
     webhooks_clear_dead_letters_handler, webhooks_dead_letters_handler, webhooks_status_handler,
-    websocket_handler, workflow_run_handler, workflow_validate_handler, AppState, health_handler,
-    llm_analytics_handler,
+    websocket_handler, workflow_run_handler, workflow_validate_handler, AppState,
 };
 
 pub fn protected_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -39,7 +39,7 @@ pub fn protected_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/sessions", get(list_sessions_handler))
         .route("/sessions/purge", delete(purge_sessions_handler))
         .route("/sessions/import", post(import_session_handler))
-        .route("/sessions/export", get(crate::bulk_export_handler))
+        .route("/sessions/export", get(bulk_export_handler))
         .route("/sessions/{id}", get(get_session_handler).delete(delete_session_handler))
         .route("/sessions/{id}/messages", get(session_messages_handler))
         .route("/sessions/{id}/fork", post(fork_session_handler))
@@ -51,7 +51,7 @@ pub fn protected_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/messages/search", get(search_messages_handler))
         .route("/usage", get(usage_handler))
         .route("/insights", get(insights_handler))
-        .route("/skills", get(list_skills_handler).post(crate::upsert_skill_handler))
+        .route("/skills", get(list_skills_handler).post(upsert_skill_handler))
         .route("/skills/search", get(search_skills_handler))
         .route("/skills/{name}", get(get_skill_handler).delete(delete_skill_handler))
         .route("/memories", get(list_memories_handler))

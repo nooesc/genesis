@@ -365,7 +365,7 @@ fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), St
     Ok(())
 }
 
-pub(crate) fn migrate_to_v6(
+fn migrate_to_v6(
     connection: &Connection,
     database_path: &Path,
 ) -> Result<(), StorageError> {
@@ -404,7 +404,7 @@ pub(crate) fn migrate_to_v6(
     Ok(())
 }
 
-pub(crate) fn migrate_to_v7(
+fn migrate_to_v7(
     connection: &Connection,
     database_path: &Path,
 ) -> Result<(), StorageError> {
@@ -428,7 +428,7 @@ pub(crate) fn migrate_to_v7(
     Ok(())
 }
 
-pub(crate) fn migrate_to_v8(
+fn migrate_to_v8(
     connection: &Connection,
     database_path: &Path,
 ) -> Result<(), StorageError> {
@@ -450,7 +450,7 @@ pub(crate) fn migrate_to_v8(
     Ok(())
 }
 
-pub(crate) fn migrate_to_v9(
+fn migrate_to_v9(
     connection: &Connection,
     database_path: &Path,
 ) -> Result<(), StorageError> {
@@ -676,4 +676,90 @@ where
     I: Iterator<Item = PathBuf>,
 {
     candidates.find(|path| path.is_dir())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::open;
+    use tempfile::tempdir;
+
+    #[test]
+    fn v6_migration_creates_response_cache_and_audit_log() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Create minimal schema without response_cache/audit_log
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+
+        // Run v6 migration
+        migrate_to_v6(&connection, &database_path).expect("v6 migration should succeed");
+
+        // Verify tables exist by querying them
+        connection
+            .execute(
+                "INSERT INTO response_cache (cache_key, model, response, expires_at) VALUES ('k', 'm', 'r', '2099-01-01')",
+                [],
+            )
+            .expect("response_cache should exist");
+        connection
+            .execute(
+                "INSERT INTO audit_log (event_type) VALUES ('test')",
+                [],
+            )
+            .expect("audit_log should exist");
+    }
+
+    #[test]
+    fn v7_migration_creates_channels_table() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Run v7 migration
+        migrate_to_v7(&connection, &database_path).expect("v7 migration should succeed");
+
+        // Verify table exists
+        connection
+            .execute(
+                "INSERT INTO channels (platform, channel_id, channel_name) VALUES ('slack', 'C1', 'general')",
+                [],
+            )
+            .expect("channels table should exist");
+    }
+
+    #[test]
+    fn v8_migration_creates_sticker_cache_table() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        let connection = open(&database_path).expect("open should work");
+
+        // Run v8 migration
+        migrate_to_v8(&connection, &database_path).expect("v8 migration should succeed");
+
+        // Verify table exists
+        connection
+            .execute(
+                "INSERT INTO sticker_cache (file_unique_id, description) VALUES ('abc', 'a cat')",
+                [],
+            )
+            .expect("sticker_cache table should exist");
+    }
+
+    #[test]
+    fn migrate_to_v9_is_idempotent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        // Bootstrap creates all tables including messages, then calls migrate_to_v9 once.
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        // Running migrate_to_v9 again should be idempotent (column already exists).
+        let connection = open(&database_path).expect("open should work");
+        migrate_to_v9(&connection, &database_path).expect("second v9 migration should succeed");
+    }
 }
