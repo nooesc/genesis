@@ -182,7 +182,11 @@ impl McpManager {
     ) -> Result<String, McpError> {
         let (server_name, tool_name) = parse_mcp_tool_name(prefixed_name)?;
 
-        // First attempt
+        // First attempt.
+        // Clone `arguments` because `call_tool` takes ownership, and we may
+        // need the value again for the retry path below. Moving the clone to
+        // the retry branch isn't feasible: the first call consumes `arguments`
+        // inside this block, so we must preserve a copy before entering it.
         let first_err = {
             let clients = self.clients.read().await;
             let client = clients

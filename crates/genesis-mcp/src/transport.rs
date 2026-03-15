@@ -48,8 +48,9 @@ pub struct StdioTransport {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     /// Monotonically increasing request ID counter.
     next_id: AtomicU64,
-    /// The child process handle (kept alive).
-    _child: Arc<Mutex<Child>>,
+    /// The child process handle — kept alive so `kill_on_drop(true)` doesn't
+    /// fire until the transport is dropped. Never accessed after construction.
+    _child: Child,
 }
 
 impl StdioTransport {
@@ -145,7 +146,7 @@ impl StdioTransport {
             outgoing_tx,
             pending,
             next_id: AtomicU64::new(1),
-            _child: Arc::new(Mutex::new(child)),
+            _child: child,
         })
     }
 }
@@ -354,12 +355,15 @@ impl McpTransport for HttpTransport {
         let http = self.http.clone();
         let url = self.url.clone();
         tokio::spawn(async move {
-            let _ = http
+            if let Err(e) = http
                 .post(&url)
                 .json(&msg)
                 .timeout(Duration::from_secs(5))
                 .send()
-                .await;
+                .await
+            {
+                warn!(error = %e, "MCP notification failed");
+            }
         });
 
         Ok(())
