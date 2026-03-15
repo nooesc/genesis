@@ -24,12 +24,14 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-// ── Eve / UI palette (mirrored from genesis_ui::colors to avoid a runtime dep) ──
+use crate::history::rgb;
+
+// ── Eve / UI palette ─────────────────────────────────────────────────────────
 
 /// `EVE_LAVENDER` — accent colour for headers.
-const ACCENT: Color = Color::Rgb(180, 167, 214);
+const ACCENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
 /// Default plain-text colour.
-const TEXT: Color = Color::Rgb(208, 208, 208);
+const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
 /// Inline-code background.
 const CODE_BG: Color = Color::Rgb(50, 50, 50);
 /// Inline-code foreground.

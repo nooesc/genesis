@@ -126,9 +126,12 @@ impl App {
                 self.status_bar.set_state(state);
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
+                self.command_popup.hide();
+                let visible_rows = self.viewport_height.saturating_sub(1).max(1);
                 self.overlay = Some(TranscriptOverlay::from_cells(
                     self.chat.committed_cells(),
                     80, // will be updated on next resize; 80 is a reasonable default
+                    visible_rows,
                 ));
                 self.frame_requester.schedule_frame();
             }
@@ -183,9 +186,12 @@ impl App {
 
         // Ctrl+T — toggle transcript overlay.
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.command_popup.hide();
+            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
             self.overlay = Some(TranscriptOverlay::from_cells(
                 self.chat.committed_cells(),
                 80,
+                visible_rows,
             ));
             self.frame_requester.schedule_frame();
             return;

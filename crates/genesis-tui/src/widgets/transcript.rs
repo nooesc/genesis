@@ -40,7 +40,7 @@ impl TranscriptOverlay {
     /// Each cell is rendered via [`HistoryCell::to_scrollback_lines`] and
     /// separated by a blank line. Scrolling starts at the bottom so the user
     /// sees the most recent messages first.
-    pub fn from_cells(cells: &[HistoryCell], width: u16) -> Self {
+    pub fn from_cells(cells: &[HistoryCell], width: u16, visible_rows: u16) -> Self {
         let mut lines: Vec<Line<'static>> = Vec::new();
         for cell in cells {
             lines.extend(cell.to_scrollback_lines(width));
@@ -48,7 +48,7 @@ impl TranscriptOverlay {
         }
         let total = lines.len();
         Self {
-            scroll_offset: total.saturating_sub(1),
+            scroll_offset: total.saturating_sub(visible_rows as usize),
             lines,
             total_lines: total,
         }
@@ -59,11 +59,11 @@ impl TranscriptOverlay {
         let half_page = (visible_rows as usize / 2).max(1);
         match key.code {
             // ── Scroll down ──────────────────────────────────────────────
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(1, visible_rows),
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_down(half_page)
+                self.scroll_down(half_page, visible_rows)
             }
-            KeyCode::PageDown => self.scroll_down(visible_rows as usize),
+            KeyCode::PageDown => self.scroll_down(visible_rows as usize, visible_rows),
 
             // ── Scroll up ────────────────────────────────────────────────
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(1),
@@ -74,9 +74,9 @@ impl TranscriptOverlay {
 
             // ── Jump to extremes ─────────────────────────────────────────
             KeyCode::Char('g') => self.scroll_to_top(),
-            KeyCode::Char('G') => self.scroll_to_bottom(),
+            KeyCode::Char('G') => self.scroll_to_bottom(visible_rows),
             KeyCode::Home => self.scroll_to_top(),
-            KeyCode::End => self.scroll_to_bottom(),
+            KeyCode::End => self.scroll_to_bottom(visible_rows),
 
             // ── Close ────────────────────────────────────────────────────
             KeyCode::Char('q') => return TranscriptAction::Close,
@@ -125,8 +125,8 @@ impl TranscriptOverlay {
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    fn scroll_down(&mut self, n: usize) {
-        let max = self.total_lines.saturating_sub(1);
+    fn scroll_down(&mut self, n: usize, visible_rows: u16) {
+        let max = self.total_lines.saturating_sub(visible_rows as usize);
         self.scroll_offset = (self.scroll_offset + n).min(max);
     }
 
@@ -138,8 +138,8 @@ impl TranscriptOverlay {
         self.scroll_offset = 0;
     }
 
-    fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.total_lines.saturating_sub(1);
+    fn scroll_to_bottom(&mut self, visible_rows: u16) {
+        self.scroll_offset = self.total_lines.saturating_sub(visible_rows as usize);
     }
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn from_cells_renders_all() {
         let cells = make_cells();
-        let t = TranscriptOverlay::from_cells(&cells, 80);
+        let t = TranscriptOverlay::from_cells(&cells, 80, 24);
         // 2 cells → 2 content lines + 2 blank separators = 4 total lines
         assert_eq!(t.total_lines, 4);
         assert_eq!(t.lines.len(), 4);
@@ -220,28 +220,36 @@ mod tests {
     /// Scrolling down increments the offset by one.
     #[test]
     fn scroll_down_advances() {
-        let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        // Use enough cells so total_lines > visible_rows (3 visible).
+        let mut cells = Vec::new();
+        for i in 0..10 {
+            cells.push(HistoryCell::Agent(AgentCell::new(format!("msg {i}"))));
+        }
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 3);
         t.scroll_to_top(); // start from 0
         let before = t.scroll_offset;
-        t.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), 24);
+        t.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), 3);
         assert_eq!(t.scroll_offset, before + 1);
     }
 
     /// Scrolling up decrements the offset by one (clamped at 0).
     #[test]
     fn scroll_up_goes_back() {
-        let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        // Use enough cells so total_lines > visible_rows (3 visible).
+        let mut cells = Vec::new();
+        for i in 0..10 {
+            cells.push(HistoryCell::Agent(AgentCell::new(format!("msg {i}"))));
+        }
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 3);
         t.scroll_to_top();
         // At offset 0, scrolling up should not underflow.
-        t.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), 24);
+        t.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), 3);
         assert_eq!(t.scroll_offset, 0);
 
         // Move down first, then up.
-        t.scroll_down(2);
+        t.scroll_down(2, 3);
         let offset_before = t.scroll_offset;
-        t.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), 24);
+        t.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), 3);
         assert_eq!(t.scroll_offset, offset_before - 1);
     }
 
@@ -249,28 +257,28 @@ mod tests {
     #[test]
     fn scroll_to_top_and_bottom() {
         let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
 
         t.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), 24);
         assert_eq!(t.scroll_offset, 0);
 
         t.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), 24);
-        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(1));
+        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(24));
     }
 
     /// `from_cells` starts at the bottom (most recent).
     #[test]
     fn starts_at_bottom() {
         let cells = make_cells();
-        let t = TranscriptOverlay::from_cells(&cells, 80);
-        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(1));
+        let t = TranscriptOverlay::from_cells(&cells, 80, 24);
+        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(24));
     }
 
     /// `q` returns `TranscriptAction::Close`.
     #[test]
     fn q_closes() {
         let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
         let action =
             t.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), 24);
         assert_eq!(action, TranscriptAction::Close);
@@ -280,7 +288,7 @@ mod tests {
     #[test]
     fn esc_closes() {
         let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
         let action = t.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 24);
         assert_eq!(action, TranscriptAction::Close);
     }
@@ -289,7 +297,7 @@ mod tests {
     #[test]
     fn ctrl_t_closes() {
         let cells = make_cells();
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
         let action = t.handle_key(
             KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
             24,
@@ -304,7 +312,7 @@ mod tests {
         for i in 0..20 {
             cells.push(HistoryCell::Agent(AgentCell::new(format!("line {i}"))));
         }
-        let mut t = TranscriptOverlay::from_cells(&cells, 80);
+        let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
         t.scroll_to_top();
         let before = t.scroll_offset;
         t.handle_key(
@@ -318,7 +326,7 @@ mod tests {
     /// Empty cell list creates an overlay without panicking.
     #[test]
     fn from_empty_cells() {
-        let t = TranscriptOverlay::from_cells(&[], 80);
+        let t = TranscriptOverlay::from_cells(&[], 80, 24);
         assert_eq!(t.total_lines, 0);
         assert_eq!(t.scroll_offset, 0);
     }
@@ -334,7 +342,7 @@ mod tests {
             true,
             Duration::from_millis(100),
         ))];
-        let t = TranscriptOverlay::from_cells(&cells, 80);
+        let t = TranscriptOverlay::from_cells(&cells, 80, 24);
         // ToolCell with default Grouped mode produces 4 lines + 1 blank = 5
         assert_eq!(t.total_lines, 5);
     }

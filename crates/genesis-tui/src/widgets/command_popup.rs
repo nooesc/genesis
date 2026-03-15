@@ -312,9 +312,9 @@ impl CommandPopup {
                         break;
                     }
                     if let Some(cell) = buf.cell_mut((x, row_y)) {
-                        let mut s = String::with_capacity(ch.len_utf8());
-                        s.push(ch);
-                        cell.set_symbol(&s);
+                        let mut char_buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut char_buf);
+                        cell.set_symbol(s);
                         cell.set_style(style);
                     }
                     let char_width =

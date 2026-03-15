@@ -5,6 +5,8 @@
 //! styles.  The `eve> ` prefix is prepended to the first line and
 //! continuation lines are indented by the same width.
 
+use std::cell::OnceCell;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -22,12 +24,24 @@ const PREFIX: &str = "eve> ";
 pub struct AgentCell {
     /// The raw response text.
     pub text: String,
+    /// Lazily-computed styled lines (avoids re-parsing markdown in both
+    /// `height()` and `to_scrollback_lines()`).
+    cached_lines: OnceCell<Vec<Line<'static>>>,
 }
 
 impl AgentCell {
     /// Construct a new `AgentCell` with the given response text.
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: text.into(),
+            cached_lines: OnceCell::new(),
+        }
+    }
+
+    /// Return the cached (or lazily computed) styled lines.
+    fn lines(&self) -> &Vec<Line<'static>> {
+        self.cached_lines
+            .get_or_init(|| prefix_markdown_lines(&self.text))
     }
 
     /// Render the cell into the given buffer area.
@@ -39,10 +53,7 @@ impl AgentCell {
 
     /// Return the number of rows this cell occupies at the given terminal width.
     pub fn height(&self, _width: u16) -> u16 {
-        // Markdown rendering is width-independent (no word-wrapping); each
-        // source line maps to one ratatui Line.
-        let md_lines = markdown_to_lines(&self.text);
-        md_lines.len().max(1) as u16
+        self.lines().len().max(1) as u16
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.
@@ -51,7 +62,7 @@ impl AgentCell {
     /// lists.  We prepend the coloured `eve> ` prefix to the first line and
     /// a matching-width indent to every subsequent line.
     pub fn to_scrollback_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        prefix_markdown_lines(&self.text)
+        self.lines().clone()
     }
 }
 
