@@ -140,7 +140,11 @@ pub(crate) fn verify_discord_signature(
 /// WhatsApp includes an `x-hub-signature-256` header with the form:
 /// `sha256=<hex_hmac_sha256>`, where the HMAC is computed over the raw
 /// request body with the app secret as key.
-pub(crate) fn verify_whatsapp_signature(secret: &str, signature: Option<&str>, body: &[u8]) -> bool {
+pub(crate) fn verify_whatsapp_signature(
+    secret: &str,
+    signature: Option<&str>,
+    body: &[u8],
+) -> bool {
     let signature = match signature.and_then(|sig| sig.strip_prefix("sha256=")) {
         Some(value) => value,
         None => return false,
@@ -234,7 +238,10 @@ mod tests {
 
     #[test]
     fn webhook_secret_compare_works() {
-        assert!(verify_secret_token("webhook-secret", Some("webhook-secret")));
+        assert!(verify_secret_token(
+            "webhook-secret",
+            Some("webhook-secret")
+        ));
         assert!(!verify_secret_token("webhook-secret", Some("other")));
         assert!(!verify_secret_token("webhook-secret", None));
     }
@@ -253,7 +260,9 @@ mod tests {
     #[test]
     fn discord_signature_rejects_invalid_signature_hex() {
         let key_hex = hex::encode([1u8; 32]);
-        assert!(!verify_discord_signature(&key_hex, "ts", b"body", "not-hex"));
+        assert!(!verify_discord_signature(
+            &key_hex, "ts", b"body", "not-hex"
+        ));
     }
 
     #[test]
@@ -370,6 +379,10 @@ mod tests {
 
     #[test]
     fn verify_whatsapp_signature_rejects_missing_header() {
-        assert!(!verify_whatsapp_signature("wh-secret", None, b"{\"foo\":\"bar\"}"));
+        assert!(!verify_whatsapp_signature(
+            "wh-secret",
+            None,
+            b"{\"foo\":\"bar\"}"
+        ));
     }
 }

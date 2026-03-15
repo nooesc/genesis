@@ -130,9 +130,7 @@ impl WebhookDispatcher {
 
         for config in &self.configs {
             // Filter by event type if the webhook has a filter
-            if !config.events.is_empty()
-                && !config.events.iter().any(|e| e == event_str)
-            {
+            if !config.events.is_empty() && !config.events.iter().any(|e| e == event_str) {
                 continue;
             }
 
@@ -260,13 +258,13 @@ impl WebhookDispatcher {
 
 /// Compute HMAC-SHA256 signature for webhook payload verification.
 fn compute_hmac(secret: &str, body: &str) -> String {
-    use sha2::Sha256;
     use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());
     let result = mac.finalize();
     format!("sha256={}", hex::encode(result.into_bytes()))

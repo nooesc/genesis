@@ -5,9 +5,9 @@ pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
 
+use genesis_storage::PairingStore;
 use std::collections::HashSet;
 use std::path::Path;
-use genesis_storage::PairingStore;
 
 /// Result of a pairing check for an incoming platform message.
 pub enum PairingCheck {
@@ -55,8 +55,8 @@ pub fn check_pairing(
         return Ok(PairingCheck::Approved);
     }
 
-    let platform_allowlist = std::env::var(platform_allowlist_env(platform.as_str()))
-        .unwrap_or_default();
+    let platform_allowlist =
+        std::env::var(platform_allowlist_env(platform.as_str())).unwrap_or_default();
     let global_allowlist = std::env::var("GATEWAY_ALLOWED_USERS").unwrap_or_default();
 
     if platform_allowlist.is_empty() && global_allowlist.is_empty() {
