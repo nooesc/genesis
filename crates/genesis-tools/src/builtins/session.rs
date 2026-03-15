@@ -119,7 +119,8 @@ impl ToolHandler for SessionHistoryTool {
         for msg in recent {
             let content = msg.content.as_deref().unwrap_or("[tool call]");
             let truncated = if content.len() > 300 {
-                format!("{}...", &content[..300])
+                let end = content.floor_char_boundary(300);
+                format!("{}...", &content[..end])
             } else {
                 content.to_owned()
             };
@@ -267,5 +268,34 @@ mod tests {
         };
         let output = SessionHistoryTool.run(&call, &ctx).expect("history");
         assert!(output.content.contains("no messages"));
+    }
+
+    #[test]
+    fn session_history_truncates_multibyte_content_without_panic() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let store = SessionStore::new(&db_path);
+        store
+            .create_session("s-utf8", "cli", None)
+            .expect("create session");
+
+        // Build a string >300 bytes where byte 300 falls inside a multi-byte
+        // character. Each emoji is 4 bytes; 76 emojis = 304 bytes.
+        let emoji_content = "\u{1F30D}".repeat(76);
+        assert!(emoji_content.len() > 300);
+        store
+            .append_message("s-utf8", "user", Some(&emoji_content), None, None)
+            .expect("append");
+
+        let call = ToolCall {
+            name: "session_history".to_owned(),
+            arguments: BTreeMap::from([("session_id".to_owned(), "s-utf8".to_owned())]),
+        };
+        // This used to panic with `&content[..300]` on a multi-byte boundary.
+        let output = SessionHistoryTool.run(&call, &ctx).expect("history");
+        assert!(output.content.contains("..."));
     }
 }

@@ -747,11 +747,22 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        // Try to find a newline within the limit
-        let split_at = remaining[..max_len]
+        // Walk back to a char boundary so we never slice inside a multi-byte
+        // character (e.g. emoji). `floor_char_boundary` returns the largest
+        // byte index <= max_len that sits on a UTF-8 char boundary.
+        let safe_end = remaining.floor_char_boundary(max_len);
+
+        // Try to find a newline within the limit, then a space
+        let mut split_at = remaining[..safe_end]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..safe_end].rfind(' '))
+            .unwrap_or(safe_end);
+
+        // Guard: if remaining starts with a delimiter, rfind returns 0 which
+        // would push an empty chunk. Fall back to the full safe window.
+        if split_at == 0 {
+            split_at = safe_end;
+        }
 
         chunks.push(remaining[..split_at].to_owned());
         remaining = remaining[split_at..].trim_start();
@@ -811,6 +822,32 @@ mod tests {
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 100);
+        }
+    }
+
+    #[test]
+    fn split_message_multibyte_utf8_does_not_panic() {
+        // Each emoji is 4 bytes. Build a string that forces a split in the
+        // middle of a multi-byte character when using naive byte indexing.
+        let emoji = "\u{1F600}"; // 4 bytes
+        let text = emoji.repeat(30); // 120 bytes total
+        // max_len=50 would land inside an emoji at byte 50 if not handled.
+        let chunks = split_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 50);
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn split_message_leading_delimiter_does_not_produce_empty_chunk() {
+        // When remaining starts with '\n' or ' ', rfind returns Some(0).
+        // The guard must prevent pushing an empty chunk.
+        let text = format!("\n{}", "a".repeat(100));
+        let chunks = split_message(&text, 50);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "empty chunk produced");
         }
     }
 
