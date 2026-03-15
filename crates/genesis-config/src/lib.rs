@@ -48,6 +48,32 @@ pub struct GenesisConfig {
     /// via cosine similarity in addition to FTS5 keyword matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<EmbeddingConfig>,
+    /// Display and UI settings for the CLI.
+    #[serde(default)]
+    pub display: DisplayConfig,
+}
+
+/// Display and UI settings for the CLI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplayConfig {
+    /// Tool call progress display mode.
+    #[serde(default)]
+    pub tool_progress: ToolDisplayMode,
+}
+
+/// Controls how tool call progress is displayed in the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolDisplayMode {
+    /// Do not show tool call progress.
+    Off,
+    /// Show a brief one-line summary per tool call.
+    Summary,
+    /// Group tool calls visually (default).
+    #[default]
+    Grouped,
+    /// Show full tool call details.
+    Verbose,
 }
 
 /// Configuration for a single MCP server.
@@ -419,6 +445,8 @@ struct FileConfig {
     personality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     embedding: Option<EmbeddingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<DisplayConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -563,6 +591,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         toolsets: HashMap::new(),
         personality: None,
         embedding: None,
+        display: DisplayConfig::default(),
     })
 }
 
@@ -793,6 +822,7 @@ pub fn load_from_map(
             toolsets: file_config.toolsets.unwrap_or_default(),
             personality: file_config.personality,
             embedding: file_config.embedding,
+            display: file_config.display.unwrap_or_default(),
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -1535,5 +1565,19 @@ toolsets:
     fn toolsets_default_empty() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.toolsets.is_empty());
+    }
+
+    #[test]
+    fn display_config_defaults_to_grouped() {
+        use super::{DisplayConfig, ToolDisplayMode};
+        let config: DisplayConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.tool_progress, ToolDisplayMode::Grouped);
+    }
+
+    #[test]
+    fn display_config_parses_modes() {
+        use super::{DisplayConfig, ToolDisplayMode};
+        let config: DisplayConfig = serde_yaml::from_str("tool_progress: verbose").unwrap();
+        assert_eq!(config.tool_progress, ToolDisplayMode::Verbose);
     }
 }

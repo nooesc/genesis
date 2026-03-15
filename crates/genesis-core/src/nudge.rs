@@ -245,6 +245,7 @@ mod tests {
                 toolsets: std::collections::HashMap::new(),
                 personality: None,
                 embedding: None,
+                display: genesis_config::DisplayConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

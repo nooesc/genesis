@@ -418,6 +418,7 @@ mod tests {
             toolsets: std::collections::HashMap::new(),
             personality: None,
             embedding: None,
+            display: genesis_config::DisplayConfig::default(),
         }
     }
 
