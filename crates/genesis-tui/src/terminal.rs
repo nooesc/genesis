@@ -6,9 +6,8 @@
 use crossterm::{
     cursor,
     event::{
-        DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste,
-        EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -66,20 +65,17 @@ fn set_panic_hook() {
 /// Flush any buffered stdin bytes (prevents stale input after mode switch).
 fn flush_stdin() {
     #[cfg(unix)]
+    // SAFETY: STDIN_FILENO is always a valid fd. If stdin has been redirected
+    // to a non-tty, tcflush returns ENOTTY which we silently ignore (the
+    // return value is discarded). This is only called after init() confirms
+    // stdout is a terminal, at which point stdin is also expected to be a tty.
     unsafe {
         libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
     }
 }
 
-/// Check if running inside Zellij (strict xterm compliance, no alt screen).
-pub fn is_zellij() -> bool {
-    std::env::var("ZELLIJ_SESSION_NAME").is_ok()
-}
-
-/// Check if running inside tmux.
-pub fn is_tmux() -> bool {
-    std::env::var("TMUX").is_ok()
-}
+// Re-export terminal detection from genesis-ui to avoid duplication.
+pub use genesis_ui::terminal::{is_tmux, is_zellij};
 
 #[cfg(test)]
 mod tests {

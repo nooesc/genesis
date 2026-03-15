@@ -51,6 +51,14 @@ pub fn is_tmux() -> bool {
     std::env::var_os("TMUX").is_some()
 }
 
+/// Returns `true` if we are running inside Zellij.
+///
+/// Zellij has strict xterm spec compliance — alternate screen and some
+/// DECSTBM features behave differently than in other multiplexers.
+pub fn is_zellij() -> bool {
+    std::env::var_os("ZELLIJ_SESSION_NAME").is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
