@@ -7,6 +7,7 @@
 
 pub mod custom_terminal;
 pub mod frame_requester;
+pub mod insert_history;
 pub mod terminal;
 
 use genesis_config::GenesisConfig;
