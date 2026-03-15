@@ -130,6 +130,9 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     #[arg(long, global = true, help = "Render machine-readable JSON output")]
     pub json: bool,
+    /// Color output mode: auto, always, never.
+    #[arg(long, global = true, default_value = "auto")]
+    pub color: String,
     #[command(subcommand)]
     pub command: Command,
 }

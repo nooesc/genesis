@@ -735,6 +735,7 @@ dependencies = [
  "genesis-storage",
  "genesis-tools",
  "genesis-types",
+ "genesis-ui",
  "rand",
  "rustyline",
  "serde_json",

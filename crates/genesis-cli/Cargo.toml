@@ -12,6 +12,7 @@ clap.workspace = true
 clap_complete.workspace = true
 futures-util.workspace = true
 genesis-auth = { path = "../genesis-auth" }
+genesis-ui = { path = "../genesis-ui" }
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
 genesis-gateway = { path = "../genesis-gateway" }
