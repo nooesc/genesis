@@ -29,6 +29,7 @@ pub mod events;
 pub mod frame_requester;
 pub mod history;
 pub mod insert_history;
+pub mod render;
 pub mod terminal;
 pub mod widgets;
 
