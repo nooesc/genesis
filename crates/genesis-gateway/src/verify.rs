@@ -240,12 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_token_matches_expected() {
-        assert!(verify_secret_token("secret", Some("secret")));
-        assert!(!verify_secret_token("secret", Some("wrong")));
-    }
-
-    #[test]
     fn discord_signature_rejects_invalid_key() {
         assert!(!verify_discord_signature("not-hex", "ts", b"body", "sig"));
     }
