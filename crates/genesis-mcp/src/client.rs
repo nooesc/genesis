@@ -412,22 +412,16 @@ impl McpClient {
                 })
             })?;
 
-        if result.is_error == Some(true) {
-            let text = result
-                .content
-                .iter()
-                .filter_map(|c| c.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(McpError::ToolCallFailed(text));
-        }
-
         let output = result
             .content
             .iter()
             .filter_map(|c| c.text.as_deref())
             .collect::<Vec<_>>()
             .join("\n");
+
+        if result.is_error == Some(true) {
+            return Err(McpError::ToolCallFailed(output));
+        }
 
         Ok(output)
     }

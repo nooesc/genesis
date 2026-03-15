@@ -14,13 +14,14 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
     Implementation, InitializeResult, JsonRpcError,
     ServerCapabilities, ToolsCapability,
 };
+use crate::read_limited_stdin_line;
 
 const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
@@ -32,8 +33,8 @@ const MAX_STDIN_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// client's request which uses Serialize).
 #[derive(Debug, Clone, Deserialize)]
 struct IncomingRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     id: Option<u64>,
     method: String,
     params: Option<Value>,
@@ -190,37 +191,6 @@ pub async fn run_stdio_server(
     }
 
     Ok(())
-}
-
-async fn read_limited_stdin_line<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> Result<Option<String>, crate::McpError>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut line = Vec::new();
-    let mut limited_reader = reader.take((max_bytes as u64).saturating_add(1));
-    let bytes_read = limited_reader
-        .read_until(b'\n', &mut line)
-        .await
-        .map_err(|e| crate::McpError::Transport(format!("stdin read error: {e}")))?;
-
-    if bytes_read == 0 {
-        return Ok(None);
-    }
-
-    if !line.ends_with(b"\n") && bytes_read > max_bytes {
-        return Err(crate::McpError::Protocol(format!(
-            "frame exceeds {max_bytes} bytes"
-        )));
-    }
-
-    String::from_utf8(line)
-        .map(Some)
-        .map_err(|error| {
-            crate::McpError::Protocol(format!("incoming frame was not valid UTF-8: {error}"))
-        })
 }
 
 /// Handle a single JSON-RPC request and return a response.
@@ -419,7 +389,7 @@ mod tests {
 
     fn make_request(id: u64, method: &str, params: Option<Value>) -> IncomingRequest {
         IncomingRequest {
-            jsonrpc: "2.0".to_owned(),
+            _jsonrpc: "2.0".to_owned(),
             id: Some(id),
             method: method.to_owned(),
             params,
@@ -528,7 +498,7 @@ mod tests {
     #[test]
     fn notification_has_no_id() {
         let req = IncomingRequest {
-            jsonrpc: "2.0".to_owned(),
+            _jsonrpc: "2.0".to_owned(),
             id: None,
             method: "notifications/initialized".to_owned(),
             params: None,
