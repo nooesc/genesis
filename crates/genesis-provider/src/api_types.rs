@@ -382,6 +382,8 @@ pub struct ChatToolFunction {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
 }
 
 /// OpenAI Chat Completions API response.
@@ -486,6 +488,7 @@ impl From<&genesis_types::ToolDefinition> for ChatTool {
                 name: def.name.clone(),
                 description: def.description.clone(),
                 parameters: def.parameters.clone(),
+                strict: Some(true),
             },
         }
     }
@@ -897,5 +900,17 @@ mod tests {
             .with_tool_choice(ToolChoice::Required);
         let json = serde_json::to_value(&request).expect("serialize");
         assert_eq!(json["tool_choice"], "required");
+    }
+
+    #[test]
+    fn chat_tool_serialization_includes_strict() {
+        let def = genesis_types::ToolDefinition {
+            name: "test_tool".to_owned(),
+            description: "A test tool".to_owned(),
+            parameters: Some(serde_json::json!({"type": "object", "properties": {}})),
+        };
+        let tool = ChatTool::from(&def);
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["function"]["strict"], true);
     }
 }
