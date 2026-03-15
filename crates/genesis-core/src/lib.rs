@@ -378,7 +378,7 @@ fn check_tool_registry() -> DoctorCheck {
 
 /// Gather storage statistics: session, skill, and schedule counts.
 fn check_storage_stats(db_path: &Path) -> DoctorCheck {
-    let sessions = SessionStore::new(db_path).count_sessions().unwrap_or(0);
+    let sessions = SessionStore::new(db_path).session_count().unwrap_or(0);
 
     // Use direct COUNT(*) queries to avoid loading full rows
     let (skills, schedules) = match rusqlite::Connection::open(db_path) {
