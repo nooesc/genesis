@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{params, Connection};
 
@@ -26,7 +26,7 @@ impl ToolHandler for MemoryStoreTool {
                 argument: "value",
             })?;
 
-        let database_path = database_path_from_context(context);
+        let database_path = context.db_path();
         let connection = open_database(&call.name, &database_path)?;
         ensure_memory_search_index(&call.name, &connection)?;
 
@@ -90,7 +90,7 @@ impl ToolHandler for MemoryRecallTool {
             .transpose()?
             .unwrap_or(DEFAULT_RECALL_LIMIT);
 
-        let database_path = database_path_from_context(context);
+        let database_path = context.db_path();
         let connection = open_database(&call.name, &database_path)?;
         ensure_memory_search_index(&call.name, &connection)?;
 
@@ -149,10 +149,6 @@ impl ToolHandler for MemoryRecallTool {
     }
 }
 
-fn database_path_from_context(context: &ToolContext) -> PathBuf {
-    Path::new(&context.data_dir).join("genesis.db")
-}
-
 fn open_database(tool_name: &str, database_path: &Path) -> Result<Connection, ToolError> {
     Connection::open(database_path).map_err(|error| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
@@ -193,7 +189,7 @@ mod tests {
     use genesis_storage::{bootstrap, SessionStore};
     use tempfile::tempdir;
 
-    use super::{database_path_from_context, MemoryRecallTool, MemoryStoreTool};
+    use super::{MemoryRecallTool, MemoryStoreTool};
     use crate::{ToolCall, ToolContext, ToolHandler};
 
     fn ctx(data_dir: &str) -> ToolContext {
@@ -278,6 +274,6 @@ mod tests {
         let dir = tempdir().expect("tempdir should exist");
         let context = ctx(dir.path().to_string_lossy().as_ref());
 
-        assert_eq!(database_path_from_context(&context), dir.path().join("genesis.db"));
+        assert_eq!(context.db_path(), dir.path().join("genesis.db"));
     }
 }

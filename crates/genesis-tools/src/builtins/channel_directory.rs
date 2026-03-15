@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -38,7 +37,7 @@ impl ToolHandler for ListChannelsTool {
             .map(|v| v == "true")
             .unwrap_or(false);
 
-        let db_path = database_path(context);
+        let db_path = context.db_path();
         let store = ChannelStore::new(&db_path);
 
         // Determine which platforms to query.
@@ -93,10 +92,6 @@ impl ToolHandler for ListChannelsTool {
             ]),
         })
     }
-}
-
-fn database_path(context: &ToolContext) -> PathBuf {
-    PathBuf::from(&context.data_dir).join("genesis.db")
 }
 
 /// Return the list of platforms that have API tokens configured.

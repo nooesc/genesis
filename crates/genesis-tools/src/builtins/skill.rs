@@ -41,7 +41,7 @@ impl ToolHandler for SkillCreateTool {
             .map(|t| t.split(',').map(|s| s.trim()).collect())
             .unwrap_or_default();
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
         let store = SkillStore::new(&db_path);
 
@@ -73,7 +73,7 @@ pub struct SkillListTool;
 
 impl ToolHandler for SkillListTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = SkillStore::new(&db_path);
 
         let skills = store.list_all().map_err(|e| ToolError::ExecutionFailed {
@@ -124,7 +124,7 @@ impl ToolHandler for SkillGetTool {
                 argument: "name",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = SkillStore::new(&db_path);
 
         let skill = store
@@ -173,7 +173,7 @@ impl ToolHandler for SkillDeleteTool {
                 argument: "name",
             })?;
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let store = SkillStore::new(&db_path);
 
         let deleted = store.delete(name).map_err(|e| ToolError::ExecutionFailed {
@@ -231,7 +231,7 @@ impl ToolHandler for SkillRecordUsageTool {
 
         let feedback = call.arguments.get("feedback").map(|s| s.as_str());
 
-        let db_path = std::path::Path::new(&context.data_dir).join("genesis.db");
+        let db_path = context.db_path();
         let _ = bootstrap(&db_path);
 
         // Verify the skill exists
