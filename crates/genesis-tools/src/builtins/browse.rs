@@ -33,9 +33,9 @@ impl ToolHandler for BrowseTool {
             })?;
 
         // SSRF protection: validate URL before making request
-        crate::url_safety::validate_url(url).map_err(|reason| ToolError::ExecutionFailed {
+        crate::url_safety::validate_url(url).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason,
+            reason: e.to_string(),
         })?;
 
         let client = http_client();

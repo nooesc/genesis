@@ -133,58 +133,28 @@ pub struct TapsConfig {
 // Error type
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SkillHubError {
-    Io(std::io::Error),
-    Json(serde_json::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("parse error: {0}")]
     Parse(String),
+    #[error("skill not found: {0}")]
     NotFound(String),
+    #[error("network error: {0}")]
     Network(String),
+    #[error("security blocked: {0}")]
     SecurityBlocked(String),
+    #[error("source type is not supported yet: {0}")]
     UnsupportedSource(&'static str),
+    #[error("integrity mismatch for {name}: expected {expected}, got {actual}")]
     IntegrityMismatch {
         name: String,
         expected: String,
         actual: String,
     },
-}
-
-impl std::fmt::Display for SkillHubError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "io error: {err}"),
-            Self::Json(err) => write!(f, "json error: {err}"),
-            Self::Parse(err) => write!(f, "parse error: {err}"),
-            Self::NotFound(name) => write!(f, "skill not found: {name}"),
-            Self::Network(msg) => write!(f, "network error: {msg}"),
-            Self::SecurityBlocked(msg) => write!(f, "security blocked: {msg}"),
-            Self::UnsupportedSource(kind) => {
-                write!(f, "source type is not supported yet: {kind}")
-            }
-            Self::IntegrityMismatch {
-                name,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "integrity mismatch for {name}: expected {expected}, got {actual}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SkillHubError {}
-
-impl From<std::io::Error> for SkillHubError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-impl From<serde_json::Error> for SkillHubError {
-    fn from(value: serde_json::Error) -> Self {
-        Self::Json(value)
-    }
 }
 
 // ---------------------------------------------------------------------------

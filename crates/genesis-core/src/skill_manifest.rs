@@ -154,28 +154,19 @@ pub fn search_entries(entries: &[SkillEntry], query: &str) -> Vec<SkillEntry> {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SkillParseError {
+    #[error("SKILL.md must start with --- frontmatter")]
     MissingFrontmatter,
+    #[error("SKILL.md frontmatter missing closing ---")]
     UnclosedFrontmatter,
+    #[error("invalid YAML frontmatter: {0}")]
     InvalidYaml(serde_yaml::Error),
+    #[error("SKILL.md frontmatter missing 'name' field")]
     MissingName,
+    #[error("IO error: {0}")]
     Io(std::io::Error),
 }
-
-impl std::fmt::Display for SkillParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "SKILL.md must start with --- frontmatter"),
-            Self::UnclosedFrontmatter => write!(f, "SKILL.md frontmatter missing closing ---"),
-            Self::InvalidYaml(e) => write!(f, "invalid YAML frontmatter: {e}"),
-            Self::MissingName => write!(f, "SKILL.md frontmatter missing 'name' field"),
-            Self::Io(e) => write!(f, "IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SkillParseError {}
 
 #[cfg(test)]
 mod tests {

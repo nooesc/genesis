@@ -41,25 +41,10 @@ pub struct SyncStats {
 }
 
 /// Errors that can occur during skill sync.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    Io(io::Error),
-}
-
-impl std::fmt::Display for SyncError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "skill sync IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SyncError {}
-
-impl From<io::Error> for SyncError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
+    #[error("skill sync IO error: {0}")]
+    Io(#[from] io::Error),
 }
 
 // ---------------------------------------------------------------------------

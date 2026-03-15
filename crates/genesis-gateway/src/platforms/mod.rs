@@ -20,9 +20,10 @@ pub enum PairingCheck {
 }
 
 /// Pairing check errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PairingCheckError {
     /// The pairing store is unavailable or returned an unexpected error.
+    #[error("pairing store is unavailable")]
     StoreUnavailable,
 }
 
