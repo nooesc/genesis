@@ -93,7 +93,6 @@ fn resolve_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn resolves_openrouter_with_explicit_key() {

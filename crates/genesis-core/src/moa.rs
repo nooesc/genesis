@@ -119,8 +119,9 @@ pub async fn run_moa(
     // Aggregation
     let aggregator_prompt = build_aggregator_prompt(prompt, &proposer_responses);
     let resolved = resolve_model(&config.aggregator, &env);
+    let aggregator_model = config.aggregator.model.clone();
     let client = ChatClient::new(&resolved).map_err(|e| MoaError::Provider {
-        model: config.aggregator.model.clone(),
+        model: aggregator_model.clone(),
         source: e,
     })?;
 
@@ -132,7 +133,7 @@ pub async fn run_moa(
     request.max_tokens = config.max_tokens;
 
     let response = client.complete(request).await.map_err(|e| MoaError::Provider {
-        model: config.aggregator.model.clone(),
+        model: aggregator_model,
         source: e,
     })?;
 

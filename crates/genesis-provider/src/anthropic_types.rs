@@ -649,9 +649,7 @@ pub(crate) fn anthropic_event_to_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_types::{
-        ChatCompletionRequest, ChatMessage, ChatTool, ChatToolFunction, ThinkingConfig, ToolChoice,
-    };
+    use crate::api_types::{ChatTool, ChatToolFunction, ThinkingConfig, ToolChoice};
 
     #[test]
     fn system_message_extracted_to_top_level() {

@@ -183,7 +183,7 @@ where
         step_outputs.insert(step.name.clone(), output.clone());
         step_results.push(StepResult {
             step_name: step.name.clone(),
-            output: output.clone(),
+            output,
             input_tokens: in_tok,
             output_tokens: out_tok,
         });

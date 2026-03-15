@@ -333,6 +333,31 @@ impl AgentBusStore {
         Ok(messages)
     }
 
+    /// Count messages per channel.
+    pub fn channel_stats(&self) -> Result<Vec<(String, i64)>, String> {
+        let conn = rusqlite::Connection::open(&self.database_path)
+            .map_err(|e| format!("Failed to open database: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel, COUNT(*) as cnt
+                 FROM agent_bus_messages
+                 GROUP BY channel
+                 ORDER BY cnt DESC",
+            )
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
+
+        let stats = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to query stats: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read stats: {e}"))?;
+
+        Ok(stats)
+    }
+}
+
+#[cfg(test)]
+impl AgentBusStore {
     /// Get all messages from a sender.
     pub fn sender_messages(
         &self,
@@ -370,28 +395,6 @@ impl AgentBusStore {
             .map_err(|e| format!("Failed to read messages: {e}"))?;
 
         Ok(messages)
-    }
-
-    /// Count messages per channel.
-    pub fn channel_stats(&self) -> Result<Vec<(String, i64)>, String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT channel, COUNT(*) as cnt
-                 FROM agent_bus_messages
-                 GROUP BY channel
-                 ORDER BY cnt DESC",
-            )
-            .map_err(|e| format!("Failed to prepare query: {e}"))?;
-
-        let stats = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| format!("Failed to query stats: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to read stats: {e}"))?;
-
-        Ok(stats)
     }
 
     /// Purge messages older than N days.
