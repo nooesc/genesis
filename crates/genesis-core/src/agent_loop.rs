@@ -29,11 +29,50 @@ pub enum StreamEvent<'a> {
     /// A text content chunk from the LLM.
     Chunk(&'a str),
     /// A tool call is about to be executed.
-    ToolCallStart { name: &'a str },
+    ToolCallStart {
+        name: &'a str,
+        /// Short summary of the arguments (max ~40 chars).
+        args_summary: String,
+    },
     /// A tool call finished executing.
-    ToolCallEnd { name: &'a str },
+    ToolCallEnd {
+        name: &'a str,
+        /// How long the tool call took to execute.
+        duration: std::time::Duration,
+        /// Whether the tool call succeeded (no `Error:` prefix in output).
+        success: bool,
+    },
     /// The agent is requesting clarification from the user.
     ClarificationNeeded { question: &'a str },
+}
+
+/// Produce a short summary string (max ~40 chars) from a tool call's JSON
+/// arguments. Tries to show the first key-value pair; falls back to truncating
+/// the raw string.
+fn summarize_args(args_json: &str) -> String {
+    if args_json.is_empty() || args_json == "{}" {
+        return String::new();
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json) {
+        if let Some((key, val)) = map.iter().next() {
+            let v = match val {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let combined = format!("{key}: {v}");
+            if combined.len() <= 40 {
+                return combined;
+            }
+            let truncated: String = combined.chars().take(37).collect();
+            return format!("{truncated}...");
+        }
+    }
+    let raw = args_json.trim_matches(|c| c == '{' || c == '}').trim();
+    if raw.len() <= 40 {
+        return raw.to_owned();
+    }
+    let truncated: String = raw.chars().take(37).collect();
+    format!("{truncated}...")
 }
 
 /// Result of a complete agent turn (user message → final assistant response).
@@ -1293,7 +1332,10 @@ impl AgentLoop {
 
                         // Emit start events and record tool calls.
                         for tc in &streamed_tool_calls {
-                            on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                            on_event(StreamEvent::ToolCallStart {
+                                name: &tc.function.name,
+                                args_summary: summarize_args(&tc.function.arguments),
+                            });
                             self.trajectory
                                 .record_tool_call(&tc.function.name, &tc.function.arguments);
                             self.fire_shell_hooks(
@@ -1310,6 +1352,7 @@ impl AgentLoop {
 
                         // Execute tool calls in parallel.
                         tool_calls_made += streamed_tool_calls.len();
+                        let tool_exec_start = Instant::now();
                         let results = match execute_tool_calls_parallel(
                             &self.tools,
                             &self.subagent_spawner,
@@ -1328,13 +1371,19 @@ impl AgentLoop {
                                 ))
                             }
                         };
+                        let tool_exec_duration = tool_exec_start.elapsed();
 
                         let mut clarification = None;
                         for (tc, (result, requires_input)) in
                             streamed_tool_calls.iter().zip(results)
                         {
                             let result = sanitize::sanitize_credentials(&result);
-                            on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                            let tool_success = !result.starts_with("Error:");
+                            on_event(StreamEvent::ToolCallEnd {
+                                name: &tc.function.name,
+                                duration: tool_exec_duration,
+                                success: tool_success,
+                            });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
                             if result.starts_with("Error:") {
@@ -1462,7 +1511,10 @@ impl AgentLoop {
 
                             // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
-                                on_event(StreamEvent::ToolCallStart { name: &tc.function.name });
+                                on_event(StreamEvent::ToolCallStart {
+                                name: &tc.function.name,
+                                args_summary: summarize_args(&tc.function.arguments),
+                            });
                                 self.trajectory
                                     .record_tool_call(&tc.function.name, &tc.function.arguments);
                                 self.fire_shell_hooks(
@@ -1479,6 +1531,7 @@ impl AgentLoop {
 
                             // Execute tool calls in parallel.
                             tool_calls_made += tool_calls.len();
+                            let tool_exec_start = Instant::now();
                             let results = match execute_tool_calls_parallel(
                                 &self.tools,
                                 &self.subagent_spawner,
@@ -1497,13 +1550,19 @@ impl AgentLoop {
                                     ))
                                 }
                             };
+                            let tool_exec_duration = tool_exec_start.elapsed();
 
                             let mut clarification = None;
                             for (tc, (result, requires_input)) in
                                 tool_calls.iter().zip(results)
                             {
                                 let result = sanitize::sanitize_credentials(&result);
-                                on_event(StreamEvent::ToolCallEnd { name: &tc.function.name });
+                                let tool_success = !result.starts_with("Error:");
+                                on_event(StreamEvent::ToolCallEnd {
+                                    name: &tc.function.name,
+                                    duration: tool_exec_duration,
+                                    success: tool_success,
+                                });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
                                 if result.starts_with("Error:") {
@@ -3347,5 +3406,38 @@ mod tests {
     fn iteration_budget_default_is_none() {
         let config = AgentLoopConfig::default();
         assert!(config.max_iterations.is_none());
+    }
+
+    #[test]
+    fn summarize_args_empty_input() {
+        assert_eq!(summarize_args(""), "");
+        assert_eq!(summarize_args("{}"), "");
+    }
+
+    #[test]
+    fn summarize_args_simple_object() {
+        let args = r#"{"command":"git status"}"#;
+        assert_eq!(summarize_args(args), "command: git status");
+    }
+
+    #[test]
+    fn summarize_args_truncates_long_value() {
+        let args = r#"{"path":"/very/long/path/that/definitely/exceeds/forty/characters/limit/here"}"#;
+        let summary = summarize_args(args);
+        assert!(summary.len() <= 40);
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn summarize_args_non_string_value() {
+        let args = r#"{"count":42}"#;
+        assert_eq!(summarize_args(args), "count: 42");
+    }
+
+    #[test]
+    fn summarize_args_invalid_json_fallback() {
+        let args = "not json";
+        let summary = summarize_args(args);
+        assert_eq!(summary, "not json");
     }
 }

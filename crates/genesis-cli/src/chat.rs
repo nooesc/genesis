@@ -8,10 +8,21 @@ use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
 use genesis_ui::UiContext;
+use genesis_ui::tool_display::{ToolCallBuffer, ToolDisplayMode};
 
 use crate::clipboard;
 use crate::slash::{SlashCompleter, handle_chat_command};
 use crate::{CliError, mcp_startup_strict, is_exit_command};
+
+/// Convert the config crate's `ToolDisplayMode` to the UI crate's equivalent.
+fn to_ui_tool_mode(mode: genesis_config::ToolDisplayMode) -> ToolDisplayMode {
+    match mode {
+        genesis_config::ToolDisplayMode::Off => ToolDisplayMode::Off,
+        genesis_config::ToolDisplayMode::Summary => ToolDisplayMode::Summary,
+        genesis_config::ToolDisplayMode::Grouped => ToolDisplayMode::Grouped,
+        genesis_config::ToolDisplayMode::Verbose => ToolDisplayMode::Verbose,
+    }
+}
 
 /// Interactive approval handler for CLI mode. Prompts the user via stdin
 /// when a tool requires explicit confirmation (e.g., send_message).
@@ -64,6 +75,7 @@ pub(crate) async fn run_chat(
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
+    let tool_mode = to_ui_tool_mode(loaded.config.display.tool_progress);
     let strict_startup = mcp_startup_strict(&loaded)?;
     let mut service = build_session_service(&loaded, strict_startup, true).await?;
     if let Some(ref sys) = system_override {
@@ -160,7 +172,7 @@ pub(crate) async fn run_chat(
     if let Some(initial) = initial_prompt {
         println!("{}{}",  ui.you_prompt(), initial);
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, &initial, model, images, ui).await?;
+        run_streaming_turn(&service, &session_id, &initial, model, images, ui, tool_mode).await?;
     }
 
     while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
@@ -194,7 +206,7 @@ pub(crate) async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new(), ui).await?;
+                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new(), ui, tool_mode).await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -634,7 +646,7 @@ pub(crate) async fn run_chat(
         }
 
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, trimmed, model, images, ui).await?;
+        run_streaming_turn(&service, &session_id, trimmed, model, images, ui, tool_mode).await?;
     }
 
     // Save readline history for next session
@@ -670,6 +682,7 @@ pub(crate) async fn run_oneshot(
 
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
+    let tool_mode = to_ui_tool_mode(loaded.config.display.tool_progress);
     let strict_startup = mcp_startup_strict(&loaded)?;
     let mut service = build_session_service(&loaded, strict_startup, true).await?;
     if let Some(sys) = system_override {
@@ -681,7 +694,7 @@ pub(crate) async fn run_oneshot(
 
     if stream && !json {
         // Streaming mode — print output as it arrives
-        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images, ui).await?;
+        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images, ui, tool_mode).await?;
         return Ok(String::new());
     }
 
@@ -958,11 +971,14 @@ pub(crate) async fn run_streaming_turn(
     model: &str,
     images: Vec<genesis_provider::ImageUrl>,
     ui: &UiContext,
+    tool_mode: ToolDisplayMode,
 ) -> Result<(), CliError> {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
 
     let eve_prompt = ui.eve_prompt();
     let streamed = AtomicBool::new(false);
+    let tool_buffer = Mutex::new(ToolCallBuffer::new(tool_mode));
     let turn_future = service.run_turn_streaming(
         SessionTurnInput {
             session_id,
@@ -974,20 +990,36 @@ pub(crate) async fn run_streaming_turn(
         },
         |event| match event {
             StreamEvent::Chunk(chunk) => {
+                // Flush any pending tool calls before printing text
+                if let Ok(mut buf) = tool_buffer.lock() {
+                    if let Some(block) = buf.flush(ui) {
+                        println!("{block}");
+                    }
+                }
                 if !streamed.swap(true, Ordering::Relaxed) {
                     print!("{eve_prompt}");
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
             }
-            StreamEvent::ToolCallStart { name } => {
+            StreamEvent::ToolCallStart { name, args_summary } => {
                 if streamed.load(Ordering::Relaxed) {
                     println!();
                 }
-                println!("{}", ui.format_metadata(&format!("     [calling {name}...]")));
+                if let Ok(mut buf) = tool_buffer.lock() {
+                    buf.on_tool_start(name, &args_summary);
+                }
+                // For Off mode, show the legacy one-liner
+                if tool_mode == ToolDisplayMode::Off {
+                    println!("{}", ui.format_metadata(&format!("     [calling {name}...]")));
+                }
                 streamed.store(false, Ordering::Relaxed);
             }
-            StreamEvent::ToolCallEnd { .. } => {}
+            StreamEvent::ToolCallEnd { name, duration, success } => {
+                if let Ok(mut buf) = tool_buffer.lock() {
+                    buf.on_tool_end(name, duration, success);
+                }
+            }
             StreamEvent::ClarificationNeeded { question } => {
                 println!("\n{}{question}", ui.eve_prompt());
             }
@@ -996,6 +1028,12 @@ pub(crate) async fn run_streaming_turn(
 
     tokio::select! {
         result = turn_future => {
+            // Flush any remaining buffered tool calls
+            if let Ok(mut buf) = tool_buffer.lock() {
+                if let Some(block) = buf.flush(ui) {
+                    println!("{block}");
+                }
+            }
             let outcome = result?;
             if outcome.result.pending_clarification.is_some() {
                 // Clarification was already printed via stream event

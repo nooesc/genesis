@@ -3006,11 +3006,11 @@ async fn websocket_session(
                             StreamEvent::Chunk(chunk) => {
                                 serde_json::json!({"type": "chunk", "content": chunk})
                             }
-                            StreamEvent::ToolCallStart { name } => {
-                                serde_json::json!({"type": "tool_call", "tool": name})
+                            StreamEvent::ToolCallStart { name, args_summary } => {
+                                serde_json::json!({"type": "tool_call", "tool": name, "args_summary": args_summary})
                             }
-                            StreamEvent::ToolCallEnd { name } => {
-                                serde_json::json!({"type": "tool_call_end", "tool": name})
+                            StreamEvent::ToolCallEnd { name, duration, success } => {
+                                serde_json::json!({"type": "tool_call_end", "tool": name, "duration_ms": duration.as_millis() as u64, "success": success})
                             }
                             StreamEvent::ClarificationNeeded { question } => {
                                 serde_json::json!({"type": "clarification", "question": question})
@@ -3181,7 +3181,7 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(Event::default().event("chunk").data(payload)));
                             }
                         }
-                        StreamEvent::ToolCallStart { name } => {
+                        StreamEvent::ToolCallStart { name, .. } => {
                             if let Ok(payload) = serde_json::to_string(&serde_json::json!({
                                 "session_id": &session_id,
                                 "tool": name,

@@ -6,6 +6,7 @@
 pub mod banner;
 pub mod colors;
 pub mod terminal;
+pub mod tool_display;
 
 use colors::Styles;
 use owo_colors::OwoColorize;
