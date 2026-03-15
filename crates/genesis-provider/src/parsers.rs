@@ -1193,6 +1193,45 @@ mod tests {
         );
     }
 
+    // -- Snapshot tests (insta) --
+
+    #[test]
+    fn snapshot_parser_registry() {
+        // Verify all known parser name aliases are stable and resolve correctly.
+        let known_parsers = [
+            "hermes",
+            "qwen",
+            "qwen25",
+            "longcat",
+            "mistral",
+            "llama",
+            "llama3",
+            "llama4",
+            "deepseek_v3",
+            "deepseek-v3",
+            "deepseek_v31",
+            "deepseek-v31",
+            "deepseek_v3.1",
+            "deepseek-v3.1",
+            "kimi_k2",
+            "kimi-k2",
+            "glm45",
+            "glm-4.5",
+            "glm4.5",
+            "glm47",
+            "glm-4.7",
+            "glm4.7",
+            "qwen3_coder",
+            "qwen3-coder",
+        ];
+        let mut results: Vec<(&str, bool)> = known_parsers
+            .iter()
+            .map(|name| (*name, get_parser(name).is_some()))
+            .collect();
+        results.sort_by_key(|(name, _)| *name);
+        insta::assert_yaml_snapshot!("parser_registry", results);
+    }
+
     #[test]
     fn normalize_response_skips_when_native_tool_calls_present() {
         use crate::api_types::*;
