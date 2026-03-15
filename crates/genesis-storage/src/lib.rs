@@ -3470,7 +3470,16 @@ impl PairingStore {
         let db = &self.database_path;
         let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
 
-        if let Some(p) = platform {
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<ApprovedUser> {
+            Ok(ApprovedUser {
+                platform: row.get(0)?,
+                user_id: row.get(1)?,
+                user_name: row.get(2)?,
+                approved_at: row.get(3)?,
+            })
+        };
+
+        let users = if let Some(p) = platform {
             let mut stmt = connection
                 .prepare(
                     "SELECT platform, user_id, user_name, approved_at
@@ -3478,19 +3487,11 @@ impl PairingStore {
                      ORDER BY approved_at DESC",
                 )
                 .map_err(me)?;
-            let users = stmt
-                .query_map(params![p], |row| {
-                    Ok(ApprovedUser {
-                        platform: row.get(0)?,
-                        user_id: row.get(1)?,
-                        user_name: row.get(2)?,
-                        approved_at: row.get(3)?,
-                    })
-                })
+            let rows = stmt.query_map(params![p], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(users)
+            rows
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3499,20 +3500,14 @@ impl PairingStore {
                      ORDER BY platform, approved_at DESC",
                 )
                 .map_err(me)?;
-            let users = stmt
-                .query_map([], |row| {
-                    Ok(ApprovedUser {
-                        platform: row.get(0)?,
-                        user_id: row.get(1)?,
-                        user_name: row.get(2)?,
-                        approved_at: row.get(3)?,
-                    })
-                })
+            let rows = stmt.query_map([], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(users)
-        }
+            rows
+        };
+
+        Ok(users)
     }
 
     /// Generate a pairing code for a new user.
@@ -3699,7 +3694,7 @@ impl PairingStore {
             })
         };
 
-        if let Some(p) = platform {
+        let pending = if let Some(p) = platform {
             let mut stmt = connection
                 .prepare(
                     "SELECT platform, code, user_id, user_name, created_at
@@ -3707,12 +3702,11 @@ impl PairingStore {
                      ORDER BY created_at DESC",
                 )
                 .map_err(me)?;
-            let pending = stmt
-                .query_map(params![p], map_row)
+            let rows = stmt.query_map(params![p], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(pending)
+            rows
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3721,13 +3715,14 @@ impl PairingStore {
                      ORDER BY platform, created_at DESC",
                 )
                 .map_err(me)?;
-            let pending = stmt
-                .query_map([], map_row)
+            let rows = stmt.query_map([], map_row)
                 .map_err(me)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(me)?;
-            Ok(pending)
-        }
+            rows
+        };
+
+        Ok(pending)
     }
 
     /// Revoke an approved user's access.
@@ -3873,7 +3868,6 @@ impl ChannelStore {
                 source,
             })?;
 
-        let mut count = 0usize;
         for ch in channels {
             connection
                 .execute(
@@ -3891,10 +3885,9 @@ impl ChannelStore {
                     path: self.database_path.clone(),
                     source,
                 })?;
-            count += 1;
         }
 
-        Ok(count)
+        Ok(channels.len())
     }
 
     /// Check if channels for a platform are cached and fresh (within max_age_secs).
