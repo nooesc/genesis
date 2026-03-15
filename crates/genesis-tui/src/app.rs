@@ -4,8 +4,18 @@ use crate::events::{AgentEvent, AppEvent, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::input_widget::InputAction;
+use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
+
+/// Which top-level screen is currently displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppScreen {
+    /// The welcome/splash screen shown on startup.
+    Welcome,
+    /// The interactive chat screen.
+    Chat,
+}
 
 /// Central application state for the TUI event loop.
 ///
@@ -18,6 +28,10 @@ pub struct App {
     pub frame_requester: FrameRequester,
     pub turn_running: bool,
     pub should_exit: bool,
+    /// Which screen is currently active.
+    pub screen: AppScreen,
+    /// The welcome screen widget.
+    pub welcome: WelcomeWidget,
     /// Composed chat area: history cells + active streaming cell + input.
     pub chat: ChatWidget,
 }
@@ -110,6 +124,20 @@ impl App {
 
     /// Route a single key event to the appropriate handler.
     fn handle_key(&mut self, key: KeyEvent) {
+        // On the welcome screen, any key dismisses it and transitions to chat.
+        if matches!(self.screen, AppScreen::Welcome) {
+            self.screen = AppScreen::Chat;
+            self.frame_requester.schedule_frame();
+            // Forward printable characters to the input widget so the user
+            // doesn't lose the first character they type.
+            if let KeyCode::Char(_) = key.code {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    self.chat.input.handle_key(key);
+                }
+            }
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -168,12 +196,23 @@ mod tests {
         let (app_tx, app_rx) = mpsc::unbounded_channel();
         let (draw_tx, _draw_rx) = broadcast::channel(16);
         let frame_requester = FrameRequester::new(draw_tx);
+        let welcome = WelcomeWidget::new(
+            crate::widgets::welcome::WelcomeInfo {
+                model: "test".to_string(),
+                cwd: "/tmp".to_string(),
+                version: "0.0.0".to_string(),
+            },
+            &[],
+            &[],
+        );
         let app = App {
             submission_tx,
             app_tx,
             frame_requester,
             turn_running: false,
             should_exit: false,
+            screen: AppScreen::Chat, // Start in Chat for existing tests
+            welcome,
             chat: ChatWidget::new(),
         };
         (app, submission_rx, app_rx)
@@ -338,5 +377,37 @@ mod tests {
         });
         assert!(app.chat.active_cell.is_none());
         assert!(!app.chat.committed_cells().is_empty());
+    }
+
+    #[tokio::test]
+    async fn welcome_screen_transitions_to_chat_on_enter() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.screen = AppScreen::Welcome;
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_tui_event(TuiEvent::Key(key));
+        assert_eq!(app.screen, AppScreen::Chat);
+        // Enter should not leave text in the input buffer.
+        assert_eq!(app.chat.input.text(), "");
+    }
+
+    #[tokio::test]
+    async fn welcome_screen_forwards_printable_char() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.screen = AppScreen::Welcome;
+        let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        app.handle_tui_event(TuiEvent::Key(key));
+        assert_eq!(app.screen, AppScreen::Chat);
+        // The 'h' should have been forwarded to the input widget.
+        assert_eq!(app.chat.input.text(), "h");
+    }
+
+    #[tokio::test]
+    async fn welcome_screen_transitions_on_escape() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        app.screen = AppScreen::Welcome;
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        app.handle_tui_event(TuiEvent::Key(key));
+        assert_eq!(app.screen, AppScreen::Chat);
+        assert_eq!(app.chat.input.text(), "");
     }
 }

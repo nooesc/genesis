@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::app::App;
+use crate::app::{App, AppScreen};
 use crate::events::{AgentEvent, AppEvent, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 
@@ -129,12 +129,29 @@ pub async fn run_tui(
 
     let frame_requester = FrameRequester::new(draw_tx);
 
+    let full_art = genesis_ui::banner::full_art();
+    let compact_art = genesis_ui::banner::compact_art();
+
+    let welcome = crate::widgets::welcome::WelcomeWidget::new(
+        crate::widgets::welcome::WelcomeInfo {
+            model: "default".to_string(), // TODO: get from config
+            cwd: std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        &full_art,
+        &compact_art,
+    );
+
     let mut app = App {
         submission_tx,
         app_tx,
         frame_requester,
         turn_running: false,
         should_exit: false,
+        screen: AppScreen::Welcome,
+        welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
     };
 
@@ -247,7 +264,7 @@ pub async fn run_tui(
     Ok(())
 }
 
-/// Render one frame: draw the chat widget into the terminal's buffer and flush.
+/// Render one frame: draw the active screen into the terminal's buffer and flush.
 ///
 /// Layout: the chat widget occupies all rows except the last (reserved for a
 /// future status bar).  The status bar row is left blank for now.
@@ -261,17 +278,25 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
     // Clear the buffer before drawing so stale content doesn't linger.
     buf.reset();
 
-    // Chat widget gets all space except the last row (reserved for status bar).
-    let chat_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
+    match app.screen {
+        AppScreen::Welcome => {
+            // Welcome screen occupies the full viewport.
+            app.welcome.render(area, buf);
+        }
+        AppScreen::Chat => {
+            // Chat widget gets all space except the last row (reserved for status bar).
+            let chat_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: area.height.saturating_sub(1),
+            };
 
-    // TODO(Task 21): render status bar widget in the last row.
+            // TODO(Task 21): render status bar widget in the last row.
 
-    app.chat.render(chat_area, buf);
+            app.chat.render(chat_area, buf);
+        }
+    }
 
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();
