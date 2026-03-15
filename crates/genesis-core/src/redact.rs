@@ -78,6 +78,10 @@ static RULES: LazyLock<Vec<RedactRule>> = LazyLock::new(|| {
 
 /// Redact credentials and secrets from the given text.
 pub fn redact(text: &str) -> String {
+    // Fast path: skip regex replacements when no patterns match.
+    if !contains_secret(text) {
+        return text.to_owned();
+    }
     let mut result = text.to_owned();
     for rule in RULES.iter() {
         result = rule.pattern.replace_all(&result, rule.replacement).into_owned();

@@ -120,6 +120,10 @@ struct SecretPattern {
 /// Returns a new string with all detected credentials replaced by
 /// `[REDACTED:<label>]`.
 pub fn sanitize_credentials(text: &str) -> String {
+    // Fast path: skip allocation and pattern scanning when no credentials are present.
+    if !contains_credentials(text) {
+        return text.to_owned();
+    }
     let mut result = text.to_owned();
 
     // Process patterns from longest prefix to shortest to avoid partial matches.

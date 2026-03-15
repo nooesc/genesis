@@ -10,6 +10,7 @@ pub mod verify;
 pub mod webhooks;
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -143,16 +144,11 @@ impl HistogramBuckets {
         let mut cumulative = 0u64;
         for (i, &boundary) in self.boundaries.iter().enumerate() {
             cumulative += self.counts[i];
-            out.push_str(&format!(
-                "{name}_bucket{{le=\"{boundary}\"}} {cumulative}\n"
-            ));
+            let _ = writeln!(out, "{name}_bucket{{le=\"{boundary}\"}} {cumulative}");
         }
-        out.push_str(&format!(
-            "{name}_bucket{{le=\"+Inf\"}} {}\n",
-            self.total_count
-        ));
-        out.push_str(&format!("{name}_sum {}\n", self.total_sum));
-        out.push_str(&format!("{name}_count {}\n", self.total_count));
+        let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {}", self.total_count);
+        let _ = writeln!(out, "{name}_sum {}", self.total_sum);
+        let _ = writeln!(out, "{name}_count {}", self.total_count);
         out
     }
 }
