@@ -20,6 +20,8 @@ use genesis_storage::{
     bootstrap, MemoryStore, ScheduleStore, SessionStore,
     SkillStore, StorageError, SubagentStore,
 };
+use genesis_ui::UiContext;
+use genesis_ui::terminal::ColorMode;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -864,9 +866,21 @@ pub enum CliError {
 }
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
+    // --json implies --color=never (machine-readable output must be plain).
+    let color_mode = if cli.json {
+        ColorMode::Never
+    } else {
+        match cli.color.as_str() {
+            "always" => ColorMode::Always,
+            "never" => ColorMode::Never,
+            _ => ColorMode::Auto,
+        }
+    };
+    let ui = UiContext::new(color_mode);
+
     match cli.command {
         Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard } => {
-            chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard).await
+            chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
         }
         Command::Doctor { bootstrap_storage, verify } => {
             let report = run_doctor(cli.config.as_deref(), bootstrap_storage)?;
@@ -1472,7 +1486,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Run { prompt, session_id, raw, system, stream, images } => {
-            chat::run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream, &images).await
+            chat::run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream, &images, &ui).await
         }
         Command::Status => {
             let loaded = load(cli.config.as_deref())?;

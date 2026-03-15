@@ -8,6 +8,7 @@ use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
 use genesis_core::prompt::agent_name;
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
+use genesis_ui::UiContext;
 
 use crate::clipboard;
 use crate::slash::{SlashCompleter, handle_chat_command};
@@ -60,6 +61,7 @@ pub(crate) async fn run_chat(
     last: bool,
     worktree: bool,
     clipboard: bool,
+    ui: &UiContext,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
@@ -105,13 +107,19 @@ pub(crate) async fn run_chat(
 
     if is_resumed {
         println!(
-            "Resuming session `{session_id}` with {}. Type `exit` or `quit` to leave.",
-            agent_name()
+            "{}",
+            ui.format_metadata(&format!(
+                "Resuming session `{session_id}` with {}. Type `exit` or `quit` to leave.",
+                agent_name()
+            ))
         );
     } else {
         println!(
-            "Starting session `{session_id}` with {}. Type `exit` or `quit` to leave.",
-            agent_name()
+            "{}",
+            ui.format_metadata(&format!(
+                "Starting session `{session_id}` with {}. Type `exit` or `quit` to leave.",
+                agent_name()
+            ))
         );
     }
 
@@ -144,9 +152,9 @@ pub(crate) async fn run_chat(
 
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
-        println!("you> {initial}");
+        println!("{}{}",  ui.you_prompt(), initial);
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, &initial, model, images).await?;
+        run_streaming_turn(&service, &session_id, &initial, model, images, ui).await?;
     }
 
     while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
@@ -180,7 +188,7 @@ pub(crate) async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new()).await?;
+                        run_streaming_turn(&service, &session_id, &prompt_text, model, Vec::new(), ui).await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -620,7 +628,7 @@ pub(crate) async fn run_chat(
         }
 
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, trimmed, model, images).await?;
+        run_streaming_turn(&service, &session_id, trimmed, model, images, ui).await?;
     }
 
     // Save readline history for next session
@@ -640,6 +648,7 @@ pub(crate) async fn run_oneshot(
     system_override: Option<String>,
     stream: bool,
     image_paths: &[String],
+    ui: &UiContext,
 ) -> Result<String, CliError> {
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
@@ -666,7 +675,7 @@ pub(crate) async fn run_oneshot(
 
     if stream && !json {
         // Streaming mode — print output as it arrives
-        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images).await?;
+        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images, ui).await?;
         return Ok(String::new());
     }
 
@@ -942,9 +951,11 @@ pub(crate) async fn run_streaming_turn(
     prompt: &str,
     model: &str,
     images: Vec<genesis_provider::ImageUrl>,
+    ui: &UiContext,
 ) -> Result<(), CliError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    let eve_prompt = ui.eve_prompt();
     let streamed = AtomicBool::new(false);
     let turn_future = service.run_turn_streaming(
         SessionTurnInput {
@@ -958,7 +969,7 @@ pub(crate) async fn run_streaming_turn(
         |event| match event {
             StreamEvent::Chunk(chunk) => {
                 if !streamed.swap(true, Ordering::Relaxed) {
-                    print!("eve> ");
+                    print!("{eve_prompt}");
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
@@ -967,12 +978,12 @@ pub(crate) async fn run_streaming_turn(
                 if streamed.load(Ordering::Relaxed) {
                     println!();
                 }
-                println!("     [calling {name}...]");
+                println!("{}", ui.format_metadata(&format!("     [calling {name}...]")));
                 streamed.store(false, Ordering::Relaxed);
             }
             StreamEvent::ToolCallEnd { .. } => {}
             StreamEvent::ClarificationNeeded { question } => {
-                println!("\neve> {question}");
+                println!("\n{}{question}", ui.eve_prompt());
             }
         },
     );
@@ -985,7 +996,7 @@ pub(crate) async fn run_streaming_turn(
             } else if streamed.load(Ordering::Relaxed) {
                 println!();
             } else {
-                println!("eve> {}", outcome.result.response);
+                println!("{}{}", ui.eve_prompt(), outcome.result.response);
             }
             let r = &outcome.result;
             if r.total_input_tokens > 0 || r.total_output_tokens > 0 {
@@ -1006,8 +1017,11 @@ pub(crate) async fn run_streaming_turn(
                     .unwrap_or_default(),
                 };
                 println!(
-                    "     [{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
-                    r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+                    "{}",
+                    ui.format_metadata(&format!(
+                        "     [{} in / {} out tokens, {} turns, {} tool calls{cost_str}]",
+                        r.total_input_tokens, r.total_output_tokens, r.turns_used, r.tool_calls_made
+                    ))
                 );
             }
         }
@@ -1015,7 +1029,7 @@ pub(crate) async fn run_streaming_turn(
             if streamed.load(Ordering::Relaxed) {
                 println!();
             }
-            println!("     [interrupted]");
+            println!("{}", ui.format_warning("     [interrupted]"));
         }
     }
 

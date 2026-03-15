@@ -11,7 +11,7 @@ async fn main() {
     match run(cli).await {
         Ok(output) => println!("{output}"),
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("\x1b[38;2;215;95;95m{error}\x1b[0m");
             std::process::exit(1);
         }
     }
