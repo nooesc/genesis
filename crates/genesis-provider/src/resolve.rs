@@ -31,22 +31,25 @@ pub fn resolve(
     api_key_env: Option<&str>,
     env: &BTreeMap<String, String>,
 ) -> ResolvedProvider {
+    let normalized_backend = backend.trim().to_ascii_lowercase();
+
     let resolved_base_url = base_url
         .map(str::to_owned)
-        .unwrap_or_else(|| default_base_url(backend).to_owned());
+        .unwrap_or_else(|| default_base_url(&normalized_backend).to_owned());
 
-    let api_key = resolve_api_key(backend, api_key_env, env);
+    let api_key = resolve_api_key(&normalized_backend, api_key_env, env);
 
     ResolvedProvider {
         base_url: resolved_base_url,
         api_key,
         model: model.to_owned(),
-        backend: backend.trim().to_ascii_lowercase(),
+        backend: normalized_backend,
     }
 }
 
+/// Map a normalized (trimmed, lowercase) backend name to its default base URL.
 fn default_base_url(backend: &str) -> &str {
-    match backend.trim().to_ascii_lowercase().as_str() {
+    match backend {
         "openrouter" => OPENROUTER_BASE_URL,
         "openai" => OPENAI_BASE_URL,
         "anthropic" => ANTHROPIC_BASE_URL,
@@ -56,6 +59,7 @@ fn default_base_url(backend: &str) -> &str {
     }
 }
 
+/// Resolve the API key for a normalized (trimmed, lowercase) backend name.
 fn resolve_api_key(
     backend: &str,
     api_key_env: Option<&str>,
@@ -69,7 +73,7 @@ fn resolve_api_key(
     }
 
     // Fall back to standard env vars per backend
-    let fallback_vars = match backend.trim().to_ascii_lowercase().as_str() {
+    let fallback_vars = match backend {
         "openrouter" => &["OPENROUTER_API_KEY"][..],
         "openai" => &["OPENAI_API_KEY"][..],
         "anthropic" => &["ANTHROPIC_API_KEY"][..],

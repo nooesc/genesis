@@ -34,7 +34,9 @@ pub trait ToolCallParser: Send + Sync {
 
 /// Generate a unique tool call ID.
 fn gen_call_id() -> String {
-    format!("call_{}", &Uuid::new_v4().simple().to_string()[..8])
+    let mut buf = [0u8; 32];
+    Uuid::new_v4().simple().encode_lower(&mut buf);
+    format!("call_{}", std::str::from_utf8(&buf[..8]).unwrap())
 }
 
 /// Build a [`ToolCallEntry`] from name and arguments JSON string.

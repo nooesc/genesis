@@ -794,16 +794,14 @@ async fn read_response_body_bytes(
     max_bytes: usize,
 ) -> Result<Vec<u8>, ProviderError> {
     let mut bytes = Vec::new();
-    let mut downloaded = 0usize;
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(ProviderError::Http)?;
-        if downloaded.saturating_add(chunk.len()) > max_bytes {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(ProviderError::ResponseTooLarge { max_bytes });
         }
 
-        downloaded = downloaded.saturating_add(chunk.len());
         bytes.extend_from_slice(&chunk);
     }
 
@@ -829,13 +827,14 @@ async fn read_json_with_limit<T: DeserializeOwned>(
 }
 
 fn take_next_sse_event(buffer: &mut String) -> Option<String> {
-    let normalized = buffer.replace("\r\n", "\n");
-    if let Some(index) = normalized.find("\n\n") {
-        let event = normalized[..index].to_owned();
-        *buffer = normalized[index + 2..].to_owned();
+    if buffer.contains("\r\n") {
+        *buffer = buffer.replace("\r\n", "\n");
+    }
+    if let Some(index) = buffer.find("\n\n") {
+        let event = buffer[..index].to_owned();
+        *buffer = buffer[index + 2..].to_owned();
         Some(event)
     } else {
-        *buffer = normalized;
         None
     }
 }
