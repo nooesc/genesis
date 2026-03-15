@@ -64,6 +64,15 @@ impl ChatClient {
                 "anthropic-version",
                 HeaderValue::from_static("2023-06-01"),
             );
+            // token-efficient-tools applies to all requests;
+            // fine-grained-tool-streaming only affects streaming calls
+            // but is harmless for non-streaming (Anthropic ignores it).
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static(
+                    "token-efficient-tools-2025-02-19,fine-grained-tool-streaming-2025-05-14",
+                ),
+            );
         } else if !is_gemini && !provider.api_key.is_empty() {
             let auth_value = format!("Bearer {}", provider.api_key);
             headers.insert(
