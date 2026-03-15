@@ -699,6 +699,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "dirs",
  "futures-util",
  "genesis-auth",
  "genesis-config",
@@ -717,6 +718,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 
