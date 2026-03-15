@@ -3468,7 +3468,24 @@ async fn chat_batch_handler(
         let sem = Arc::clone(&semaphore);
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
+            let _permit = match sem.acquire().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return BatchItemResult {
+                        index,
+                        session_id: item
+                            .session_id
+                            .unwrap_or_else(default_api_session_id),
+                        response: None,
+                        error: Some("batch semaphore closed".to_string()),
+                        turns_used: 0,
+                        tool_calls_made: 0,
+                        estimated_cost: None,
+                        total_input_tokens: 0,
+                        total_output_tokens: 0,
+                    };
+                }
+            };
 
             let mut service = SessionExecutionService::new(&state.loaded);
             if let Some(mcp) = &state.mcp {

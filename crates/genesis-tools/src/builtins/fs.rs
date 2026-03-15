@@ -68,7 +68,7 @@ impl ToolHandler for WriteFileTool {
 
         // Create parent directories if needed.
         if let Some(parent) = Path::new(path).parent() {
-            if !parent.exists() {
+            if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("failed to create directories for `{path}`: {e}"),
