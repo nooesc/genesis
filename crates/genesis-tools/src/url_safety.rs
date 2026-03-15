@@ -16,6 +16,8 @@ pub enum UrlValidationError {
     BlockedHost(String),
     #[error("access to private/internal IP {0} is blocked")]
     BlockedIp(IpAddr),
+    #[error("URL must have a host")]
+    MissingHost,
 }
 
 /// Validate that a URL is safe for outbound requests.
@@ -39,7 +41,7 @@ pub fn validate_url(url: &str) -> Result<(), UrlValidationError> {
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| UrlValidationError::InvalidUrl("URL must have a host".to_owned()))?;
+        .ok_or_else(|| UrlValidationError::MissingHost)?;
 
     // Block well-known localhost hostnames
     let lower = host.to_ascii_lowercase();

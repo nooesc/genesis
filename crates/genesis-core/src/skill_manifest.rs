@@ -161,11 +161,11 @@ pub enum SkillParseError {
     #[error("SKILL.md frontmatter missing closing ---")]
     UnclosedFrontmatter,
     #[error("invalid YAML frontmatter: {0}")]
-    InvalidYaml(serde_yaml::Error),
+    InvalidYaml(#[source] serde_yaml::Error),
     #[error("SKILL.md frontmatter missing 'name' field")]
     MissingName,
     #[error("IO error: {0}")]
-    Io(std::io::Error),
+    Io(#[source] std::io::Error),
 }
 
 #[cfg(test)]
