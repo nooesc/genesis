@@ -39,7 +39,7 @@ where
     let bytes_read = limited
         .read_until(b'\n', &mut line)
         .await
-        .map_err(|e| McpError::Transport(format!("stdin read error: {e}")))?;
+        .map_err(|e| McpError::Transport(format!("line read error: {e}")))?;
 
     if bytes_read == 0 {
         return Ok(None);
