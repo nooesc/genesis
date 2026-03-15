@@ -41,7 +41,7 @@ pub fn validate_url(url: &str) -> Result<(), UrlValidationError> {
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| UrlValidationError::MissingHost)?;
+        .ok_or(UrlValidationError::MissingHost)?;
 
     // Block well-known localhost hostnames
     let lower = host.to_ascii_lowercase();

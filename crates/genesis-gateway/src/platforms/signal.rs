@@ -484,20 +484,7 @@ async fn process_envelope(
                 })
                 .await;
 
-            let reply_text = match result {
-                Ok(outcome) => {
-                    info!(
-                        turns_used = outcome.result.turns_used,
-                        tool_calls_made = outcome.result.tool_calls_made,
-                        "signal turn completed"
-                    );
-                    outcome.result.response
-                }
-                Err(e) => {
-                    error!(error = %e, "signal turn failed");
-                    format!("Sorry, I encountered an error: {e}")
-                }
-            };
+            let reply_text = super::extract_reply(result, "signal");
 
             // Stop typing indicator.
             let _ = send_typing_stop(

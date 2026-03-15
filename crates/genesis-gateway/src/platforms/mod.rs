@@ -8,6 +8,32 @@ pub mod whatsapp;
 use genesis_storage::PairingStore;
 use std::collections::HashSet;
 use std::path::Path;
+use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
+
+/// Extract the reply text from a `run_turn` result, logging success or failure.
+///
+/// Every platform handler performs the same match on `Result<SessionTurnOutcome, _>`
+/// to log turn metrics and produce a user-facing reply string. This helper
+/// centralises that logic.
+pub fn extract_reply(
+    result: Result<SessionTurnOutcome, SessionExecutionError>,
+    platform: &str,
+) -> String {
+    match result {
+        Ok(outcome) => {
+            tracing::info!(
+                turns_used = outcome.result.turns_used,
+                tool_calls_made = outcome.result.tool_calls_made,
+                "{platform} turn completed"
+            );
+            outcome.result.response
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "{platform} turn failed");
+            format!("Sorry, I encountered an error: {e}")
+        }
+    }
+}
 
 /// Result of a pairing check for an incoming platform message.
 pub enum PairingCheck {

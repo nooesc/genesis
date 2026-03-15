@@ -332,20 +332,7 @@ pub async fn webhook_handler(
                             })
                             .await;
 
-                        let reply_text = match result {
-                            Ok(outcome) => {
-                                info!(
-                                    turns_used = outcome.result.turns_used,
-                                    tool_calls_made = outcome.result.tool_calls_made,
-                                    "whatsapp turn completed"
-                                );
-                                outcome.result.response
-                            }
-                            Err(e) => {
-                                error!(error = %e, "whatsapp turn failed");
-                                format!("Sorry, I encountered an error: {e}")
-                            }
-                        };
+                        let reply_text = super::extract_reply(result, "whatsapp");
 
                         if let Err(e) =
                             send_reply(&state.http_client, &token, &phone_id, &from, &reply_text)
