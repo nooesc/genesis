@@ -10,6 +10,7 @@ pub mod verify;
 pub mod webhooks;
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -140,19 +141,12 @@ impl HistogramBuckets {
         let mut out = format!(
             "# HELP {name} {help}\n# TYPE {name} histogram\n"
         );
-        let mut cumulative = 0u64;
         for (i, &boundary) in self.boundaries.iter().enumerate() {
-            cumulative += self.counts[i];
-            out.push_str(&format!(
-                "{name}_bucket{{le=\"{boundary}\"}} {cumulative}\n"
-            ));
+            let _ = writeln!(out, "{name}_bucket{{le=\"{boundary}\"}} {}", self.counts[i]);
         }
-        out.push_str(&format!(
-            "{name}_bucket{{le=\"+Inf\"}} {}\n",
-            self.total_count
-        ));
-        out.push_str(&format!("{name}_sum {}\n", self.total_sum));
-        out.push_str(&format!("{name}_count {}\n", self.total_count));
+        let _ = writeln!(out, "{name}_bucket{{le=\"+Inf\"}} {}", self.total_count);
+        let _ = writeln!(out, "{name}_sum {}", self.total_sum);
+        let _ = writeln!(out, "{name}_count {}", self.total_count);
         out
     }
 }
@@ -4182,5 +4176,36 @@ mod tests {
         }"#;
         let req: OpenAiCompletionsRequest = serde_json::from_str(json).expect("should deserialize");
         assert!(req.stream.is_none());
+    }
+
+    #[test]
+    fn histogram_buckets_no_double_counting() {
+        // Boundaries: 100, 500, 1000
+        let buckets: &[u64] = &[100, 500, 1000];
+        // SAFETY: we leak a small slice so it lives for 'static, which is fine in tests.
+        let static_buckets: &'static [u64] = Box::leak(buckets.to_vec().into_boxed_slice());
+        let mut h = HistogramBuckets::new(static_buckets);
+
+        // Observe three values:
+        // 50ms  -> fits in buckets le=100, le=500, le=1000
+        // 200ms -> fits in buckets le=500, le=1000
+        // 800ms -> fits in bucket  le=1000
+        h.observe(50);
+        h.observe(200);
+        h.observe(800);
+
+        let output = h.format_prometheus("test_duration_ms", "Test histogram");
+
+        // Prometheus cumulative buckets should be:
+        //   le=100  -> 1  (only 50ms)
+        //   le=500  -> 2  (50ms + 200ms)
+        //   le=1000 -> 3  (50ms + 200ms + 800ms)
+        //   le=+Inf -> 3
+        assert!(output.contains(r#"test_duration_ms_bucket{le="100"} 1"#), "le=100 should be 1, got:\n{output}");
+        assert!(output.contains(r#"test_duration_ms_bucket{le="500"} 2"#), "le=500 should be 2, got:\n{output}");
+        assert!(output.contains(r#"test_duration_ms_bucket{le="1000"} 3"#), "le=1000 should be 3, got:\n{output}");
+        assert!(output.contains(r#"test_duration_ms_bucket{le="+Inf"} 3"#), "le=+Inf should be 3, got:\n{output}");
+        assert!(output.contains("test_duration_ms_sum 1050"), "sum should be 1050, got:\n{output}");
+        assert!(output.contains("test_duration_ms_count 3"), "count should be 3, got:\n{output}");
     }
 }
