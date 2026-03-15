@@ -20,6 +20,7 @@ use genesis_core::execution::{
     SessionExecutionError, SessionExecutionService, SessionTurnInput, SessionTurnOutcome,
 };
 use genesis_types::DeliveryPlatform;
+use ratatui::layout::Rect;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
@@ -117,6 +118,9 @@ pub async fn run_tui(
 ) -> Result<(), TuiError> {
     terminal::init()?;
 
+    let size = crossterm::terminal::size()?;
+    let mut term = custom_terminal::CustomTerminal::new(size.0, size.1)?;
+
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (submission_tx, mut submission_rx) = mpsc::unbounded_channel::<Submission>();
@@ -133,6 +137,9 @@ pub async fn run_tui(
         chat: crate::widgets::chat_widget::ChatWidget::new(),
     };
 
+    // Schedule an initial frame so the UI renders immediately.
+    app.frame_requester.schedule_frame();
+
     let mut crossterm_events = EventStream::new();
 
     // The turn future borrows `service` (lifetime 'a) so it can't be spawned.
@@ -145,6 +152,11 @@ pub async fn run_tui(
             ct_event = crossterm_events.next() => {
                 if let Some(Ok(event)) = ct_event {
                     if let Some(tui_event) = translate_crossterm(event) {
+                        // Intercept Resize to update the terminal viewport
+                        // before delegating to App (which schedules a frame).
+                        if let TuiEvent::Resize { width, height } = &tui_event {
+                            term.set_viewport_area(Rect::new(0, 0, *width, *height));
+                        }
                         app.handle_tui_event(tui_event);
                     }
                 }
@@ -215,7 +227,7 @@ pub async fn run_tui(
 
             // ── Frame draw timer ────────────────────────────────────
             _ = draw_rx.recv() => {
-                // TODO(Task 14): render_frame()
+                render_frame(&mut term, &app);
             }
         }
 
@@ -226,6 +238,38 @@ pub async fn run_tui(
 
     terminal::restore()?;
     Ok(())
+}
+
+/// Render one frame: draw the chat widget into the terminal's buffer and flush.
+///
+/// Layout: the chat widget occupies all rows except the last (reserved for a
+/// future status bar).  The status bar row is left blank for now.
+fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
+    let area = term.viewport_area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let buf = term.current_buffer_mut();
+    // Clear the buffer before drawing so stale content doesn't linger.
+    buf.reset();
+
+    // Chat widget gets all space except the last row (reserved for status bar).
+    let chat_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+
+    // TODO(Task 21): render status bar widget in the last row.
+
+    app.chat.render(chat_area, buf);
+
+    // Write only changed cells to the terminal, then swap buffers.
+    let _ = term.draw_diff();
+    term.swap_buffers();
+    let _ = term.flush();
 }
 
 /// Convert crossterm events to TUI events.
