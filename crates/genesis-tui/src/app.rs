@@ -73,7 +73,10 @@ impl App {
             }
             AgentEvent::ClarificationNeeded(_) => {}
             AgentEvent::Error(_err) => {
+                // Complete the turn to clear active_cell.
+                self.chat.complete_turn();
                 self.turn_running = false;
+                // TODO: display error in chat (e.g. as a styled AgentCell)
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
             }
             AgentEvent::Warning(_) => {}

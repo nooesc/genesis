@@ -8,12 +8,14 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
 
+use super::rgb;
+
 /// Green colour for a successful tool call.
-const COLOR_OK: Color = Color::Rgb(135, 175, 95);
+const COLOR_OK: Color = rgb(genesis_ui::colors::UI_SUCCESS);
 /// Red colour for a failed tool call.
-const COLOR_FAIL: Color = Color::Rgb(215, 95, 95);
+const COLOR_FAIL: Color = rgb(genesis_ui::colors::UI_ERROR);
 /// Dim grey for structural characters.
-const UI_DIM: Color = Color::Rgb(108, 108, 108);
+const UI_DIM: Color = rgb(genesis_ui::colors::UI_DIM);
 
 /// A single tool invocation cell.
 ///

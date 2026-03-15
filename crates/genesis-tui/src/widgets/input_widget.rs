@@ -7,22 +7,24 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
+
+use crate::history::rgb;
 
 /// The prefix shown before user input (includes trailing space).
 const PREFIX: &str = "you> ";
 
 /// Style for the `you> ` prefix.
-const PREFIX_STYLE: Style = Style::new().fg(Color::Rgb(108, 108, 108));
+const PREFIX_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_DIM));
 
 /// Style for normal (non-cursor) input text.
-const TEXT_STYLE: Style = Style::new().fg(Color::Rgb(208, 208, 208));
+const TEXT_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_TEXT));
 
 /// Style for the character under the cursor.
 const CURSOR_STYLE: Style = Style::new()
-    .fg(Color::Rgb(208, 208, 208))
+    .fg(rgb(genesis_ui::colors::UI_TEXT))
     .add_modifier(Modifier::REVERSED);
 
 /// Action returned from [`InputWidget::handle_key`].
@@ -247,7 +249,8 @@ impl InputWidget {
                     cell.set_symbol(&s);
                     cell.set_style(style);
                 }
-                x += 1;
+                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                x += char_width;
             }
         }
     }

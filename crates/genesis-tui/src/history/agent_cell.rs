@@ -2,17 +2,10 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Widget as _;
-use unicode_width::UnicodeWidthStr as _;
 
-use super::user_cell::word_wrap;
-
-/// Lavender used for the `eve> ` prefix.
-const EVE_LAVENDER: Color = Color::Rgb(180, 167, 214);
-/// Light grey used for response text.
-const UI_TEXT: Color = Color::Rgb(208, 208, 208);
+use super::{render_prefixed_lines, rgb};
 
 const PREFIX: &str = "eve> ";
 
@@ -43,36 +36,20 @@ impl AgentCell {
 
     /// Produce the styled [`Line`]s for scrollback insertion.
     pub fn to_scrollback_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let prefix_width = PREFIX.width() as u16;
-        let text_width = width.saturating_sub(prefix_width);
-
-        let wrapped = word_wrap(&self.text, text_width);
-
-        wrapped
-            .into_iter()
-            .enumerate()
-            .map(|(i, chunk)| {
-                if i == 0 {
-                    Line::from(vec![
-                        Span::styled(PREFIX, Style::default().fg(EVE_LAVENDER)),
-                        Span::styled(chunk, Style::default().fg(UI_TEXT)),
-                    ])
-                } else {
-                    // Continuation lines: indent by prefix_width spaces.
-                    let indent = " ".repeat(prefix_width as usize);
-                    Line::from(vec![
-                        Span::raw(indent),
-                        Span::styled(chunk, Style::default().fg(UI_TEXT)),
-                    ])
-                }
-            })
-            .collect()
+        render_prefixed_lines(
+            &self.text,
+            width,
+            PREFIX,
+            rgb(genesis_ui::colors::EVE_LAVENDER),
+            rgb(genesis_ui::colors::UI_TEXT),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     #[test]
     fn agent_cell_height_short_message() {
@@ -97,7 +74,10 @@ mod tests {
         // First span should be the lavender prefix.
         assert_eq!(lines[0].spans[0].content, PREFIX);
         // Prefix style should use EVE_LAVENDER.
-        assert_eq!(lines[0].spans[0].style.fg, Some(EVE_LAVENDER));
+        assert_eq!(
+            lines[0].spans[0].style.fg,
+            Some(rgb(genesis_ui::colors::EVE_LAVENDER))
+        );
     }
 
     #[test]

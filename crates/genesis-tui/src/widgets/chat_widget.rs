@@ -8,21 +8,17 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::Widget as _,
 };
 
 use crate::history::agent_cell::AgentCell;
 use crate::history::cell::HistoryCell;
+use crate::history::{render_prefixed_lines, rgb};
 use crate::history::tool_cell::ToolCell;
 use crate::history::user_cell::UserCell;
 use crate::widgets::input_widget::InputWidget;
 
-/// Lavender used for the `eve> ` prefix in the active streaming cell.
-const EVE_LAVENDER: Color = Color::Rgb(180, 167, 214);
-/// Light grey for streaming text.
-const UI_TEXT: Color = Color::Rgb(208, 208, 208);
 /// The active streaming cell prefix.
 const ACTIVE_PREFIX: &str = "eve> ";
 
@@ -272,31 +268,13 @@ impl Default for ChatWidget {
 ///
 /// Uses the same `eve> ` prefix/indent pattern as [`AgentCell`].
 fn active_cell_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    use crate::history::user_cell::word_wrap;
-    use unicode_width::UnicodeWidthStr as _;
-
-    let prefix_width = ACTIVE_PREFIX.width() as u16;
-    let text_width = width.saturating_sub(prefix_width);
-    let wrapped = word_wrap(text, text_width);
-
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(i, chunk)| {
-            if i == 0 {
-                Line::from(vec![
-                    Span::styled(ACTIVE_PREFIX, Style::default().fg(EVE_LAVENDER)),
-                    Span::styled(chunk, Style::default().fg(UI_TEXT)),
-                ])
-            } else {
-                let indent = " ".repeat(prefix_width as usize);
-                Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(chunk, Style::default().fg(UI_TEXT)),
-                ])
-            }
-        })
-        .collect()
+    render_prefixed_lines(
+        text,
+        width,
+        ACTIVE_PREFIX,
+        rgb(genesis_ui::colors::EVE_LAVENDER),
+        rgb(genesis_ui::colors::UI_TEXT),
+    )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
