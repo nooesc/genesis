@@ -5,6 +5,7 @@
 //! conversation turns are pushed into terminal scrollback via DECSTBM
 //! scroll regions.
 
+pub mod custom_terminal;
 pub mod terminal;
 
 use genesis_config::GenesisConfig;
