@@ -73,7 +73,7 @@ jobs:
             if is_test_name_file "$file"; then
               wc -l < "$file"
             elif rg -q --no-heading "^[[:space:]]*#\\[cfg\\(test\\)\\]" "$file"; then
-              awk '/^[[:space:]]*#\[cfg\(test\)\]/{in_test=1; next} in_test { print }' "$file" | wc -l
+              awk '/^[[:space:]]*#\\[cfg\\(test\\)\\]/{in_test=1; next} in_test { print }' "$file" | wc -l
             else
               echo 0
             fi
