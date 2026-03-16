@@ -145,7 +145,7 @@ impl StatusBar {
                 match self.dance_frame % 3 {
                     0 => " (~'.')~",
                     1 => " ~('.'~)",
-                    _ => " (~'.')~",
+                    _ => "  ('.')",
                 }
             }
             _ => "",
@@ -183,14 +183,16 @@ impl StatusBar {
             self.tokens_in, self.tokens_out, self.cost
         );
 
-        // Calculate visible widths (excluding ANSI codes) for padding
+        // Calculate visible widths (display columns, not bytes) for padding
         let left_visible = format!("\u{2666} {state_text}  {elapsed_str}{dance}");
         let right_visible = format!(
             "{session_short}  {}\u{2191} {}\u{2193}  ${:.2}",
             self.tokens_in, self.tokens_out, self.cost
         );
         // +2 accounts for the leading and trailing spaces
-        let visible_len = left_visible.len() + right_visible.len() + 2;
+        let visible_len = unicode_width::UnicodeWidthStr::width(left_visible.as_str())
+            + unicode_width::UnicodeWidthStr::width(right_visible.as_str())
+            + 2;
         let padding = if cols > visible_len {
             " ".repeat(cols - visible_len)
         } else {

@@ -221,9 +221,10 @@ impl ToolCallBuffer {
     }
 }
 
-/// Truncate a string for display, adding "..." if it exceeds `max_len`.
+/// Truncate a string for display, adding "..." if it exceeds `max_len` characters.
 fn truncate_display(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_owned()
     } else {
         let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();

@@ -10,18 +10,22 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, stdout, IsTerminal};
 use std::panic;
 
 /// Enable raw mode, keyboard enhancements, and bracketed paste.
+///
+/// Enters alternate screen and hides the cursor for a full-screen TUI.
 pub fn init() -> io::Result<()> {
     if !stdout().is_terminal() {
         return Err(io::Error::other("stdout is not a terminal"));
     }
 
     enable_raw_mode()?;
+    let _ = execute!(stdout(), cursor::Hide);
+    let _ = execute!(stdout(), EnterAlternateScreen);
     execute!(stdout(), EnableBracketedPaste)?;
 
     // Best-effort keyboard enhancement (not supported on all terminals)
@@ -48,6 +52,7 @@ pub fn restore() -> io::Result<()> {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableBracketedPaste);
     let _ = execute!(stdout(), DisableFocusChange);
+    let _ = execute!(stdout(), LeaveAlternateScreen);
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), cursor::Show);
     Ok(())

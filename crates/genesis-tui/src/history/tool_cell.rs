@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::rgb;
 
@@ -95,16 +96,9 @@ impl ToolCell {
     }
 
     /// Return the number of rows this cell occupies at the given terminal width.
-    pub fn height(&self, _width: u16) -> u16 {
-        match self.display_mode {
-            ToolDisplayMode::Off => 0,
-            ToolDisplayMode::Summary => 1,
-            ToolDisplayMode::Grouped => 4,
-            ToolDisplayMode::Verbose => {
-                // 4-line bordered block + 1 extra line for the output row (if any).
-                if self.output.is_some() { 5 } else { 4 }
-            }
-        }
+    pub fn height(&self, width: u16) -> u16 {
+        let width = width.max(1);
+        wrapped_row_count(&self.to_scrollback_lines(width), width)
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.
@@ -183,9 +177,11 @@ impl ToolCell {
             Span::styled(" │", Style::default().fg(UI_DIM)),
         ]);
 
-        // Bottom border: `  └──────────────────┘`
+        // Bottom border: `  └─ … ─┘` matching the top border width.
+        let fill_width = self.tool_name.len() + 2; // "─ " + name + " ─"
+        let bottom_fill = "─".repeat(fill_width);
         let bottom = Line::from(vec![
-            Span::styled("  └─┘", Style::default().fg(UI_DIM)),
+            Span::styled(format!("  └{}┘", bottom_fill), Style::default().fg(UI_DIM)),
         ]);
 
         vec![top, args_line, status_line, bottom]
@@ -212,9 +208,10 @@ impl ToolCell {
 
         // Output line (only in Verbose mode, if output is present).
         if let Some(output) = &self.output {
-            // Truncate output to a reasonable display length.
-            let truncated = if output.len() > 60 {
-                format!("{}…", &output[..60])
+            // Truncate output to a reasonable display length (character count, not bytes).
+            let truncated = if output.chars().count() > 60 {
+                let s: String = output.chars().take(60).collect();
+                format!("{s}…")
             } else {
                 output.clone()
             };
@@ -234,14 +231,35 @@ impl ToolCell {
             Span::styled(" │", Style::default().fg(UI_DIM)),
         ]);
 
+        let fill_width = self.tool_name.len() + 2; // match top border
+        let bottom_fill = "─".repeat(fill_width);
         let bottom = Line::from(vec![
-            Span::styled("  └─┘", Style::default().fg(UI_DIM)),
+            Span::styled(format!("  └{}┘", bottom_fill), Style::default().fg(UI_DIM)),
         ]);
 
         lines.push(status_line);
         lines.push(bottom);
         lines
     }
+}
+
+fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
+    let width = wrap_width.max(1) as usize;
+    let mut rows: usize = 0;
+    for line in lines {
+        let line_width = line
+            .spans
+            .iter()
+            .map(|span| span.content.width())
+            .sum::<usize>();
+        let wrapped = if line_width == 0 {
+            1
+        } else {
+            (line_width.saturating_sub(1) / width) + 1
+        };
+        rows = rows.saturating_add(wrapped);
+    }
+    rows.try_into().unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

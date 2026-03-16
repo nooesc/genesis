@@ -144,7 +144,11 @@ impl TranscriptOverlay {
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         let hint = " Transcript — j/k scroll, Ctrl+D/U page, g/G top/bottom, q to close ";
-        let pos_text = format!("[{}/{}]", self.scroll_offset + 1, self.total_lines.max(1));
+        let pos_text = if self.total_lines == 0 {
+            "[empty]".to_owned()
+        } else {
+            format!("[{}/{}]", self.scroll_offset + 1, self.total_lines)
+        };
 
         // Left-aligned hint.
         let hint_span = Span::styled(

@@ -3,6 +3,7 @@
 use crate::events::{AgentEvent, AppEvent, OverlayKind, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
+use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
 use crate::widgets::input_widget::InputAction;
 use crate::widgets::status_bar::StatusBarWidget;
@@ -31,6 +32,8 @@ pub struct App {
     pub frame_requester: FrameRequester,
     pub turn_running: bool,
     pub should_exit: bool,
+    /// When the current turn started (for elapsed time display).
+    pub turn_start: Option<std::time::Instant>,
     /// Which screen is currently active.
     pub screen: AppScreen,
     /// The welcome screen widget.
@@ -45,6 +48,8 @@ pub struct App {
     pub viewport_height: u16,
     /// Slash command popup (shown when input starts with `/`).
     pub command_popup: CommandPopup,
+    /// Interactive clarification picker (shown when agent asks a question with choices).
+    pub clarification: ClarificationWidget,
 }
 
 impl App {
@@ -72,6 +77,7 @@ impl App {
         match event {
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
+                self.turn_start = Some(std::time::Instant::now());
                 self.chat.start_turn();
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Thinking));
             }
@@ -96,18 +102,37 @@ impl App {
             } => {
                 self.chat.tool_call_end(&call_id, success, duration);
             }
-            AgentEvent::TurnComplete { .. } => {
+            AgentEvent::TurnComplete {
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
                 self.chat.complete_turn();
                 self.turn_running = false;
+                self.turn_start = None;
+                self.status_bar.tokens_in += input_tokens;
+                self.status_bar.tokens_out += output_tokens;
+                self.status_bar.turn_elapsed = None;
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
-            AgentEvent::ClarificationNeeded(_) => {}
-            AgentEvent::Error(_err) => {
-                // Complete the turn to clear active_cell.
+            AgentEvent::ClarificationNeeded(question) => {
+                // Show interactive picker if the question has choices,
+                // otherwise show it as text and unlock input.
+                self.clarification.show(&question);
+                // Complete the turn visually so the user can interact.
                 self.chat.complete_turn();
                 self.turn_running = false;
-                // TODO: display error in chat (e.g. as a styled AgentCell)
+                self.turn_start = None;
+                self.status_bar.turn_elapsed = None;
+                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+                let _ = self.app_tx.send(AppEvent::CommitHistory);
+            }
+            AgentEvent::Error(_err) => {
+                self.chat.complete_turn();
+                self.turn_running = false;
+                self.turn_start = None;
+                self.status_bar.turn_elapsed = None;
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
             }
             AgentEvent::Warning(_) => {}
@@ -119,15 +144,16 @@ impl App {
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::CommitHistory => {
-                // Scrollback insertion is handled in `run_tui` (which owns the
-                // terminal). See `commit_history_to_scrollback` in lib.rs.
+                // Alternate-screen TUI owns all history rendering in overlays;
+                // drain any terminal-scrollback queue so buffers don't grow.
+                let _ = self.chat.drain_pending_scrollback();
             }
             AppEvent::UpdateStatus(state) => {
                 self.status_bar.set_state(state);
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
-                let visible_rows = self.viewport_height.saturating_sub(1).max(1);
+                let visible_rows = self.viewport_height.saturating_sub(2).max(1);
                 self.overlay = Some(TranscriptOverlay::from_cells(
                     self.chat.committed_cells(),
                     80, // will be updated on next resize; 80 is a reasonable default
@@ -175,7 +201,7 @@ impl App {
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
             // visible rows = viewport height minus header row inside the overlay
-            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
+            let visible_rows = self.viewport_height.saturating_sub(2).max(1);
             let action = overlay.handle_key(key, visible_rows);
             if matches!(action, TranscriptAction::Close) {
                 self.overlay = None;
@@ -184,10 +210,26 @@ impl App {
             return;
         }
 
+        // When the clarification picker is visible, route keys to it first.
+        if self.clarification.is_visible() {
+            match self.clarification.handle_key(key) {
+                ClarificationAction::Confirm(answer) => {
+                    // Submit the chosen answer as a user message.
+                    self.submit_text(answer);
+                }
+                ClarificationAction::Dismiss => {
+                    // User cancelled — just close the picker.
+                }
+                ClarificationAction::None => {}
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // Ctrl+T — toggle transcript overlay.
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.command_popup.hide();
-            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
+            let visible_rows = self.viewport_height.saturating_sub(2).max(1);
             self.overlay = Some(TranscriptOverlay::from_cells(
                 self.chat.committed_cells(),
                 80,
@@ -199,6 +241,14 @@ impl App {
 
         // When the command popup is visible, route keys to it first.
         if self.command_popup.is_visible() {
+            // Keep the slash command query synced with the actual input widget so
+            // the popup always reflects what the user typed.
+            let is_text_key = matches!(key.code, KeyCode::Char(_))
+                && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT);
+            if is_text_key || matches!(key.code, KeyCode::Backspace) {
+                self.chat.input.handle_key(key);
+            }
+
             match self.command_popup.handle_key(key) {
                 CommandAction::Select(cmd) => {
                     // Clear the input (which contained the typed slash command).
@@ -211,6 +261,18 @@ impl App {
                 }
                 CommandAction::None => {}
             }
+
+            // Keep popup query state aligned with the actual input buffer.
+            let input_text = self.chat.input.text().to_owned();
+            if let Some(query) = input_text.strip_prefix('/') {
+                if !self.command_popup.is_visible() {
+                    self.command_popup.show();
+                }
+                self.command_popup.update_query(query);
+            } else if self.command_popup.is_visible() {
+                self.command_popup.hide();
+            }
+
             self.frame_requester.schedule_frame();
             return;
         }
@@ -288,11 +350,14 @@ mod tests {
         let welcome = WelcomeWidget::new(
             crate::widgets::welcome::WelcomeInfo {
                 model: "test".to_string(),
+                backend: "test-backend".to_string(),
+                session_id: "session-test".to_string(),
                 cwd: "/tmp".to_string(),
                 version: "0.0.0".to_string(),
+                tool_count_builtin: 0,
+                tool_count_mcp: 0,
+                skill_count: 0,
             },
-            &[],
-            &[],
         );
         let app = App {
             submission_tx,
@@ -300,6 +365,7 @@ mod tests {
             frame_requester,
             turn_running: false,
             should_exit: false,
+            turn_start: None,
             screen: AppScreen::Chat, // Start in Chat for existing tests
             welcome,
             chat: ChatWidget::new(),
@@ -307,6 +373,7 @@ mod tests {
             overlay: None,
             viewport_height: 24,
             command_popup: CommandPopup::new(),
+            clarification: ClarificationWidget::new(),
         };
         (app, submission_rx, app_rx)
     }

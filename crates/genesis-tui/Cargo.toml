@@ -9,11 +9,11 @@ genesis-ui.path = "../genesis-ui"
 genesis-core.path = "../genesis-core"
 genesis-types.path = "../genesis-types"
 genesis-config.path = "../genesis-config"
+genesis-storage.path = "../genesis-storage"
 ratatui.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
 syntect.workspace = true
-image.workspace = true
 unicode-width.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

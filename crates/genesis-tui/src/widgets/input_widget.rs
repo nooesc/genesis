@@ -218,6 +218,14 @@ impl InputWidget {
     /// with inverted colours. If the cursor is at the end of the text, a
     /// space with inverted colours acts as the block cursor.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        self.render_with_state(area, buf, true);
+    }
+
+    /// Render the input line into `buf` with optional cursor visibility.
+    ///
+    /// When the cursor is hidden (e.g. agent turn active), text is rendered
+    /// normally and no highlighted cursor span is shown.
+    pub fn render_with_state(&self, area: Rect, buf: &mut Buffer, show_cursor: bool) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -225,7 +233,7 @@ impl InputWidget {
         let prefix_span = Span::styled(PREFIX, PREFIX_STYLE);
 
         // Build text spans with cursor highlight.
-        let text_spans = self.build_text_spans();
+        let text_spans = self.build_text_spans(show_cursor);
 
         let line = Line::from(
             std::iter::once(prefix_span)
@@ -257,13 +265,16 @@ impl InputWidget {
 
     // ── Private helpers ───────────────────────────────────────────────────
 
-    /// Build the spans for the text portion including the cursor highlight.
-    fn build_text_spans(&self) -> Vec<Span<'static>> {
+    /// Build the spans for the text portion.
+    fn build_text_spans(&self, show_cursor: bool) -> Vec<Span<'static>> {
         let text = &self.buffer;
 
         if text.is_empty() {
-            // Show a block cursor on a space at position 0.
-            return vec![Span::styled(" ", CURSOR_STYLE)];
+            if show_cursor {
+                // Show a block cursor on a space at position 0.
+                return vec![Span::styled(" ", CURSOR_STYLE)];
+            }
+            return vec![Span::styled(" ", TEXT_STYLE)];
         }
 
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -285,10 +296,17 @@ impl InputWidget {
                 .map(|(i, _)| self.cursor + i)
                 .unwrap_or(text.len());
 
-            spans.push(Span::styled(
-                text[self.cursor..char_end].to_owned(),
-                CURSOR_STYLE,
-            ));
+            if show_cursor {
+                spans.push(Span::styled(
+                    text[self.cursor..char_end].to_owned(),
+                    CURSOR_STYLE,
+                ));
+            } else {
+                spans.push(Span::styled(
+                    text[self.cursor..char_end].to_owned(),
+                    TEXT_STYLE,
+                ));
+            }
 
             // Text after the cursor.
             if char_end < text.len() {
@@ -296,7 +314,7 @@ impl InputWidget {
             }
         } else {
             // Cursor is past the end — add a block cursor space.
-            spans.push(Span::styled(" ", CURSOR_STYLE));
+            spans.push(Span::styled(" ", if show_cursor { CURSOR_STYLE } else { TEXT_STYLE }));
         }
 
         spans

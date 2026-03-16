@@ -60,7 +60,7 @@ pub enum AgentEvent {
 /// Internal TUI events (state changes triggered by the app itself).
 #[derive(Debug)]
 pub enum AppEvent {
-    /// Commit completed cells to terminal scrollback.
+    /// Signal that a completed turn should be committed.
     CommitHistory,
     /// Update status bar state.
     UpdateStatus(StatusState),

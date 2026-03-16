@@ -1,9 +1,4 @@
 //! Genesis TUI — ratatui-based terminal interface for Eve.
-//!
-//! Ported from Codex CLI's inline-viewport architecture. The TUI renders
-//! in an inline viewport at the bottom of the terminal; completed
-//! conversation turns are pushed into terminal scrollback via DECSTBM
-//! scroll regions.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,12 +10,16 @@ use crate::frame_requester::FrameRequester;
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use futures_util::StreamExt;
 use genesis_config::GenesisConfig;
+use genesis_storage::SkillStore;
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     SessionExecutionError, SessionExecutionService, SessionTurnInput, SessionTurnOutcome,
 };
 use genesis_types::DeliveryPlatform;
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+};
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
@@ -28,7 +27,6 @@ pub mod custom_terminal;
 pub mod events;
 pub mod frame_requester;
 pub mod history;
-pub mod insert_history;
 pub mod render;
 pub mod terminal;
 pub mod widgets;
@@ -124,7 +122,7 @@ fn make_turn_future<'a>(
 /// so there is no separate `pending_text` variable that would create
 /// cross-borrow issues in the `select!` macro expansion.
 pub async fn run_tui(
-    _config: &GenesisConfig,
+    config: &GenesisConfig,
     service: &SessionExecutionService<'_>,
     session_id: &str,
 ) -> Result<(), TuiError> {
@@ -132,6 +130,8 @@ pub async fn run_tui(
 
     let size = crossterm::terminal::size()?;
     let mut term = custom_terminal::CustomTerminal::new(size.0, size.1)?;
+    let viewport_area = Rect::new(0, 0, size.0, size.1);
+    term.set_viewport_area(viewport_area);
 
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -140,19 +140,24 @@ pub async fn run_tui(
 
     let frame_requester = FrameRequester::new(draw_tx);
 
-    let full_art = genesis_ui::banner::full_art();
-    let compact_art = genesis_ui::banner::compact_art();
+    let (tool_count_builtin, tool_count_mcp) = service.tool_counts().await;
+    let skill_count = SkillStore::new(&config.storage.database_path)
+        .list_all()
+        .map_or(0, |skills| skills.len());
 
     let welcome = crate::widgets::welcome::WelcomeWidget::new(
         crate::widgets::welcome::WelcomeInfo {
-            model: "default".to_string(), // TODO: get from config
+            model: config.provider.model.clone(),
+            backend: config.provider.backend.clone(),
+            session_id: session_id.to_string(),
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
+            tool_count_builtin,
+            tool_count_mcp,
+            skill_count,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        &full_art,
-        &compact_art,
     );
 
     let mut app = App {
@@ -161,6 +166,7 @@ pub async fn run_tui(
         frame_requester,
         turn_running: false,
         should_exit: false,
+        turn_start: None,
         screen: AppScreen::Welcome,
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
@@ -168,8 +174,9 @@ pub async fn run_tui(
             "default".to_string(), // TODO: get from config
         ),
         overlay: None,
-        viewport_height: size.1,
+        viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
+        clarification: crate::widgets::clarification::ClarificationWidget::new(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -190,7 +197,9 @@ pub async fn run_tui(
                         // Intercept Resize to update the terminal viewport
                         // before delegating to App (which schedules a frame).
                         if let TuiEvent::Resize { width, height } = &tui_event {
-                            term.set_viewport_area(Rect::new(0, 0, *width, *height));
+                            let clamped = Rect::new(0, 0, *width, *height);
+                            term.set_viewport_area(clamped);
+                            app.viewport_height = clamped.height;
                         }
                         app.handle_tui_event(tui_event);
                     }
@@ -256,32 +265,38 @@ pub async fn run_tui(
             // ── Internal app events ─────────────────────────────────
             app_event = app_rx.recv() => {
                 if let Some(event) = app_event {
-                    // CommitHistory needs the terminal, which App doesn't own,
-                    // so we handle the scrollback insertion here before
-                    // delegating the rest to App.
                     if matches!(&event, AppEvent::CommitHistory) {
-                        commit_history_to_scrollback(&mut term, &mut app.chat);
+                        // In alternate-screen mode, history insertion is handled
+                        // by the transcript overlay and does not write to
+                        // terminal scrollback.
                     }
                     app.handle_app_event(event);
                 }
             }
 
             // ── Frame draw timer ────────────────────────────────────
-            _ = draw_rx.recv() => {
-                // Advance the sway animation before rendering the welcome screen.
-                if matches!(app.screen, AppScreen::Welcome) {
-                    app.welcome.next_frame();
+            draw_result = draw_rx.recv() => {
+                // Break on channel close to avoid an infinite render spin.
+                if matches!(draw_result, Err(broadcast::error::RecvError::Closed)) {
+                    break;
                 }
 
                 // Advance status bar animation (sprite / spinner).
                 app.status_bar.tick();
 
+                // Update elapsed time for the current turn.
+                if app.turn_running {
+                    if let Some(start) = app.turn_start {
+                        app.status_bar.turn_elapsed = Some(start.elapsed());
+                    }
+                }
+
                 render_frame(&mut term, &app);
 
-                // Schedule the next animation frame while on the welcome screen.
-                if matches!(app.screen, AppScreen::Welcome) && app.welcome.animated {
+                // Schedule periodic redraws while animations are active.
+                if app.status_bar.is_animating() {
                     app.frame_requester
-                        .schedule_frame_in(std::time::Duration::from_millis(150));
+                        .schedule_frame_in(app.status_bar.animation_interval());
                 }
             }
         }
@@ -324,30 +339,141 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
             app.welcome.render(area, buf);
         }
         AppScreen::Chat => {
-            // Chat widget gets all space except the last row (reserved for status bar).
-            let chat_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: area.height.saturating_sub(1),
-            };
+            // Reserve the final row for status, leave space for a bounded input
+            // panel and a separator between messages and input.
+            if area.height < 2 {
+                app.status_bar.render(area, buf);
+            } else {
+                const INPUT_PANEL_ROWS: u16 = 3;
+                const SEPARATOR_ROW: u16 = 1;
+                const STATUS_ROWS: u16 = 1;
 
-            // Status bar occupies the last row.
-            if area.height >= 1 {
                 let status_area = Rect {
                     x: area.x,
-                    y: area.y + area.height - 1,
+                    y: area.y + area.height - STATUS_ROWS,
                     width: area.width,
-                    height: 1,
+                    height: STATUS_ROWS,
                 };
                 app.status_bar.render(status_area, buf);
-            }
 
-            app.chat.render(chat_area, buf);
+                let chat_area_height = area.height - STATUS_ROWS;
+                let input_rows = INPUT_PANEL_ROWS.min(chat_area_height);
+                let message_area_height = if chat_area_height > input_rows {
+                    chat_area_height.saturating_sub(input_rows + 1)
+                } else {
+                    0
+                };
+                let separator_rows = if message_area_height > 0 { SEPARATOR_ROW } else { 0 };
 
-            // Render the slash command popup on top of the chat area when visible.
-            if app.command_popup.is_visible() {
-                app.command_popup.render(area, buf);
+                let message_area = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: message_area_height,
+                };
+                let separator_area = Rect {
+                    x: area.x,
+                    y: area.y + message_area_height,
+                    width: area.width,
+                    height: separator_rows,
+                };
+                let input_area = Rect {
+                    x: area.x,
+                    y: area.y + message_area_height + separator_rows,
+                    width: area.width,
+                    height: input_rows,
+                };
+                let interactive_area = Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: chat_area_height,
+                };
+
+                if message_area_height > 0 {
+                    app.chat.render_messages(message_area, buf);
+                }
+
+                if separator_rows > 0 {
+                    let line_style = Style::default().fg(Color::Rgb(72, 72, 72));
+                    let sep_row = separator_area.y;
+                    for x in separator_area.x..separator_area.x + separator_area.width {
+                        if let Some(cell) = buf.cell_mut((x, sep_row)) {
+                            cell.set_symbol("─");
+                            cell.set_style(line_style);
+                        }
+                    }
+                }
+
+                if input_area.height >= 2 && input_area.width >= 2 {
+                    // Input panel border.
+                    let border_style = Style::default().fg(Color::Rgb(108, 108, 108));
+                    let right = input_area.x + input_area.width - 1;
+                    let bottom = input_area.y + input_area.height - 1;
+
+                    if let Some(cell) = buf.cell_mut((input_area.x, input_area.y)) {
+                        cell.set_symbol("┌");
+                        cell.set_style(border_style);
+                    }
+                    for col in (input_area.x + 1)..right {
+                        if let Some(cell) = buf.cell_mut((col, input_area.y)) {
+                            cell.set_symbol("─");
+                            cell.set_style(border_style);
+                        }
+                    }
+                    if let Some(cell) = buf.cell_mut((right, input_area.y)) {
+                        cell.set_symbol("┐");
+                        cell.set_style(border_style);
+                    }
+
+                    for row in (input_area.y + 1)..bottom {
+                        if let Some(cell) = buf.cell_mut((input_area.x, row)) {
+                            cell.set_symbol("│");
+                            cell.set_style(border_style);
+                        }
+                        if let Some(cell) = buf.cell_mut((right, row)) {
+                            cell.set_symbol("│");
+                            cell.set_style(border_style);
+                        }
+                    }
+
+                    if let Some(cell) = buf.cell_mut((input_area.x, bottom)) {
+                        cell.set_symbol("└");
+                        cell.set_style(border_style);
+                    }
+                    for col in (input_area.x + 1)..right {
+                        if let Some(cell) = buf.cell_mut((col, bottom)) {
+                            cell.set_symbol("─");
+                            cell.set_style(border_style);
+                        }
+                    }
+                    if let Some(cell) = buf.cell_mut((right, bottom)) {
+                        cell.set_symbol("┘");
+                        cell.set_style(border_style);
+                    }
+
+                    let inner = Rect {
+                        x: input_area.x + 1,
+                        y: input_area.y + 1,
+                        width: input_area.width - 2,
+                        height: input_area.height - 2,
+                    };
+                    if inner.width > 0 && inner.height > 0 {
+                        app.chat.render_input(inner, buf, app.turn_running);
+                    }
+                } else {
+                    app.chat.render_input(input_area, buf, app.turn_running);
+                }
+
+                // Render the slash command popup above the input area.
+                if app.command_popup.is_visible() {
+                    app.command_popup.render(interactive_area, buf);
+                }
+
+                // Render the clarification picker as a centered overlay.
+                if app.clarification.is_visible() {
+                    app.clarification.render(area, buf);
+                }
             }
         }
     }
@@ -355,40 +481,6 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();
     term.swap_buffers();
-    let _ = term.flush();
-}
-
-/// Push newly committed history cells into terminal scrollback.
-///
-/// Drains the pending scrollback queue from the [`ChatWidget`], converts each
-/// cell to styled [`Line`]s, then uses [`insert_history::insert_history_lines`]
-/// to write them above the viewport via DECSTBM scroll-region insertion.
-fn commit_history_to_scrollback(
-    term: &mut custom_terminal::CustomTerminal,
-    chat: &mut widgets::chat_widget::ChatWidget,
-) {
-    let cells = chat.drain_pending_scrollback();
-    if cells.is_empty() {
-        return;
-    }
-
-    let width = term.viewport_area().width;
-    let viewport_top = term.viewport_area().y;
-
-    let mut all_lines = Vec::new();
-    for cell in &cells {
-        all_lines.extend(cell.to_scrollback_lines(width));
-    }
-
-    if all_lines.is_empty() {
-        return;
-    }
-
-    let rendered = insert_history::lines_to_rendered(&all_lines);
-    let backend = term.backend_mut();
-    if let Ok(inserted) = insert_history::insert_history_lines(backend, viewport_top, &rendered) {
-        term.note_history_rows_inserted(inserted);
-    }
     let _ = term.flush();
 }
 

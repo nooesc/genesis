@@ -1036,6 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "genesis-cli",
+ "genesis-tui",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1245,12 +1246,13 @@ name = "genesis-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm 0.28.1",
+ "dirs",
  "futures-util",
  "genesis-config",
  "genesis-core",
+ "genesis-storage",
  "genesis-types",
  "genesis-ui",
- "image",
  "libc",
  "ratatui",
  "syntect",

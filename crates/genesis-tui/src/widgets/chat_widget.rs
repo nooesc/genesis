@@ -9,8 +9,9 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     text::Line,
-    widgets::Widget as _,
+    widgets::{Paragraph, Widget as _, Wrap},
 };
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
@@ -42,10 +43,10 @@ pub struct ActiveCell {
 pub struct ChatWidget {
     /// Cells that have been committed (frozen) from previous turns.
     committed_cells: Vec<HistoryCell>,
-    /// Cells waiting to be pushed into terminal scrollback.
+    /// Cells queued after each committed message/turn.
     ///
-    /// Populated by [`complete_turn`] and drained by [`drain_pending_scrollback`]
-    /// in the `run_tui` event loop (which has access to the terminal).
+    /// Populated by submit/complete paths and drained by
+    /// [`drain_pending_scrollback`] when `AppEvent::CommitHistory` is handled.
     pending_scrollback: Vec<HistoryCell>,
     /// The current in-flight turn, if one is running.
     pub active_cell: Option<ActiveCell>,
@@ -68,8 +69,8 @@ impl ChatWidget {
 
     /// Add a user message to committed cells immediately.
     ///
-    /// The cell is also queued for scrollback insertion so it will be pushed
-    /// to the terminal history when the next `CommitHistory` event fires.
+    /// The cell is also queued so the commit path can atomically collect
+    /// completed turn cells; alternate-screen mode keeps it in-memory only.
     pub fn add_user_message(&mut self, text: String) {
         let cell = HistoryCell::User(UserCell::new(text));
         self.committed_cells.push(cell.clone());
@@ -136,8 +137,8 @@ impl ChatWidget {
     ///   Tool calls with no recorded result (partial) are emitted as failures
     ///   with zero duration.
     ///
-    /// Returns the newly committed cells so callers can push them to
-    /// scrollback. Also appends them to `committed_cells`.
+    /// Returns the newly committed cells and queues them for the commit path.
+    /// Alternate-screen mode keeps this in-memory only.
     pub fn complete_turn(&mut self) -> Vec<HistoryCell> {
         let Some(cell) = self.active_cell.take() else {
             return Vec::new();
@@ -171,7 +172,7 @@ impl ChatWidget {
         new_cells
     }
 
-    /// Drain cells that are waiting to be pushed into terminal scrollback.
+    /// Drain cells queued for the commit path.
     ///
     /// Returns the pending cells and clears the internal queue. Called from
     /// `run_tui` where both `App` and `CustomTerminal` are accessible.
@@ -190,38 +191,47 @@ impl ChatWidget {
 
     /// Render the chat widget into the given area.
     ///
-    /// Layout (bottom-up):
-    /// 1. Bottom 1 row — InputWidget
-    /// 2. Above that — active streaming cell (if running), word-wrapped
-    /// 3. Remaining space — most recent committed cells, bottom-aligned
+    /// Backwards-compatible default path: reserve the last row for input.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        // Preserve existing behavior for callers that still use this method.
+        let input_height = 1.min(area.height);
+        let message_area_height = area.height.saturating_sub(input_height);
+        let message_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: message_area_height,
+        };
+        self.render_messages(message_area, buf);
+
+        let input_area = Rect {
+            x: area.x,
+            y: area.y + message_area_height,
+            width: area.width,
+            height: input_height,
+        };
+        self.render_input(input_area, buf, false);
+    }
+
+    /// Render only the chat messages (no input row).
+    pub fn render_messages(&self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
             return;
         }
 
-        // ── 1. Reserve bottom row for input ───────────────────────────────
-        let input_row = area.y + area.height - 1;
-        let input_area = Rect {
-            x: area.x,
-            y: input_row,
-            width: area.width,
-            height: 1,
-        };
-        self.input.render(input_area, buf);
+        let mut remaining_rows = area.height;
+        let mut bottom_y = area.y + area.height;
 
-        if area.height < 2 {
-            return;
-        }
-
-        // Available rows above the input.
-        let mut remaining_rows = area.height - 1;
-        let mut bottom_y = input_row; // exclusive: next cell renders above this
-
-        // ── 2. Active cell (if any) ───────────────────────────────────────
+        // ── Active cell (if any) ───────────────────────────────────────
         if let Some(active) = &self.active_cell {
             if !active.text_buffer.is_empty() {
                 let lines = active_cell_lines(&active.text_buffer, area.width);
-                let cell_height = lines.len() as u16;
+                let wrap_width = area.width.max(1);
+                let cell_height = wrapped_row_count(&lines, wrap_width).max(1);
                 let rows_to_use = cell_height.min(remaining_rows);
 
                 if rows_to_use > 0 {
@@ -231,10 +241,11 @@ impl ChatWidget {
                         width: area.width,
                         height: rows_to_use,
                     };
-                    // Render the last `rows_to_use` lines (clip from top if needed).
-                    let skip = lines.len().saturating_sub(rows_to_use as usize);
-                    let visible_lines: Vec<Line<'_>> = lines.into_iter().skip(skip).collect();
-                    let paragraph = ratatui::widgets::Paragraph::new(visible_lines);
+
+                    let skip = cell_height.saturating_sub(rows_to_use);
+                    let paragraph = Paragraph::new(lines)
+                        .wrap(Wrap { trim: false })
+                        .scroll((0, skip));
                     paragraph.render(cell_area, buf);
 
                     bottom_y -= rows_to_use;
@@ -247,7 +258,7 @@ impl ChatWidget {
             return;
         }
 
-        // ── 3. Committed cells (most recent first, bottom-up) ────────────
+        // ── Committed cells (most recent first, bottom-up) ────────────
         // Walk committed cells in reverse and allocate rows.
         let mut cells_to_render: Vec<(u16, &HistoryCell)> = Vec::new();
         let mut used = 0u16;
@@ -262,7 +273,7 @@ impl ChatWidget {
 
         // Render from oldest to newest (reverse the reversed list).
         cells_to_render.reverse();
-        let mut row_cursor = bottom_y - used;
+        let mut row_cursor = bottom_y.saturating_sub(used);
         for (h, cell) in cells_to_render {
             let cell_area = Rect {
                 x: area.x,
@@ -273,6 +284,15 @@ impl ChatWidget {
             cell.render(cell_area, buf);
             row_cursor += h;
         }
+    }
+
+    /// Render the input widget in the given row or box.
+    ///
+    /// `show_cursor` controls whether the input cursor is visible (used while
+    /// an agent turn is running).
+    pub fn render_input(&self, area: Rect, buf: &mut Buffer, is_turn_running: bool) {
+        self.input
+            .render_with_state(area, buf, !is_turn_running);
     }
 }
 
@@ -288,6 +308,27 @@ impl Default for ChatWidget {
 /// markdown formatting applied so styles appear live as the agent types.
 fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
     prefix_markdown_lines(text)
+}
+
+fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
+    let width = wrap_width.max(1) as usize;
+    let mut rows: usize = 0;
+
+    for line in lines {
+        let line_width = line
+            .spans
+            .iter()
+            .map(|span| span.content.width())
+            .sum::<usize>();
+        let wrapped = if line_width == 0 {
+            1
+        } else {
+            (line_width.saturating_sub(1) / width) + 1
+        };
+        rows = rows.saturating_add(wrapped);
+    }
+
+    rows.try_into().unwrap_or(u16::MAX)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

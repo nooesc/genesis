@@ -1,12 +1,9 @@
-//! Custom terminal wrapper with inline viewport and dual-buffer diff rendering.
+//! Custom terminal wrapper with full-screen alternate-mode rendering and dual-buffer diff rendering.
 //!
 //! This is a simplified wrapper around ratatui's crossterm backend that provides:
 //! - Dual-buffer diff rendering: two `Buffer` objects swapped after each frame,
 //!   writing only changed cells to the terminal.
-//! - Viewport area tracking: the region ratatui renders into (may start at y > 0
-//!   for inline viewports).
-//! - History row tracking: how many rows above the viewport have been pushed into
-//!   terminal scrollback.
+//! - Viewport area tracking: the region ratatui renders into.
 //!
 //! Derived from Codex CLI's `custom_terminal.rs` (MIT-licensed, see codex-rs).
 
@@ -32,15 +29,12 @@ pub struct CustomTerminal {
     buffers: [Buffer; 2],
     current: usize,
     viewport_area: Rect,
-    visible_history_rows: u16,
 }
 
 impl CustomTerminal {
     /// Create a new `CustomTerminal` with the given viewport dimensions.
     ///
-    /// The viewport starts at row 0 and column 0.  Call [`set_viewport_area`]
-    /// to move it (e.g. after determining the cursor position for an inline
-    /// viewport).
+    /// The viewport starts at row 0 and column 0.
     pub fn new(width: u16, height: u16) -> io::Result<Self> {
         let backend = CrosstermBackend::new(io::stdout());
         let area = Rect::new(0, 0, width, height);
@@ -49,7 +43,6 @@ impl CustomTerminal {
             buffers: [Buffer::empty(area), Buffer::empty(area)],
             current: 0,
             viewport_area: area,
-            visible_history_rows: 0,
         })
     }
 
@@ -58,33 +51,11 @@ impl CustomTerminal {
         self.viewport_area
     }
 
-    /// Number of rows above the viewport that have been pushed into scrollback.
-    pub fn visible_history_rows(&self) -> u16 {
-        self.visible_history_rows
-    }
-
     /// Update the viewport area and resize both buffers to match.
-    ///
-    /// History rows are clamped so they never exceed `area.y` (the viewport's
-    /// top edge, which is the maximum number of scrollback rows that can exist
-    /// above it).
     pub fn set_viewport_area(&mut self, area: Rect) {
         self.buffers[self.current].resize(area);
         self.buffers[1 - self.current].resize(area);
         self.viewport_area = area;
-        self.visible_history_rows = self.visible_history_rows.min(area.y);
-    }
-
-    /// Record that `rows` new lines have been pushed into scrollback above the
-    /// viewport (e.g. via DECSTBM scroll-region insertion).
-    ///
-    /// The total is clamped to `viewport_area.y` so we never claim more history
-    /// rows than physically exist above the viewport.
-    pub fn note_history_rows_inserted(&mut self, rows: u16) {
-        self.visible_history_rows = self
-            .visible_history_rows
-            .saturating_add(rows)
-            .min(self.viewport_area.y);
     }
 
     /// Get a mutable reference to the current (front) buffer for drawing into.
@@ -117,10 +88,7 @@ impl CustomTerminal {
     /// Diff the previous buffer against the current buffer and write only the
     /// changed cells to the terminal.
     ///
-    /// **Important**: `Buffer::diff` returns `(x, y)` coordinates that are
-    /// *already* absolute screen positions (because the buffers are created with
-    /// `Buffer::empty(viewport_area)` where `viewport_area.y` may be > 0).
-    /// We must **not** add the viewport offset again.
+    /// **Important**: `Buffer::diff` returns `(x, y)` coordinates.
     pub fn draw_diff(&mut self) -> io::Result<()> {
         let previous = &self.buffers[1 - self.current];
         let current = &self.buffers[self.current];
@@ -177,7 +145,8 @@ impl CustomTerminal {
             SetAttribute(CAttribute::Reset),
         )?;
 
-        self.backend.flush()
+        // Note: caller is responsible for flushing via `self.flush()`.
+        Ok(())
     }
 
     /// Hard-reset: clear the entire screen and scrollback, reset style state.
@@ -192,7 +161,6 @@ impl CustomTerminal {
     pub fn clear_all(&mut self) -> io::Result<()> {
         write!(self.backend, "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H")?;
         self.backend.flush()?;
-        self.visible_history_rows = 0;
         // Reset the previous buffer so the next draw_diff redraws everything.
         self.buffers[1 - self.current].reset();
         Ok(())
@@ -293,10 +261,8 @@ mod tests {
             buffers,
             current: 0,
             viewport_area: area,
-            visible_history_rows: 0,
         };
         assert_eq!(ct.viewport_area(), Rect::new(0, 0, 80, 24));
-        assert_eq!(ct.visible_history_rows(), 0);
     }
 
     #[test]
@@ -307,7 +273,6 @@ mod tests {
             buffers: make_buffers(initial),
             current: 0,
             viewport_area: initial,
-            visible_history_rows: 0,
         };
 
         let new_area = Rect::new(0, 5, 120, 30);
@@ -319,29 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn note_history_rows_clamped_to_viewport_top() {
-        // Viewport starts at row 10, so at most 10 history rows can exist.
-        let area = Rect::new(0, 10, 80, 14);
-        let mut ct = CustomTerminal {
-            backend: CrosstermBackend::new(io::stdout()),
-            buffers: make_buffers(area),
-            current: 0,
-            viewport_area: area,
-            visible_history_rows: 0,
-        };
-
-        ct.note_history_rows_inserted(5);
-        assert_eq!(ct.visible_history_rows(), 5);
-
-        ct.note_history_rows_inserted(3);
-        assert_eq!(ct.visible_history_rows(), 8);
-
-        // Would exceed viewport top (10) -- should clamp.
-        ct.note_history_rows_inserted(100);
-        assert_eq!(ct.visible_history_rows(), 10);
-    }
-
-    #[test]
     fn swap_buffers_alternates() {
         let area = Rect::new(0, 0, 10, 5);
         let mut ct = CustomTerminal {
@@ -349,7 +291,6 @@ mod tests {
             buffers: make_buffers(area),
             current: 0,
             viewport_area: area,
-            visible_history_rows: 0,
         };
 
         assert_eq!(ct.current, 0);
@@ -386,38 +327,4 @@ mod tests {
         assert_eq!(cell.symbol(), "X");
     }
 
-    #[test]
-    fn diff_with_offset_viewport_returns_absolute_coords() {
-        // Viewport starting at row 5 -- diff coordinates include that offset.
-        let area = Rect::new(0, 5, 10, 3);
-        let prev = Buffer::empty(area);
-        let mut curr = Buffer::empty(area);
-        curr.cell_mut((2, 5))
-            .expect("cell should exist")
-            .set_symbol("A");
-
-        let updates = prev.diff(&curr);
-        assert!(!updates.is_empty());
-        let (x, y, cell) = &updates[0];
-        assert_eq!(*x, 2);
-        assert_eq!(*y, 5); // absolute row, not 0
-        assert_eq!(cell.symbol(), "A");
-    }
-
-    #[test]
-    fn set_viewport_area_clamps_history_rows() {
-        let area = Rect::new(0, 20, 80, 4);
-        let mut ct = CustomTerminal {
-            backend: CrosstermBackend::new(io::stdout()),
-            buffers: make_buffers(area),
-            current: 0,
-            viewport_area: area,
-            visible_history_rows: 15,
-        };
-
-        // Move viewport up -- history rows should be clamped.
-        let new_area = Rect::new(0, 8, 80, 16);
-        ct.set_viewport_area(new_area);
-        assert_eq!(ct.visible_history_rows(), 8);
-    }
 }
