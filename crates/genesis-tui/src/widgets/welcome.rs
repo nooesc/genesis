@@ -23,12 +23,20 @@ const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
 const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
-    "       @@@       ",
-    "     @@%%%@@     ",
-    "    @@%@@@%@@    ",
-    "    @%  %  %@    ",
-    "    @% /_\\\\ %@    ",
-    "   @@%_____%@@   ",
+    "          .-''''-.          ",
+    "       .-'  .--.  `-.       ",
+    "      /   .'_  _`.   \\      ",
+    "     /   /  ( \\/ )\\   \\     ",
+    "    /   |      /\\  |   \\    ",
+    "    |   |     /  \\ |   |    ",
+    "    |   |   .-''''-.   |    ",
+    "    |   |  /  .--.  \\  |    ",
+    "    |   |  | (____) |  |    ",
+    "    |    \\  \\______/  /|    ",
+    "     \\    `-._____.-' /     ",
+    "      `-.     __    .-'     ",
+    "         `-._/  \\_.-'       ",
+    "           /_/\\_\\           ",
 ];
 
 const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
@@ -538,6 +546,42 @@ mod tests {
 
         assert!(!rows.iter().any(|row| row.contains('@')));
         assert!(portrait.0 < title.0, "compact portrait should render above the title");
+    }
+
+    #[test]
+    fn wide_welcome_uses_hybrid_portrait_signature() {
+        let widget = WelcomeWidget::new(
+            WelcomeInfo {
+                model: "gpt-5.4".to_string(),
+                cwd: "/home/user/project".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            &[],
+            &[],
+        );
+
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let rows = buffer_rows(&buf, area.width);
+
+        assert!(
+            rows.iter().any(|row| row.contains(".-'  .--.  `-.")),
+            "wide portrait should include the hybrid head contour"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("|   .-''''-.   |")),
+            "wide portrait should include the interior bust contour"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("\\  \\______/  /|")),
+            "wide portrait should include the shoulder taper"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("@@%%%@@")),
+            "wide portrait should no longer use the placeholder signature"
+        );
     }
 
     #[test]
