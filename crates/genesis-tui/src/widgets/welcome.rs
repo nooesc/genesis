@@ -52,10 +52,6 @@ pub struct WelcomeWidget {
     split_art: Vec<Line<'static>>,
     /// Compact portrait lines used in medium mode.
     compact_art: Vec<Line<'static>>,
-    /// Kept for API compatibility; static portraits do not advance frames.
-    current_frame: usize,
-    /// Static portraits are terminal-native and never animated.
-    pub animated: bool,
 }
 
 impl WelcomeWidget {
@@ -68,13 +64,8 @@ impl WelcomeWidget {
             info,
             split_art: parse_portrait_art(full_art, DEFAULT_SPLIT_PORTRAIT_ART),
             compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
-            current_frame: 0,
-            animated: false,
         }
     }
-
-    /// Static portraits do not animate, so advancing frames is a no-op.
-    pub fn next_frame(&mut self) {}
 
     /// Get the current split portrait lines.
     fn current_full_art(&self) -> &[Line<'static>] {
@@ -522,73 +513,58 @@ mod tests {
     }
 
     #[test]
-    fn welcome_widget_wide_render_uses_split_portrait() {
-        let split_art = vec!["@@@@".to_string(), "@%%@".to_string()];
-        let compact_art = vec!["++++".to_string(), "+==+".to_string()];
-        let widget = WelcomeWidget::new(
-            WelcomeInfo {
-                model: "gpt-5.4".to_string(),
-                cwd: "/home/user/project".to_string(),
-                version: "0.1.0".to_string(),
-            },
-            &split_art,
-            &compact_art,
-        );
-
-        let area = Rect::new(0, 0, 120, 24);
+    fn welcome_widget_width_100_uses_split_layout() {
+        let area = Rect::new(0, 0, 100, 24);
         let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        sample_widget().render(area, &mut buf);
 
-        let rendered = buffer_contents(&buf);
-        assert!(rendered.contains('@'));
-        assert!(!rendered.contains('+'));
+        let rows = buffer_rows(&buf, area.width);
+        let portrait = first_match_position(&rows, "@").expect("split portrait should render");
+        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
+
+        assert!(!rows.iter().any(|row| row.contains('+')));
+        assert!(portrait.1 < title.1, "portrait should render left of the title");
     }
 
     #[test]
-    fn welcome_widget_medium_render_uses_compact_portrait() {
-        let split_art = vec!["@@@@".to_string(), "@%%@".to_string()];
-        let compact_art = vec!["++++".to_string(), "+==+".to_string()];
-        let widget = WelcomeWidget::new(
-            WelcomeInfo {
-                model: "gpt-5.4".to_string(),
-                cwd: "/home/user/project".to_string(),
-                version: "0.1.0".to_string(),
-            },
-            &split_art,
-            &compact_art,
-        );
-
-        let area = Rect::new(0, 0, 80, 24);
+    fn welcome_widget_width_99_uses_compact_layout() {
+        let area = Rect::new(0, 0, 99, 24);
         let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        sample_widget().render(area, &mut buf);
 
-        let rendered = buffer_contents(&buf);
-        assert!(rendered.contains('+'));
-        assert!(!rendered.contains('@'));
+        let rows = buffer_rows(&buf, area.width);
+        let portrait = first_match_position(&rows, "+").expect("compact portrait should render");
+        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
+
+        assert!(!rows.iter().any(|row| row.contains('@')));
+        assert!(portrait.0 < title.0, "compact portrait should render above the title");
     }
 
     #[test]
-    fn welcome_widget_narrow_render_omits_portrait_and_keeps_title() {
-        let split_art = vec!["@@@@".to_string(), "@%%@".to_string()];
-        let compact_art = vec!["++++".to_string(), "+==+".to_string()];
-        let widget = WelcomeWidget::new(
-            WelcomeInfo {
-                model: "gpt-5.4".to_string(),
-                cwd: "/home/user/project".to_string(),
-                version: "0.1.0".to_string(),
-            },
-            &split_art,
-            &compact_art,
-        );
-
-        let area = Rect::new(0, 0, 40, 10);
+    fn welcome_widget_width_60_uses_compact_layout() {
+        let area = Rect::new(0, 0, 60, 24);
         let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        sample_widget().render(area, &mut buf);
 
-        let rendered = buffer_contents(&buf);
-        assert!(!rendered.contains('@'));
-        assert!(!rendered.contains('+'));
-        assert!(rendered.contains(">_ Eve v0.1.0"));
+        let rows = buffer_rows(&buf, area.width);
+        let portrait = first_match_position(&rows, "+").expect("compact portrait should render");
+        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
+
+        assert!(!rows.iter().any(|row| row.contains('@')));
+        assert!(portrait.0 < title.0, "compact portrait should render above the title");
+    }
+
+    #[test]
+    fn welcome_widget_width_59_uses_text_only_layout() {
+        let area = Rect::new(0, 0, 59, 10);
+        let mut buf = Buffer::empty(area);
+        sample_widget().render(area, &mut buf);
+
+        let rows = buffer_rows(&buf, area.width);
+
+        assert!(!rows.iter().any(|row| row.contains('@')));
+        assert!(!rows.iter().any(|row| row.contains('+')));
+        assert!(rows.iter().any(|row| row.contains(">_ Eve v0.1.0")));
     }
 
     #[test]
@@ -640,27 +616,30 @@ mod tests {
         assert!(model_text.contains("claude-4"));
     }
 
-    #[test]
-    fn next_frame_is_a_no_op_for_static_portraits() {
-        let widget_info = WelcomeInfo {
-            model: "test".to_string(),
-            cwd: "/tmp".to_string(),
-            version: "0.0.0".to_string(),
-        };
-        let mut widget = WelcomeWidget::new(widget_info, &[], &[]);
-
-        assert!(!widget.animated);
-        assert_eq!(widget.current_frame, 0);
-
-        widget.next_frame();
-        assert_eq!(widget.current_frame, 0);
+    fn sample_widget() -> WelcomeWidget {
+        let split_art = vec!["@@@@".to_string(), "@%%@".to_string()];
+        let compact_art = vec!["++++".to_string(), "+==+".to_string()];
+        WelcomeWidget::new(
+            WelcomeInfo {
+                model: "gpt-5.4".to_string(),
+                cwd: "/home/user/project".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            &split_art,
+            &compact_art,
+        )
     }
 
-    fn buffer_contents(buf: &Buffer) -> String {
+    fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
         buf.content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<Vec<_>>()
-            .join("")
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<Vec<_>>().join(""))
+            .collect()
+    }
+
+    fn first_match_position(rows: &[String], needle: &str) -> Option<(usize, usize)> {
+        rows.iter()
+            .enumerate()
+            .find_map(|(row_idx, row)| row.find(needle).map(|col_idx| (row_idx, col_idx)))
     }
 }

@@ -268,21 +268,10 @@ pub async fn run_tui(
 
             // ── Frame draw timer ────────────────────────────────────
             _ = draw_rx.recv() => {
-                // Advance the sway animation before rendering the welcome screen.
-                if matches!(app.screen, AppScreen::Welcome) {
-                    app.welcome.next_frame();
-                }
-
                 // Advance status bar animation (sprite / spinner).
                 app.status_bar.tick();
 
                 render_frame(&mut term, &app);
-
-                // Schedule the next animation frame while on the welcome screen.
-                if matches!(app.screen, AppScreen::Welcome) && app.welcome.animated {
-                    app.frame_requester
-                        .schedule_frame_in(std::time::Duration::from_millis(150));
-                }
             }
         }
 
