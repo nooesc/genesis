@@ -57,9 +57,14 @@ const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
 
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
+    pub session: String,
+    pub backend: String,
     pub model: String,
     pub cwd: String,
     pub version: String,
+    pub builtin_tools: usize,
+    pub mcp_tools: usize,
+    pub skills: usize,
 }
 
 /// Welcome screen widget showing portrait art with session info.
@@ -255,17 +260,17 @@ impl WelcomeWidget {
             Style::default().fg(accent),
         ));
         let blank = Line::from("");
-        let session_backend_line = Line::from(vec![
+        let session_line = Line::from(vec![
             Span::styled("session: ", Style::default().fg(dim)),
-            Span::styled("current", Style::default().fg(text_color)),
-            Span::styled("    backend: ", Style::default().fg(dim)),
-            Span::styled("default", Style::default().fg(text_color)),
+            Span::styled(self.info.session.clone(), Style::default().fg(text_color)),
         ]);
-        let model_tools_line = Line::from(vec![
+        let backend_line = Line::from(vec![
+            Span::styled("backend: ", Style::default().fg(dim)),
+            Span::styled(self.info.backend.clone(), Style::default().fg(text_color)),
+        ]);
+        let model_line = Line::from(vec![
             Span::styled("model: ", Style::default().fg(dim)),
             Span::styled(self.info.model.clone(), Style::default().fg(text_color)),
-            Span::styled("    tools: ", Style::default().fg(dim)),
-            Span::styled("enabled", Style::default().fg(text_color)),
         ]);
         let cwd_line = Line::from(vec![
             Span::styled("cwd: ", Style::default().fg(dim)),
@@ -274,9 +279,19 @@ impl WelcomeWidget {
                 Style::default().fg(text_color),
             ),
         ]);
+        let tools_line = Line::from(vec![
+            Span::styled("tools: ", Style::default().fg(dim)),
+            Span::styled(
+                format_tool_summary(self.info.builtin_tools, self.info.mcp_tools),
+                Style::default().fg(text_color),
+            ),
+        ]);
         let skills_line = Line::from(vec![
             Span::styled("skills: ", Style::default().fg(dim)),
-            Span::styled("available", Style::default().fg(text_color)),
+            Span::styled(
+                format!("{} installed", self.info.skills),
+                Style::default().fg(text_color),
+            ),
         ]);
         let hint_line_primary = Line::from(vec![
             Span::styled("enter", Style::default().fg(accent)),
@@ -292,15 +307,22 @@ impl WelcomeWidget {
         vec![
             title,
             blank.clone(),
-            session_backend_line,
-            model_tools_line,
+            session_line,
+            backend_line,
+            model_line,
             cwd_line,
+            tools_line,
             skills_line,
             blank,
             hint_line_primary,
             hint_line_secondary,
         ]
     }
+}
+
+fn format_tool_summary(builtin_tools: usize, mcp_tools: usize) -> String {
+    let total = builtin_tools + mcp_tools;
+    format!("{total} total ({builtin_tools} built-in, {mcp_tools} MCP)")
 }
 
 /// Truncate a path string to at most `max_len` characters, replacing the
@@ -521,6 +543,7 @@ mod tests {
                 model: "gpt-5.4".to_string(),
                 cwd: "/home/user/project".to_string(),
                 version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &["\x1b[38;2;180;167;214m▀▀▀\x1b[0m".to_string()],
             &["\x1b[38;2;180;167;214m▀\x1b[0m".to_string()],
@@ -537,6 +560,7 @@ mod tests {
                 model: "gpt-5.4".to_string(),
                 cwd: "/home/user/project".to_string(),
                 version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &["\x1b[38;2;180;167;214m▀▀▀\x1b[0m".to_string()],
             &["\x1b[38;2;180;167;214m▀\x1b[0m".to_string()],
@@ -553,6 +577,7 @@ mod tests {
                 model: "gpt-5.4".to_string(),
                 cwd: "/home/user/project".to_string(),
                 version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &[],
             &[],
@@ -587,11 +612,17 @@ mod tests {
         for needle in [
             ">_ Eve v0.1.0",
             "session:",
+            "session-123",
             "model:",
+            "gpt-5.4",
             "backend:",
+            "openai",
             "cwd:",
+            "/home/user/project",
             "tools:",
+            "64 total",
             "skills:",
+            "12 installed",
             "enter",
             "commands",
             "esc",
@@ -599,6 +630,22 @@ mod tests {
             assert!(
                 rendered.contains(needle),
                 "wide layout should render {needle:?} in the metadata block"
+            );
+        }
+    }
+
+    #[test]
+    fn welcome_metadata_uses_real_values_instead_of_placeholders() {
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        default_widget().render(area, &mut buf);
+
+        let rendered = buffer_rows(&buf, area.width).join("\n");
+
+        for placeholder in ["current", "default", "enabled", "available"] {
+            assert!(
+                !rendered.contains(placeholder),
+                "wide layout should not render placeholder value {placeholder:?}"
             );
         }
     }
@@ -631,6 +678,7 @@ mod tests {
                 model: "gpt-5.4".to_string(),
                 cwd: "/home/user/project".to_string(),
                 version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &[],
             &[],
@@ -703,6 +751,7 @@ mod tests {
                 model: "m".to_string(),
                 cwd: "/".to_string(),
                 version: "0".to_string(),
+                ..test_welcome_info()
             },
             &[],
             &[],
@@ -729,20 +778,24 @@ mod tests {
     fn info_lines_contain_version_and_model() {
         let widget = WelcomeWidget::new(
             WelcomeInfo {
+                session: "session-review".to_string(),
+                backend: "anthropic".to_string(),
                 model: "claude-4".to_string(),
                 cwd: "/tmp".to_string(),
                 version: "1.2.3".to_string(),
+                builtin_tools: 61,
+                mcp_tools: 2,
+                skills: 7,
             },
             &[],
             &[],
         );
         let lines = widget.info_lines();
-        // Title line should contain version.
-        let title_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(title_text.contains("1.2.3"));
-        // Model line (index 2 since index 1 is blank).
-        let model_text: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(model_text.contains("claude-4"));
+        let rendered_lines: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(rendered_lines.iter().any(|line| line.contains("1.2.3")));
+        assert!(rendered_lines
+            .iter()
+            .any(|line| line.contains("model: claude-4")));
     }
 
     fn sample_widget() -> WelcomeWidget {
@@ -750,9 +803,7 @@ mod tests {
         let compact_art = vec!["++++".to_string(), "+==+".to_string()];
         WelcomeWidget::new(
             WelcomeInfo {
-                model: "gpt-5.4".to_string(),
-                cwd: "/home/user/project".to_string(),
-                version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &split_art,
             &compact_art,
@@ -762,13 +813,24 @@ mod tests {
     fn default_widget() -> WelcomeWidget {
         WelcomeWidget::new(
             WelcomeInfo {
-                model: "gpt-5.4".to_string(),
-                cwd: "/home/user/project".to_string(),
-                version: "0.1.0".to_string(),
+                ..test_welcome_info()
             },
             &[],
             &[],
         )
+    }
+
+    fn test_welcome_info() -> WelcomeInfo {
+        WelcomeInfo {
+            session: "session-123".to_string(),
+            backend: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            cwd: "/home/user/project".to_string(),
+            version: "0.1.0".to_string(),
+            builtin_tools: 61,
+            mcp_tools: 3,
+            skills: 12,
+        }
     }
 
     fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
@@ -776,6 +838,10 @@ mod tests {
             .chunks(width as usize)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<Vec<_>>().join(""))
             .collect()
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     fn first_match_position(rows: &[String], needle: &str) -> Option<(usize, usize)> {

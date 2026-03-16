@@ -287,9 +287,14 @@ mod tests {
         let frame_requester = FrameRequester::new(draw_tx);
         let welcome = WelcomeWidget::new(
             crate::widgets::welcome::WelcomeInfo {
+                session: "session-test".to_string(),
+                backend: "openai".to_string(),
                 model: "test".to_string(),
                 cwd: "/tmp".to_string(),
                 version: "0.0.0".to_string(),
+                builtin_tools: 61,
+                mcp_tools: 0,
+                skills: 12,
             },
             &[],
             &[],

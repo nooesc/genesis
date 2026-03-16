@@ -124,7 +124,7 @@ fn make_turn_future<'a>(
 /// so there is no separate `pending_text` variable that would create
 /// cross-borrow issues in the `select!` macro expansion.
 pub async fn run_tui(
-    _config: &GenesisConfig,
+    config: &GenesisConfig,
     service: &SessionExecutionService<'_>,
     session_id: &str,
 ) -> Result<(), TuiError> {
@@ -142,14 +142,24 @@ pub async fn run_tui(
 
     let full_art = genesis_ui::banner::full_art();
     let compact_art = genesis_ui::banner::compact_art();
+    let (builtin_tools, mcp_tools) = service.tool_counts().await;
+    let skills = genesis_storage::SkillStore::new(&config.storage.database_path)
+        .list_all()
+        .map(|skills| skills.len())
+        .unwrap_or(0);
 
     let welcome = crate::widgets::welcome::WelcomeWidget::new(
         crate::widgets::welcome::WelcomeInfo {
-            model: "default".to_string(), // TODO: get from config
+            session: session_id.to_string(),
+            backend: config.provider.backend.clone(),
+            model: config.provider.model.clone(),
             cwd: std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            builtin_tools,
+            mcp_tools,
+            skills,
         },
         &full_art,
         &compact_art,
