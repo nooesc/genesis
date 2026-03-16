@@ -1,4 +1,4 @@
-//! Eve ASCII art banner with animation for Genesis CLI startup.
+//! Eve banner rendering and startup art helpers for Genesis CLI and TUI.
 //!
 //! Displays an animated ASCII art welcome banner featuring Eve — an anime-style
 //! hooded girl character. The banner adapts to terminal width:
@@ -12,8 +12,12 @@
 mod animate;
 mod frames;
 
-// Re-export art generation functions for use by the TUI welcome widget.
-pub use frames::{compact_art, compact_image, full_art, full_image, render_halfblocks};
+// Re-export art generation functions for use by the CLI banner and TUI welcome widget.
+pub use frames::{
+    compact_art, compact_image, full_art, full_image, render_halfblocks, render_welcome_frame,
+    render_welcome_frames, welcome_image, HalfBlockCell, HalfBlockFrame, RgbColor,
+    WELCOME_FRAME_COUNT,
+};
 
 use crate::colors::{UI_ACCENT, UI_DIM, UI_TEXT};
 use crate::terminal::TerminalSize;
