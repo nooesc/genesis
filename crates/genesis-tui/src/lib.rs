@@ -281,6 +281,11 @@ pub async fn run_tui(
                     break;
                 }
 
+                // Advance welcome animation while the splash screen is visible.
+                if matches!(app.screen, AppScreen::Welcome) {
+                    app.welcome.tick();
+                }
+
                 // Advance status bar animation (sprite / spinner).
                 app.status_bar.tick();
 
@@ -291,10 +296,13 @@ pub async fn run_tui(
                     }
                 }
 
-                render_frame(&mut term, &app);
+                render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                if app.status_bar.is_animating() {
+                if matches!(app.screen, AppScreen::Welcome) {
+                    app.frame_requester
+                        .schedule_frame_in(app.welcome.animation_interval());
+                } else if app.status_bar.is_animating() {
                     app.frame_requester
                         .schedule_frame_in(app.status_bar.animation_interval());
                 }
@@ -314,7 +322,7 @@ pub async fn run_tui(
 ///
 /// When an overlay is active it occupies the full viewport (no status bar).
 /// Otherwise, the chat widget and status bar share the viewport as usual.
-fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &App) {
+fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
