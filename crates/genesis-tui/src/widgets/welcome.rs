@@ -40,10 +40,13 @@ const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
 ];
 
 const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
-    "    @@@    ",
-    "  @@%%%@@  ",
-    "  @%/_\\\\%@  ",
-    "  @@___@@  ",
+    "   _.-._   ",
+    " .'_   _`. ",
+    "/_   _\\\\   ",
+    "| |\\_/| |  ",
+    "| | o | |  ",
+    " \\_.-'._/  ",
+    "   /_\\\\    ",
 ];
 
 /// Session info displayed on the welcome screen.
@@ -538,13 +541,20 @@ mod tests {
     fn welcome_widget_width_99_uses_compact_layout() {
         let area = Rect::new(0, 0, 99, 24);
         let mut buf = Buffer::empty(area);
-        sample_widget().render(area, &mut buf);
+        default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait = first_match_position(&rows, "+").expect("compact portrait should render");
+        let portrait = first_match_position(&rows, "_.-._").expect("compact portrait should render");
         let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
 
-        assert!(!rows.iter().any(|row| row.contains('@')));
+        assert!(
+            rows.iter().any(|row| row.contains("/_   _\\")),
+            "medium width should use the compact portrait signature"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains(".-'  .--.  `-.")),
+            "medium width should not render the wide portrait"
+        );
         assert!(portrait.0 < title.0, "compact portrait should render above the title");
     }
 
@@ -588,13 +598,20 @@ mod tests {
     fn welcome_widget_width_60_uses_compact_layout() {
         let area = Rect::new(0, 0, 60, 24);
         let mut buf = Buffer::empty(area);
-        sample_widget().render(area, &mut buf);
+        default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait = first_match_position(&rows, "+").expect("compact portrait should render");
+        let portrait = first_match_position(&rows, "_.-._").expect("compact portrait should render");
         let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
 
-        assert!(!rows.iter().any(|row| row.contains('@')));
+        assert!(
+            rows.iter().any(|row| row.contains("\\_.-'._/")),
+            "threshold medium width should still use the compact portrait"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains(".-'  .--.  `-.")),
+            "threshold medium width should not render the wide portrait"
+        );
         assert!(portrait.0 < title.0, "compact portrait should render above the title");
     }
 
@@ -602,12 +619,14 @@ mod tests {
     fn welcome_widget_width_59_uses_text_only_layout() {
         let area = Rect::new(0, 0, 59, 10);
         let mut buf = Buffer::empty(area);
-        sample_widget().render(area, &mut buf);
+        default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
 
-        assert!(!rows.iter().any(|row| row.contains('@')));
-        assert!(!rows.iter().any(|row| row.contains('+')));
+        assert!(!rows.iter().any(|row| row.contains("_.-._")));
+        assert!(!rows.iter().any(|row| row.contains("/_   _\\")));
+        assert!(!rows.iter().any(|row| row.contains("\\_.-'._/")));
+        assert!(!rows.iter().any(|row| row.contains(".-'  .--.  `-.")));
         assert!(rows.iter().any(|row| row.contains(">_ Eve v0.1.0")));
     }
 
@@ -671,6 +690,18 @@ mod tests {
             },
             &split_art,
             &compact_art,
+        )
+    }
+
+    fn default_widget() -> WelcomeWidget {
+        WelcomeWidget::new(
+            WelcomeInfo {
+                model: "gpt-5.4".to_string(),
+                cwd: "/home/user/project".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            &[],
+            &[],
         )
     }
 
