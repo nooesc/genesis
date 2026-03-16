@@ -1,133 +1,178 @@
-# Genesis TUI Welcome Screen Update Implementation Plan
+# Genesis TUI Welcome Screen Animated Image Upgrade Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Replace the placeholder welcome art with a terminal-native Eve portrait that degrades cleanly across wide, medium, and narrow terminal widths while preserving the richer startup metadata.
+**Goal:** Replace the current hand-authored welcome portrait with a bundled three-frame Eve animation rendered as monochrome half-block terminal art with one accent color, while preserving the metadata-rich welcome layout and text-only fallback on narrow terminals.
 
-**Architecture:** Keep all rendering logic inside `WelcomeWidget` and continue constructing `WelcomeInfo` once in `run_tui`. The widget should choose between three explicit layout modes based on terminal width: split portrait, compact portrait, and text-only. No animation, image decoding, or runtime asset loading should be introduced.
+**Architecture:** Move portrait generation out of raw ASCII constants and onto the existing image-to-terminal path in `genesis-ui`. Bundle the three approved PNG frames under version control, build a welcome-specific renderer that produces ratatui-friendly lines or spans from those images, and let `genesis-tui` consume that renderable output in wide and compact welcome modes. Keep animation timing inside the existing TUI loop and disable it as soon as the app leaves the welcome screen.
 
-**Tech Stack:** Rust, ratatui, crossterm, existing `genesis-tui` widget tests
+**Tech Stack:** Rust, ratatui, crossterm, `genesis-tui`, `genesis-ui`, bundled PNG assets, existing test framework
 
 ---
 
-### Task 1: Add failing tests for responsive welcome layouts
+### Task 1: Import and normalize the three source frames
 
 **Files:**
-- Modify: `crates/genesis-tui/src/widgets/welcome.rs`
+- Create: `crates/genesis-ui/assets/welcome/eve_frame_01.png`
+- Create: `crates/genesis-ui/assets/welcome/eve_frame_02.png`
+- Create: `crates/genesis-ui/assets/welcome/eve_frame_03.png`
+- Modify: `docs/plans/2026-03-15-genesis-tui-welcome-screen-update-design.md`
 
-**Step 1: Write the failing tests**
+**Step 1: Copy the approved source images into the repo**
 
-Add tests that exercise:
-- wide render path using the split portrait
-- medium-width render path using the compact portrait
-- narrow render path using the text-only fallback
+Use the user-approved `nano banana` images from Downloads as the import source only. Rename them to stable asset names under `crates/genesis-ui/assets/welcome/`.
 
-Use direct `Buffer::empty(Rect::new(...))` rendering and assert that:
-- the wide render includes visible portrait glyphs
-- the compact render includes visible portrait glyphs
-- the narrow render omits portrait glyphs but still includes the title
+**Step 2: Verify the assets are deterministic**
 
-**Step 2: Run test to verify it fails**
+Check that the files exist at the committed paths and are the only runtime source for welcome art.
 
-Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
-Expected: FAIL because the current widget only has one portrait variant and no explicit text-only threshold.
+Run: `file crates/genesis-ui/assets/welcome/eve_frame_01.png crates/genesis-ui/assets/welcome/eve_frame_02.png crates/genesis-ui/assets/welcome/eve_frame_03.png`
+Expected: three PNG files with consistent dimensions.
 
-**Step 3: Write minimal implementation**
-
-Introduce explicit width thresholds and separate art constants so each render mode is selected intentionally.
-
-**Step 4: Run test to verify it passes**
-
-Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
-Expected: PASS
-
-**Step 5: Commit**
+**Step 3: Commit**
 
 ```bash
-git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "test: cover responsive welcome screen modes"
+git add crates/genesis-ui/assets/welcome/eve_frame_01.png crates/genesis-ui/assets/welcome/eve_frame_02.png crates/genesis-ui/assets/welcome/eve_frame_03.png docs/plans/2026-03-15-genesis-tui-welcome-screen-update-design.md
+git commit -m "feat: add welcome animation source frames"
 ```
 
-### Task 2: Replace placeholder art with a wide hybrid portrait
+### Task 2: Add welcome-specific image rendering in `genesis-ui`
 
 **Files:**
-- Modify: `crates/genesis-tui/src/widgets/welcome.rs`
+- Modify: `crates/genesis-ui/src/banner/frames.rs`
+- Modify: `crates/genesis-ui/src/banner/mod.rs`
+- Test: `crates/genesis-ui/src/banner/frames.rs`
 
 **Step 1: Write the failing test**
 
-Add a test that renders the wide layout and asserts the portrait uses specific stable glyph sequences from the new wide portrait instead of the current simplistic placeholder art.
+Add tests for a welcome-render helper that:
+- loads one bundled frame
+- renders it into half-block output for a small target size
+- applies a stylized monochrome palette
+- preserves a sparse accent color path
+
+Assert that:
+- output is non-empty
+- output dimensions are bounded by the target size
+- accent usage is present but limited
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-tui wide_welcome -- --nocapture`
-Expected: FAIL because the old art does not match the intended portrait signature.
+Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
+Expected: FAIL because no welcome-specific renderer exists yet.
 
 **Step 3: Write minimal implementation**
 
-Replace the current placeholder ASCII constant with a hand-tuned wide portrait that:
-- is approximately 24-32 columns wide
-- reads as a bust/character silhouette
-- uses contour plus sparse shading
-- keeps any typographic fill limited and readable
+Add a focused helper in `frames.rs` that:
+- loads the bundled PNG
+- scales/crops for welcome usage
+- converts to half-block rows
+- maps colors to a monochrome-plus-accent palette
+
+Export only the minimal API needed by `genesis-tui`.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-tui wide_welcome -- --nocapture`
+Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "feat: add wide Eve portrait to welcome screen"
+git add crates/genesis-ui/src/banner/frames.rs crates/genesis-ui/src/banner/mod.rs
+git commit -m "feat: add welcome half-block frame renderer"
 ```
 
-### Task 3: Add a compact portrait and text-only fallback
+### Task 3: Add welcome animation state and frame selection in `genesis-tui`
+
+**Files:**
+- Modify: `crates/genesis-tui/src/app.rs`
+- Modify: `crates/genesis-tui/src/lib.rs`
+- Modify: `crates/genesis-tui/src/widgets/welcome.rs`
+- Test: `crates/genesis-tui/src/widgets/welcome.rs`
+
+**Step 1: Write the failing test**
+
+Add tests for welcome-state frame selection that verify:
+- frame index advances over time while welcome is visible
+- animation stops advancing after the welcome screen is dismissed
+- the widget can render a static first frame if animation state is unavailable
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
+Expected: FAIL because welcome currently has no image-backed frame state.
+
+**Step 3: Write minimal implementation**
+
+Introduce minimal animation state:
+- active frame index
+- last frame tick timestamp or tick counter
+- fixed low-FPS cadence
+
+Advance frames only in the welcome state. Avoid extra background tasks or per-frame decoding.
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add crates/genesis-tui/src/app.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/widgets/welcome.rs
+git commit -m "feat: add animated welcome frame state"
+```
+
+### Task 4: Replace ASCII portrait rendering with image-backed layouts
 
 **Files:**
 - Modify: `crates/genesis-tui/src/widgets/welcome.rs`
+- Test: `crates/genesis-tui/src/widgets/welcome.rs`
 
 **Step 1: Write the failing test**
 
 Add tests that verify:
-- medium widths use the compact portrait constant
-- widths below the threshold skip all portrait art
+- wide layouts render image-derived content plus metadata
+- medium layouts render a smaller image above metadata
+- narrow layouts remain text-only
+- old hard-coded portrait glyph signatures are gone
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-tui compact_welcome -- --nocapture`
-Expected: FAIL because the render path does not yet distinguish compact portrait vs text-only.
+Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
+Expected: FAIL because the widget still depends on ASCII portrait constants.
 
 **Step 3: Write minimal implementation**
 
-Add:
-- `ASCII_GIRL_WIDE`
-- `ASCII_GIRL_COMPACT`
-- `WIDE_LAYOUT_MIN_WIDTH`
-- `COMPACT_LAYOUT_MIN_WIDTH`
+Refactor `WelcomeWidget` so:
+- wide mode renders image left, metadata right
+- compact mode renders smaller image above metadata
+- narrow mode skips image rendering entirely
 
-Refactor `render` and the line builders so the layout mode is explicit and deterministic.
+Delete the old `ASCII_GIRL_*` constants and any portrait-specific string layout code that is no longer needed.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-tui compact_welcome -- --nocapture`
+Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
 git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "feat: add compact and text-only welcome layouts"
+git commit -m "refactor: replace welcome ascii art with image rendering"
 ```
 
-### Task 4: Rebalance metadata and hint presentation around the new portrait
+### Task 5: Preserve metadata layout and key hints around the new image
 
 **Files:**
 - Modify: `crates/genesis-tui/src/widgets/welcome.rs`
+- Test: `crates/genesis-tui/src/widgets/welcome.rs`
 
 **Step 1: Write the failing test**
 
-Add a test asserting that the wide layout still renders:
+Add assertions that wide and compact layouts still render:
 - title
 - session
 - model
@@ -140,11 +185,11 @@ Add a test asserting that the wide layout still renders:
 **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p genesis-tui welcome_metadata -- --nocapture`
-Expected: FAIL if any metadata is clipped away or omitted by the new layout logic.
+Expected: FAIL if the new image area starves the text block or causes clipping.
 
 **Step 3: Write minimal implementation**
 
-Adjust spacing, clipping, and line composition so the portrait remains on the left without starving the metadata block on the right.
+Rebalance column widths and vertical spacing so the metadata remains readable alongside the rendered image. Keep text clipping conservative and preserve the existing richer welcome content.
 
 **Step 4: Run test to verify it passes**
 
@@ -155,34 +200,41 @@ Expected: PASS
 
 ```bash
 git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "refactor: rebalance welcome metadata layout"
+git commit -m "refactor: rebalance welcome metadata around image panel"
 ```
 
-### Task 5: Run targeted verification
+### Task 6: Run full verification
 
 **Files:**
+- Verify: `crates/genesis-ui/src/banner/frames.rs`
+- Verify: `crates/genesis-ui/src/banner/mod.rs`
 - Verify: `crates/genesis-tui/src/widgets/welcome.rs`
 - Verify: `crates/genesis-tui/src/lib.rs`
 - Verify: `crates/genesis-tui/src/app.rs`
 
-**Step 1: Run welcome-specific tests**
+**Step 1: Run image-render tests**
+
+Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
+Expected: PASS
+
+**Step 2: Run welcome-specific TUI tests**
 
 Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
 Expected: PASS
 
-**Step 2: Run full TUI test suite**
+**Step 3: Run full TUI suite**
 
 Run: `cargo test -p genesis-tui`
 Expected: PASS
 
-**Step 3: Run CLI integration compile/test path**
+**Step 4: Run CLI coverage path**
 
 Run: `cargo test -p genesis-cli --no-default-features`
 Expected: PASS
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
-git add crates/genesis-tui/src/widgets/welcome.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/app.rs
-git commit -m "test: verify welcome screen portrait update"
+git add crates/genesis-ui/src/banner/frames.rs crates/genesis-ui/src/banner/mod.rs crates/genesis-tui/src/widgets/welcome.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/app.rs
+git commit -m "test: verify animated welcome image upgrade"
 ```
