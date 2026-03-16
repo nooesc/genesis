@@ -23,21 +23,39 @@ const MUTED: ratatui::style::Color = rgb(genesis_ui::colors::UI_MUTED);
 const AMBER: ratatui::style::Color = rgb(genesis_ui::colors::EVE_AMBER);
 const SUCCESS: ratatui::style::Color = rgb(genesis_ui::colors::UI_SUCCESS);
 
-const ART_SPLIT_THRESHOLD: u16 = 100;
+const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
+const COMPACT_LAYOUT_MIN_WIDTH: u16 = 60;
+const WIDE_LAYOUT_GAP: usize = 4;
+const WIDE_INFO_MIN_WIDTH: usize = 40;
 
-const ASCII_GIRL: &[&str] = &[
-    "         .-\"\"\"-.        ",
-    "        / o   o \\       ",
-    "        |   ^   |       ",
-    "        |  ___  |       ",
-    "        | /   \\ |       ",
-    "        |/_____\\|       ",
-    "       /|       |\\      ",
-    "      / |   ^   | \\     ",
-    "     /  |  ---  |  \\    ",
-    "    /   |       |   \\   ",
-    "   /   /|\\   /|\\   \\  ",
-    "  /___/ | \\ / | \\___\\ ",
+const ASCII_GIRL_WIDE: &[&str] = &[
+    "           .-''''-.           ",
+    "        .-'  .--.  `-.        ",
+    "      .'   .'_  _`.   `.      ",
+    "     /   .' (o)(o) `.   \\     ",
+    "    /   /    /__\\    \\   \\    ",
+    "   /   /   .-====-.   \\   \\   ",
+    "   |   |  /  .--.  \\  |   |   ",
+    "   |   |  |  |  |  |  |   |   ",
+    "   |   |  |  |  |  |  |   |   ",
+    "   |   |  |  '--'  |  |   |   ",
+    "   |   |   \\  __  /   |   |   ",
+    "   |   | .-'`----'`-. |   |   ",
+    "   |   |/  /| /\\ |\\  \\|   |   ",
+    "   |   /  /_|/  \\|_\\  \\   |   ",
+    "   |__/__/  /____\\  \\__\\__|   ",
+];
+
+const ASCII_GIRL_COMPACT: &[&str] = &[
+    "      .-''-.      ",
+    "    .' .--. `.    ",
+    "   /  /(o )\\  \\   ",
+    "  /  /  /_\\ \\  \\  ",
+    "  |  | .-==-.| |  ",
+    "  |  | | -- || |  ",
+    "  |  | |____|| |  ",
+    "  |  | /_||_\\\\ |  ",
+    "  `--'/_/  \\_\\\\'  ",
 ];
 
 /// Session info displayed on the welcome screen.
@@ -69,10 +87,12 @@ impl WelcomeWidget {
             return;
         }
 
-        let lines = if area.width >= ART_SPLIT_THRESHOLD {
+        let lines = if area.width >= WIDE_LAYOUT_MIN_WIDTH {
             self.build_split_lines(area.width)
-        } else {
+        } else if area.width >= COMPACT_LAYOUT_MIN_WIDTH {
             self.build_centered_lines(area.width)
+        } else {
+            self.build_text_only_lines()
         };
 
         if lines.is_empty() {
@@ -89,7 +109,7 @@ impl WelcomeWidget {
             height: render_height,
         };
 
-        let align = if area.width >= ART_SPLIT_THRESHOLD {
+        let align = if area.width >= WIDE_LAYOUT_MIN_WIDTH {
             Alignment::Left
         } else {
             Alignment::Center
@@ -99,30 +119,35 @@ impl WelcomeWidget {
     }
 
     fn build_split_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let art_width = ascii_width_max(ASCII_GIRL);
-        let info = self.build_info_lines();
+        let art_width = ascii_width_max(ASCII_GIRL_WIDE);
+        let info = self.build_split_info_lines();
         let mut rows = Vec::new();
 
-        let max_rows = info.len().max(ASCII_GIRL.len());
-        let gap = 4usize;
-        let right_width = width
-            .saturating_sub((art_width + gap) as u16)
-            .min(width)
-            .max(1) as usize;
+        let max_rows = info.len().max(ASCII_GIRL_WIDE.len());
+        let right_width = width as usize;
+        let reserved_info = WIDE_INFO_MIN_WIDTH.min(right_width);
+        let available_left = right_width
+            .saturating_sub(reserved_info)
+            .saturating_sub(WIDE_LAYOUT_GAP);
+        let left_width = art_width.min(available_left.max(art_width.min(right_width)));
+        let info_width = right_width
+            .saturating_sub(left_width)
+            .saturating_sub(WIDE_LAYOUT_GAP)
+            .max(1);
 
         for i in 0..max_rows {
             let mut spans: Vec<Span<'static>> = Vec::new();
-            let art_line = ASCII_GIRL.get(i).copied().unwrap_or("");
-            let left = pad_right(art_line, art_width);
+            let art_line = ASCII_GIRL_WIDE.get(i).copied().unwrap_or("");
+            let left = pad_right(art_line, left_width);
             spans.push(Span::styled(
                 left,
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(Span::raw(" ".repeat(WIDE_LAYOUT_GAP)));
 
             if let Some(info_line) = info.get(i) {
                 let mut clipped = info_line.clone();
-                let mut remaining = right_width;
+                let mut remaining = info_width;
                 let mut spans_left = Vec::new();
 
                 for mut span in clipped.spans.drain(..) {
@@ -154,7 +179,7 @@ impl WelcomeWidget {
         )));
         lines.push(Line::from(""));
 
-        for art in ASCII_GIRL {
+        for art in ASCII_GIRL_COMPACT {
             lines.push(Line::from(Span::styled(
                 art.to_owned(),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -166,6 +191,49 @@ impl WelcomeWidget {
         lines.push(Line::from(""));
         lines.extend(self.build_hint_lines());
 
+        lines
+    }
+
+    fn build_text_only_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(">_ Eve v{}", self.info.version),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("model       ", Style::default().fg(DIM)),
+            Span::styled(self.info.model.clone(), Style::default().fg(TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("backend     ", Style::default().fg(DIM)),
+            Span::styled(self.info.backend.clone(), Style::default().fg(TEXT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("cwd         ", Style::default().fg(DIM)),
+            Span::styled(
+                truncate_path(&self.info.cwd, 40),
+                Style::default().fg(TEXT),
+            ),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "press any key to start",
+            Style::default().fg(DIM),
+        )));
+        lines
+    }
+
+    fn build_split_info_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(">_ Eve v{}", self.info.version),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.extend(self.build_info_lines());
+        lines.push(Line::from(""));
+        lines.extend(self.build_hint_lines());
         lines
     }
 
@@ -291,6 +359,17 @@ fn truncate_path(path: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
+    fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
+        buf.content
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<Vec<_>>().join(""))
+            .collect()
+    }
+
+    fn rendered_text(buf: &Buffer, width: u16) -> String {
+        buffer_rows(buf, width).join("\n")
+    }
+
     fn sample_info() -> WelcomeInfo {
         WelcomeInfo {
             model: "gpt-5.4".to_string(),
@@ -309,6 +388,10 @@ mod tests {
         let widget = WelcomeWidget::new(sample_info());
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
         widget.render(Rect::new(0, 0, 120, 30), &mut buf);
+        let rendered = rendered_text(&buf, 120);
+        assert!(rendered.contains(">_ Eve v0.1.0"));
+        assert!(rendered.contains(".-'  .--.  `-."));
+        assert!(rendered.contains("Enter"));
     }
 
     #[test]
@@ -316,6 +399,21 @@ mod tests {
         let widget = WelcomeWidget::new(sample_info());
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
         widget.render(Rect::new(0, 0, 40, 10), &mut buf);
+        let rendered = rendered_text(&buf, 40);
+        assert!(rendered.contains(">_ Eve v0.1.0"));
+        assert!(!rendered.contains(".-'  .--.  `-."));
+        assert!(!rendered.contains(".-''-."));
+    }
+
+    #[test]
+    fn welcome_widget_compact_mode_uses_compact_portrait() {
+        let widget = WelcomeWidget::new(sample_info());
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        widget.render(Rect::new(0, 0, 80, 24), &mut buf);
+        let rendered = rendered_text(&buf, 80);
+        assert!(rendered.contains(".-''-."));
+        assert!(rendered.contains("/  /(o )\\  \\"));
+        assert!(!rendered.contains(".-'  .--.  `-."));
     }
 
     #[test]
