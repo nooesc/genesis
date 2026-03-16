@@ -295,6 +295,10 @@ fn welcome_pixel_color(pixel: Rgba<u8>) -> Option<RgbColor> {
     let luminance =
         ((54u16 * u16::from(r) + 183u16 * u16::from(g) + 19u16 * u16::from(b)) / 256) as u8;
 
+    if is_welcome_background_key(r, g, b, max, chroma, luminance) {
+        return None;
+    }
+
     if is_welcome_accent(r, g, b, chroma, luminance) {
         return Some(RgbColor::from_tuple(EVE_AMBER));
     }
@@ -317,6 +321,17 @@ fn is_welcome_accent(r: u8, g: u8, b: u8, chroma: u8, luminance: u8) -> bool {
             (r > g.saturating_add(28) && r > b.saturating_add(28))
                 || (r > 150 && g > 80 && g < 170 && b < 110)
         )
+}
+
+fn is_welcome_background_key(
+    _r: u8,
+    _g: u8,
+    _b: u8,
+    max: u8,
+    chroma: u8,
+    luminance: u8,
+) -> bool {
+    max <= 14 && chroma <= 10 && luminance <= 12
 }
 
 #[cfg(test)]

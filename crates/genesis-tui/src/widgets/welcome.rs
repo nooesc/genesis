@@ -25,6 +25,8 @@ const SUCCESS: Color = rgb(genesis_ui::colors::UI_SUCCESS);
 
 const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
 const COMPACT_LAYOUT_MIN_WIDTH: u16 = 70;
+const WIDE_LAYOUT_MIN_HEIGHT: u16 = 16;
+const COMPACT_LAYOUT_MIN_HEIGHT: u16 = 14;
 const WIDE_LAYOUT_GAP: usize = 4;
 const WIDE_INFO_MIN_WIDTH: usize = 40;
 const WELCOME_ANIMATION_INTERVAL: Duration = Duration::from_millis(350);
@@ -57,6 +59,7 @@ struct WelcomeArtCache {
 /// Welcome screen widget showing animated terminal art and session info.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
+    animating: bool,
     frame_index: usize,
     last_frame_advance: Instant,
     art_cache: Option<WelcomeArtCache>,
@@ -67,10 +70,27 @@ impl WelcomeWidget {
     pub fn new(info: WelcomeInfo) -> Self {
         Self {
             info,
+            animating: false,
             frame_index: 0,
             last_frame_advance: Instant::now(),
             art_cache: None,
         }
+    }
+
+    pub fn start(&mut self) {
+        self.animating = true;
+        self.frame_index = 0;
+        self.last_frame_advance = Instant::now();
+    }
+
+    pub fn stop(&mut self) {
+        self.animating = false;
+        self.frame_index = 0;
+        self.last_frame_advance = Instant::now();
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.animating
     }
 
     pub fn animation_interval(&self) -> Duration {
@@ -78,7 +98,7 @@ impl WelcomeWidget {
     }
 
     pub fn tick(&mut self) {
-        if self.last_frame_advance.elapsed() >= WELCOME_ANIMATION_INTERVAL {
+        if self.animating && self.last_frame_advance.elapsed() >= WELCOME_ANIMATION_INTERVAL {
             self.frame_index = (self.frame_index + 1) % genesis_ui::banner::WELCOME_FRAME_COUNT;
             self.last_frame_advance = Instant::now();
         }
@@ -90,9 +110,12 @@ impl WelcomeWidget {
             return;
         }
 
-        let lines = if area.width >= WIDE_LAYOUT_MIN_WIDTH {
+        let lines = if area.width >= WIDE_LAYOUT_MIN_WIDTH && area.height >= WIDE_LAYOUT_MIN_HEIGHT
+        {
             self.build_split_lines(area)
-        } else if area.width >= COMPACT_LAYOUT_MIN_WIDTH {
+        } else if area.width >= COMPACT_LAYOUT_MIN_WIDTH
+            && area.height >= COMPACT_LAYOUT_MIN_HEIGHT
+        {
             self.build_centered_lines(area)
         } else {
             self.build_text_only_lines()
@@ -127,8 +150,11 @@ impl WelcomeWidget {
             .saturating_sub(reserved_info)
             .saturating_sub(WIDE_LAYOUT_GAP)
             .max(16);
-        let max_art_size = area.height.saturating_sub(6).clamp(12, 24);
+        let max_art_size = area.height.saturating_sub(6).min(24);
         let art_size = available_left.min(max_art_size as usize) as u16;
+        if art_size < 8 {
+            return self.build_text_only_lines();
+        }
         let art_lines = self
             .current_art_lines(WelcomeArtVariant::Wide, art_size, art_size)
             .map(|lines| lines.to_vec())
@@ -178,11 +204,15 @@ impl WelcomeWidget {
         let hint_lines = self.build_hint_lines();
         let reserved_text_rows =
             (info_lines.len() + hint_lines.len() + 4).min(area.height as usize) as u16;
+        let max_art_size = area.height.saturating_sub(reserved_text_rows).min(18);
         let art_size = area
             .width
             .saturating_sub(10)
-            .min(area.height.saturating_sub(reserved_text_rows))
-            .clamp(10, 18);
+            .min(max_art_size);
+
+        if art_size < 8 {
+            return self.build_text_only_lines();
+        }
 
         if let Some(art_lines) = self.current_art_lines(WelcomeArtVariant::Compact, art_size, art_size)
         {
@@ -450,6 +480,7 @@ mod tests {
     #[test]
     fn welcome_widget_renders_image_backed_wide_layout() {
         let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
         widget.render(Rect::new(0, 0, 120, 30), &mut buf);
         let rendered = rendered_text(&buf, 120);
@@ -462,6 +493,7 @@ mod tests {
     #[test]
     fn welcome_widget_renders_text_only_when_narrow() {
         let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
         widget.render(Rect::new(0, 0, 40, 10), &mut buf);
         let rendered = rendered_text(&buf, 40);
@@ -473,6 +505,7 @@ mod tests {
     #[test]
     fn welcome_widget_compact_mode_uses_rendered_frame() {
         let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         widget.render(Rect::new(0, 0, 80, 24), &mut buf);
         let rendered = rendered_text(&buf, 80);
@@ -483,9 +516,32 @@ mod tests {
     #[test]
     fn welcome_widget_tick_advances_frame_index() {
         let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
         widget.last_frame_advance = Instant::now() - WELCOME_ANIMATION_INTERVAL;
         widget.tick();
         assert_eq!(widget.frame_index, 1);
+    }
+
+    #[test]
+    fn welcome_widget_short_terminal_falls_back_to_text_only() {
+        let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 12));
+        widget.render(Rect::new(0, 0, 120, 12), &mut buf);
+        let rendered = rendered_text(&buf, 120);
+        assert!(rendered.contains(">_ Eve v0.1.0"));
+        assert!(!rendered.contains("▀"));
+        assert!(!rendered.contains("▄"));
+    }
+
+    #[test]
+    fn welcome_widget_stop_resets_animation() {
+        let mut widget = WelcomeWidget::new(sample_info());
+        widget.start();
+        widget.frame_index = 2;
+        widget.stop();
+        assert!(!widget.is_animating());
+        assert_eq!(widget.frame_index, 0);
     }
 
     #[test]
