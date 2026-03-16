@@ -22,6 +22,12 @@ const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
 /// Minimum width for the medium (stacked) layout.
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
+/// Minimum width to reserve for the metadata column in wide mode.
+const WIDE_INFO_MIN_WIDTH: u16 = 56;
+
+/// Gap between portrait and metadata in wide mode.
+const WIDE_LAYOUT_GAP: u16 = 2;
+
 const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
     "          .-''''-.          ",
     "       .-'  .--.  `-.       ",
@@ -126,9 +132,10 @@ impl WelcomeWidget {
         let art_height = art.len() as u16;
 
         // Art on the left, info on the right.
-        let art_col_width = art_width.min(inner.width / 2);
-        let info_col_x = inner.x + art_col_width + 2; // 2 cols gap
-        let info_col_width = inner.width.saturating_sub(art_col_width + 2);
+        let art_col_width =
+            art_width.min(inner.width.saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP));
+        let info_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
+        let info_col_width = inner.width.saturating_sub(art_col_width + WIDE_LAYOUT_GAP);
 
         // Center art vertically within the inner area.
         let art_y = inner.y + inner.height.saturating_sub(art_height) / 2;
@@ -248,19 +255,51 @@ impl WelcomeWidget {
             Style::default().fg(accent),
         ));
         let blank = Line::from("");
-        let model_line = Line::from(vec![
+        let session_backend_line = Line::from(vec![
+            Span::styled("session: ", Style::default().fg(dim)),
+            Span::styled("current", Style::default().fg(text_color)),
+            Span::styled("    backend: ", Style::default().fg(dim)),
+            Span::styled("default", Style::default().fg(text_color)),
+        ]);
+        let model_tools_line = Line::from(vec![
             Span::styled("model: ", Style::default().fg(dim)),
             Span::styled(self.info.model.clone(), Style::default().fg(text_color)),
+            Span::styled("    tools: ", Style::default().fg(dim)),
+            Span::styled("enabled", Style::default().fg(text_color)),
         ]);
         let cwd_line = Line::from(vec![
-            Span::styled("  cwd: ", Style::default().fg(dim)),
+            Span::styled("cwd: ", Style::default().fg(dim)),
             Span::styled(
                 truncate_path(&self.info.cwd, 40),
                 Style::default().fg(text_color),
             ),
         ]);
+        let skills_line = Line::from(vec![
+            Span::styled("skills: ", Style::default().fg(dim)),
+            Span::styled("available", Style::default().fg(text_color)),
+        ]);
+        let hint_line_primary = Line::from(vec![
+            Span::styled("enter", Style::default().fg(accent)),
+            Span::styled(" start chat    ", Style::default().fg(dim)),
+            Span::styled("/", Style::default().fg(accent)),
+            Span::styled(" commands", Style::default().fg(dim)),
+        ]);
+        let hint_line_secondary = Line::from(vec![
+            Span::styled("esc", Style::default().fg(accent)),
+            Span::styled(" dismiss welcome", Style::default().fg(dim)),
+        ]);
 
-        vec![title, blank, model_line, cwd_line]
+        vec![
+            title,
+            blank.clone(),
+            session_backend_line,
+            model_tools_line,
+            cwd_line,
+            skills_line,
+            blank,
+            hint_line_primary,
+            hint_line_secondary,
+        ]
     }
 }
 
@@ -535,6 +574,33 @@ mod tests {
 
         assert!(!rows.iter().any(|row| row.contains('+')));
         assert!(portrait.1 < title.1, "portrait should render left of the title");
+    }
+
+    #[test]
+    fn welcome_metadata_wide_layout_renders_title_metadata_and_hints() {
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        default_widget().render(area, &mut buf);
+
+        let rendered = buffer_rows(&buf, area.width).join("\n");
+
+        for needle in [
+            ">_ Eve v0.1.0",
+            "session:",
+            "model:",
+            "backend:",
+            "cwd:",
+            "tools:",
+            "skills:",
+            "enter",
+            "commands",
+            "esc",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "wide layout should render {needle:?} in the metadata block"
+            );
+        }
     }
 
     #[test]
