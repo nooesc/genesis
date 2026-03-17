@@ -437,8 +437,9 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = build_cors_layer(state.loaded.config.gateway.as_ref());
 
-    // Protected routes (require API key when configured/required)
-    let protected = Router::new()
+    // API routes nested under /api/ (require API key when configured/required).
+    // These are all the primary REST endpoints for the dashboard and clients.
+    let api_routes = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
         .route("/chat/ws", get(websocket_handler))
@@ -552,7 +553,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/guardrails/check", post(guardrails_check_handler))
         // Config introspection
         .route("/config", get(config_handler))
-        // OpenAI-compatible API
+        // Health accessible under /api/ as well as root
+        .route("/health", get(health_handler))
+        .route("/health/mcp", get(mcp_status_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth_middleware,
+        ));
+
+    // Root-level protected routes: OpenAI-compatible API and Prometheus metrics.
+    // These stay at the root path (not under /api/) for compatibility with
+    // existing integrations, but still require API key authentication.
+    let root_protected = Router::new()
         .route(
             "/v1/chat/completions",
             post(openai_chat_completions_handler),
@@ -586,16 +598,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/signal/webhook", post(platforms::signal::webhook_handler))
         .route("/signal/poll", post(platforms::signal::poll_handler));
 
-    // Rate-limited routes (protected + platform webhooks)
+    // Rate-limited routes (api_routes nested under /api/, root_protected, and platform webhooks)
     let rate_limited = Router::new()
-        .merge(protected)
+        .nest("/api", api_routes)
+        .merge(root_protected)
         .merge(platform_webhooks)
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             rate_limit_middleware,
         ));
 
-    // Public routes
+    // Public routes at root (no auth, no rate limiting for health checks)
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
@@ -4282,6 +4295,102 @@ mod tests {
         }"#;
         let req: OpenAiCompletionsRequest = serde_json::from_str(json).expect("should deserialize");
         assert!(req.stream.is_none());
+    }
+
+    /// Build a minimal `AppState` backed by a temp-dir SQLite database.
+    ///
+    /// Used by router integration tests so they don't touch the real filesystem.
+    #[cfg(test)]
+    fn create_test_state() -> Arc<AppState> {
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let database_path = dir.path().join("genesis.db");
+        // Bootstrap the schema so AgentBus persistence doesn't fail on first access.
+        genesis_storage::bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let config = genesis_config::GenesisConfig {
+            schema_version: 1,
+            profile: "test".to_owned(),
+            provider: genesis_config::ProviderConfig {
+                backend: "openai".to_owned(),
+                model: "gpt-4.1-mini".to_owned(),
+                base_url: None,
+                api_key_env: None,
+                extra_body: None,
+                tool_call_parser: None,
+            },
+            tool_provider: None,
+            fallback_providers: Vec::new(),
+            mcp_servers: std::collections::HashMap::new(),
+            storage: genesis_config::StorageConfig {
+                data_dir: dir.path().to_path_buf(),
+                database_path: database_path.clone(),
+            },
+            runtime: genesis_config::RuntimeConfig {
+                max_concurrency: 4,
+                allow_destructive_tools: false,
+                max_turns: 20,
+                max_context_messages: None,
+                budget_limit: None,
+                terminal: None,
+                thinking_budget: None,
+                max_context_tokens: None,
+                max_iterations: None,
+                context_security: genesis_config::ContextSecurityPolicy::default(),
+                reasoning_effort: None,
+                cache: None,
+                tool_filter: None,
+                guardrails: None,
+            },
+            gateway: None,
+            toolsets: std::collections::HashMap::new(),
+            personality: None,
+            embedding: None,
+        };
+        let loaded = genesis_config::LoadedConfig {
+            config,
+            paths: genesis_config::AppPaths {
+                config_path: dir.path().join("genesis.toml"),
+                data_dir: dir.path().to_path_buf(),
+                database_path,
+            },
+        };
+        // Keep `dir` alive by leaking it — it lives for the duration of the test.
+        std::mem::forget(dir);
+        Arc::new(AppState::new(loaded, None, false, None, None, Vec::new()))
+    }
+
+    #[tokio::test]
+    async fn api_routes_accessible_under_api_prefix() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let state = create_test_state();
+        let app = build_router(state);
+
+        // /health at root should return 200
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health at root must return 200"
+        );
+
+        // /api/health should also return 200
+        let req = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/api/health must return 200"
+        );
     }
 
     #[test]
