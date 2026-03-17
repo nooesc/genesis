@@ -359,6 +359,19 @@ pub(crate) struct HealthResponse {
     pub total_tools: usize,
 }
 
+/// JSON metrics response for the dashboard.
+#[derive(Debug, Serialize)]
+struct MetricsJsonResponse {
+    uptime_seconds: u64,
+    requests_total: u64,
+    errors_total: u64,
+    input_tokens_total: u64,
+    output_tokens_total: u64,
+    stream_requests_total: u64,
+    total_sessions: usize,
+    active_schedules: usize,
+}
+
 /// Detailed MCP server status response.
 #[derive(Debug, Serialize)]
 pub(crate) struct McpStatusResponse {
@@ -553,6 +566,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/guardrails/check", post(guardrails_check_handler))
         // Config introspection
         .route("/config", get(config_handler))
+        // JSON metrics for the web dashboard
+        .route("/metrics/json", get(metrics_json_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -946,6 +961,32 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
         .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
+}
+
+/// JSON metrics endpoint for the web dashboard.
+///
+/// Returns the same counters as the Prometheus endpoint but in a structured
+/// JSON format that is easier for browser-based clients to consume.
+async fn metrics_json_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<MetricsJsonResponse> {
+    let db_path = &state.loaded.config.storage.database_path;
+    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0) as usize;
+    let active_schedules = ScheduleStore::new(db_path)
+        .list_enabled()
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    Json(MetricsJsonResponse {
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        requests_total: state.requests_total.load(Ordering::Relaxed),
+        errors_total: state.errors_total.load(Ordering::Relaxed),
+        input_tokens_total: state.input_tokens_total.load(Ordering::Relaxed),
+        output_tokens_total: state.output_tokens_total.load(Ordering::Relaxed),
+        stream_requests_total: state.stream_requests_total.load(Ordering::Relaxed),
+        total_sessions,
+        active_schedules,
+    })
 }
 
 /// Query parameters for listing sessions.
@@ -4495,5 +4536,31 @@ mod tests {
             output.contains("test_duration_ms_count 3"),
             "count should be 3, got:\n{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_json_returns_structured_data() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/metrics/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("uptime_seconds").is_some());
+        assert!(json.get("requests_total").is_some());
+        assert!(json.get("errors_total").is_some());
+        assert!(json.get("input_tokens_total").is_some());
+        assert!(json.get("output_tokens_total").is_some());
     }
 }
