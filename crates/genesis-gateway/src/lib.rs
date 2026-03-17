@@ -553,9 +553,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/guardrails/check", post(guardrails_check_handler))
         // Config introspection
         .route("/config", get(config_handler))
-        // Health accessible under /api/ as well as root
-        .route("/health", get(health_handler))
-        .route("/health/mcp", get(mcp_status_handler))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth_middleware,
@@ -612,6 +609,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        // /api/health is also public — health checks must not require an API key
+        .route("/api/health", get(health_handler))
+        .route("/api/health/mcp", get(mcp_status_handler))
         .route("/.well-known/agent.json", get(agent_card_handler))
         .merge(rate_limited)
         .layer(middleware::from_fn(request_logging_middleware))
@@ -4299,9 +4299,21 @@ mod tests {
 
     /// Build a minimal `AppState` backed by a temp-dir SQLite database.
     ///
+    /// Returns both the `Arc<AppState>` and the `TempDir` guard so the caller keeps the
+    /// directory alive for the duration of the test.
+    ///
     /// Used by router integration tests so they don't touch the real filesystem.
     #[cfg(test)]
-    fn create_test_state() -> Arc<AppState> {
+    fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        create_test_state_with_key(None, false)
+    }
+
+    /// Like `create_test_state` but allows configuring API key authentication.
+    #[cfg(test)]
+    fn create_test_state_with_key(
+        api_key: Option<String>,
+        api_key_required: bool,
+    ) -> (Arc<AppState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir should succeed");
         let database_path = dir.path().join("genesis.db");
         // Bootstrap the schema so AgentBus persistence doesn't fail on first access.
@@ -4354,9 +4366,15 @@ mod tests {
                 database_path,
             },
         };
-        // Keep `dir` alive by leaking it — it lives for the duration of the test.
-        std::mem::forget(dir);
-        Arc::new(AppState::new(loaded, None, false, None, None, Vec::new()))
+        let state = Arc::new(AppState::new(
+            loaded,
+            api_key,
+            api_key_required,
+            None,
+            None,
+            Vec::new(),
+        ));
+        (state, dir)
     }
 
     #[tokio::test]
@@ -4365,7 +4383,7 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt as _;
 
-        let state = create_test_state();
+        let (state, _dir) = create_test_state();
         let app = build_router(state);
 
         // /health at root should return 200
@@ -4390,6 +4408,43 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "/api/health must return 200"
+        );
+    }
+
+    /// Verify that `/api/health` is accessible without authentication even when an API key is
+    /// configured, while a protected route like `/api/sessions` correctly returns 401.
+    #[tokio::test]
+    async fn api_health_is_public_even_with_auth_configured() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) =
+            create_test_state_with_key(Some("test-key".to_string()), true);
+        let app = build_router(state);
+
+        // /api/health must return 200 with NO Authorization header
+        let req = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/api/health must be reachable without auth even when a key is configured"
+        );
+
+        // A protected route must return 401 when no Authorization header is sent
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/sessions must require auth when api_key_required is true"
         );
     }
 
