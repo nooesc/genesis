@@ -446,6 +446,40 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
     }
 }
 
+#[cfg(feature = "embed-ui")]
+mod web_assets {
+    #[derive(rust_embed::Embed)]
+    #[folder = "../../web/dist/"]
+    pub struct Assets;
+}
+
+#[cfg(feature = "embed-ui")]
+async fn static_file_handler(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+
+    if let Some(file) = web_assets::Assets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return (
+            [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+            file.data,
+        )
+            .into_response();
+    }
+
+    // SPA fallback
+    match web_assets::Assets::get("index.html") {
+        Some(index) => (
+            [(header::CONTENT_TYPE, "text/html".to_string())],
+            index.data,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Build the axum Router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = build_cors_layer(state.loaded.config.gateway.as_ref());
@@ -621,15 +655,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ));
 
     // Public routes at root (no auth, no rate limiting for health checks)
-    Router::new()
+    let app = Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
         // /api/health is also public — health checks must not require an API key
         .route("/api/health", get(health_handler))
         .route("/api/health/mcp", get(mcp_status_handler))
         .route("/.well-known/agent.json", get(agent_card_handler))
-        .merge(rate_limited)
-        .layer(middleware::from_fn(request_logging_middleware))
+        .merge(rate_limited);
+
+    #[cfg(not(feature = "embed-ui"))]
+    let app = app;
+
+    #[cfg(feature = "embed-ui")]
+    let app = app.fallback(static_file_handler);
+
+    app.layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
         .with_state(state)
 }
