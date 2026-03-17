@@ -1,140 +1,133 @@
-# Welcome Screen (Animated Monochrome Eve Image + Session Metadata) Design
+# Welcome Screen (Centered Text Dashboard) Design
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:writing-plans to create the implementation plan.
 
-**Goal:** Replace the failed hand-authored ASCII welcome portrait with an image-derived Eve animation rendered as terminal half-block art, while preserving the richer session metadata and key hints already added to the startup screen.
+**Goal:** Replace the current improvised text-only welcome blob with a clean centered dashboard that feels intentional, is easy to scan, and preserves the most useful startup metadata without any image or animation complexity.
 
-**Architecture:** Keep welcome composition inside `WelcomeWidget`, but stop treating the portrait as authored text. Instead, bundle three source image frames in the repo, decode them once, convert them into ratatui lines using the existing half-block image renderer in `genesis-ui`, and cycle frames only while the welcome screen is visible. The widget remains responsive across wide, medium, and narrow terminal widths, with text-only fallback below the minimum art width.
+**Architecture:** Keep all welcome behavior inside `WelcomeWidget` in `genesis-tui`. The screen should render as a single centered panel with left-aligned contents, a clear title block, compact metadata rows, a subtle divider, and a concise command legend. No image assets, no banner renderer integration, and no welcome animation state should remain active.
 
-**Tech Stack:** Rust + ratatui + crossterm + existing Genesis crates (`genesis-tui`, `genesis-ui`) + bundled PNG assets.
+**Tech Stack:** Rust + ratatui + crossterm + existing Genesis TUI widgets.
 
 ---
 
 ## Design Decision
 
-The previous direction used hand-authored ASCII portraits. That was the wrong medium for the visual target. The user explicitly wants the welcome screen to feel closer to `cli-music`, which achieves quality by rendering real images into terminal block characters rather than drawing silhouettes from punctuation.
+The image-backed welcome experiment created too much rendering churn for too little value. The startup screen should not be the most fragile part of the TUI. The right move is to simplify hard and make the screen feel deliberate through structure, spacing, and typography instead of terminal art.
 
 The selected direction is:
 
-1. Bundle three Eve source frames in the repository.
-2. Render them into terminal half-block art using the existing `genesis-ui` pipeline.
-3. Convert the image output to a mostly monochrome palette with a single accent color.
-4. Animate only on the welcome screen at a restrained frame rate.
-5. Fall back to text-only when the terminal is too narrow for the portrait to read cleanly.
+1. text-only welcome screen
+2. single centered panel
+3. left-aligned contents inside that panel
+4. compressed metadata layout
+5. compact command legend
+6. one strong call to action at the bottom
 
-This is a material architectural change from “ASCII portrait widget” to “image-backed terminal art widget”, and the plan should reflect that directly.
+This keeps the startup experience polished without introducing more rendering complexity.
 
-## Source Asset Strategy
+## Layout Model
 
-The user’s Downloads directory is only the import source. The application must not depend on `~/Downloads` at runtime.
+The welcome screen should render as one narrow centered dashboard, not as individually centered text lines.
 
-Requirements:
+Structure:
 
-1. Copy the three approved PNG frames into a committed asset directory under the repository.
-2. Give them stable, descriptive names.
-3. Load them from the repo at build time or runtime from a deterministic relative path.
-4. Do not attempt to read user-specific filesystem locations once the feature is implemented.
+1. `Title block`
+   - `>_ Eve`
+   - version line or muted subtitle below it
 
-Likely asset placement:
+2. `Metadata section`
+   - fixed-width label column
+   - left-aligned values
+   - rows for:
+     - session
+     - model
+     - backend
+     - cwd
+     - tools
+     - skills
 
-- `crates/genesis-ui/assets/welcome/eve_frame_01.png`
-- `crates/genesis-ui/assets/welcome/eve_frame_02.png`
-- `crates/genesis-ui/assets/welcome/eve_frame_03.png`
+3. `Divider`
+   - one subtle horizontal rule
 
-This keeps the image-rendering concern close to the crate that already owns the half-block rendering primitives.
+4. `Command legend`
+   - compact command/action rows
+   - should read like a dashboard, not a help manual
 
-## Rendering Model
+5. `Primary footer`
+   - `Press any key to start`
 
-The correct implementation path is to reuse existing image-to-terminal code instead of inventing a second renderer inside `genesis-tui`.
+The panel itself should be centered within the terminal, but the content inside it should be left-aligned for readability.
 
-Existing relevant file:
+## Visual Hierarchy
 
-- `crates/genesis-ui/src/banner/frames.rs`
+The current welcome screen fails because every line has nearly the same visual weight. The revised screen needs clear hierarchy:
 
-That renderer already contains the core mechanism for converting images into terminal half-block output. The welcome screen should either:
+1. strong title color and weight
+2. muted subtitle/secondary metadata
+3. normal body text for values
+4. subdued labels
+5. slightly emphasized CTA
 
-1. reuse the existing renderer directly, or
-2. introduce a small welcome-specific helper in `genesis-ui` that wraps the shared image conversion logic
+The screen should feel closer to a compact launch dashboard than a dump of debug values.
 
-The second option is usually cleaner because welcome rendering has distinct requirements:
+## Spacing Rules
 
-- fixed small canvas sizes
-- monochrome/stylized palette mapping
-- a single accent color
-- three-frame animation instead of a single static banner
+The layout should avoid both extremes:
 
-The important constraint is architectural: `genesis-tui` should consume a prepared renderable output, not own raw image processing details.
-
-## Palette and Styling
-
-The target is not full-color art. The target is monochrome/stylized terminal art with one accent.
-
-Palette rules:
-
-1. Main body of the image maps to a grayscale or warm-neutral ramp.
-2. Background should remain visually quiet and integrate with the current TUI palette.
-3. One accent color is allowed for small high-value details only.
-4. Accent should be sparse. Good candidates are the eyes or tiny suit/collar highlights.
-5. If accent overpowers the portrait, the mapping is wrong.
-
-This keeps the startup screen readable and intentional instead of turning it into a noisy ANSI poster.
-
-## Animation Behavior
-
-Animation should be welcome-only and low-frequency.
+- not a dense wall of text
+- not a sparse floating blob
 
 Rules:
 
-1. Cycle through the three frames only while the welcome screen is visible.
-2. Use a restrained cadence, roughly `2-3 fps`.
-3. Stop animation immediately once the app leaves the welcome state.
-4. Do not spawn ad hoc background work per frame; integrate with the existing render/event loop timing.
-5. If animation timing fails or frame decode/render is unavailable, fall back to the first frame or to text-only.
+1. Use one blank line between major sections only.
+2. Keep metadata rows tight and regular.
+3. Keep command hints compact, ideally one per row with aligned keys.
+4. Avoid stacking too many empty lines for centering aesthetics.
 
-The goal is subtle motion, not a distracting loop.
+## Content Rules
 
-## Responsive Layout
+Keep:
 
-The welcome screen still needs the three explicit layout bands:
+- title
+- version
+- session id
+- model
+- backend
+- cwd
+- tool counts
+- skill count
+- key hints
+- start prompt
 
-1. `>= 100 cols` — split layout:
-   animated portrait on the left, title + metadata + key hints on the right.
-2. `70-99 cols` — compact stacked layout:
-   smaller portrait centered above the title and metadata.
-3. `< 70 cols` — text-only layout:
-   no portrait at all.
+Do not add:
 
-The portrait must never squeeze the metadata column until it wraps badly. If the image cannot fit cleanly, the widget should degrade to the simpler mode.
+- art
+- animation
+- fake terminal frame
+- loading gimmicks
+- noisy status prose
 
-## Data Flow
+## Responsive Behavior
 
-Existing `WelcomeInfo` enrichment should remain:
+Even though the layout is single-panel, it should still degrade intentionally:
 
-- `session_id`
-- `model`
-- `backend`
-- `cwd`
-- `tool_count_builtin`
-- `tool_count_mcp`
-- `skill_count`
-- `version`
+1. wide terminals:
+   - centered panel at fixed target width
+2. medium terminals:
+   - same layout with narrower truncation
+3. narrow terminals:
+   - preserve the same structure, but shorten the cwd and keep labels compact
 
-That data is already the right shape for the richer startup screen. The change is strictly in how the left-side visual content is produced and animated.
+The layout should not switch modes unless necessary. The key is consistency.
 
 ## Failure Handling
 
-The welcome screen must degrade safely.
+There is very little that can fail now. The main concerns are terminal size and string length.
 
-Failure cases to handle:
+Handle:
 
-1. image decode failure
-2. missing bundled asset
-3. terminal too narrow
-4. unexpected render sizing issue
+1. zero-sized areas by returning early
+2. narrow widths with truncation
+3. small heights by clipping safely rather than panicking
 
-Fallback order:
-
-1. first static frame
-2. no portrait, text-only welcome
-
-Broken or partially rendered art is worse than no art.
+This design intentionally removes the previous failure-prone asset and animation paths from the welcome experience.

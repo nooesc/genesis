@@ -1,240 +1,190 @@
-# Genesis TUI Welcome Screen Animated Image Upgrade Implementation Plan
+# Genesis TUI Welcome Screen Centered Dashboard Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Replace the current hand-authored welcome portrait with a bundled three-frame Eve animation rendered as monochrome half-block terminal art with one accent color, while preserving the metadata-rich welcome layout and text-only fallback on narrow terminals.
+**Goal:** Replace the current rough text-only welcome screen with a clean centered dashboard layout that is readable, intentional, and stable without relying on art, images, or animation.
 
-**Architecture:** Move portrait generation out of raw ASCII constants and onto the existing image-to-terminal path in `genesis-ui`. Bundle the three approved PNG frames under version control, build a welcome-specific renderer that produces ratatui-friendly lines or spans from those images, and let `genesis-tui` consume that renderable output in wide and compact welcome modes. Keep animation timing inside the existing TUI loop and disable it as soon as the app leaves the welcome screen.
+**Architecture:** Keep the welcome screen entirely inside `crates/genesis-tui/src/widgets/welcome.rs`. The widget should render one centered fixed-width panel, left-align all content inside that panel, and organize the startup information into clear sections: title, metadata, divider, command legend, and call to action. Existing API hooks for the removed welcome animation path should either become inert compatibility shims or be removed if nothing depends on them.
 
-**Tech Stack:** Rust, ratatui, crossterm, `genesis-tui`, `genesis-ui`, bundled PNG assets, existing test framework
+**Tech Stack:** Rust, ratatui, crossterm, existing Genesis TUI test framework
 
 ---
 
-### Task 1: Import and normalize the three source frames
+### Task 1: Add failing tests for the centered dashboard layout
 
 **Files:**
-- Create: `crates/genesis-ui/assets/welcome/eve_frame_01.png`
-- Create: `crates/genesis-ui/assets/welcome/eve_frame_02.png`
-- Create: `crates/genesis-ui/assets/welcome/eve_frame_03.png`
-- Modify: `docs/plans/2026-03-15-genesis-tui-welcome-screen-update-design.md`
-
-**Step 1: Copy the approved source images into the repo**
-
-Use the user-approved `nano banana` images from Downloads as the import source only. Rename them to stable asset names under `crates/genesis-ui/assets/welcome/`.
-
-**Step 2: Verify the assets are deterministic**
-
-Check that the files exist at the committed paths and are the only runtime source for welcome art.
-
-Run: `file crates/genesis-ui/assets/welcome/eve_frame_01.png crates/genesis-ui/assets/welcome/eve_frame_02.png crates/genesis-ui/assets/welcome/eve_frame_03.png`
-Expected: three PNG files with consistent dimensions.
-
-**Step 3: Commit**
-
-```bash
-git add crates/genesis-ui/assets/welcome/eve_frame_01.png crates/genesis-ui/assets/welcome/eve_frame_02.png crates/genesis-ui/assets/welcome/eve_frame_03.png docs/plans/2026-03-15-genesis-tui-welcome-screen-update-design.md
-git commit -m "feat: add welcome animation source frames"
-```
-
-### Task 2: Add welcome-specific image rendering in `genesis-ui`
-
-**Files:**
-- Modify: `crates/genesis-ui/src/banner/frames.rs`
-- Modify: `crates/genesis-ui/src/banner/mod.rs`
-- Test: `crates/genesis-ui/src/banner/frames.rs`
+- Modify: `crates/genesis-tui/src/widgets/welcome.rs`
 
 **Step 1: Write the failing test**
 
-Add tests for a welcome-render helper that:
-- loads one bundled frame
-- renders it into half-block output for a small target size
-- applies a stylized monochrome palette
-- preserves a sparse accent color path
+Add tests that render the welcome widget and assert:
+- the title appears
+- the subtitle appears
+- metadata rows render with labels and values
+- the command legend appears
+- no half-block art glyphs (`▀`, `▄`) are present
 
-Assert that:
-- output is non-empty
-- output dimensions are bounded by the target size
-- accent usage is present but limited
+Also add a test that verifies the panel contents are no longer centered line-by-line but render as a left-aligned block inside the viewport.
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
-Expected: FAIL because no welcome-specific renderer exists yet.
+Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
+Expected: FAIL because the current widget layout is still not the intended centered dashboard composition.
 
 **Step 3: Write minimal implementation**
 
-Add a focused helper in `frames.rs` that:
-- loads the bundled PNG
-- scales/crops for welcome usage
-- converts to half-block rows
-- maps colors to a monochrome-plus-accent palette
-
-Export only the minimal API needed by `genesis-tui`.
+Adjust `WelcomeWidget` tests and helpers so they describe the new layout clearly and fail for the current composition.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
+Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add crates/genesis-ui/src/banner/frames.rs crates/genesis-ui/src/banner/mod.rs
-git commit -m "feat: add welcome half-block frame renderer"
+git add crates/genesis-tui/src/widgets/welcome.rs
+git commit -m "test: cover centered welcome dashboard layout"
 ```
 
-### Task 3: Add welcome animation state and frame selection in `genesis-tui`
+### Task 2: Refactor the welcome widget into a fixed-width centered panel
 
 **Files:**
-- Modify: `crates/genesis-tui/src/app.rs`
-- Modify: `crates/genesis-tui/src/lib.rs`
 - Modify: `crates/genesis-tui/src/widgets/welcome.rs`
-- Test: `crates/genesis-tui/src/widgets/welcome.rs`
 
 **Step 1: Write the failing test**
 
-Add tests for welcome-state frame selection that verify:
-- frame index advances over time while welcome is visible
-- animation stops advancing after the welcome screen is dismissed
-- the widget can render a static first frame if animation state is unavailable
+Add assertions that the widget:
+- uses a bounded panel width
+- truncates long paths safely
+- keeps the panel centered in wide terminals
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
-Expected: FAIL because welcome currently has no image-backed frame state.
+Run: `cargo test -p genesis-tui welcome_panel -- --nocapture`
+Expected: FAIL because the current rendering logic does not fully encode the centered-panel contract.
 
 **Step 3: Write minimal implementation**
 
-Introduce minimal animation state:
-- active frame index
-- last frame tick timestamp or tick counter
-- fixed low-FPS cadence
-
-Advance frames only in the welcome state. Avoid extra background tasks or per-frame decoding.
+Implement a single centered panel with:
+- fixed target width
+- left-aligned rows inside the panel
+- manual buffer drawing or equivalent deterministic rendering
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
+Run: `cargo test -p genesis-tui welcome_panel -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add crates/genesis-tui/src/app.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "feat: add animated welcome frame state"
+git add crates/genesis-tui/src/widgets/welcome.rs
+git commit -m "refactor: center welcome content in a fixed-width panel"
 ```
 
-### Task 4: Replace ASCII portrait rendering with image-backed layouts
+### Task 3: Improve hierarchy and section structure
 
 **Files:**
 - Modify: `crates/genesis-tui/src/widgets/welcome.rs`
-- Test: `crates/genesis-tui/src/widgets/welcome.rs`
 
 **Step 1: Write the failing test**
 
 Add tests that verify:
-- wide layouts render image-derived content plus metadata
-- medium layouts render a smaller image above metadata
-- narrow layouts remain text-only
-- old hard-coded portrait glyph signatures are gone
+- title and subtitle are both present
+- metadata section is separated from command legend by a divider
+- CTA is present and visually distinct by style or position
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
-Expected: FAIL because the widget still depends on ASCII portrait constants.
+Run: `cargo test -p genesis-tui welcome_hierarchy -- --nocapture`
+Expected: FAIL if hierarchy is still too flat or sections are not clearly separated.
 
 **Step 3: Write minimal implementation**
 
-Refactor `WelcomeWidget` so:
-- wide mode renders image left, metadata right
-- compact mode renders smaller image above metadata
-- narrow mode skips image rendering entirely
+Restructure the content into:
+- title block
+- metadata block
+- divider
+- command legend
+- CTA footer
 
-Delete the old `ASCII_GIRL_*` constants and any portrait-specific string layout code that is no longer needed.
+Use existing palette colors only; do not add new visual gimmicks.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
+Run: `cargo test -p genesis-tui welcome_hierarchy -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
 git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "refactor: replace welcome ascii art with image rendering"
+git commit -m "refactor: add hierarchy to welcome dashboard"
 ```
 
-### Task 5: Preserve metadata layout and key hints around the new image
+### Task 4: Remove active welcome animation behavior
 
 **Files:**
 - Modify: `crates/genesis-tui/src/widgets/welcome.rs`
-- Test: `crates/genesis-tui/src/widgets/welcome.rs`
+- Modify: `crates/genesis-tui/src/lib.rs`
+- Modify: `crates/genesis-tui/src/app.rs`
 
 **Step 1: Write the failing test**
 
-Add assertions that wide and compact layouts still render:
-- title
-- session
-- model
-- backend
-- cwd
-- tools
-- skills
-- keybinding hints
+Add or update tests to verify:
+- welcome widget reports no active animation
+- ticking the welcome widget is a no-op
+- the render loop does not rely on welcome animation to schedule redraws
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p genesis-tui welcome_metadata -- --nocapture`
-Expected: FAIL if the new image area starves the text block or causes clipping.
+Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
+Expected: FAIL if any active animation assumptions remain.
 
 **Step 3: Write minimal implementation**
 
-Rebalance column widths and vertical spacing so the metadata remains readable alongside the rendered image. Keep text clipping conservative and preserve the existing richer welcome content.
+Make the welcome screen fully static:
+- remove active animation state or leave only inert compatibility hooks
+- ensure the event loop does not schedule redraws for welcome animation
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p genesis-tui welcome_metadata -- --nocapture`
+Run: `cargo test -p genesis-tui welcome_animation -- --nocapture`
 Expected: PASS
 
 **Step 5: Commit**
 
 ```bash
-git add crates/genesis-tui/src/widgets/welcome.rs
-git commit -m "refactor: rebalance welcome metadata around image panel"
+git add crates/genesis-tui/src/widgets/welcome.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/app.rs
+git commit -m "refactor: make welcome screen static"
 ```
 
-### Task 6: Run full verification
+### Task 5: Run targeted verification
 
 **Files:**
-- Verify: `crates/genesis-ui/src/banner/frames.rs`
-- Verify: `crates/genesis-ui/src/banner/mod.rs`
 - Verify: `crates/genesis-tui/src/widgets/welcome.rs`
 - Verify: `crates/genesis-tui/src/lib.rs`
 - Verify: `crates/genesis-tui/src/app.rs`
 
-**Step 1: Run image-render tests**
-
-Run: `cargo test -p genesis-ui welcome_frame -- --nocapture`
-Expected: PASS
-
-**Step 2: Run welcome-specific TUI tests**
+**Step 1: Run welcome-specific tests**
 
 Run: `cargo test -p genesis-tui welcome_widget -- --nocapture`
 Expected: PASS
 
-**Step 3: Run full TUI suite**
+**Step 2: Run full TUI suite**
 
 Run: `cargo test -p genesis-tui`
 Expected: PASS
 
-**Step 4: Run CLI coverage path**
+**Step 3: Run CLI coverage path**
 
 Run: `cargo test -p genesis-cli --no-default-features`
 Expected: PASS
 
-**Step 5: Commit**
+**Step 4: Commit**
 
 ```bash
-git add crates/genesis-ui/src/banner/frames.rs crates/genesis-ui/src/banner/mod.rs crates/genesis-tui/src/widgets/welcome.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/app.rs
-git commit -m "test: verify animated welcome image upgrade"
+git add crates/genesis-tui/src/widgets/welcome.rs crates/genesis-tui/src/lib.rs crates/genesis-tui/src/app.rs
+git commit -m "test: verify centered welcome dashboard"
 ```
