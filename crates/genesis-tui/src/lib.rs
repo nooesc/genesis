@@ -145,7 +145,7 @@ pub async fn run_tui(
         .list_all()
         .map_or(0, |skills| skills.len());
 
-    let mut welcome = crate::widgets::welcome::WelcomeWidget::new(
+    let welcome = crate::widgets::welcome::WelcomeWidget::new(
         crate::widgets::welcome::WelcomeInfo {
             model: config.provider.model.clone(),
             backend: config.provider.backend.clone(),
@@ -159,7 +159,6 @@ pub async fn run_tui(
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
     );
-    welcome.start();
 
     let mut app = App {
         submission_tx,
@@ -282,11 +281,6 @@ pub async fn run_tui(
                     break;
                 }
 
-                // Advance welcome animation while the splash screen is visible.
-                if matches!(app.screen, AppScreen::Welcome) && app.welcome.is_animating() {
-                    app.welcome.tick();
-                }
-
                 // Advance status bar animation (sprite / spinner).
                 app.status_bar.tick();
 
@@ -300,10 +294,7 @@ pub async fn run_tui(
                 render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                if matches!(app.screen, AppScreen::Welcome) && app.welcome.is_animating() {
-                    app.frame_requester
-                        .schedule_frame_in(app.welcome.animation_interval());
-                } else if app.status_bar.is_animating() {
+                if app.status_bar.is_animating() {
                     app.frame_requester
                         .schedule_frame_in(app.status_bar.animation_interval());
                 }

@@ -1,17 +1,13 @@
 //! Welcome screen widget.
 //!
-//! Displays a centered startup screen with image-derived Eve art and rich
-//! session metadata.
-
-use std::time::{Duration, Instant};
+//! Displays a centered text-only startup screen with session metadata.
 
 use ratatui::prelude::Widget;
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
 };
 
 use crate::history::rgb;
@@ -22,14 +18,7 @@ const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
 const MUTED: Color = rgb(genesis_ui::colors::UI_MUTED);
 const AMBER: Color = rgb(genesis_ui::colors::EVE_AMBER);
 const SUCCESS: Color = rgb(genesis_ui::colors::UI_SUCCESS);
-
-const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
-const COMPACT_LAYOUT_MIN_WIDTH: u16 = 70;
-const WIDE_LAYOUT_MIN_HEIGHT: u16 = 16;
-const COMPACT_LAYOUT_MIN_HEIGHT: u16 = 14;
-const WIDE_LAYOUT_GAP: usize = 4;
-const WIDE_INFO_MIN_WIDTH: usize = 40;
-const WELCOME_ANIMATION_INTERVAL: Duration = Duration::from_millis(350);
+const PANEL_WIDTH: u16 = 60;
 
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
@@ -43,65 +32,15 @@ pub struct WelcomeInfo {
     pub skill_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WelcomeArtVariant {
-    Wide,
-    Compact,
-}
-
-struct WelcomeArtCache {
-    variant: WelcomeArtVariant,
-    width: u16,
-    height: u16,
-    frames: Vec<Vec<Line<'static>>>,
-}
-
-/// Welcome screen widget showing animated terminal art and session info.
+/// Welcome screen widget showing text-only session info.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
-    animating: bool,
-    frame_index: usize,
-    last_frame_advance: Instant,
-    art_cache: Option<WelcomeArtCache>,
 }
 
 impl WelcomeWidget {
     /// Create a new welcome widget from session info.
     pub fn new(info: WelcomeInfo) -> Self {
-        Self {
-            info,
-            animating: false,
-            frame_index: 0,
-            last_frame_advance: Instant::now(),
-            art_cache: None,
-        }
-    }
-
-    pub fn start(&mut self) {
-        self.animating = true;
-        self.frame_index = 0;
-        self.last_frame_advance = Instant::now();
-    }
-
-    pub fn stop(&mut self) {
-        self.animating = false;
-        self.frame_index = 0;
-        self.last_frame_advance = Instant::now();
-    }
-
-    pub fn is_animating(&self) -> bool {
-        self.animating
-    }
-
-    pub fn animation_interval(&self) -> Duration {
-        WELCOME_ANIMATION_INTERVAL
-    }
-
-    pub fn tick(&mut self) {
-        if self.animating && self.last_frame_advance.elapsed() >= WELCOME_ANIMATION_INTERVAL {
-            self.frame_index = (self.frame_index + 1) % genesis_ui::banner::WELCOME_FRAME_COUNT;
-            self.last_frame_advance = Instant::now();
-        }
+        Self { info }
     }
 
     /// Render the welcome screen into the given area.
@@ -110,188 +49,45 @@ impl WelcomeWidget {
             return;
         }
 
-        let lines = if area.width >= WIDE_LAYOUT_MIN_WIDTH && area.height >= WIDE_LAYOUT_MIN_HEIGHT
-        {
-            self.build_split_lines(area)
-        } else if area.width >= COMPACT_LAYOUT_MIN_WIDTH
-            && area.height >= COMPACT_LAYOUT_MIN_HEIGHT
-        {
-            self.build_centered_lines(area)
-        } else {
-            self.build_text_only_lines()
-        };
-
+        let panel_width = PANEL_WIDTH.min(area.width).max(24);
+        let lines = self.build_lines(panel_width);
         if lines.is_empty() {
             return;
         }
 
         let content_height = lines.len() as u16;
-        let render_height = content_height.min(area.height);
-        let start_y = area.y + area.height.saturating_sub(render_height) / 2;
-        let text_area = Rect {
-            x: area.x,
-            y: start_y,
-            width: area.width,
-            height: render_height,
-        };
+        let panel_height = content_height.min(area.height);
+        let panel_x = area.x + area.width.saturating_sub(panel_width) / 2;
+        let panel_y = area.y + area.height.saturating_sub(panel_height) / 2;
 
-        let align = if area.width >= WIDE_LAYOUT_MIN_WIDTH {
-            Alignment::Left
-        } else {
-            Alignment::Center
-        };
-        Paragraph::new(lines).alignment(align).render(text_area, buf);
-    }
+        for (row_index, line) in lines.iter().take(panel_height as usize).enumerate() {
+            let mut x = panel_x;
+            let y = panel_y + row_index as u16;
 
-    fn build_split_lines(&mut self, area: Rect) -> Vec<Line<'static>> {
-        let right_width = area.width as usize;
-        let reserved_info = WIDE_INFO_MIN_WIDTH.min(right_width);
-        let available_left = right_width
-            .saturating_sub(reserved_info)
-            .saturating_sub(WIDE_LAYOUT_GAP)
-            .max(16);
-        let max_art_size = area.height.saturating_sub(6).min(24);
-        let art_size = available_left.min(max_art_size as usize) as u16;
-        if art_size < 8 {
-            return self.build_text_only_lines();
-        }
-        let art_lines = self
-            .current_art_lines(WelcomeArtVariant::Wide, art_size, art_size)
-            .map(|lines| lines.to_vec())
-            .unwrap_or_default();
-
-        if art_lines.is_empty() {
-            return self.build_text_only_lines();
-        }
-
-        let info = self.build_split_info_lines();
-        let left_width = art_size as usize;
-        let info_width = right_width
-            .saturating_sub(left_width)
-            .saturating_sub(WIDE_LAYOUT_GAP)
-            .max(1);
-
-        let mut rows = Vec::new();
-        let max_rows = info.len().max(art_lines.len());
-
-        for index in 0..max_rows {
-            let mut spans = if let Some(art_line) = art_lines.get(index) {
-                art_line.spans.clone()
-            } else {
-                vec![Span::raw(" ".repeat(left_width))]
-            };
-            spans.push(Span::raw(" ".repeat(WIDE_LAYOUT_GAP)));
-
-            if let Some(info_line) = info.get(index) {
-                spans.extend(clipped_spans(info_line, info_width));
+            for span in &line.spans {
+                for ch in span.content.chars() {
+                    if x >= panel_x + panel_width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        let mut s = String::with_capacity(ch.len_utf8());
+                        s.push(ch);
+                        cell.set_symbol(&s);
+                        cell.set_style(span.style);
+                    }
+                    let char_width =
+                        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                    x = x.saturating_add(char_width.max(1));
+                }
             }
-
-            rows.push(Line::from(spans));
         }
-
-        rows
     }
 
-    fn build_centered_lines(&mut self, area: Rect) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            format!(">_ Eve v{}", self.info.version),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-
-        let info_lines = self.build_info_lines();
-        let hint_lines = self.build_hint_lines();
-        let reserved_text_rows =
-            (info_lines.len() + hint_lines.len() + 4).min(area.height as usize) as u16;
-        let max_art_size = area.height.saturating_sub(reserved_text_rows).min(18);
-        let art_size = area
-            .width
-            .saturating_sub(10)
-            .min(max_art_size);
-
-        if art_size < 8 {
-            return self.build_text_only_lines();
-        }
-
-        if let Some(art_lines) = self.current_art_lines(WelcomeArtVariant::Compact, art_size, art_size)
-        {
-            lines.extend(art_lines.iter().cloned());
-            lines.push(Line::from(""));
-        }
-
-        lines.extend(info_lines);
-        lines.push(Line::from(""));
-        lines.extend(hint_lines);
-        lines
-    }
-
-    fn build_text_only_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            format!(">_ Eve v{}", self.info.version),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled("model       ", Style::default().fg(DIM)),
-            Span::styled(self.info.model.clone(), Style::default().fg(TEXT)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("backend     ", Style::default().fg(DIM)),
-            Span::styled(self.info.backend.clone(), Style::default().fg(TEXT)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("cwd         ", Style::default().fg(DIM)),
-            Span::styled(
-                truncate_path(&self.info.cwd, 40),
-                Style::default().fg(TEXT),
-            ),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "press any key to start",
-            Style::default().fg(DIM),
-        )));
-        lines
-    }
-
-    fn build_split_info_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            format!(">_ Eve v{}", self.info.version),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        lines.extend(self.build_info_lines());
-        lines.push(Line::from(""));
-        lines.extend(self.build_hint_lines());
-        lines
-    }
-
-    fn build_info_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "session"), Style::default().fg(DIM)),
-            Span::styled(self.info.session_id.clone(), Style::default().fg(TEXT)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "model"), Style::default().fg(DIM)),
-            Span::styled(self.info.model.clone(), Style::default().fg(TEXT)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "backend"), Style::default().fg(DIM)),
-            Span::styled(self.info.backend.clone(), Style::default().fg(TEXT)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "cwd"), Style::default().fg(DIM)),
-            Span::styled(
-                truncate_path(&self.info.cwd, 64),
-                Style::default().fg(TEXT),
-            ),
-        ]));
-
+    fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let label_width = 9;
+        let path_width = usize::from(width.saturating_sub(label_width + 2)).clamp(16, 40);
+        let rule = "─".repeat(width as usize);
+        let subtitle = format!("v{}  •  interactive coding session", self.info.version);
         let tools = if self.info.tool_count_mcp > 0 {
             format!(
                 "{} builtin, {} mcp",
@@ -301,140 +97,74 @@ impl WelcomeWidget {
         } else {
             format!("{} builtin", self.info.tool_count_builtin)
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "tools"), Style::default().fg(DIM)),
-            Span::styled(tools, Style::default().fg(SUCCESS)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "skills"), Style::default().fg(DIM)),
-            Span::styled(
-                self.info.skill_count.to_string(),
-                Style::default().fg(MUTED),
+
+        vec![
+            Line::from(Span::styled(
+                ">_ Eve",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(subtitle, Style::default().fg(MUTED))),
+            Line::from(""),
+            Line::from(Span::styled(rule, Style::default().fg(DIM))),
+            Line::from(""),
+            info_row(label_width, "session", self.info.session_id.clone(), TEXT),
+            info_row(label_width, "model", self.info.model.clone(), TEXT),
+            info_row(label_width, "backend", self.info.backend.clone(), TEXT),
+            info_row(
+                label_width,
+                "cwd",
+                truncate_path(&self.info.cwd, path_width),
+                TEXT,
             ),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "session ready",
-            Style::default()
-                .fg(AMBER)
-                .add_modifier(Modifier::ITALIC),
-        )));
-        lines
+            info_row(label_width, "tools", tools, SUCCESS),
+            info_row(
+                label_width,
+                "skills",
+                self.info.skill_count.to_string(),
+                MUTED,
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "session ready",
+                Style::default()
+                    .fg(AMBER)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Enter   ", Style::default().fg(ACCENT)),
+                Span::styled("send message", Style::default().fg(MUTED)),
+                Span::styled("   /   ", Style::default().fg(ACCENT)),
+                Span::styled("commands", Style::default().fg(MUTED)),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+T  ", Style::default().fg(ACCENT)),
+                Span::styled("transcript", Style::default().fg(MUTED)),
+                Span::styled("   Ctrl+C  ", Style::default().fg(ACCENT)),
+                Span::styled("interrupt", Style::default().fg(MUTED)),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+D  ", Style::default().fg(ACCENT)),
+                Span::styled("exit", Style::default().fg(MUTED)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "press any key to start",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )),
+        ]
     }
+}
 
-    fn build_hint_lines(&self) -> Vec<Line<'static>> {
-        let key_style = Style::default().fg(ACCENT);
-        let desc_style = Style::default().fg(MUTED);
-        let hints = [
-            ("Enter", "send message"),
-            ("/", "slash commands"),
-            ("Ctrl+T", "transcript"),
-            ("Ctrl+C", "interrupt"),
-            ("Ctrl+D", "exit"),
-        ];
-
-        let mut lines = Vec::new();
-        for (key, desc) in &hints {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:>10}", key), key_style),
-                Span::styled(format!("  {desc}"), desc_style),
-            ]));
-        }
-        lines.push(Line::from(Span::styled(
-            "press any key to start",
+fn info_row(label_width: usize, label: &str, value: String, value_color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:>width$}", width = label_width),
             Style::default().fg(DIM),
-        )));
-        lines
-    }
-
-    fn current_art_lines(
-        &mut self,
-        variant: WelcomeArtVariant,
-        width: u16,
-        height: u16,
-    ) -> Option<&[Line<'static>]> {
-        if width == 0 || height == 0 {
-            return None;
-        }
-
-        let needs_refresh = self.art_cache.as_ref().map_or(true, |cache| {
-            cache.variant != variant || cache.width != width || cache.height != height
-        });
-
-        if needs_refresh {
-            let frames = genesis_ui::banner::render_welcome_frames(width, height)
-                .into_iter()
-                .map(|frame| halfblock_frame_to_lines(&frame))
-                .collect::<Vec<_>>();
-            if frames.is_empty() {
-                self.art_cache = None;
-                return None;
-            }
-            self.art_cache = Some(WelcomeArtCache {
-                variant,
-                width,
-                height,
-                frames,
-            });
-        }
-
-        self.art_cache
-            .as_ref()
-            .and_then(|cache| cache.frames.get(self.frame_index % cache.frames.len()))
-            .map(Vec::as_slice)
-    }
-}
-
-fn halfblock_frame_to_lines(frame: &genesis_ui::banner::HalfBlockFrame) -> Vec<Line<'static>> {
-    frame
-        .lines
-        .iter()
-        .map(|row| {
-            let spans = row
-                .iter()
-                .map(|cell| {
-                    let mut style = Style::default();
-                    if let Some(fg) = cell.fg {
-                        style = style.fg(Color::Rgb(fg.r, fg.g, fg.b));
-                    }
-                    if let Some(bg) = cell.bg {
-                        style = style.bg(Color::Rgb(bg.r, bg.g, bg.b));
-                    }
-                    Span::styled(cell.symbol.to_string(), style)
-                })
-                .collect::<Vec<_>>();
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn clipped_spans(line: &Line<'static>, max_chars: usize) -> Vec<Span<'static>> {
-    let mut remaining = max_chars;
-    let mut out = Vec::new();
-
-    for mut span in line.spans.clone() {
-        if remaining == 0 {
-            break;
-        }
-        let clipped = clip_text(span.content.as_ref(), remaining);
-        let spent = visible_width(&clipped);
-        remaining = remaining.saturating_sub(spent);
-        span.content = clipped.into();
-        out.push(span);
-    }
-
-    out
-}
-
-fn visible_width(value: &str) -> usize {
-    value.chars().count()
-}
-
-fn clip_text(value: &str, max_chars: usize) -> String {
-    if visible_width(value) <= max_chars {
-        return value.to_owned();
-    }
-    value.chars().take(max_chars).collect()
+        ),
+        Span::raw("  "),
+        Span::styled(value, Style::default().fg(value_color)),
+    ])
 }
 
 /// Truncate a path string to at most `max_len` characters.
@@ -467,81 +197,40 @@ mod tests {
     fn sample_info() -> WelcomeInfo {
         WelcomeInfo {
             model: "gpt-5.4".to_string(),
-            backend: "openrouter".to_string(),
-            session_id: "cli-20260315-abcdef".to_string(),
-            cwd: "/home/user/project".to_string(),
+            backend: "openai-codex".to_string(),
+            session_id: "cli-1773717043".to_string(),
+            cwd: "/Users/coler/dev-personal/genesis".to_string(),
             version: "0.1.0".to_string(),
-            tool_count_builtin: 58,
-            tool_count_mcp: 4,
-            skill_count: 12,
+            tool_count_builtin: 73,
+            tool_count_mcp: 0,
+            skill_count: 1,
         }
     }
 
     #[test]
-    fn welcome_widget_renders_image_backed_wide_layout() {
+    fn welcome_widget_renders_dashboard_layout() {
         let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 30));
-        widget.render(Rect::new(0, 0, 120, 30), &mut buf);
-        let rendered = rendered_text(&buf, 120);
-        assert!(rendered.contains(">_ Eve v0.1.0"));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 24));
+        widget.render(Rect::new(0, 0, 100, 24), &mut buf);
+        let rendered = rendered_text(&buf, 100);
+        assert!(rendered.contains(">_ Eve"));
+        assert!(rendered.contains("interactive coding session"));
         assert!(rendered.contains("session"));
-        assert!(rendered.contains("Enter"));
-        assert!(rendered.contains("▀") || rendered.contains("▄"));
-    }
-
-    #[test]
-    fn welcome_widget_renders_text_only_when_narrow() {
-        let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
-        widget.render(Rect::new(0, 0, 40, 10), &mut buf);
-        let rendered = rendered_text(&buf, 40);
-        assert!(rendered.contains(">_ Eve v0.1.0"));
-        assert!(!rendered.contains("▀"));
-        assert!(!rendered.contains("▄"));
-    }
-
-    #[test]
-    fn welcome_widget_compact_mode_uses_rendered_frame() {
-        let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-        widget.render(Rect::new(0, 0, 80, 24), &mut buf);
-        let rendered = rendered_text(&buf, 80);
         assert!(rendered.contains("press any key to start"));
-        assert!(rendered.contains("▀") || rendered.contains("▄"));
-    }
-
-    #[test]
-    fn welcome_widget_tick_advances_frame_index() {
-        let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        widget.last_frame_advance = Instant::now() - WELCOME_ANIMATION_INTERVAL;
-        widget.tick();
-        assert_eq!(widget.frame_index, 1);
-    }
-
-    #[test]
-    fn welcome_widget_short_terminal_falls_back_to_text_only() {
-        let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 12));
-        widget.render(Rect::new(0, 0, 120, 12), &mut buf);
-        let rendered = rendered_text(&buf, 120);
-        assert!(rendered.contains(">_ Eve v0.1.0"));
         assert!(!rendered.contains("▀"));
         assert!(!rendered.contains("▄"));
     }
 
     #[test]
-    fn welcome_widget_stop_resets_animation() {
+    fn welcome_widget_renders_narrow_text_only_layout() {
         let mut widget = WelcomeWidget::new(sample_info());
-        widget.start();
-        widget.frame_index = 2;
-        widget.stop();
-        assert!(!widget.is_animating());
-        assert_eq!(widget.frame_index, 0);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 16));
+        widget.render(Rect::new(0, 0, 40, 16), &mut buf);
+        let rendered = rendered_text(&buf, 40);
+        assert!(rendered.contains(">_ Eve"));
+        assert!(rendered.contains("model"));
+        assert!(!rendered.contains("▀"));
+        assert!(!rendered.contains("▄"));
     }
 
     #[test]
