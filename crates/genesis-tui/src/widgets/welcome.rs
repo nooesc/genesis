@@ -2,7 +2,6 @@
 //!
 //! Displays a centered text-only startup screen with session metadata.
 
-use ratatui::prelude::Widget;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -49,7 +48,7 @@ impl WelcomeWidget {
             return;
         }
 
-        let panel_width = PANEL_WIDTH.min(area.width).max(24);
+        let panel_width = PANEL_WIDTH.min(area.width);
         let lines = self.build_lines(panel_width);
         if lines.is_empty() {
             return;
@@ -84,8 +83,10 @@ impl WelcomeWidget {
     }
 
     fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let label_width = 9;
-        let path_width = usize::from(width.saturating_sub(label_width + 2)).clamp(16, 40);
+        let spacer_width = 2u16;
+        let label_width = usize::from(width.saturating_sub(spacer_width + 1)).min(9);
+        let value_width = usize::from(width.saturating_sub(label_width as u16 + spacer_width));
+        let path_width = value_width;
         let rule = "─".repeat(width as usize);
         let subtitle = format!("v{}  •  interactive coding session", self.info.version);
         let tools = if self.info.tool_count_mcp > 0 {
@@ -107,20 +108,35 @@ impl WelcomeWidget {
             Line::from(""),
             Line::from(Span::styled(rule, Style::default().fg(DIM))),
             Line::from(""),
-            info_row(label_width, "session", self.info.session_id.clone(), TEXT),
-            info_row(label_width, "model", self.info.model.clone(), TEXT),
-            info_row(label_width, "backend", self.info.backend.clone(), TEXT),
+            info_row(
+                label_width,
+                "session",
+                clip_text(&self.info.session_id, value_width),
+                TEXT,
+            ),
+            info_row(
+                label_width,
+                "model",
+                clip_text(&self.info.model, value_width),
+                TEXT,
+            ),
+            info_row(
+                label_width,
+                "backend",
+                clip_text(&self.info.backend, value_width),
+                TEXT,
+            ),
             info_row(
                 label_width,
                 "cwd",
                 truncate_path(&self.info.cwd, path_width),
                 TEXT,
             ),
-            info_row(label_width, "tools", tools, SUCCESS),
+            info_row(label_width, "tools", clip_text(&tools, value_width), SUCCESS),
             info_row(
                 label_width,
                 "skills",
-                self.info.skill_count.to_string(),
+                clip_text(&self.info.skill_count.to_string(), value_width),
                 MUTED,
             ),
             Line::from(""),
@@ -157,18 +173,36 @@ impl WelcomeWidget {
 }
 
 fn info_row(label_width: usize, label: &str, value: String, value_color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{label:>width$}", width = label_width),
-            Style::default().fg(DIM),
-        ),
-        Span::raw("  "),
-        Span::styled(value, Style::default().fg(value_color)),
-    ])
+    let mut spans = vec![Span::styled(
+        format!("{label:>width$}", width = label_width),
+        Style::default().fg(DIM),
+    )];
+
+    if !value.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(value, Style::default().fg(value_color)));
+    }
+
+    Line::from(spans)
+}
+
+fn clip_text(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        value.to_owned()
+    } else {
+        value.chars().take(max_len).collect()
+    }
 }
 
 /// Truncate a path string to at most `max_len` characters.
 fn truncate_path(path: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    if max_len <= 3 {
+        return ".".repeat(max_len);
+    }
+
     let chars: Vec<char> = path.chars().collect();
     if chars.len() <= max_len {
         path.to_owned()

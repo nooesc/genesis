@@ -50,6 +50,8 @@ pub struct App {
     pub command_popup: CommandPopup,
     /// Interactive clarification picker (shown when agent asks a question with choices).
     pub clarification: ClarificationWidget,
+    /// Force a one-shot terminal clear on the next frame after leaving welcome.
+    pub clear_after_welcome: bool,
 }
 
 impl App {
@@ -187,6 +189,7 @@ impl App {
         // On the welcome screen, any key dismisses it and transitions to chat.
         if matches!(self.screen, AppScreen::Welcome) {
             self.screen = AppScreen::Chat;
+            self.clear_after_welcome = true;
             self.frame_requester.schedule_frame();
             // Forward printable characters to the input widget so the user
             // doesn't lose the first character they type.
@@ -374,6 +377,7 @@ mod tests {
             viewport_height: 24,
             command_popup: CommandPopup::new(),
             clarification: ClarificationWidget::new(),
+            clear_after_welcome: false,
         };
         (app, submission_rx, app_rx)
     }

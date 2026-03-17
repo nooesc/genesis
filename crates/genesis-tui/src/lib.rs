@@ -177,6 +177,7 @@ pub async fn run_tui(
         viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
         clarification: crate::widgets::clarification::ClarificationWidget::new(),
+        clear_after_welcome: false,
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -289,6 +290,11 @@ pub async fn run_tui(
                     if let Some(start) = app.turn_start {
                         app.status_bar.turn_elapsed = Some(start.elapsed());
                     }
+                }
+
+                if app.clear_after_welcome {
+                    let _ = term.clear_all();
+                    app.clear_after_welcome = false;
                 }
 
                 render_frame(&mut term, &mut app);
