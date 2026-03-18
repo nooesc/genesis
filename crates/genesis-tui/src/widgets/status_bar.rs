@@ -74,8 +74,8 @@ pub struct StatusBarWidget {
     pub sprite_frame: usize,
     /// When the last frame advance happened.
     pub last_tick: Instant,
-    /// Git branch name (or cwd fallback).
-    right_info: String,
+    /// Git branch name (or cwd fallback). `None` until first populated.
+    right_info: Option<String>,
     /// Cumulative input tokens this session.
     pub tokens_in: u32,
     /// Cumulative output tokens this session.
@@ -86,18 +86,30 @@ pub struct StatusBarWidget {
 
 impl StatusBarWidget {
     /// Create a new status bar.
+    ///
+    /// Git branch detection is deferred to the first `render()` call so the
+    /// constructor never blocks the async runtime with a synchronous subprocess.
     pub fn new(model: String) -> Self {
-        let right_info = Self::detect_right_info();
         Self {
             model,
             context_percent: 0,
             state: StatusState::Idle,
             sprite_frame: 0,
             last_tick: Instant::now(),
-            right_info,
+            right_info: None,
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
+        }
+    }
+
+    /// Ensure `right_info` is populated, running the git subprocess if needed.
+    ///
+    /// This is intentionally synchronous but called at most once per session,
+    /// from `render()`, which runs in the terminal draw callback.
+    fn ensure_right_info(&mut self) {
+        if self.right_info.is_none() {
+            self.right_info = Some(Self::detect_right_info());
         }
     }
 
@@ -134,13 +146,11 @@ impl StatusBarWidget {
 
     /// Advance the animation frame if enough time has elapsed.
     pub fn tick(&mut self) {
-        let interval = match &self.state {
-            StatusState::Thinking => DANCE_INTERVAL,
-            StatusState::ToolRunning { .. } => SPINNER_INTERVAL,
-            StatusState::Streaming { .. } => SPINNER_INTERVAL,
-            StatusState::Idle => return,
-        };
+        if matches!(self.state, StatusState::Idle) {
+            return;
+        }
 
+        let interval = self.animation_interval();
         if self.last_tick.elapsed() >= interval {
             self.sprite_frame = self.sprite_frame.wrapping_add(1);
             self.last_tick = Instant::now();
@@ -148,7 +158,8 @@ impl StatusBarWidget {
     }
 
     /// Render the status bar into `buf` within `area`.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        self.ensure_right_info();
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -338,7 +349,7 @@ impl StatusBarWidget {
             Style::default().fg(BRANCH_COLOR).bg(bg),
         ));
         spans.push(Span::styled(
-            self.right_info.clone(),
+            self.right_info.clone().unwrap_or_default(),
             Style::default().fg(DIM).bg(bg),
         ));
 
@@ -447,7 +458,7 @@ mod tests {
             state: StatusState::Idle,
             sprite_frame: 0,
             last_tick: Instant::now(),
-            right_info: "main".to_string(),
+            right_info: Some("main".to_string()),
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
