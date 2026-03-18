@@ -566,6 +566,15 @@ impl AgentLoop {
 
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            // Skip fallback providers whose circuit breaker is open.
+            if fallback.circuit_state() == genesis_provider::circuit_breaker::CircuitState::Open {
+                debug!(
+                    fallback_index = i,
+                    model = fb_model.as_str(),
+                    "skipping fallback provider — circuit open"
+                );
+                continue;
+            }
             match fallback.complete(request.clone()).await {
                 Ok(response) => {
                     info!(
@@ -617,6 +626,15 @@ impl AgentLoop {
 
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            // Skip fallback providers whose circuit breaker is open.
+            if fallback.circuit_state() == genesis_provider::circuit_breaker::CircuitState::Open {
+                debug!(
+                    fallback_index = i,
+                    model = fb_model.as_str(),
+                    "skipping fallback provider stream — circuit open"
+                );
+                continue;
+            }
             match fallback.complete_stream(request.clone()).await {
                 Ok(stream) => {
                     info!(
