@@ -18,6 +18,57 @@ const COLOR_FAIL: Color = rgb(genesis_ui::colors::UI_ERROR);
 /// Dim grey for structural characters.
 const UI_DIM: Color = rgb(genesis_ui::colors::UI_DIM);
 
+// ── Per-tool category colors ─────────────────────────────────────────────
+
+/// Neutral dim for read-only tools.
+const CAT_READ: Color = Color::Rgb(140, 140, 140);
+/// Amber for write/modify tools.
+const CAT_WRITE: Color = Color::Rgb(212, 165, 116);
+/// Red for shell/execution tools.
+const CAT_SHELL: Color = Color::Rgb(215, 95, 95);
+/// Blue for web/network tools.
+const CAT_WEB: Color = Color::Rgb(100, 149, 237);
+/// Lavender for memory/skill/agent tools.
+const CAT_AGENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
+/// Default tool color (text).
+const CAT_DEFAULT: Color = rgb(genesis_ui::colors::UI_TEXT);
+
+/// Return a category-based color for a tool name.
+fn tool_color(name: &str) -> Color {
+    match name {
+        // Read-only tools
+        "read_file" | "glob" | "tree" | "list_dir" | "search" | "grep"
+        | "find_tools" | "session_info" | "echo" => CAT_READ,
+
+        // Write/modify tools
+        "write_file" | "patch_file" | "create_file" | "delete_file"
+        | "rename_file" | "move_file" => CAT_WRITE,
+
+        // Shell/execution tools
+        "shell_exec" | "docker_exec" | "ssh_exec" | "process"
+        | "kill_process" | "code_execute" => CAT_SHELL,
+
+        // Web/network tools
+        "web_search" | "web_fetch" | "browse" | "browser_navigate"
+        | "browser_click" | "browser_fill" => CAT_WEB,
+
+        // Agent/memory/skill tools
+        "memory_search" | "memory_store" | "skill_create" | "skill_search"
+        | "subagent_spawn" | "clarify" | "think" | "moa_consult"
+        | "reason_with_model" => CAT_AGENT,
+
+        // Tools with common prefixes
+        _ if name.starts_with("git_") => CAT_WRITE,
+        _ if name.starts_with("browser_") => CAT_WEB,
+        _ if name.starts_with("mcp_") => CAT_AGENT,
+        _ if name.starts_with("ha_") => CAT_WEB, // Home Assistant
+        _ if name.starts_with("skill_") => CAT_AGENT,
+        _ if name.starts_with("memory_") => CAT_AGENT,
+
+        _ => CAT_DEFAULT,
+    }
+}
+
 /// Controls how a [`ToolCell`] is rendered.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ToolDisplayMode {
@@ -129,11 +180,12 @@ impl ToolCell {
     fn summary_lines(&self) -> Vec<Line<'static>> {
         let duration_str = self.fmt_duration();
         let (status_str, status_color) = self.status_str();
+        let name_color = tool_color(&self.tool_name);
 
         let line = Line::from(vec![
             Span::styled("  ", Style::default().fg(UI_DIM)),
             Span::styled("[", Style::default().fg(UI_DIM)),
-            Span::styled(self.tool_name.clone(), Style::default().fg(UI_DIM)),
+            Span::styled(self.tool_name.clone(), Style::default().fg(name_color)),
             Span::styled("] ", Style::default().fg(UI_DIM)),
             Span::styled(duration_str, Style::default().fg(UI_DIM)),
             Span::styled(" ", Style::default()),
@@ -155,9 +207,10 @@ impl ToolCell {
         let (status_str, status_color) = self.status_str();
 
         // Top border: `  ┌─ tool_name ──...──┐`
+        let name_color = tool_color(&self.tool_name);
         let top = Line::from(vec![
             Span::styled("  ┌─ ", Style::default().fg(UI_DIM)),
-            Span::styled(self.tool_name.clone(), Style::default().fg(UI_DIM)),
+            Span::styled(self.tool_name.clone(), Style::default().fg(name_color)),
             Span::styled(" ─┐", Style::default().fg(UI_DIM)),
         ]);
 
