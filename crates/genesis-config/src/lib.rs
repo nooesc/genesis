@@ -79,6 +79,45 @@ pub enum ToolDisplayMode {
     Verbose,
 }
 
+/// Granular toggles for individual visual effects.
+/// When `TuiConfig::animations` is false, all effects are suppressed regardless
+/// of these settings. These toggles allow fine-grained control for accessibility
+/// (e.g. respecting REDUCE_MOTION at the effect level).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectsConfig {
+    /// Show the boot sequence animation on startup.
+    #[serde(default = "default_true")]
+    pub boot_sequence: bool,
+    /// Enable transition animations between UI states.
+    #[serde(default = "default_true")]
+    pub transitions: bool,
+    /// Enable pulsing animation on status indicators.
+    #[serde(default = "default_true")]
+    pub status_pulse: bool,
+    /// Enable idle glow effect on the input border.
+    #[serde(default = "default_true")]
+    pub idle_glow: bool,
+    /// Enable breathing (fade in/out) animation while idle.
+    #[serde(default = "default_true")]
+    pub idle_breathing: bool,
+    /// Enable the braille-dot particle canvas.
+    #[serde(default = "default_true")]
+    pub braille_canvas: bool,
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self {
+            boot_sequence: true,
+            transitions: true,
+            status_pulse: true,
+            idle_glow: true,
+            idle_breathing: true,
+            braille_canvas: true,
+        }
+    }
+}
+
 /// TUI (terminal user interface) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TuiConfig {
@@ -97,6 +136,9 @@ pub struct TuiConfig {
     /// Display settings.
     #[serde(default)]
     pub display: TuiDisplayConfig,
+    /// Granular per-effect toggles (all default to true).
+    #[serde(default)]
+    pub effects: EffectsConfig,
 }
 
 impl Default for TuiConfig {
@@ -107,6 +149,7 @@ impl Default for TuiConfig {
             alt_screen: AltScreenMode::default(),
             welcome_screen: true,
             display: TuiDisplayConfig::default(),
+            effects: EffectsConfig::default(),
         }
     }
 }
@@ -1761,6 +1804,17 @@ toolsets:
         assert!(matches!(config.display.tool_mode, super::ToolDisplayMode::Grouped));
         assert!(matches!(config.alt_screen, super::AltScreenMode::Auto));
         assert!(matches!(config.display.diff_mode, super::DiffMode::Auto));
+    }
+
+    #[test]
+    fn effects_config_defaults_all_true() {
+        let config: super::EffectsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(config.boot_sequence);
+        assert!(config.transitions);
+        assert!(config.status_pulse);
+        assert!(config.idle_glow);
+        assert!(config.idle_breathing);
+        assert!(config.braille_canvas);
     }
 
     #[test]
