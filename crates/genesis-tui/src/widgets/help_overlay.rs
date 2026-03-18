@@ -189,6 +189,9 @@ impl HelpOverlay {
 
             // Close
             KeyCode::Char('q') => return HelpAction::Close,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return HelpAction::Close
+            }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return HelpAction::Close
             }

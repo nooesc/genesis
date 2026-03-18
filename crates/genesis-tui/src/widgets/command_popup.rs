@@ -39,9 +39,9 @@ pub struct CommandDef {
 }
 
 const COMMANDS: &[CommandDef] = &[
+    CommandDef { name: "/help",        description: "Show keybindings and commands" },
     CommandDef { name: "/clear",       description: "Clear conversation history" },
     CommandDef { name: "/exit",        description: "Exit Eve" },
-    CommandDef { name: "/help",        description: "Show keybindings and commands" },
 ];
 
 // ── CommandAction ─────────────────────────────────────────────────────────
@@ -524,9 +524,9 @@ mod tests {
     fn enter_selects_command() {
         let mut popup = CommandPopup::new();
         popup.show();
-        // First item is "/clear".
+        // First item is "/help" (safe default).
         let action = popup.handle_key(key(KeyCode::Enter));
-        assert_eq!(action, CommandAction::Select("/clear".to_owned()));
+        assert_eq!(action, CommandAction::Select("/help".to_owned()));
         assert!(!popup.is_visible());
     }
 
