@@ -29,6 +29,7 @@ pub struct LuaRuntime {
     lua: Lua,
     plugin_names: Vec<String>,
     logs: Arc<Mutex<Vec<String>>>,
+    plugin_errors: Vec<String>,
 }
 
 impl std::fmt::Debug for LuaRuntime {
@@ -36,6 +37,7 @@ impl std::fmt::Debug for LuaRuntime {
         f.debug_struct("LuaRuntime")
             .field("plugin_names", &self.plugin_names)
             .field("logs", &self.logs())
+            .field("plugin_errors", &self.plugin_errors)
             .finish()
     }
 }
@@ -118,6 +120,7 @@ impl LuaRuntime {
             lua,
             plugin_names: Vec::new(),
             logs,
+            plugin_errors: Vec::new(),
         };
         runtime.load_plugins(&config)?;
         Ok(runtime)
@@ -128,15 +131,36 @@ impl LuaRuntime {
             return Ok(());
         }
 
-        let plugins = discover_plugins(&config.plugin_dir)?;
+        let plugins = match discover_plugins(&config.plugin_dir) {
+            Ok(plugins) => plugins,
+            Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(err) => {
+                self.plugin_errors.push(err.to_string());
+                return Ok(());
+            }
+        };
         for plugin in plugins {
-            let source = fs::read_to_string(&plugin.entrypoint).map_err(|source| {
+            let source = match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
                 LuaRuntimeError::ReadPluginSource {
                     path: plugin.entrypoint.clone(),
                     source,
                 }
-            })?;
-            self.lua.load(&source).set_name(&plugin.name).exec()?;
+            }) {
+                Ok(source) => source,
+                Err(err) => {
+                    self.plugin_errors.push(err.to_string());
+                    continue;
+                }
+            };
+            if let Err(err) = self.lua.load(&source).set_name(&plugin.name).exec() {
+                self.plugin_errors
+                    .push(format!("plugin `{}` failed to load: {err}", plugin.name));
+                continue;
+            }
             self.plugin_names.push(plugin.name);
         }
         Ok(())
@@ -156,5 +180,9 @@ impl LuaRuntime {
             .lock()
             .expect("log sink mutex should not be poisoned")
             .clone()
+    }
+
+    pub fn plugin_errors(&self) -> &[String] {
+        &self.plugin_errors
     }
 }

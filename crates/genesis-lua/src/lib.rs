@@ -109,6 +109,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_treats_missing_plugin_directory_as_empty() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let missing = dir.path().join("missing-plugins");
+
+        let runtime = test_runtime(&missing, BTreeMap::new()).expect("runtime should still build");
+
+        assert!(runtime.plugin_names().is_empty());
+        assert!(runtime.plugin_errors().is_empty());
+    }
+
+    #[test]
+    fn runtime_skips_broken_plugins_and_records_errors() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("good.lua"), "genesis.log('good loaded')")
+            .expect("good plugin should write");
+        fs::write(dir.path().join("broken.lua"), "this is not valid lua(")
+            .expect("broken plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
+        assert_eq!(runtime.plugin_errors().len(), 1);
+        assert!(
+            runtime.plugin_errors()[0].contains("broken"),
+            "broken plugin should be identified in recorded errors: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
     fn test_runtime(
         plugin_dir: &std::path::Path,
         config_values: BTreeMap<String, String>,
