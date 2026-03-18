@@ -104,8 +104,6 @@ struct MarkdownWriter {
     table_cell_spans: Vec<Span<'static>>,
     /// Whether we're inside a table.
     in_table: bool,
-    /// Whether we're inside a table header.
-    in_table_head: bool,
     /// Link destination being accumulated.
     link_url: Option<String>,
 }
@@ -125,7 +123,6 @@ impl MarkdownWriter {
             table_rows: Vec::new(),
             table_cell_spans: Vec::new(),
             in_table: false,
-            in_table_head: false,
             link_url: None,
         }
     }
@@ -203,8 +200,10 @@ impl MarkdownWriter {
             }
             Event::End(TagEnd::Paragraph) => {
                 self.finish_line();
-                // Add blank line after paragraphs (unless in a list item).
-                if self.list_stack.is_empty() && !self.in_table {
+                // Add blank line after paragraphs (unless in a list item,
+                // table, or blockquote — blockquote prefix would produce
+                // a visible blank row with just "│ ").
+                if self.list_stack.is_empty() && !self.in_table && self.blockquote_depth == 0 {
                     self.finish_line();
                 }
             }
@@ -276,12 +275,8 @@ impl MarkdownWriter {
                 self.render_table();
             }
 
-            Event::Start(Tag::TableHead) => {
-                self.in_table_head = true;
-            }
-            Event::End(TagEnd::TableHead) => {
-                self.in_table_head = false;
-            }
+            Event::Start(Tag::TableHead) | Event::End(TagEnd::TableHead) => {}
+
 
             Event::Start(Tag::TableRow) => {
                 self.table_rows.push(Vec::new());
@@ -353,6 +348,11 @@ impl MarkdownWriter {
             }
 
             Event::Code(code) => {
+                // Emit list prefix if this is the first inline node in a list item.
+                if self.at_list_item_start && !self.in_table {
+                    self.emit_list_prefix();
+                    self.at_list_item_start = false;
+                }
                 // Inline code.
                 if self.in_table {
                     self.table_cell_spans.push(Span::styled(
@@ -368,10 +368,30 @@ impl MarkdownWriter {
             }
 
             Event::SoftBreak => {
-                // In a TUI rendering LLM output, preserve line breaks rather than
-                // collapsing to spaces (CommonMark default). LLMs frequently use
-                // single newlines as intentional line breaks.
-                self.finish_line();
+                if self.in_table {
+                    // Inside table cells, soft breaks become spaces.
+                    self.table_cell_spans.push(Span::raw(" ".to_owned()));
+                } else if self.code_block.is_some() {
+                    // Inside code blocks, preserve newlines.
+                    if let Some((_, ref mut buf)) = self.code_block {
+                        buf.push('\n');
+                    }
+                } else {
+                    // In a TUI rendering LLM output, preserve line breaks rather
+                    // than collapsing to spaces (CommonMark default). LLMs
+                    // frequently use single newlines as intentional line breaks.
+                    self.finish_line();
+                    // Re-apply list indentation on continuation lines.
+                    if !self.list_stack.is_empty() {
+                        let depth = self.list_stack.len().saturating_sub(1);
+                        let indent = "  ".repeat(depth);
+                        // Indent continuation lines to align with list item text.
+                        let prefix_width = indent.len() + 2; // "• " or "N. "
+                        self.current_spans.push(Span::raw(
+                            " ".repeat(prefix_width),
+                        ));
+                    }
+                }
             }
 
             Event::HardBreak => {
@@ -422,16 +442,21 @@ impl MarkdownWriter {
 
     /// Render the accumulated table data into lines.
     fn render_table(&mut self) {
+        use unicode_width::UnicodeWidthStr;
+
         if self.table_rows.is_empty() {
             return;
         }
 
-        // Compute column widths.
+        // Compute column widths using Unicode display width (not byte count).
         let num_cols = self.table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut col_widths = vec![0usize; num_cols];
         for row in &self.table_rows {
             for (i, cell) in row.iter().enumerate() {
-                let width: usize = cell.iter().map(|s| s.content.len()).sum();
+                let width: usize = cell
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
                 col_widths[i] = col_widths[i].max(width);
             }
         }
@@ -441,18 +466,25 @@ impl MarkdownWriter {
             let line = self.render_table_row(header, &col_widths, true);
             self.lines.push(line);
 
-            // Separator line.
+            // Separator line — constructed without byte-slicing to avoid
+            // panics on multi-byte characters like `─` (U+2500, 3 bytes).
             let sep: String = col_widths
                 .iter()
                 .enumerate()
                 .map(|(i, &w)| {
-                    let bar = "─".repeat(w + 2);
                     let align = self.table_alignments.get(i).copied().unwrap_or(Alignment::None);
+                    let seg_width = w + 2;
                     match align {
-                        Alignment::Left => format!(":{}", &bar[1..]),
-                        Alignment::Right => format!("{}:", &bar[1..]),
-                        Alignment::Center => format!(":{}:", &bar[2..]),
-                        Alignment::None => bar,
+                        Alignment::Left => {
+                            format!(":{}", "─".repeat(seg_width.saturating_sub(1)))
+                        }
+                        Alignment::Right => {
+                            format!("{}:", "─".repeat(seg_width.saturating_sub(1)))
+                        }
+                        Alignment::Center => {
+                            format!(":{}:", "─".repeat(seg_width.saturating_sub(2)))
+                        }
+                        Alignment::None => "─".repeat(seg_width),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -473,11 +505,15 @@ impl MarkdownWriter {
         col_widths: &[usize],
         is_header: bool,
     ) -> Line<'static> {
+        use unicode_width::UnicodeWidthStr;
         let mut spans: Vec<Span<'static>> = Vec::new();
 
         for (i, cell) in row.iter().enumerate() {
             let width = col_widths.get(i).copied().unwrap_or(0);
-            let content_len: usize = cell.iter().map(|s| s.content.len()).sum();
+            let content_len: usize = cell
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             let padding = width.saturating_sub(content_len);
             let align = self.table_alignments.get(i).copied().unwrap_or(Alignment::None);
 
