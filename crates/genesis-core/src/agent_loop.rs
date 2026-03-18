@@ -1033,10 +1033,9 @@ impl AgentLoop {
                                 .expect("executed tool results should align with allowed calls"),
                         };
                         result = sanitize::sanitize_credentials(&result);
-                        result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                        self.trajectory.record_tool_result(&tc.function.name, &result);
-                        // Track consecutive failures per tool
                         let success = !result.starts_with("Error:");
+                        let result = self.run_lua_post_tool_call(&tc.function.name, &result);
+                        self.trajectory.record_tool_result(&tc.function.name, &result);
                         if !success {
                             let count = self
                                 .tool_failure_counts
@@ -1481,7 +1480,7 @@ impl AgentLoop {
                             for (tc, veto_reason) in streamed_tool_calls.iter().zip(veto_reasons.into_iter()) {
                             let lua_vetoed = veto_reason.is_some();
                             let (mut result, requires_input) = match veto_reason {
-                                Some(reason) => (
+                            Some(reason) => (
                                     format!(
                                         "Error: tool call blocked by Lua hook: {reason}"
                                     ),
@@ -1492,8 +1491,8 @@ impl AgentLoop {
                                     .expect("executed tool results should align with allowed calls"),
                             };
                             result = sanitize::sanitize_credentials(&result);
-                            result = self.run_lua_post_tool_call(&tc.function.name, &result);
                             let tool_success = !result.starts_with("Error:");
+                            let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
                                 call_id: &tc.id,
@@ -1502,7 +1501,7 @@ impl AgentLoop {
                             });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
-                            if result.starts_with("Error:") {
+                            if !tool_success {
                                 let count = self
                                     .tool_failure_counts
                                     .entry(tc.function.name.clone())
@@ -1517,13 +1516,13 @@ impl AgentLoop {
                                     "session_id": hook_session,
                                     "tool_name": tc.function.name,
                                     "tool_call_id": tc.id,
-                                        "success": !result.starts_with("Error:"),
-                                        "result": result,
-                                        "requires_input": requires_input,
-                                        "streaming": true,
-                                        "lua_vetoed": lua_vetoed,
-                                    }),
-                                );
+                                    "success": tool_success,
+                                    "result": result,
+                                    "requires_input": requires_input,
+                                    "streaming": true,
+                                    "lua_vetoed": lua_vetoed,
+                                }),
+                            );
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
@@ -1689,12 +1688,12 @@ impl AgentLoop {
                                         false,
                                     ),
                                     None => executed_results
-                                        .next()
-                                        .expect("executed tool results should align with allowed calls"),
+                                    .next()
+                                    .expect("executed tool results should align with allowed calls"),
                                 };
                                 result = sanitize::sanitize_credentials(&result);
-                                result = self.run_lua_post_tool_call(&tc.function.name, &result);
                                 let tool_success = !result.starts_with("Error:");
+                                let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
                                     call_id: &tc.id,
@@ -1703,7 +1702,7 @@ impl AgentLoop {
                                 });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
-                                if result.starts_with("Error:") {
+                                if !tool_success {
                                     let count = self
                                         .tool_failure_counts
                                         .entry(tc.function.name.clone())
@@ -1718,7 +1717,7 @@ impl AgentLoop {
                                         "session_id": hook_session,
                                         "tool_name": tc.function.name,
                                         "tool_call_id": tc.id,
-                                        "success": !result.starts_with("Error:"),
+                                        "success": tool_success,
                                         "result": result,
                                         "requires_input": requires_input,
                                         "streaming": false,
@@ -4091,6 +4090,96 @@ end)
         assert!(
             post.stdout.contains("blocked by Lua hook"),
             "post tool shell hook should see the synthesized veto output: {}",
+            post.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_post_tool_call_rewrite_does_not_change_failure_accounting() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "does_not_exist",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::PostToolCall,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PostToolCall", function(_)
+    return "rewritten"
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a missing tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+        assert_eq!(
+            agent.tool_failure_counts.get("does_not_exist"),
+            Some(&1),
+            "tool failure accounting should use the underlying tool outcome"
+        );
+
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool hook");
+        assert!(
+            post.stdout.contains(r#""success":false"#),
+            "shell hook should preserve the underlying failure status: {}",
+            post.stdout
+        );
+        assert!(
+            post.stdout.contains("rewritten"),
+            "shell hook should still see the Lua-rewritten output: {}",
             post.stdout
         );
     }

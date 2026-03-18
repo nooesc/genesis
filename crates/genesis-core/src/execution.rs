@@ -1160,6 +1160,69 @@ struct ExecutionSubagentSpawner {
     model_override: Option<(String, String)>,
 }
 
+impl ExecutionSubagentSpawner {
+    fn build_lua_runtime(&self, child_session_id: &str) -> Option<Arc<LuaRuntime>> {
+        if !self.loaded.config.plugins.enabled {
+            return None;
+        }
+
+        let (backend, model) = match &self.model_override {
+            Some((b, m)) => (b.as_str(), m.as_str()),
+            None => (
+                self.loaded.config.provider.backend.as_str(),
+                self.loaded.config.provider.model.as_str(),
+            ),
+        };
+
+        let mut config_values = BTreeMap::new();
+        config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
+        config_values.insert("provider_backend".to_owned(), backend.to_owned());
+        config_values.insert("provider_model".to_owned(), model.to_owned());
+        config_values.insert("delivery_platform".to_owned(), "cli".to_owned());
+        config_values.insert(
+            "plugins_enabled".to_owned(),
+            self.loaded.config.plugins.enabled.to_string(),
+        );
+        config_values.insert(
+            "data_dir".to_owned(),
+            self.loaded.paths.data_dir.to_string_lossy().into_owned(),
+        );
+        config_values.insert(
+            "database_path".to_owned(),
+            self.loaded.paths.database_path.to_string_lossy().into_owned(),
+        );
+        config_values.insert(
+            "plugin_dir".to_owned(),
+            self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
+        );
+
+        let config = LuaRuntimeConfig {
+            plugin_dir: self.loaded.paths.plugin_dir.clone(),
+            session: LuaSessionContext {
+                id: child_session_id.to_owned(),
+                model: model.to_owned(),
+                turn_count: 0,
+                total_tokens: 0,
+                platform: "cli".to_owned(),
+                personality: None,
+            },
+            config_values,
+        };
+
+        match LuaRuntime::builder().with_config(config).build() {
+            Ok(runtime) => Some(Arc::new(runtime)),
+            Err(error) => {
+                warn!(
+                    child_session_id = child_session_id,
+                    error = %error,
+                    "failed to initialize lua runtime for subagent"
+                );
+                None
+            }
+        }
+    }
+}
+
 impl SubagentSpawner for ExecutionSubagentSpawner {
     fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str) {
         let loaded = Arc::clone(&self.loaded);
@@ -1167,6 +1230,7 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
         let hook_runner = self.hook_runner.clone();
         let hooks = Arc::clone(&self.hooks);
         let model_override = self.model_override.clone();
+        let lua_runtime = self.build_lua_runtime(child_session_id);
         let child_session_id = child_session_id.to_owned();
         let subagent_id = subagent_id.to_owned();
         let task = task.to_owned();
@@ -1231,6 +1295,9 @@ impl SubagentSpawner for ExecutionSubagentSpawner {
                     hook_runner,
                 );
                 agent.set_hooks(hooks);
+                if let Some(runtime) = lua_runtime {
+                    agent.set_lua_runtime(runtime);
+                }
 
                 // Run the subagent turn
                 match agent.run_turn(&task).await {
@@ -1622,9 +1689,9 @@ mod tests {
     use super::{
         delivery_platform_from_str, generate_session_title, maybe_inject_skill_nudge,
         persist_new_messages, restore_chat_history, ExecutedTurn, SessionExecutionService,
-        SessionTurnInput,
+        SessionTurnInput, ExecutionSubagentSpawner,
     };
-    use crate::agent_loop::AgentResult;
+    use crate::agent_loop::{AgentResult, NoopHooks};
     use crate::tests::test_loaded_config;
     use genesis_config::{
         AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
@@ -2225,6 +2292,44 @@ mod tests {
                 .expect("runtime cache mutex should not be poisoned")
                 .contains_key(&service.lua_runtime_cache_key("session-1", &DeliveryPlatform::Cli)),
             "building an agent loop should warm the lua runtime"
+        );
+    }
+
+    #[test]
+    fn execution_subagent_spawner_builds_lua_runtime_for_child_sessions() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("hooks.lua"),
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "child: " .. ctx.user_message
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let db_path = data_dir.join("genesis.db");
+        let loaded = Arc::new(test_loaded_config(data_dir, db_path));
+        let execution_context =
+            crate::build_execution_context_from_loaded(&loaded, "parent".to_owned(), DeliveryPlatform::Cli);
+        let spawner = ExecutionSubagentSpawner {
+            loaded,
+            tool_runtime: Arc::new(crate::build_default_tool_runtime(&execution_context)),
+            hook_runner: crate::hooks::HookRunner::default(),
+            hooks: Arc::new(NoopHooks),
+            model_override: None,
+        };
+
+        let runtime = spawner
+            .build_lua_runtime("child-session")
+            .expect("subagent runtime should build");
+
+        assert_eq!(
+            runtime.run_pre_turn("hello").expect("hook should run"),
+            genesis_lua::hooks::PreHookOutcome::Allow("child: hello".to_owned())
         );
     }
 
