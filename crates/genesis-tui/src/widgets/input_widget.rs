@@ -233,14 +233,12 @@ impl InputWidget {
     /// Handle a bracketed-paste event by inserting all characters.
     ///
     /// Newlines inside the pasted text are preserved for multi-line editing.
+    /// CRLF (`\r\n`) sequences are collapsed to a single `\n`.
     pub fn handle_paste(&mut self, text: &str) {
-        for c in text.chars() {
-            if c == '\r' {
-                // Convert carriage returns to newlines.
-                self.insert_char('\n');
-            } else {
-                self.insert_char(c);
-            }
+        // Normalize line endings: \r\n → \n, lone \r → \n.
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for c in normalized.chars() {
+            self.insert_char(c);
         }
     }
 
@@ -391,40 +389,52 @@ impl InputWidget {
         }
     }
 
-    /// Column offset of cursor within the current line (in bytes).
-    fn cursor_column(&self) -> usize {
-        self.cursor - self.current_line_start()
+    /// Column offset of cursor within the current line (in characters, not bytes).
+    fn cursor_char_column(&self) -> usize {
+        let line_start = self.current_line_start();
+        self.buffer[line_start..self.cursor].chars().count()
     }
 
-    /// Move cursor up one line, preserving column position.
+    /// Move cursor up one line, preserving character column position.
     fn move_cursor_up(&mut self) {
         let current_line = self.cursor_line_index();
         if current_line == 0 {
-            return; // Already on first line.
+            return;
         }
-        let col = self.cursor_column();
+        let col = self.cursor_char_column();
         let prev_line_start = self.line_byte_offset(current_line - 1);
         let prev_line_end = self.line_byte_offset(current_line) - 1; // before the \n
-        let prev_line_len = prev_line_end - prev_line_start;
-        self.cursor = prev_line_start + col.min(prev_line_len);
+        let prev_line_text = &self.buffer[prev_line_start..prev_line_end];
+        // Advance `col` characters into the previous line (clamped).
+        let target_byte = prev_line_text
+            .char_indices()
+            .nth(col)
+            .map(|(i, _)| prev_line_start + i)
+            .unwrap_or(prev_line_end);
+        self.cursor = target_byte;
     }
 
-    /// Move cursor down one line, preserving column position.
+    /// Move cursor down one line, preserving character column position.
     fn move_cursor_down(&mut self) {
         let current_line = self.cursor_line_index();
         let total_lines = self.buffer.matches('\n').count() + 1;
         if current_line + 1 >= total_lines {
-            return; // Already on last line.
+            return;
         }
-        let col = self.cursor_column();
+        let col = self.cursor_char_column();
         let next_line_start = self.line_byte_offset(current_line + 1);
         let next_line_end = if current_line + 2 < total_lines {
             self.line_byte_offset(current_line + 2) - 1
         } else {
             self.buffer.len()
         };
-        let next_line_len = next_line_end - next_line_start;
-        self.cursor = next_line_start + col.min(next_line_len);
+        let next_line_text = &self.buffer[next_line_start..next_line_end];
+        let target_byte = next_line_text
+            .char_indices()
+            .nth(col)
+            .map(|(i, _)| next_line_start + i)
+            .unwrap_or(next_line_end);
+        self.cursor = target_byte;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -709,6 +719,15 @@ mod tests {
         w.handle_paste("line1\nline2");
         assert_eq!(w.text(), "line1\nline2");
         assert!(w.is_multiline());
+    }
+
+    #[test]
+    fn paste_normalizes_crlf() {
+        let mut w = InputWidget::new();
+        w.handle_paste("a\r\nb\r\nc");
+        assert_eq!(w.text(), "a\nb\nc");
+        // Should not double the newlines.
+        assert_eq!(w.buffer.matches('\n').count(), 2);
     }
 
     #[test]
