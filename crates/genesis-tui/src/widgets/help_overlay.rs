@@ -36,7 +36,6 @@ pub struct HelpOverlay {
 const ACCENT: Color = Color::Rgb(180, 167, 214);
 const DIM: Color = Color::Rgb(98, 98, 98);
 const TEXT: Color = Color::Rgb(168, 168, 168);
-const HEADING: Color = Color::Rgb(180, 167, 214);
 const KEY: Color = Color::Rgb(212, 165, 116);
 
 impl Default for HelpOverlay {
@@ -60,8 +59,8 @@ impl HelpOverlay {
     fn build_content() -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        let heading_style = Style::default()
-            .fg(HEADING)
+        let accent_style = Style::default()
+            .fg(ACCENT)
             .add_modifier(Modifier::BOLD);
         let key_style = Style::default().fg(KEY).add_modifier(Modifier::BOLD);
         let desc_style = Style::default().fg(TEXT);
@@ -71,14 +70,14 @@ impl HelpOverlay {
         lines.push(Line::default());
         lines.push(Line::from(vec![
             Span::styled("  ◆ ", Style::default().fg(ACCENT)),
-            Span::styled("Eve — Genesis TUI Help", heading_style),
+            Span::styled("Eve — Genesis TUI Help", accent_style),
         ]));
         lines.push(Line::default());
 
         // Keybindings section
         lines.push(Line::from(Span::styled(
             "  Keybindings",
-            heading_style,
+            accent_style,
         )));
         lines.push(Line::from(Span::styled(
             "  ───────────",
@@ -109,7 +108,7 @@ impl HelpOverlay {
         // Slash commands section
         lines.push(Line::from(Span::styled(
             "  Slash Commands",
-            heading_style,
+            accent_style,
         )));
         lines.push(Line::from(Span::styled(
             "  ──────────────",
@@ -135,7 +134,7 @@ impl HelpOverlay {
         // Overlay navigation
         lines.push(Line::from(Span::styled(
             "  Overlay Navigation",
-            heading_style,
+            accent_style,
         )));
         lines.push(Line::from(Span::styled(
             "  ─────────────────",
@@ -190,6 +189,9 @@ impl HelpOverlay {
 
             // Close
             KeyCode::Char('q') => return HelpAction::Close,
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return HelpAction::Close
+            }
             KeyCode::Esc => return HelpAction::Close,
 
             _ => {}
@@ -246,7 +248,7 @@ impl HelpOverlay {
     }
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
-        let hint = " Help — j/k scroll, q to close ";
+        let hint = " Help — j/k scroll, Ctrl+D/U page, g/G top/bottom, q to close ";
         let hint_span = Span::styled(
             hint,
             Style::default()
