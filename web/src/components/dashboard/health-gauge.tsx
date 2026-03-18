@@ -38,7 +38,6 @@ export function HealthGauge({ value, label, status, sublabel }: HealthGaugeProps
         <svg
           width={size}
           height={size}
-          className="gauge-svg"
           style={{ transform: 'rotate(135deg)' }}
         >
           {/* Background arc */}

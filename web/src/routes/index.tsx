@@ -75,9 +75,9 @@ function DashboardPage() {
             ) : (
               <HealthGauge
                 value={isHealthy ? uptimeFraction : 0.15}
-                label={isHealthy ? 'OK' : '!!'}
-                status={isHealthy ? 'success' : 'error'}
-                sublabel={health ? `Up ${formatUptime(health.uptime_seconds)}` : undefined}
+                label={isHealthy ? 'OK' : health ? '!!' : '?'}
+                status={isHealthy ? 'success' : health ? 'error' : 'warning'}
+                sublabel={health ? `Up ${formatUptime(health.uptime_seconds)}` : 'unreachable'}
               />
             )}
           </CardContent>

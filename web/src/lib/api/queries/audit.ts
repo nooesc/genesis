@@ -5,6 +5,7 @@ import type { AuditEntry } from '../types'
 interface AuditParams {
   limit?: number
   offset?: number
+  refetchInterval?: number
 }
 
 export function useAuditLog(params?: AuditParams) {
@@ -14,7 +15,8 @@ export function useAuditLog(params?: AuditParams) {
   const qs = searchParams.toString()
 
   return useQuery({
-    queryKey: ['audit', params],
+    queryKey: ['audit', { limit: params?.limit, offset: params?.offset }],
     queryFn: () => api.get<AuditEntry[]>(`/audit${qs ? `?${qs}` : ''}`),
+    refetchInterval: params?.refetchInterval,
   })
 }

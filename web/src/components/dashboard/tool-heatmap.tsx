@@ -35,7 +35,6 @@ export function ToolHeatmap({ toolUsage, maxItems = 24 }: ToolHeatmapProps) {
           <div
             key={name}
             className={`group relative flex h-8 items-center justify-center rounded ${getHeatColor(intensity)} transition-colors duration-200 hover:ring-1 hover:ring-primary/50`}
-            title={`${name}: ${count} calls`}
           >
             <span className="truncate px-1 font-mono text-[8px] text-foreground/60">
               {name.replace(/_/g, ' ').slice(0, 8)}
