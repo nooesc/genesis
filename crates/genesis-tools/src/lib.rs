@@ -239,6 +239,13 @@ pub struct ToolOutput {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// Summary of a tool for discovery (name + description, no schema).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
@@ -336,6 +343,28 @@ impl ToolRegistry {
             .values()
             .map(|registration| registration.definition.clone())
             .collect()
+    }
+
+    /// Search registered tools by name or description (case-insensitive).
+    pub fn search_tools(&self, query: &str) -> Vec<ToolSummary> {
+        let q = query.to_lowercase();
+        let mut results: Vec<(bool, ToolSummary)> = self
+            .tools
+            .values()
+            .filter(|reg| {
+                reg.definition.name.to_lowercase().contains(&q)
+                    || reg.definition.description.to_lowercase().contains(&q)
+            })
+            .map(|reg| {
+                let name_match = reg.definition.name.to_lowercase().contains(&q);
+                (name_match, ToolSummary {
+                    name: reg.definition.name.clone(),
+                    description: reg.definition.description.clone(),
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| b.0.cmp(&a.0));
+        results.into_iter().map(|(_, s)| s).collect()
     }
 
     pub fn execute(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
@@ -1629,6 +1658,21 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::browser::BrowserConsole { manager: browser_mgr },
+        )
+        .register(
+            ToolDefinition {
+                name: "find_tools".to_owned(),
+                description: "Search for available tools by name or description. Returns matching tools with descriptions. Use to discover what tools are available for a task.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query to match tool names/descriptions" }
+                    },
+                    "required": ["query"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::find_tools::FindToolsTool,
         );
 
     registry
@@ -1979,5 +2023,35 @@ mod tests {
                 reason: "user denied approval".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn search_tools_finds_by_name() {
+        let registry = super::default_registry();
+        let results = registry.search_tools("echo");
+        assert!(!results.is_empty(), "should find echo tool");
+        assert!(results.iter().any(|t| t.name == "echo"));
+    }
+
+    #[test]
+    fn search_tools_finds_by_description() {
+        let registry = super::default_registry();
+        let results = registry.search_tools("shell");
+        assert!(!results.is_empty(), "should find shell-related tools");
+    }
+
+    #[test]
+    fn search_tools_returns_empty_for_no_match() {
+        let registry = super::default_registry();
+        let results = registry.search_tools("zzzznonexistent");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_tools_name_matches_ranked_first() {
+        let registry = super::default_registry();
+        let results = registry.search_tools("find_tools");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].name, "find_tools");
     }
 }

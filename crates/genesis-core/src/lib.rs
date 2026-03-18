@@ -660,6 +660,38 @@ impl ToolRuntime {
     /// Execute a tool call, routing MCP-prefixed tools to the MCP manager
     /// and `moa_consult` to the Mixture of Agents engine.
     pub async fn execute_async(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
+        // Handle find_tools — needs direct registry access for search.
+        if call.name == "find_tools" {
+            let query = call.arguments.get("query").ok_or_else(|| {
+                genesis_tools::ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "query",
+                }
+            })?;
+            if query.trim().is_empty() {
+                return Err(genesis_tools::ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "query cannot be empty".to_owned(),
+                });
+            }
+            let results = self.registry.search_tools(query);
+            let content = if results.is_empty() {
+                format!("No tools found matching \"{query}\". Try a different search term.")
+            } else {
+                let mut lines = vec![format!("Found {} tool(s) matching \"{query}\":\n", results.len())];
+                for tool in &results {
+                    lines.push(format!("  **{}** — {}", tool.name, tool.description));
+                }
+                lines.push(String::new());
+                lines.push("Use any of these tools by calling them directly.".to_owned());
+                lines.join("\n")
+            };
+            return Ok(genesis_tools::ToolOutput {
+                content,
+                metadata: std::collections::BTreeMap::new(),
+            });
+        }
+
         if call.name.starts_with("mcp_") {
             if let Some(mcp) = &self.mcp {
                 // Handle built-in MCP resource/prompt operations
