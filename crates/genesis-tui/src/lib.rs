@@ -223,7 +223,7 @@ pub async fn run_tui(
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
-        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color),
+        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color, config.tui.effects.clone()),
         idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
             t: 0.0,
             a: 3.0,
@@ -390,13 +390,15 @@ pub async fn run_tui(
                 // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
 
-                // Tick braille patterns using real elapsed time.
-                let pattern_dt = app.effects.frame_dt();
-                if matches!(app.screen, AppScreen::Welcome) {
-                    app.welcome.braille_pattern.tick(pattern_dt);
-                }
-                if !app.turn_running {
-                    app.idle_pattern.tick(pattern_dt);
+                // Compute frame delta once — used by both braille patterns and tachyonfx.
+                let frame_dt = app.effects.frame_dt();
+                if animations_enabled {
+                    if matches!(app.screen, AppScreen::Welcome) {
+                        app.welcome.braille_pattern.tick(frame_dt);
+                    }
+                    if !app.turn_running {
+                        app.idle_pattern.tick(frame_dt);
+                    }
                 }
 
                 // Update elapsed time for the current turn.
@@ -421,13 +423,14 @@ pub async fn run_tui(
                     app.effects.start_idle_effects(status_area);
                 }
 
-                render_frame(&mut term, &mut app);
+                render_frame(&mut term, &mut app, frame_dt);
 
                 // Schedule periodic redraws while animations are active.
                 let has_tachyonfx = app.effects.is_running();
                 let has_sprite_anim = app.status_bar.is_animating();
-                let has_braille = matches!(app.screen, AppScreen::Welcome)
-                    || (!app.turn_running && matches!(app.screen, AppScreen::Chat));
+                let has_braille = animations_enabled
+                    && (matches!(app.screen, AppScreen::Welcome)
+                        || (!app.turn_running && matches!(app.screen, AppScreen::Chat)));
                 if has_tachyonfx || has_sprite_anim || has_braille {
                     let interval = if has_tachyonfx {
                         std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
@@ -455,7 +458,7 @@ pub async fn run_tui(
 ///
 /// When an overlay is active it occupies the full viewport (no status bar).
 /// Otherwise, the chat widget and status bar share the viewport as usual.
-fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
+fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame_dt: std::time::Duration) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -564,7 +567,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
                     // is remaining vertical space (at least 5 rows).
                     const IDLE_CANVAS_HEIGHT: u16 = 5;
                     const IDLE_CANVAS_WIDTH: u16 = 15;
-                    if !app.turn_running {
+                    if !app.turn_running && app.effects.enabled() {
                         let content_h = app.chat.visible_content_height(area.width);
                         let remaining = message_area_height.saturating_sub(content_h);
                         if remaining >= IDLE_CANVAS_HEIGHT {
@@ -680,8 +683,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
     }
 
     // Apply post-render effects (tachyonfx).
-    let dt = app.effects.frame_dt();
-    app.effects.process(dt, buf, area);
+    app.effects.process(frame_dt, buf, area);
 
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();

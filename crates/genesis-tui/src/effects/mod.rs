@@ -44,6 +44,7 @@ pub struct GenesisEffects {
     manager: EffectManager<EffectId>,
     enabled: bool,
     no_color: bool,
+    config: genesis_config::EffectsConfig,
     last_frame: Instant,
 }
 
@@ -54,13 +55,30 @@ impl GenesisEffects {
     ///   [`is_running`](Self::is_running) always returns `false`.
     /// * `no_color` — when `true`, colour-dependent effects should be skipped
     ///   by downstream code (checked via [`color_effects_enabled`](Self::color_effects_enabled)).
-    pub fn new(enabled: bool, no_color: bool) -> Self {
+    /// * `config` — granular per-effect toggles from `tui.effects.*`.
+    pub fn new(enabled: bool, no_color: bool, config: genesis_config::EffectsConfig) -> Self {
         Self {
             manager: EffectManager::default(),
             enabled,
             no_color,
+            config,
             last_frame: Instant::now(),
         }
+    }
+
+    /// Whether a specific effect category is enabled.
+    pub fn boot_enabled(&self) -> bool {
+        self.enabled && self.config.boot_sequence
+    }
+
+    /// Whether transitions are enabled.
+    pub fn transitions_enabled(&self) -> bool {
+        self.enabled && self.config.transitions
+    }
+
+    /// Whether the braille canvas effects are enabled.
+    pub fn braille_enabled(&self) -> bool {
+        self.enabled && self.config.braille_canvas
     }
 
     /// Process all active effects for the given duration.
@@ -82,6 +100,9 @@ impl GenesisEffects {
     }
 
     /// Cancel every known [`EffectId`].
+    ///
+    /// The match below ensures a compile error if a variant is added to
+    /// `EffectId` but not listed here.
     pub fn cancel_all(&mut self) {
         const ALL_IDS: &[EffectId] = &[
             EffectId::BootTitle,
@@ -97,6 +118,24 @@ impl GenesisEffects {
             EffectId::ActivePulse,
             EffectId::StatusTransition,
         ];
+        // Exhaustiveness guard — adding a new EffectId variant without updating
+        // ALL_IDS above will cause a compile error here.
+        const _: () = {
+            let _guard = |id: EffectId| match id {
+                EffectId::BootTitle
+                | EffectId::BootPortrait
+                | EffectId::BootStatus
+                | EffectId::BootSettle
+                | EffectId::TransitionOut
+                | EffectId::TransitionIn
+                | EffectId::ErrorFlash
+                | EffectId::CompressionSweep
+                | EffectId::IdleGlow
+                | EffectId::IdleBreathing
+                | EffectId::ActivePulse
+                | EffectId::StatusTransition => {}
+            };
+        };
         for &id in ALL_IDS {
             self.manager.cancel_unique_effect(id);
         }
@@ -124,7 +163,7 @@ impl GenesisEffects {
     /// Cancels any running boot effects first so they don't compete with the
     /// dissolve. No-op when effects are disabled.
     pub fn start_welcome_to_chat_transition(&mut self, area: Rect) {
-        if !self.enabled {
+        if !self.enabled || !self.config.transitions {
             return;
         }
         self.cancel_all();
@@ -135,9 +174,9 @@ impl GenesisEffects {
     /// Start the chat screen coalesce-in effect after the terminal has been
     /// cleared.
     ///
-    /// No-op when effects are disabled.
+    /// No-op when effects or transitions are disabled.
     pub fn start_chat_coalesce(&mut self, area: Rect) {
-        if !self.enabled {
+        if !self.enabled || !self.config.transitions {
             return;
         }
         self.manager
@@ -185,7 +224,7 @@ impl GenesisEffects {
         status_area: Rect,
         full_area: Rect,
     ) {
-        if !self.enabled {
+        if !self.enabled || !self.config.boot_sequence {
             return;
         }
         boot::start_boot_sequence(
@@ -290,20 +329,20 @@ mod tests {
 
     #[test]
     fn new_effects_manager_starts_idle() {
-        let effects = GenesisEffects::new(true, false);
+        let effects = GenesisEffects::new(true, false, Default::default());
         assert!(!effects.is_running());
     }
 
     #[test]
     fn disabled_effects_never_run() {
-        let effects = GenesisEffects::new(false, false);
+        let effects = GenesisEffects::new(false, false, Default::default());
         // Even if we try to process, is_running stays false
         assert!(!effects.is_running());
     }
 
     #[test]
     fn process_with_no_effects_is_noop() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 10, 5);
         let mut buf = Buffer::empty(area);
         effects.process(std::time::Duration::from_millis(16), &mut buf, area);
@@ -312,7 +351,7 @@ mod tests {
 
     #[test]
     fn cancel_all_does_not_panic_when_empty() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         effects.cancel_all();
         // cancel_all inserts zero-duration sentinels; one process cycle clears them.
         let area = Rect::new(0, 0, 10, 5);
@@ -323,7 +362,7 @@ mod tests {
 
     #[test]
     fn frame_dt_returns_positive_duration() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         // Burn a tiny bit of wall time so dt > 0.
         std::thread::sleep(std::time::Duration::from_millis(1));
         let dt = effects.frame_dt();
@@ -332,15 +371,15 @@ mod tests {
 
     #[test]
     fn color_effects_enabled_respects_flags() {
-        assert!(GenesisEffects::new(true, false).color_effects_enabled());
-        assert!(!GenesisEffects::new(true, true).color_effects_enabled());
-        assert!(!GenesisEffects::new(false, false).color_effects_enabled());
-        assert!(!GenesisEffects::new(false, true).color_effects_enabled());
+        assert!(GenesisEffects::new(true, false, Default::default()).color_effects_enabled());
+        assert!(!GenesisEffects::new(true, true, Default::default()).color_effects_enabled());
+        assert!(!GenesisEffects::new(false, false, Default::default()).color_effects_enabled());
+        assert!(!GenesisEffects::new(false, true, Default::default()).color_effects_enabled());
     }
 
     #[test]
     fn start_boot_sequence_makes_is_running_true() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
         let portrait = Rect::new(5, 6, 30, 14);
@@ -352,7 +391,7 @@ mod tests {
 
     #[test]
     fn start_boot_sequence_noop_when_disabled() {
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
         let portrait = Rect::new(5, 6, 30, 14);
@@ -364,7 +403,7 @@ mod tests {
 
     #[test]
     fn start_welcome_to_chat_transition_cancels_boot_and_starts_dissolve() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
         let portrait = Rect::new(5, 6, 30, 14);
@@ -388,7 +427,7 @@ mod tests {
 
     #[test]
     fn start_welcome_to_chat_transition_noop_when_disabled() {
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         effects.start_welcome_to_chat_transition(area);
         assert!(!effects.is_running());
@@ -396,7 +435,7 @@ mod tests {
 
     #[test]
     fn start_chat_coalesce_starts_effect() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         effects.start_chat_coalesce(area);
         assert!(effects.is_running(), "coalesce-in should be running");
@@ -404,7 +443,7 @@ mod tests {
 
     #[test]
     fn start_chat_coalesce_noop_when_disabled() {
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         effects.start_chat_coalesce(area);
         assert!(!effects.is_running());
@@ -412,7 +451,7 @@ mod tests {
 
     #[test]
     fn flash_error_creates_effect_without_panic() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.flash_error(area);
         assert!(effects.is_running(), "error flash should be running");
@@ -420,7 +459,7 @@ mod tests {
 
     #[test]
     fn flash_error_is_noop_when_disabled() {
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.flash_error(area);
         assert!(!effects.is_running(), "flash_error should be no-op when disabled");
@@ -428,7 +467,7 @@ mod tests {
 
     #[test]
     fn sweep_compression_creates_effect_without_panic() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.sweep_compression(area);
         assert!(effects.is_running(), "compression sweep should be running");
@@ -436,7 +475,7 @@ mod tests {
 
     #[test]
     fn sweep_compression_is_noop_when_disabled() {
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.sweep_compression(area);
         assert!(!effects.is_running(), "sweep_compression should be no-op when disabled");
@@ -446,7 +485,7 @@ mod tests {
     fn on_status_change_idle_to_thinking_starts_effects() {
         use crate::events::StatusState;
 
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
         assert!(effects.is_running(), "transition + pulse should be running");
@@ -456,7 +495,7 @@ mod tests {
     fn on_status_change_thinking_to_idle_starts_idle_effects() {
         use crate::events::StatusState;
 
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Thinking, &StatusState::Idle, area);
         assert!(effects.is_running(), "deactivate + idle effects should be running");
@@ -466,7 +505,7 @@ mod tests {
     fn on_status_change_noop_when_disabled() {
         use crate::events::StatusState;
 
-        let mut effects = GenesisEffects::new(false, false);
+        let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
         assert!(!effects.is_running());
@@ -476,7 +515,7 @@ mod tests {
     fn on_status_change_noop_when_no_color() {
         use crate::events::StatusState;
 
-        let mut effects = GenesisEffects::new(true, true);
+        let mut effects = GenesisEffects::new(true, true, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
         assert!(!effects.is_running());
@@ -484,7 +523,7 @@ mod tests {
 
     #[test]
     fn start_idle_effects_makes_running() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.start_idle_effects(area);
         assert!(effects.is_running(), "idle effects should be running");
@@ -492,7 +531,7 @@ mod tests {
 
     #[test]
     fn stop_idle_effects_cancels() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.start_idle_effects(area);
         effects.stop_idle_effects();
@@ -504,7 +543,7 @@ mod tests {
 
     #[test]
     fn active_pulse_starts_and_stops() {
-        let mut effects = GenesisEffects::new(true, false);
+        let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.start_active_pulse(area);
         assert!(effects.is_running());

@@ -68,12 +68,8 @@ impl Pattern {
                     *vy += GRAVITY * secs;
                     *x += *vx * secs;
                     *y += *vy * secs;
-                    // Wrap around [0, 1] bounds.
-                    if *x < 0.0 {
-                        *x += 1.0;
-                    } else if *x > 1.0 {
-                        *x -= 1.0;
-                    }
+                    // Wrap around [0, 1] bounds (handles large dt jumps).
+                    *x = x.rem_euclid(1.0);
                     if *y < 0.0 {
                         *y = 0.0;
                         *vy = vy.abs() * 0.6; // bounce

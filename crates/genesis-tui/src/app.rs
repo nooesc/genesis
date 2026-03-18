@@ -625,7 +625,7 @@ mod tests {
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
-            effects: crate::effects::GenesisEffects::new(false, false),
+            effects: crate::effects::GenesisEffects::new(false, false, Default::default()),
             idle_pattern: Pattern::Lissajous {
                 t: 0.0,
                 a: 3.0,
