@@ -151,7 +151,15 @@ pub async fn run_tui(
     .unwrap_or(0);
 
     // Look up context window size for the configured model.
-    let context_window_size = genesis_provider::model_metadata::lookup(&config.provider.model)
+    // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
+    // since model_metadata only indexes bare model IDs.
+    let model_for_lookup = config
+        .provider
+        .model
+        .rsplit('/')
+        .next()
+        .unwrap_or(&config.provider.model);
+    let context_window_size = genesis_provider::model_metadata::lookup(model_for_lookup)
         .map(|m| m.context_length)
         .unwrap_or(genesis_provider::model_metadata::DEFAULT_CONTEXT_LENGTH);
 

@@ -133,10 +133,12 @@ impl App {
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
 
-                // Update context usage percentage based on cumulative input tokens
-                // relative to the model's context window size.
+                // Update context usage percentage. Use the latest turn's
+                // input_tokens (not the cumulative sum) because each LLM call
+                // re-sends the full conversation, so input_tokens already
+                // represents the current context window consumption.
                 if self.context_window_size > 0 {
-                    let pct = ((self.status_bar.tokens_in as u128 * 100)
+                    let pct = ((input_tokens as u128 * 100)
                         / self.context_window_size as u128)
                         .min(100) as u8;
                     self.status_bar.set_context_percent(pct);
