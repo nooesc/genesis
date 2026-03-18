@@ -364,6 +364,17 @@ impl App {
             return;
         }
 
+        // Ctrl+P — open command palette (accessible anytime).
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if !self.command_popup.is_visible() {
+                self.command_popup.show();
+            } else {
+                self.command_popup.hide();
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // When the command popup is visible, route keys to it first.
         if self.command_popup.is_visible() {
             // Keep the slash command query synced with the actual input widget so
