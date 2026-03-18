@@ -120,21 +120,44 @@ impl InputWidget {
     // ── Event handling ────────────────────────────────────────────────────
 
     /// Handle a keyboard event and return the resulting [`InputAction`].
+    ///
+    /// ## Newline insertion
+    ///
+    /// Multiple keybindings are supported for inserting newlines, since
+    /// Shift+Enter requires the Kitty keyboard protocol which many
+    /// terminals don't support:
+    ///
+    /// - **Shift+Enter** — works in Kitty, WezTerm, foot, and other
+    ///   terminals supporting the keyboard enhancement protocol
+    /// - **Alt+Enter** (Option+Enter on macOS) — works in most terminals
+    ///   when iTerm2 "Option sends Esc+" is enabled
+    /// - **Ctrl+J** — universal fallback (ASCII newline, works everywhere)
     pub fn handle_key(&mut self, key: KeyEvent) -> InputAction {
         match (key.code, key.modifiers) {
-            // ── Submit (Enter without Shift) ─────────────────────────────
-            (KeyCode::Enter, mods) if !mods.contains(KeyModifiers::SHIFT) => {
+            // ── Newline insertion (must be checked BEFORE plain Enter) ────
+            // Shift+Enter — requires Kitty keyboard protocol
+            (KeyCode::Enter, mods) if mods.contains(KeyModifiers::SHIFT) => {
+                self.insert_char('\n');
+                InputAction::None
+            }
+            // Alt+Enter — works in terminals with "Option sends Esc+"
+            (KeyCode::Enter, mods) if mods.contains(KeyModifiers::ALT) => {
+                self.insert_char('\n');
+                InputAction::None
+            }
+            // Ctrl+J — universal ASCII newline, works in all terminals
+            (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                self.insert_char('\n');
+                InputAction::None
+            }
+
+            // ── Submit (plain Enter) ─────────────────────────────────────
+            (KeyCode::Enter, _) => {
                 let text = std::mem::take(&mut self.buffer);
                 self.cursor = 0;
                 self.history_index = None;
                 self.saved_input = None;
                 InputAction::Submit(text)
-            }
-
-            // ── Newline (Shift+Enter) ────────────────────────────────────
-            (KeyCode::Enter, mods) if mods.contains(KeyModifiers::SHIFT) => {
-                self.insert_char('\n');
-                InputAction::None
             }
 
             // ── Interrupt / Exit ─────────────────────────────────────────
@@ -810,6 +833,26 @@ mod tests {
         w.handle_key(key(KeyCode::Char('b')));
         assert_eq!(w.text(), "a\nb");
         assert!(w.is_multiline());
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline() {
+        let mut w = InputWidget::new();
+        w.handle_key(key(KeyCode::Char('a')));
+        let action = w.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(action, InputAction::None);
+        w.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(w.text(), "a\nb");
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline() {
+        let mut w = InputWidget::new();
+        w.handle_key(key(KeyCode::Char('a')));
+        let action = w.handle_key(ctrl('j'));
+        assert_eq!(action, InputAction::None);
+        w.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(w.text(), "a\nb");
     }
 
     #[test]

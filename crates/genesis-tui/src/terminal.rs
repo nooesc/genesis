@@ -28,12 +28,15 @@ pub fn init() -> io::Result<()> {
     let _ = execute!(stdout(), EnterAlternateScreen);
     execute!(stdout(), EnableBracketedPaste)?;
 
-    // Best-effort keyboard enhancement (not supported on all terminals)
+    // Best-effort keyboard enhancement (not supported on all terminals).
+    // DISAMBIGUATE_ESCAPE_CODES enables Shift+Enter detection in Kitty/WezTerm.
+    // REPORT_ALL_KEYS_AS_ESCAPE_CODES improves modifier detection for Enter/Tab.
     let _ = execute!(
         stdout(),
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
         )
     );
 
