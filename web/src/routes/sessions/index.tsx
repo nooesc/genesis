@@ -2,7 +2,7 @@ import * as React from 'react'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { z } from 'zod'
 import { type ColumnDef } from '@tanstack/react-table'
-import { useSessions } from '@/lib/api/queries/sessions'
+import { useSessionsWithCount } from '@/lib/api/queries/sessions'
 import { DataTable } from '@/components/shared/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -78,10 +78,10 @@ const columns: ColumnDef<SessionSummary, unknown>[] = [
     header: 'Tokens',
     size: 120,
     accessorFn: (row) => row.total_input_tokens + row.total_output_tokens,
-    cell: ({ row }) => {
+    cell: ({ row, table }) => {
       const total = row.original.total_input_tokens + row.original.total_output_tokens
-      const maxTokens = 100_000 // reasonable max for bar visualization
-      const barWidth = Math.min((total / maxTokens) * 100, 100)
+      const maxTokens = (table.options.meta as { maxTokens?: number })?.maxTokens ?? 1
+      const barWidth = maxTokens > 0 ? Math.min((total / maxTokens) * 100, 100) : 0
       return (
         <div className="flex items-center gap-2">
           <span className="w-12 text-right font-mono text-[10px] tabular-nums text-muted-foreground/60">
@@ -115,7 +115,9 @@ function SessionsPage() {
   const [inputValue, setInputValue] = React.useState(search ?? '')
   const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const { data: sessions, isLoading } = useSessions({ search: search || undefined })
+  const { data: response, isLoading } = useSessionsWithCount({ search: search || undefined })
+  const sessions = response?.sessions
+  const totalCount = response?.count ?? 0
 
   function handleSearchChange(e: React.ChangeEvent<HTMLInputElement>) {
     const value = e.target.value
@@ -136,7 +138,10 @@ function SessionsPage() {
     }
   }, [])
 
-  const sessionCount = sessions?.length ?? 0
+  const maxTokens = React.useMemo(
+    () => Math.max(1, ...(sessions ?? []).map(s => s.total_input_tokens + s.total_output_tokens)),
+    [sessions],
+  )
 
   return (
     <div className="flex flex-col gap-4">
@@ -147,7 +152,7 @@ function SessionsPage() {
           </h1>
           {!isLoading && (
             <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {sessionCount}
+              {totalCount}
             </span>
           )}
         </div>
@@ -169,6 +174,7 @@ function SessionsPage() {
         <DataTable
           columns={columns}
           data={sessions ?? []}
+          meta={{ maxTokens }}
           onRowClick={(session) => {
             void navigate({ to: '/sessions/$id', params: { id: session.id } })
           }}
