@@ -39,13 +39,9 @@ pub struct CommandDef {
 }
 
 const COMMANDS: &[CommandDef] = &[
-    CommandDef { name: "/model",       description: "Switch the LLM model" },
+    CommandDef { name: "/help",        description: "Show keybindings and commands" },
     CommandDef { name: "/clear",       description: "Clear conversation history" },
     CommandDef { name: "/exit",        description: "Exit Eve" },
-    CommandDef { name: "/help",        description: "Show available commands" },
-    CommandDef { name: "/sessions",    description: "List recent sessions" },
-    CommandDef { name: "/personality", description: "Change Eve's personality" },
-    CommandDef { name: "/tools",       description: "List available tools" },
 ];
 
 // ── CommandAction ─────────────────────────────────────────────────────────
@@ -458,19 +454,19 @@ mod tests {
     fn filter_matches_substring() {
         let mut popup = CommandPopup::new();
         popup.show();
-        popup.update_query("mod");
-        // Only "/model" should match.
+        popup.update_query("hel");
+        // Only "/help" should match.
         assert_eq!(popup.filtered.len(), 1);
-        assert_eq!(popup.commands[popup.filtered[0]].name, "/model");
+        assert_eq!(popup.commands[popup.filtered[0]].name, "/help");
     }
 
     #[test]
     fn filter_is_case_insensitive() {
         let mut popup = CommandPopup::new();
         popup.show();
-        popup.update_query("MOD");
+        popup.update_query("HEL");
         assert_eq!(popup.filtered.len(), 1);
-        assert_eq!(popup.commands[popup.filtered[0]].name, "/model");
+        assert_eq!(popup.commands[popup.filtered[0]].name, "/help");
     }
 
     #[test]
@@ -528,9 +524,9 @@ mod tests {
     fn enter_selects_command() {
         let mut popup = CommandPopup::new();
         popup.show();
-        // First item is "/model".
+        // First item is "/help" (safe default).
         let action = popup.handle_key(key(KeyCode::Enter));
-        assert_eq!(action, CommandAction::Select("/model".to_owned()));
+        assert_eq!(action, CommandAction::Select("/help".to_owned()));
         assert!(!popup.is_visible());
     }
 

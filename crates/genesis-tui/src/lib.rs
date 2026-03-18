@@ -354,9 +354,12 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
     // Clear the buffer before drawing so stale content doesn't linger.
     buf.reset();
 
-    // ── Overlay (Transcript) takes over the full viewport ─────────────────
+    // ── Overlay takes over the full viewport ────────────────────────────
     if let Some(overlay) = &app.overlay {
-        overlay.render(area, buf);
+        match overlay {
+            app::ActiveOverlay::Transcript(t) => t.render(area, buf),
+            app::ActiveOverlay::Help(h) => h.render(area, buf),
+        }
         let _ = term.draw_diff();
         term.swap_buffers();
         let _ = term.flush();

@@ -87,6 +87,7 @@ pub enum StatusState {
 #[derive(Debug)]
 pub enum OverlayKind {
     Transcript,
+    Help,
 }
 
 /// User actions sent to the agent.
