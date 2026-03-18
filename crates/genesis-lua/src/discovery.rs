@@ -46,20 +46,16 @@ fn ensure_unique_name(names: &mut HashSet<String>, name: &str) -> Result<(), Lua
 fn scan_plugins(root: &Path, best_effort: bool) -> Result<DiscoveryReport, LuaRuntimeError> {
     let mut report = DiscoveryReport::default();
     let mut names = HashSet::new();
-    let mut entries = fs::read_dir(root)
-        .map_err(|source| LuaRuntimeError::ReadPluginDirectory {
-            path: root.to_path_buf(),
-            source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| LuaRuntimeError::ReadPluginEntry {
-            path: root.to_path_buf(),
-            source,
-        })?;
-    entries.sort_by_key(|entry| entry.file_name());
+    let read_dir = fs::read_dir(root).map_err(|source| LuaRuntimeError::ReadPluginDirectory {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let (entries, entry_errors) =
+        collect_plugin_entry_paths(read_dir.map(|entry| entry.map(|entry| entry.path())), root, best_effort)?;
+    report.errors.extend(entry_errors);
 
     for entry in entries {
-        match discover_plugin_entry(entry.path(), &mut names) {
+        match discover_plugin_entry(entry, &mut names) {
             Ok(Some(plugin)) => report.plugins.push(plugin),
             Ok(None) => {}
             Err(err) if best_effort => report.errors.push(err),
@@ -68,6 +64,37 @@ fn scan_plugins(root: &Path, best_effort: bool) -> Result<DiscoveryReport, LuaRu
     }
 
     Ok(report)
+}
+
+fn collect_plugin_entry_paths<I>(
+    entries: I,
+    root: &Path,
+    best_effort: bool,
+) -> Result<(Vec<PathBuf>, Vec<LuaRuntimeError>), LuaRuntimeError>
+where
+    I: IntoIterator<Item = std::io::Result<PathBuf>>,
+{
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+
+    for entry in entries {
+        match entry {
+            Ok(path) => paths.push(path),
+            Err(source) if best_effort => errors.push(LuaRuntimeError::ReadPluginEntry {
+                path: root.to_path_buf(),
+                source,
+            }),
+            Err(source) => {
+                return Err(LuaRuntimeError::ReadPluginEntry {
+                    path: root.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+
+    paths.sort();
+    Ok((paths, errors))
 }
 
 fn discover_plugin_entry(
@@ -134,11 +161,12 @@ fn discover_plugin_entry(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
 
     use crate::LuaRuntimeError;
 
-    use super::discover_plugins;
+    use super::{collect_plugin_entry_paths, discover_plugins};
 
     #[test]
     fn discovers_single_file_plugin_as_untrusted() {
@@ -240,6 +268,32 @@ name = "broken"
         assert!(
             matches!(err, LuaRuntimeError::ParsePluginManifest { ref path, .. } if path == &manifest_path),
             "expected parse plugin manifest error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn best_effort_collects_entry_errors_without_dropping_valid_paths() {
+        let root = PathBuf::from("/tmp/plugins");
+        let alpha = root.join("alpha.lua");
+        let gamma = root.join("gamma.lua");
+
+        let (paths, errors) = collect_plugin_entry_paths(
+            vec![
+                Ok(gamma.clone()),
+                Err(std::io::Error::new(ErrorKind::PermissionDenied, "denied")),
+                Ok(alpha.clone()),
+            ],
+            &root,
+            true,
+        )
+        .expect("best-effort path collection should succeed");
+
+        assert_eq!(paths, vec![alpha, gamma], "valid paths should be retained and sorted");
+        assert_eq!(errors.len(), 1, "iterator error should be recorded");
+        assert!(
+            matches!(errors[0], LuaRuntimeError::ReadPluginEntry { ref path, .. } if path == &root),
+            "expected entry-read error rooted at the plugin dir, got: {:?}",
+            errors[0]
         );
     }
 }
