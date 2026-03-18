@@ -2239,13 +2239,28 @@ async fn execute_tool_calls_parallel(
 
     if tool_calls.len() == 1 {
         // Fast path: avoid semaphore overhead for single tool calls.
+        // execute_single_tool converts all errors to soft "Error:" content,
+        // so the Ok(r) branch always succeeds and timeouts are the only
+        // additional failure mode to handle.
         let result = match tokio::time::timeout(
             timeout_duration,
             execute_single_tool(tools, subagent_spawner, &tool_calls[0]),
         )
         .await
         {
-            Ok(r) => r?,
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => {
+                // Defensive: execute_single_tool should never return Err
+                // after error-as-data conversion, but handle it gracefully.
+                (
+                    format!(
+                        "Error: tool `{}` encountered an unexpected error. \
+                         Try a different approach.",
+                        tool_calls[0].function.name
+                    ),
+                    false,
+                )
+            }
             Err(_) => {
                 warn!(
                     tool_name = tool_calls[0].function.name.as_str(),
@@ -2253,7 +2268,9 @@ async fn execute_tool_calls_parallel(
                 );
                 (
                     format!(
-                        "Error: tool `{}` timed out after {timeout_secs}s",
+                        "Error: tool `{}` timed out after {timeout_secs}s. \
+                         The operation took too long. Try a simpler approach \
+                         or break the task into smaller steps.",
                         tool_calls[0].function.name
                     ),
                     false,
@@ -2289,7 +2306,11 @@ async fn execute_tool_calls_parallel(
                             timeout_secs, "tool call timed out"
                         );
                         Ok((
-                            format!("Error: tool `{tool_name}` timed out after {timeout_secs}s"),
+                            format!(
+                                "Error: tool `{tool_name}` timed out after {timeout_secs}s. \
+                                 The operation took too long. Try a simpler approach \
+                                 or break the task into smaller steps."
+                            ),
                             false,
                         ))
                     }
@@ -2320,15 +2341,37 @@ async fn execute_single_tool(
         tool_call_id = tc.id.as_str()
     );
     let started_at = Instant::now();
+    let tool_name = &tc.function.name;
+
+    // Parse arguments — malformed JSON from the LLM is a recoverable error
+    // (feed it back so the model can self-correct) rather than a hard failure.
     let arguments = {
         let _entered = span.enter();
-        let args = parse_tool_arguments(&tc.function.arguments)?;
-        debug!(argument_count = args.len(), "parsed tool arguments");
-        args
+        match parse_tool_arguments(&tc.function.arguments) {
+            Ok(args) => {
+                debug!(argument_count = args.len(), "parsed tool arguments");
+                args
+            }
+            Err(e) => {
+                warn!(
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    tool_name = tool_name.as_str(),
+                    error = %e,
+                    "tool argument parse failed, feeding error back to LLM"
+                );
+                return Ok((
+                    format!(
+                        "Error: tool `{tool_name}` received invalid arguments: {e}\n\n\
+                         Please fix the JSON arguments and try again."
+                    ),
+                    false,
+                ));
+            }
+        }
     };
 
     let call = ToolCall {
-        name: tc.function.name.clone(),
+        name: tool_name.clone(),
         arguments,
     };
 
@@ -2363,33 +2406,53 @@ async fn execute_single_tool(
                 .unwrap_or(false);
             Ok((output.content, requires_input))
         }
-        Err(err) => match &err {
-            ToolError::ToolNotFound(name) => {
-                warn!(
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    tool_name = name.as_str(),
-                    "tool not found, suggesting alternatives"
-                );
-                let suggestions = suggest_similar_tools(name, tools);
-                let msg = if suggestions.is_empty() {
-                    format!("Error: tool `{name}` not found. Use only tools listed in the system prompt.")
-                } else {
+        Err(err) => {
+            warn!(
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                tool_name = tool_name.as_str(),
+                error = %err,
+                "tool call failed, feeding error back to LLM"
+            );
+            match &err {
+                ToolError::ToolNotFound(name) => {
+                    let suggestions = suggest_similar_tools(name, tools);
+                    let msg = if suggestions.is_empty() {
+                        format!(
+                            "Error: tool `{name}` not found. \
+                             Use only tools listed in the system prompt."
+                        )
+                    } else {
+                        format!(
+                            "Error: tool `{name}` not found. Did you mean: {}?\n\n\
+                             Try calling one of the suggested tools instead.",
+                            suggestions.join(", ")
+                        )
+                    };
+                    Ok((msg, false))
+                }
+                ToolError::MissingArgument { tool, argument } => Ok((
                     format!(
-                        "Error: tool `{name}` not found. Did you mean: {}?",
-                        suggestions.join(", ")
-                    )
-                };
-                Ok((msg, false))
+                        "Error: tool `{tool}` is missing required argument `{argument}`.\n\n\
+                         Please include the `{argument}` parameter and try again."
+                    ),
+                    false,
+                )),
+                ToolError::ApprovalDenied { tool, reason } => Ok((
+                    format!(
+                        "Error: tool `{tool}` was denied: {reason}\n\n\
+                         Try a different approach that doesn't require this operation."
+                    ),
+                    false,
+                )),
+                ToolError::ExecutionFailed { tool, reason } => Ok((
+                    format!(
+                        "Error: tool `{tool}` execution failed: {reason}\n\n\
+                         You can try a different approach or use an alternative tool."
+                    ),
+                    false,
+                )),
             }
-            _ => {
-                warn!(
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %err,
-                    "tool call returned recoverable error content"
-                );
-                Ok((format!("Error: {err}"), false))
-            }
-        },
+        }
     }
 }
 
@@ -2822,6 +2885,55 @@ mod tests {
 
         assert!(result.0.starts_with("Error:"));
         assert!(!result.1, "error results should not require input");
+    }
+
+    #[tokio::test]
+    async fn malformed_arguments_produce_soft_error_not_hard_failure() {
+        let agent = test_agent();
+        let result = execute_single_tool(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &ToolCallEntry {
+                id: "tool-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: "not valid json at all".to_owned(),
+                },
+            },
+        )
+        .await;
+
+        // Malformed JSON should be a soft error, not a hard failure
+        let (msg, requires_input) = result.expect("malformed args should be recoverable");
+        assert!(msg.starts_with("Error:"), "should start with Error: prefix");
+        assert!(
+            msg.contains("invalid arguments"),
+            "should mention invalid arguments: {msg}"
+        );
+        assert!(!requires_input);
+    }
+
+    #[tokio::test]
+    async fn non_object_arguments_produce_soft_error() {
+        let agent = test_agent();
+        let result = execute_single_tool(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &ToolCallEntry {
+                id: "tool-1".to_owned(),
+                call_type: "function".to_owned(),
+                function: genesis_provider::FunctionCall {
+                    name: "echo".to_owned(),
+                    arguments: "[1,2,3]".to_owned(),
+                },
+            },
+        )
+        .await;
+
+        let (msg, _) = result.expect("non-object JSON should be recoverable");
+        assert!(msg.starts_with("Error:"));
+        assert!(msg.contains("invalid arguments"));
     }
 
     #[tokio::test]
