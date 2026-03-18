@@ -5,7 +5,6 @@
 //! are cached locally with a configurable TTL.
 
 use serde::Deserialize;
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 /// Default cache TTL: 1 hour.
@@ -172,7 +171,7 @@ pub async fn fetch_models(
 }
 
 /// Read models from cache if the file exists and is fresh.
-fn read_cache(path: &PathBuf) -> Option<Vec<OpenRouterModel>> {
+fn read_cache(path: &std::path::Path) -> Option<Vec<OpenRouterModel>> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     let age = SystemTime::now().duration_since(modified).ok()?;
@@ -187,7 +186,7 @@ fn read_cache(path: &PathBuf) -> Option<Vec<OpenRouterModel>> {
 }
 
 /// Write the raw API response to the cache file.
-fn write_cache(path: &PathBuf, content: &str) -> std::io::Result<()> {
+fn write_cache(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

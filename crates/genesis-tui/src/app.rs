@@ -322,8 +322,10 @@ impl App {
                 self.overlay = None;
             }
             if let Some(model_id) = model_selected {
-                // Switch model — notify via AppEvent.
-                let _ = self.app_tx.send(AppEvent::ModelChanged(model_id));
+                // Update status bar display.
+                let _ = self.app_tx.send(AppEvent::ModelChanged(model_id.clone()));
+                // Switch the actual execution service model via submission channel.
+                let _ = self.submission_tx.send(Submission::ModelSwitch(model_id));
             }
             self.frame_requester.schedule_frame();
             return;

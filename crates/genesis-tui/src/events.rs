@@ -104,4 +104,7 @@ pub enum Submission {
     },
     /// Interrupt the current turn (Ctrl+C).
     Interrupt,
+    /// Switch the active model (from model picker).
+    /// Format: "backend/model" (e.g. "anthropic/claude-sonnet-4-6").
+    ModelSwitch(String),
 }

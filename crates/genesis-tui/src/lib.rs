@@ -226,7 +226,23 @@ pub async fn run_tui(
     // It lives here as an Option and gets polled in select!.
     let mut turn_future: Option<Pin<Box<dyn Future<Output = TurnResult> + '_>>> = None;
 
+    let mut pending_model_switch: Option<String> = None;
+
     loop {
+        // Process deferred model switch — must drop turn_future first
+        // to release the immutable borrow on `service`.
+        if let Some(model_id) = pending_model_switch.take() {
+            // Drop any active turn future to release the borrow on service.
+            turn_future = None;
+            let (backend, model) = if let Some(pos) = model_id.find('/') {
+                (model_id[..pos].to_owned(), model_id.clone())
+            } else {
+                ("openrouter".to_owned(), model_id.clone())
+            };
+            service.set_model_override(backend, model);
+            tracing::info!(model_id = model_id.as_str(), "model switched via picker");
+        }
+
         tokio::select! {
             // ── Terminal events — always active ──────────────────────
             ct_event = crossterm_events.next() => {
@@ -262,6 +278,12 @@ pub async fn run_tui(
                     Some(Submission::Interrupt) => {
                         // Drop the turn future to cancel
                         turn_future = None;
+                    }
+                    Some(Submission::ModelSwitch(_model_id)) => {
+                        // Model switch is handled below, outside the select
+                        // block, to avoid borrow conflicts with turn_future.
+                        // Store it for deferred processing.
+                        pending_model_switch = Some(_model_id);
                     }
                     None => break,
                 }
