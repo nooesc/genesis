@@ -21,8 +21,8 @@ use ratatui::{
 // ── Palette ─────────────────────────────────────────────────────────────────
 
 /// Eve lavender accent for active dots.
-const EVE_LAVENDER: Color = Color::Rgb(180, 167, 214);
-/// Dim grey for flatline / inactive.
+const EVE_LAVENDER: Color = crate::history::rgb(genesis_ui::colors::EVE_LAVENDER);
+/// Dim grey for flatline / inactive (slightly dimmer than UI_DIM).
 const DIM_GREY: Color = Color::Rgb(98, 98, 98);
 
 // ── Pattern ─────────────────────────────────────────────────────────────────

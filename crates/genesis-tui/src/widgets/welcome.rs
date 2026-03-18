@@ -211,7 +211,7 @@ impl WelcomeWidget {
 
         let big_title = BigText::builder()
             .pixel_size(PixelSize::Quadrant)
-            .style(Style::default().fg(Color::Rgb(180, 167, 214)))
+            .style(Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER)))
             .lines(vec!["GENESIS".into()])
             .centered()
             .build();
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(line.spans[1].content, "▀");
         assert_eq!(
             line.spans[1].style,
-            Style::default().fg(Color::Rgb(180, 167, 214))
+            Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER))
         );
         assert_eq!(line.spans[2].content, " ");
     }

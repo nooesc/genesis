@@ -14,6 +14,7 @@ use ratatui::layout::Rect;
 use tachyonfx::{fx, Interpolation};
 
 use super::EffectId;
+use crate::history::rgb;
 
 /// Register the full boot sequence on the given effect manager.
 ///
@@ -56,7 +57,7 @@ pub fn start_boot_sequence(
     let settle_effect = fx::sequence(&[
         fx::sleep(2800),
         fx::fade_from_fg(
-            ratatui::style::Color::Rgb(180, 167, 214),
+            rgb(genesis_ui::colors::EVE_LAVENDER),
             (400, Interpolation::SineOut),
         )
         .with_area(full_area),

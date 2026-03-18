@@ -355,8 +355,8 @@ pub async fn run_tui(
                 // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
 
-                // Tick braille patterns for welcome screen and idle canvas.
-                let pattern_dt = std::time::Duration::from_millis(80);
+                // Tick braille patterns using real elapsed time.
+                let pattern_dt = app.effects.frame_dt();
                 if matches!(app.screen, AppScreen::Welcome) {
                     app.welcome.braille_pattern.tick(pattern_dt);
                 }
@@ -389,20 +389,18 @@ pub async fn run_tui(
                 render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                // Idle effects (border glow, breathing) and braille patterns also need ticking.
-                let braille_animating = matches!(app.screen, AppScreen::Welcome)
+                let has_tachyonfx = app.effects.is_running();
+                let has_sprite_anim = app.status_bar.is_animating();
+                let has_braille = matches!(app.screen, AppScreen::Welcome)
                     || (!app.turn_running && matches!(app.screen, AppScreen::Chat));
-                let needs_redraw = app.status_bar.is_animating()
-                    || app.effects.is_running()
-                    || braille_animating
-                    || (app.effects.enabled()
-                        && matches!(app.screen, AppScreen::Chat)
-                        && matches!(app.status_bar.state, crate::events::StatusState::Idle));
-                if needs_redraw {
-                    let interval = if app.effects.is_running() {
-                        std::time::Duration::from_millis(16) // ~60fps for smooth effects
-                    } else {
+                if has_tachyonfx || has_sprite_anim || has_braille {
+                    let interval = if has_tachyonfx {
+                        std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
+                    } else if has_sprite_anim {
                         app.status_bar.animation_interval()
+                    } else {
+                        // Idle braille patterns — 200ms (~5fps) is plenty for slow curves
+                        std::time::Duration::from_millis(200)
                     };
                     app.frame_requester.schedule_frame_in(interval);
                 }

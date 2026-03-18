@@ -19,8 +19,8 @@ use super::EffectId;
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 
-/// Status bar background (idle).
-const BAR_BG: Color = Color::Rgb(30, 28, 36);
+/// Status bar background (idle). Shared with transitions.
+pub(crate) const BAR_BG: Color = Color::Rgb(30, 28, 36);
 
 // ── Status transition effects (Task 12) ─────────────────────────────────────
 

@@ -21,6 +21,8 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+use crate::history::rgb;
+
 /// Subsystem health summary for the boot status display.
 pub struct BootStatusInfo {
     pub provider_ok: bool,
@@ -35,14 +37,10 @@ pub struct BootStatusWidget {
     info: BootStatusInfo,
 }
 
-/// EVE_LAVENDER for labels.
-const LABEL_COLOR: Color = Color::Rgb(180, 167, 214);
-/// UI_SUCCESS for "ok".
-const OK_COLOR: Color = Color::Rgb(135, 175, 95);
-/// UI_WARNING for "--".
-const WARN_COLOR: Color = Color::Rgb(215, 175, 95);
-/// UI_DIM for the dot separator.
-const SEP_COLOR: Color = Color::Rgb(108, 108, 108);
+const LABEL_COLOR: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
+const OK_COLOR: Color = rgb(genesis_ui::colors::UI_SUCCESS);
+const WARN_COLOR: Color = rgb(genesis_ui::colors::UI_WARNING);
+const SEP_COLOR: Color = rgb(genesis_ui::colors::UI_DIM);
 
 impl BootStatusWidget {
     /// Create a new boot status widget from subsystem health info.

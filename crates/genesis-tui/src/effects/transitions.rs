@@ -53,7 +53,7 @@ pub fn compression_sweep(area: Rect) -> Effect {
         Motion::LeftToRight,
         10,  // gradient_length
         0,   // randomness
-        ratatui::style::Color::Rgb(30, 28, 36),
+        super::ambient::BAR_BG,
         (400, Interpolation::SineInOut),
     )
     .with_area(area)

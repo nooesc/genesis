@@ -180,11 +180,6 @@ impl StatusBarWidget {
         self.token_history.push_back(tokens_in + tokens_out);
     }
 
-    /// Borrow the token history for rendering.
-    pub fn token_history(&self) -> &VecDeque<u64> {
-        &self.token_history
-    }
-
     /// Set whether effects are enabled (affects idle animation interval).
     pub fn set_effects_enabled(&mut self, enabled: bool) {
         self.effects_enabled = enabled;
@@ -225,18 +220,20 @@ impl StatusBarWidget {
 
     /// Advance the animation frame if enough time has elapsed.
     pub fn tick(&mut self) {
-        // Tick the heartbeat pattern regardless of state.
-        let dt = self.last_tick.elapsed();
+        let now = Instant::now();
+        // Tick the heartbeat with the actual elapsed time since last tick.
+        let dt = now.duration_since(self.last_tick);
         self.heartbeat.tick(dt);
 
         if matches!(self.state, StatusState::Idle) {
+            self.last_tick = now;
             return;
         }
 
         let interval = self.animation_interval();
         if dt >= interval {
             self.sprite_frame = self.sprite_frame.wrapping_add(1);
-            self.last_tick = Instant::now();
+            self.last_tick = now;
         }
     }
 
@@ -317,39 +314,11 @@ impl StatusBarWidget {
 
             // Draw fill between center and heartbeat/sparkline/right.
             let center_end = area.x + center_start as u16 + center_w as u16 + 1;
-            let decorations_total = sparkline_w + heartbeat_w;
-            let decorations_start = if decorations_total > 0 {
-                area.x + right_start as u16 - decorations_total as u16
-            } else {
-                area.x + right_start as u16
-            };
-            if center_end < decorations_start {
-                let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in center_end..decorations_start {
-                    if let Some(cell) = buf.cell_mut((x, row)) {
-                        cell.set_symbol("─");
-                        cell.set_style(fill_style);
-                    }
-                }
-            }
+            fill_to_decorations(center_end, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
         } else {
             // No center — fill between left and heartbeat/sparkline/right.
             let fill_start = area.x + 1 + left_w as u16 + 1;
-            let decorations_total = sparkline_w + heartbeat_w;
-            let decorations_start = if decorations_total > 0 {
-                area.x + right_start as u16 - decorations_total as u16
-            } else {
-                area.x + right_start as u16
-            };
-            if fill_start < decorations_start {
-                let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in fill_start..decorations_start {
-                    if let Some(cell) = buf.cell_mut((x, row)) {
-                        cell.set_symbol("─");
-                        cell.set_style(fill_style);
-                    }
-                }
-            }
+            fill_to_decorations(fill_start, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
         }
 
         // Draw heartbeat (braille canvas, 1-row inline).
@@ -593,6 +562,31 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
         .flat_map(|s| s.content.chars())
         .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
         .sum()
+}
+
+/// Fill with "─" from `fill_start` up to the decorations (heartbeat + sparkline) area.
+fn fill_to_decorations(
+    fill_start: u16,
+    right_start: u16,
+    decorations_w: usize,
+    row: u16,
+    bg: Color,
+    buf: &mut Buffer,
+) {
+    let decorations_start = if decorations_w > 0 {
+        right_start - decorations_w as u16
+    } else {
+        right_start
+    };
+    if fill_start < decorations_start {
+        let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
+        for x in fill_start..decorations_start {
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol("─");
+                cell.set_style(fill_style);
+            }
+        }
+    }
 }
 
 /// Write spans into the buffer starting at (start_x, row), clipped at bound_x.

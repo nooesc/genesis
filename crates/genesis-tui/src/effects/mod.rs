@@ -119,17 +119,6 @@ impl GenesisEffects {
         self.enabled && !self.no_color
     }
 
-    /// Borrow the inner [`EffectManager`] mutably so callers can
-    /// register new effects via [`EffectManager::add_unique_effect`] etc.
-    pub fn manager_mut(&mut self) -> &mut EffectManager<EffectId> {
-        &mut self.manager
-    }
-
-    /// Borrow the inner [`EffectManager`] immutably.
-    pub fn manager(&self) -> &EffectManager<EffectId> {
-        &self.manager
-    }
-
     /// Start the Welcome → Chat transition: dissolve the welcome screen out.
     ///
     /// Cancels any running boot effects first so they don't compete with the
