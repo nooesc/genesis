@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod cache;
 pub mod http;
 pub mod url_safety;
 
@@ -270,12 +271,14 @@ struct ToolRegistration {
     definition: ToolDefinition,
     approval: ApprovalPolicy,
     handler: Arc<dyn ToolHandler>,
+    cache_policy: cache::CachePolicy,
 }
 
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, ToolRegistration>,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    cache: cache::ToolCache,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -318,6 +321,30 @@ impl ToolRegistry {
                 definition,
                 approval,
                 handler: Arc::new(handler),
+                cache_policy: cache::CachePolicy::NotCacheable,
+            },
+        );
+        self
+    }
+
+    /// Register a tool with a specific cache policy.
+    pub fn register_cached<H>(
+        &mut self,
+        definition: ToolDefinition,
+        approval: ApprovalPolicy,
+        handler: H,
+        cache_policy: cache::CachePolicy,
+    ) -> &mut Self
+    where
+        H: ToolHandler + 'static,
+    {
+        self.tools.insert(
+            definition.name.clone(),
+            ToolRegistration {
+                definition,
+                approval,
+                handler: Arc::new(handler),
+                cache_policy,
             },
         );
         self
@@ -379,7 +406,42 @@ impl ToolRegistry {
             &call.arguments,
             context,
         )?;
+
+        // Check cache for cacheable tools.
+        if let cache::CachePolicy::Cacheable(ttl) = &registration.cache_policy {
+            if let Some((content, metadata)) = self.cache.get(&call.name, &call.arguments) {
+                return Ok(ToolOutput { content, metadata });
+            }
+
+            let ttl = *ttl;
+            let result = registration.handler.run(call, context)?;
+            let tracked_path = cache::extract_tracked_path(&call.name, &call.arguments);
+            self.cache.insert(
+                &call.name,
+                &call.arguments,
+                result.content.clone(),
+                result.metadata.clone(),
+                ttl,
+                tracked_path,
+            );
+            return Ok(result);
+        }
+
+        // For invalidating tools, execute and then invalidate cache.
+        if let cache::CachePolicy::Invalidates = &registration.cache_policy {
+            let result = registration.handler.run(call, context)?;
+            if let Some(path) = cache::extract_tracked_path(&call.name, &call.arguments) {
+                self.cache.invalidate_path(&path);
+            }
+            return Ok(result);
+        }
+
         registration.handler.run(call, context)
+    }
+
+    /// Return the tool result cache.
+    pub fn cache(&self) -> &cache::ToolCache {
+        &self.cache
     }
 
     fn enforce_approval(
@@ -534,7 +596,7 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Destructive,
             builtins::ssh::SshExecTool,
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "read_file".to_owned(),
                 description: "Reads the contents of a file at the given path.".to_owned(),
@@ -548,8 +610,9 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::fs::ReadFileTool,
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(30)),
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "write_file".to_owned(),
                 description:
@@ -566,8 +629,9 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::fs::WriteFileTool,
+            cache::CachePolicy::Invalidates,
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "list_dir".to_owned(),
                 description: "Lists entries in a directory, marking subdirectories with a trailing slash."
@@ -582,6 +646,7 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::fs::ListDirTool,
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(60)),
         )
         .register(
             ToolDefinition {
@@ -617,7 +682,7 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Never,
             builtins::memory::MemoryRecallTool,
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "search_files".to_owned(),
                 description: "Searches file contents recursively using ripgrep (rg) with grep fallback, returning matching lines with file paths and line numbers.".to_owned(),
@@ -636,6 +701,7 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::search::SearchFilesTool,
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(60)),
         )
         .register(
             ToolDefinition {
@@ -862,7 +928,7 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Never,
             builtins::session::SessionHistoryTool,
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "patch".to_owned(),
                 description: "Applies a targeted find-and-replace within a file. Tries exact match first; if that fails, falls back to fuzzy line-based matching (≥70% similarity) so small whitespace or indentation differences don't cause failures. More efficient than write_file for small edits.".to_owned(),
@@ -879,6 +945,7 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Destructive,
             builtins::patch::PatchTool,
+            cache::CachePolicy::Invalidates,
         )
         .register(
             ToolDefinition {
@@ -1177,7 +1244,7 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Destructive,
             builtins::mixture::MixtureOfAgentsTool,
         )
-        .register(
+        .register_cached(
             ToolDefinition {
                 name: "list_tree".to_owned(),
                 description: "Recursively lists a directory as an indented tree. Skips noise directories (.git, node_modules, target, etc.) by default. Supports depth limiting, hidden files, and glob pattern filtering.".to_owned(),
@@ -1194,6 +1261,7 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::tree::ListTreeTool,
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(60)),
         )
         .register(
             ToolDefinition {
@@ -1747,7 +1815,7 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
+        cache, default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
         ToolOutput, ToolRegistry,
     };
     use genesis_types::ToolDefinition;
@@ -2023,6 +2091,170 @@ mod tests {
                 reason: "user denied approval".to_owned(),
             }
         );
+    }
+
+    /// A tool that counts how many times it has been called.
+    struct CountingTool {
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl ToolHandler for CountingTool {
+        fn run(&self, _call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ToolOutput {
+                content: format!("call #{}", n + 1),
+                metadata: BTreeMap::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn cacheable_tool_returns_cached_result_on_second_call() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register_cached(
+            ToolDefinition {
+                name: "cached_tool".to_owned(),
+                description: "a cacheable tool".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            CountingTool {
+                call_count: call_count.clone(),
+            },
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(60)),
+        );
+
+        let call = ToolCall {
+            name: "cached_tool".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let ctx = sample_context();
+
+        let r1 = registry.execute(&call, &ctx).unwrap();
+        assert_eq!(r1.content, "call #1");
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call should return cached result, NOT incrementing the counter.
+        let r2 = registry.execute(&call, &ctx).unwrap();
+        assert_eq!(r2.content, "call #1");
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let stats = registry.cache().stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn invalidating_tool_clears_cache_for_same_path() {
+        let read_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        let mut registry = ToolRegistry::new();
+
+        // Register a cacheable reader.
+        registry.register_cached(
+            ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "reads a file".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            CountingTool {
+                call_count: read_count.clone(),
+            },
+            cache::CachePolicy::Cacheable(std::time::Duration::from_secs(60)),
+        );
+
+        // Register an invalidating writer.
+        struct WriteTool;
+        impl ToolHandler for WriteTool {
+            fn run(
+                &self,
+                _call: &ToolCall,
+                _context: &ToolContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput {
+                    content: "written".to_owned(),
+                    metadata: BTreeMap::new(),
+                })
+            }
+        }
+        registry.register_cached(
+            ToolDefinition {
+                name: "write_file".to_owned(),
+                description: "writes a file".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            WriteTool,
+            cache::CachePolicy::Invalidates,
+        );
+
+        let ctx = sample_context();
+        let path_str = file_path.to_string_lossy().to_string();
+
+        let mut read_args = BTreeMap::new();
+        read_args.insert("path".to_owned(), path_str.clone());
+
+        let read_call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: read_args,
+        };
+
+        // First read → miss → handler runs.
+        registry.execute(&read_call, &ctx).unwrap();
+        assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second read → cache hit → handler NOT called.
+        registry.execute(&read_call, &ctx).unwrap();
+        assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Write → invalidates the read cache.
+        let mut write_args = BTreeMap::new();
+        write_args.insert("path".to_owned(), path_str);
+        let write_call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: write_args,
+        };
+        registry.execute(&write_call, &ctx).unwrap();
+
+        // Third read → miss (invalidated) → handler runs again.
+        registry.execute(&read_call, &ctx).unwrap();
+        assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn non_cacheable_tool_always_executes_handler() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register(
+            ToolDefinition {
+                name: "uncached_tool".to_owned(),
+                description: "a non-cacheable tool".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            CountingTool {
+                call_count: call_count.clone(),
+            },
+        );
+
+        let call = ToolCall {
+            name: "uncached_tool".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let ctx = sample_context();
+
+        registry.execute(&call, &ctx).unwrap();
+        registry.execute(&call, &ctx).unwrap();
+        registry.execute(&call, &ctx).unwrap();
+
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]

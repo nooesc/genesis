@@ -69,6 +69,7 @@ ratatui = { version = "0.29", features = ["unstable-backend-writer"] }
 insta = { version = "1", features = ["yaml"] }
 rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
+notify = "8"
 
 [profile.dev]
 split-debuginfo = "unpacked"

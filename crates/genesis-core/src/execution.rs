@@ -447,6 +447,17 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_default_working_dir(dir.clone());
         }
 
+        // Start filesystem watcher for tool result cache.
+        // Uses the working directory (or worktree dir) as the watch root.
+        {
+            let watch_dir = self
+                .default_working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(std::path::Path::new("."));
+            tool_runtime.start_cache_watcher(watch_dir);
+        }
+
         // Apply tool filter (allowlist/denylist)
         if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
             let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
