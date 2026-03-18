@@ -14,28 +14,22 @@ import {
 } from '@/components/ui/dialog'
 import { useDeleteSession, useForkSession } from '@/lib/api/mutations/sessions'
 import type { SessionSummary } from '@/lib/api/types'
-import { formatTokens } from '@/lib/utils'
+import { formatTokens, formatRelativeTime } from '@/lib/utils'
 
 interface SessionHeaderProps {
   session: SessionSummary
   messageCount?: number
 }
 
-function formatAge(isoString: string): string {
-  const ms = Date.now() - new Date(isoString).getTime()
-  const sec = Math.floor(ms / 1000)
-  if (sec < 60) return `${sec}s ago`
-  const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}m ago`
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr}h ago`
-  return `${Math.floor(hr / 24)}d ago`
-}
-
 export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
   const navigate = useNavigate()
   const [deleteOpen, setDeleteOpen] = React.useState(false)
   const [copied, setCopied] = React.useState(false)
+  const copyTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  React.useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+  }, [])
   const deleteMutation = useDeleteSession()
   const forkMutation = useForkSession()
 
@@ -61,7 +55,8 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
   function handleCopyId() {
     navigator.clipboard.writeText(session.id).then(() => {
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => setCopied(false), 1500)
     }).catch(() => {
       // clipboard unavailable (non-HTTPS or denied)
     })
@@ -142,9 +137,9 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
         <ChipDivider />
         <MetricChip label="OUT" value={formatTokens(session.total_output_tokens)} dim />
         <ChipDivider />
-        <MetricChip label="CREATED" value={formatAge(session.created_at)} dim />
+        <MetricChip label="CREATED" value={formatRelativeTime(session.created_at)} dim />
         <ChipDivider />
-        <MetricChip label="UPDATED" value={formatAge(session.updated_at)} dim />
+        <MetricChip label="UPDATED" value={formatRelativeTime(session.updated_at)} dim />
       </div>
     </div>
   )

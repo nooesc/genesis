@@ -60,8 +60,7 @@ export function MessageThread({ messages }: MessageThreadProps) {
   let lastDate = ''
 
   return (
-    <div className="relative">
-      <div className="flex flex-col">
+    <div className="flex flex-col">
         {messages.map((msg, idx) => {
           const config = ROLE_CONFIG[msg.role]
           const Icon = config.icon
@@ -154,7 +153,6 @@ export function MessageThread({ messages }: MessageThreadProps) {
             </div>
           )
         })}
-      </div>
     </div>
   )
 }

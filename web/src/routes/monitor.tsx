@@ -6,34 +6,18 @@ import { AgentCanvas } from '@/components/monitor/agent-canvas'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPlatformColor } from '@/lib/platforms'
+import { formatUptime, formatTokens, isHealthyStatus } from '@/lib/utils'
 
 export const Route = createFileRoute('/monitor')({
   component: MonitorPage,
 })
-
-function formatUptime(seconds: number): string {
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const parts: string[] = []
-  if (d > 0) parts.push(`${d}d`)
-  if (h > 0) parts.push(`${h}h`)
-  parts.push(`${m}m`)
-  return parts.join(' ')
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
-}
 
 function MonitorPage() {
   const { data: health, isLoading: healthLoading } = useHealth()
   const { data: insights, isLoading: insightsLoading } = useInsights(7, { refetchInterval: 60_000 })
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 20 })
 
-  const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
+  const isHealthy = isHealthyStatus(health?.status)
   const totalTokens7d = insights
     ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0)
     : 0
