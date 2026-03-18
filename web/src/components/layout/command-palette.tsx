@@ -44,7 +44,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             No results found.
           </CommandEmpty>
           <CommandGroup heading="Navigation">
-            {navRoutes.map(({ to, label, icon: Icon, keywords }) => (
+            {navRoutes.map(({ to, label, icon: Icon, keywords, shortcut }) => (
               <CommandItem
                 key={to}
                 value={`${label} ${keywords}`}
@@ -56,9 +56,16 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               >
                 <Icon className="h-4 w-4 text-muted-foreground" />
                 <span className="font-mono text-xs">{label}</span>
-                <span className="ml-auto font-mono text-[9px] text-muted-foreground/40">
-                  {to}
-                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  {shortcut && (
+                    <kbd className="flex h-4 min-w-[16px] items-center justify-center rounded border border-border/30 bg-muted/20 px-1 font-mono text-[8px] text-muted-foreground/40">
+                      {shortcut}
+                    </kbd>
+                  )}
+                  <span className="font-mono text-[9px] text-muted-foreground/30">
+                    {to}
+                  </span>
+                </div>
               </CommandItem>
             ))}
           </CommandGroup>
