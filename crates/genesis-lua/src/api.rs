@@ -12,6 +12,11 @@ struct SessionView {
     ctx: LuaSessionContext,
 }
 
+#[derive(Debug, Clone)]
+struct ConfigView {
+    values: Arc<std::collections::BTreeMap<String, String>>,
+}
+
 impl UserData for SessionView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, this| Ok(this.ctx.id.clone()));
@@ -20,6 +25,15 @@ impl UserData for SessionView {
         fields.add_field_method_get("total_tokens", |_, this| Ok(this.ctx.total_tokens));
         fields.add_field_method_get("platform", |_, this| Ok(this.ctx.platform.clone()));
         fields.add_field_method_get("personality", |_, this| Ok(this.ctx.personality.clone()));
+    }
+}
+
+impl UserData for ConfigView {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_function_get("get", |lua, ud| {
+            let values = ud.borrow::<ConfigView>()?.values.clone();
+            lua.create_function(move |_, key: String| Ok(values.get(&key).cloned()))
+        });
     }
 }
 
@@ -37,11 +51,10 @@ pub(crate) fn install_genesis_api(
     })?;
     genesis.set("session", session)?;
 
-    let config_table = lua.create_table()?;
-    let config_values = config.config_values.clone();
-    let get = lua.create_function(move |_, key: String| Ok(config_values.get(&key).cloned()))?;
-    config_table.set("get", get)?;
-    genesis.set("config", config_table)?;
+    let config_view = lua.create_userdata(ConfigView {
+        values: Arc::new(config.config_values.clone()),
+    })?;
+    genesis.set("config", config_view)?;
 
     genesis.set("log", make_logger(lua, Arc::clone(&logs), None)?)?;
     genesis.set(

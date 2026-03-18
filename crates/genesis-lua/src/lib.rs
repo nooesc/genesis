@@ -75,6 +75,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_rejects_config_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let err = runtime
+            .eval_string("genesis.config.extra = 'boom'; return genesis.config.extra")
+            .expect_err("config view should be read-only");
+        assert!(
+            err.to_string().contains("userdata")
+                || err.to_string().contains("read-only")
+                || err.to_string().contains("index"),
+            "unexpected mutation error: {err}"
+        );
+    }
+
+    #[test]
     fn runtime_loads_plugin_that_calls_genesis_log() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(
