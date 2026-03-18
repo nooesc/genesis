@@ -67,6 +67,12 @@ pub struct App {
     pub context_window_size: usize,
     /// Last known viewport width (used for transcript overlay).
     pub viewport_width: u16,
+    /// Active tool approval overlay (shown when a tool needs user approval).
+    pub approval: Option<crate::widgets::approval_overlay::ApprovalOverlay>,
+    /// Channel to send approval responses back to the tool execution thread.
+    pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
+    /// Queue of pending approval requests (processed one at a time).
+    pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
 }
 
 impl App {
@@ -250,6 +256,26 @@ impl App {
             return;
         }
 
+        // When a tool approval is pending, route keys to it first.
+        if let Some(approval) = &mut self.approval {
+            use crate::widgets::approval_overlay::ApprovalAction;
+            let action = approval.handle_key(key);
+            match action {
+                ApprovalAction::Approve | ApprovalAction::Deny => {
+                    let approved = matches!(action, ApprovalAction::Approve);
+                    if let Some(tx) = self.approval_response.take() {
+                        let _ = tx.send(approved);
+                    }
+                    self.approval = None;
+                    // Process next queued approval request, if any.
+                    self.pop_next_approval();
+                }
+                ApprovalAction::None => {}
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
@@ -378,6 +404,19 @@ impl App {
         self.frame_requester.schedule_frame();
     }
 
+    /// Pop the next queued approval request and show it, if any.
+    fn pop_next_approval(&mut self) {
+        if let Some(req) = self.approval_queue.pop_front() {
+            self.approval = Some(
+                crate::widgets::approval_overlay::ApprovalOverlay::new(
+                    req.tool_name,
+                    &req.arguments,
+                ),
+            );
+            self.approval_response = Some(req.response_tx);
+        }
+    }
+
     /// Submit a user message: record it in the chat widget and send to agent.
     fn submit_text(&mut self, text: String) {
         if text.is_empty() {
@@ -439,6 +478,9 @@ mod tests {
             streaming_chars: 0,
             context_window_size: 128_000,
             viewport_width: 80,
+            approval: None,
+            approval_response: None,
+            approval_queue: std::collections::VecDeque::new(),
         };
         (app, submission_rx, app_rx)
     }
