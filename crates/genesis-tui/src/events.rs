@@ -44,8 +44,8 @@ pub enum AgentEvent {
     /// Agent turn completed.
     TurnComplete {
         response: String,
-        input_tokens: u32,
-        output_tokens: u32,
+        input_tokens: u64,
+        output_tokens: u64,
         turns_used: usize,
         tool_calls_made: usize,
     },
@@ -79,7 +79,7 @@ pub enum AppEvent {
 pub enum StatusState {
     Idle,
     Thinking,
-    Streaming { tokens: u32 },
+    Streaming { tokens: u64 },
     ToolRunning { tool_name: String },
 }
 
@@ -99,6 +99,4 @@ pub enum Submission {
     },
     /// Interrupt the current turn (Ctrl+C).
     Interrupt,
-    /// Trigger context compression.
-    Compact,
 }

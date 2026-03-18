@@ -77,9 +77,9 @@ pub struct StatusBarWidget {
     /// Git branch name (or cwd fallback). `None` until first populated.
     right_info: Option<String>,
     /// Cumulative input tokens this session.
-    pub tokens_in: u32,
+    pub tokens_in: u64,
     /// Cumulative output tokens this session.
-    pub tokens_out: u32,
+    pub tokens_out: u64,
     /// Elapsed time since the current turn started.
     pub turn_elapsed: Option<Duration>,
 }
@@ -435,7 +435,7 @@ fn write_spans(spans: &[Span<'_>], start_x: u16, row: u16, bound_x: u16, buf: &m
 }
 
 /// Format token counts compactly: 1234 → "1.2k", 12345 → "12k".
-fn format_tokens(n: u32) -> String {
+fn format_tokens(n: u64) -> String {
     if n < 1000 {
         n.to_string()
     } else if n < 10_000 {
