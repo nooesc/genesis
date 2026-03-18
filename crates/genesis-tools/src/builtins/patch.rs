@@ -65,9 +65,10 @@ impl ToolHandler for PatchTool {
             })?;
 
             let replacements = if replace_all { count } else { 1 };
+            let diff_section = format_patch_diff(path, old_text, new_text);
             return Ok(ToolOutput {
                 content: format!(
-                    "patched `{path}`: {replacements} replacement(s) applied ({} bytes → {} bytes)",
+                    "patched `{path}`: {replacements} replacement(s) applied ({} bytes → {} bytes)\n\n{diff_section}",
                     content.len(),
                     updated.len()
                 ),
@@ -457,6 +458,33 @@ fn build_diff_hint(expected: &str, actual: &str) -> String {
             diffs.join("\n")
         )
     }
+}
+
+/// Format a minimal unified diff showing what was replaced.
+fn format_patch_diff(path: &str, old_text: &str, new_text: &str) -> String {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{path}\n"));
+    out.push_str(&format!("+++ b/{path}\n"));
+    out.push_str(&format!(
+        "@@ -{},{}  +{},{} @@\n",
+        1,
+        old_lines.len(),
+        1,
+        new_lines.len()
+    ));
+    for line in &old_lines {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in &new_lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
