@@ -2,8 +2,5 @@
 .claude/
 CLAUDE.md
 README.md
-docs/*
-!docs/plans/
-docs/plans/*
-!docs/plans/*.md
+docs/
 .worktrees/
