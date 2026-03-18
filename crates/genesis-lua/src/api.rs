@@ -31,10 +31,35 @@ struct ConfigView {
     values: Arc<std::collections::BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct PluginContext {
     pub name: String,
     pub permissions: PluginPermissions,
+    load_active: Arc<Mutex<bool>>,
+}
+
+impl PluginContext {
+    pub(crate) fn new(name: String, permissions: PluginPermissions) -> Self {
+        Self {
+            name,
+            permissions,
+            load_active: Arc::new(Mutex::new(true)),
+        }
+    }
+
+    pub(crate) fn close_tool_registration(&self) {
+        *self
+            .load_active
+            .lock()
+            .expect("plugin load state mutex should not be poisoned") = false;
+    }
+
+    fn tool_registration_open(&self) -> bool {
+        *self
+            .load_active
+            .lock()
+            .expect("plugin load state mutex should not be poisoned")
+    }
 }
 
 impl UserData for SessionView {
@@ -108,6 +133,11 @@ impl UserData for GenesisApi {
                 let plugin_context = plugin_context.clone().ok_or_else(|| {
                     mlua::Error::external(LuaRuntimeError::ToolRegistrationUnavailable)
                 })?;
+                if !plugin_context.tool_registration_open() {
+                    return Err(mlua::Error::external(
+                        LuaRuntimeError::ToolRegistrationUnavailable,
+                    ));
+                }
                 tools
                     .lock()
                     .expect("tool registry mutex should not be poisoned")

@@ -81,6 +81,11 @@ impl LuaToolRegistry {
             .collect()
     }
 
+    pub fn remove_tools_owned_by(&mut self, plugin_name: &str) {
+        self.tools
+            .retain(|_, entry| entry.registration.plugin_name != plugin_name);
+    }
+
     pub fn invoke(
         &self,
         lua: &Lua,

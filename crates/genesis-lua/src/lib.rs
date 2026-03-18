@@ -323,6 +323,84 @@ genesis.register_tool({
     }
 
     #[test]
+    fn runtime_rolls_back_tools_from_failed_plugins() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("broken.lua"),
+            r#"
+genesis.register_tool({
+    name = "broken_tool",
+    description = "Should not survive load failure",
+    run = function(_)
+        return "nope"
+    end,
+})
+error("boom")
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert!(
+            runtime.registered_tools().is_empty(),
+            "failed plugins must not leave registered tools behind"
+        );
+        assert!(
+            runtime.plugin_errors().iter().any(|entry| entry.contains("boom")),
+            "plugin failure should still be recorded: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_tool_registration_after_plugin_load() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("late.lua"),
+            r#"
+local late_register = genesis.register_tool
+
+genesis.on("PreTurn", function(ctx)
+    late_register({
+        name = "late_tool",
+        description = "Should not be allowed after load",
+        run = function(_)
+            return "late"
+        end,
+    })
+    return ctx.user_message
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        assert!(
+            runtime.registered_tools().is_empty(),
+            "plugin load should not eagerly register the late tool"
+        );
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("hook execution should not crash runtime");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+        );
+        assert!(
+            runtime.registered_tools().is_empty(),
+            "tool registration should stay closed after plugin load"
+        );
+        assert!(
+            runtime.logs().iter().any(|entry| entry.contains("only available during plugin load")),
+            "late registration failure should be logged: {:?}",
+            runtime.logs()
+        );
+    }
+
+    #[test]
     fn runtime_invokes_lua_tool_with_string_arguments() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(

@@ -197,14 +197,19 @@ impl LuaRuntime {
                     continue;
                 }
             };
-            let plugin_env = self.plugin_environment(config, &plugin)?;
-            if let Err(err) = self
+            let (plugin_env, plugin_context) = self.plugin_environment(config, &plugin)?;
+            let load_result = self
                 .lua
                 .load(&source)
                 .set_name(&plugin.name)
                 .set_environment(plugin_env)
-                .exec()
-            {
+                .exec();
+            plugin_context.close_tool_registration();
+            if let Err(err) = load_result {
+                self.tool_registry
+                    .lock()
+                    .expect("tool registry mutex should not be poisoned")
+                    .remove_tools_owned_by(&plugin.name);
                 self.plugin_errors
                     .push(format!("plugin `{}` failed to load: {err}", plugin.name));
                 continue;
@@ -327,10 +332,14 @@ impl LuaRuntime {
         &self,
         config: &LuaRuntimeConfig,
         plugin: &crate::DiscoveredPlugin,
-    ) -> Result<Table, LuaRuntimeError> {
+    ) -> Result<(Table, PluginContext), LuaRuntimeError> {
         let globals = self.lua.globals();
         let mut cloned_tables = HashMap::new();
         let env = self.clone_table(&globals, &mut cloned_tables)?;
+        let plugin_context = PluginContext::new(
+            plugin.name.clone(),
+            plugin.manifest.permissions.clone(),
+        );
         let plugin_genesis = install_genesis_api(
             &self.lua,
             config,
@@ -338,15 +347,12 @@ impl LuaRuntime {
             Arc::clone(&self.session_state),
             Arc::clone(&self.hook_registry),
             Arc::clone(&self.tool_registry),
-            Some(PluginContext {
-                name: plugin.name.clone(),
-                permissions: plugin.manifest.permissions.clone(),
-            }),
+            Some(plugin_context.clone()),
         )?;
         env.set("genesis", plugin_genesis)?;
         env.set("_G", env.clone())?;
         env.set("_ENV", env.clone())?;
-        Ok(env)
+        Ok((env, plugin_context))
     }
 
     fn clone_table(
