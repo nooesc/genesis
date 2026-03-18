@@ -9,6 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::render::diff;
+
 use super::rgb;
 
 /// Green colour for a successful tool call.
@@ -195,13 +197,7 @@ impl ToolCell {
         vec![line]
     }
 
-    /// 4-line bordered block:
-    /// ```text
-    ///   ┌─ shell ──────────────────────────┐
-    ///   │ args: echo "hello"               │
-    ///   │ 1.2s ok                          │
-    ///   └──────────────────────────────────┘
-    /// ```
+    /// Bordered block: tool name, args, optional diff output, duration, status.
     fn grouped_lines(&self) -> Vec<Line<'static>> {
         let duration_str = self.fmt_duration();
         let (status_str, status_color) = self.status_str();
@@ -221,6 +217,20 @@ impl ToolCell {
             Span::styled(" │", Style::default().fg(UI_DIM)),
         ]);
 
+        let mut lines = vec![top, args_line];
+
+        // If output looks like a unified diff, render it with colors.
+        if let Some(output) = &self.output {
+            if diff::is_unified_diff(output) {
+                let diff_lines = diff::diff_to_lines(output);
+                for dl in diff_lines {
+                    let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                    spans.extend(dl.spans);
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+
         // Status line: `  │ 1.2s ok          │`
         let status_line = Line::from(vec![
             Span::styled("  │ ", Style::default().fg(UI_DIM)),
@@ -237,7 +247,9 @@ impl ToolCell {
             Span::styled(format!("  └{}┘", bottom_fill), Style::default().fg(UI_DIM)),
         ]);
 
-        vec![top, args_line, status_line, bottom]
+        lines.push(status_line);
+        lines.push(bottom);
+        lines
     }
 
     /// 4-line (or 5-line with output) bordered block including optional output.
@@ -259,21 +271,32 @@ impl ToolCell {
 
         let mut lines = vec![top, args_line];
 
-        // Output line (only in Verbose mode, if output is present).
+        // Output (only in Verbose mode, if output is present).
         if let Some(output) = &self.output {
-            // Truncate output to a reasonable display length (character count, not bytes).
-            let truncated = if output.chars().count() > 60 {
-                let s: String = output.chars().take(60).collect();
-                format!("{s}…")
+            if diff::is_unified_diff(output) {
+                // Render unified diff with colors, gutter, and line numbers.
+                let diff_lines = diff::diff_to_lines(output);
+                for dl in diff_lines {
+                    // Indent diff lines inside the tool box.
+                    let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                    spans.extend(dl.spans);
+                    lines.push(Line::from(spans));
+                }
             } else {
-                output.clone()
-            };
-            let output_line = Line::from(vec![
-                Span::styled("  │ output: ", Style::default().fg(UI_DIM)),
-                Span::styled(truncated, Style::default().fg(UI_DIM)),
-                Span::styled(" │", Style::default().fg(UI_DIM)),
-            ]);
-            lines.push(output_line);
+                // Plain text output — truncate to a reasonable display length.
+                let truncated = if output.chars().count() > 60 {
+                    let s: String = output.chars().take(60).collect();
+                    format!("{s}…")
+                } else {
+                    output.clone()
+                };
+                let output_line = Line::from(vec![
+                    Span::styled("  │ output: ", Style::default().fg(UI_DIM)),
+                    Span::styled(truncated, Style::default().fg(UI_DIM)),
+                    Span::styled(" │", Style::default().fg(UI_DIM)),
+                ]);
+                lines.push(output_line);
+            }
         }
 
         let status_line = Line::from(vec![
@@ -507,5 +530,75 @@ mod tests {
             output_line.contains('…'),
             "long output should be truncated with ellipsis: {output_line:?}"
         );
+    }
+
+    // ── Diff rendering tests ──────────────────────────────────────────────
+
+    const SAMPLE_DIFF: &str = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!(\"hello\");
++    println!(\"hello world\");
+ }";
+
+    #[test]
+    fn verbose_mode_renders_diff_with_colors() {
+        let cell = make_cell(true)
+            .with_display_mode(ToolDisplayMode::Verbose)
+            .with_output(SAMPLE_DIFF);
+        let lines = cell.to_scrollback_lines(80);
+        // Should have more than 5 lines (top + args + diff lines + status + bottom)
+        assert!(
+            lines.len() > 5,
+            "diff output should produce more than 5 lines, got {}",
+            lines.len()
+        );
+        // Check that some lines contain diff markers
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("+"), "diff should contain additions");
+        assert!(all_text.contains("-"), "diff should contain deletions");
+    }
+
+    #[test]
+    fn grouped_mode_shows_diff_when_output_is_diff() {
+        let cell = make_cell(true)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output(SAMPLE_DIFF);
+        let lines = cell.to_scrollback_lines(80);
+        // Grouped with diff: top + args + diff lines + status + bottom > 4
+        assert!(
+            lines.len() > 4,
+            "grouped with diff should have more than 4 lines, got {}",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn grouped_mode_no_diff_for_plain_output() {
+        let cell = make_cell(true)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output("wrote 42 bytes to foo.txt");
+        let lines = cell.to_scrollback_lines(80);
+        // Plain output should not expand — grouped mode ignores non-diff output
+        assert_eq!(lines.len(), 4, "grouped with plain output should be 4 lines");
+    }
+
+    #[test]
+    fn verbose_mode_plain_output_still_truncated() {
+        let cell = make_cell(true)
+            .with_display_mode(ToolDisplayMode::Verbose)
+            .with_output("wrote 42 bytes to foo.txt");
+        let lines = cell.to_scrollback_lines(80);
+        // Plain output: top + args + output + status + bottom = 5
+        assert_eq!(lines.len(), 5, "verbose with plain output should be 5 lines");
+        let output_line: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(output_line.contains("output:"), "should have output: label");
     }
 }
