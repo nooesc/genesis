@@ -23,5 +23,7 @@ tracing.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
 libc.workspace = true
+tachyonfx.workspace = true
+tui-big-text.workspace = true
 
 [dev-dependencies]

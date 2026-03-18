@@ -15,7 +15,7 @@ use crossterm::style::{
     Attribute as CAttribute, Colors, Print, SetAttribute, SetBackgroundColor, SetColors,
     SetForegroundColor,
 };
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{CrosstermBackend, IntoCrossterm};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
@@ -128,7 +128,10 @@ impl CustomTerminal {
             if cell.fg != fg || cell.bg != bg {
                 queue!(
                     self.backend,
-                    SetColors(Colors::new(cell.fg.into(), cell.bg.into()))
+                    SetColors(Colors::new(
+                        cell.fg.into_crossterm(),
+                        cell.bg.into_crossterm(),
+                    ))
                 )?;
                 fg = cell.fg;
                 bg = cell.bg;

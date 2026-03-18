@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 pub mod app;
 pub mod approval;
 pub mod custom_terminal;
+pub mod effects;
 pub mod events;
 pub mod frame_requester;
 pub mod history;
@@ -191,6 +192,15 @@ pub async fn run_tui(
         &compact_art,
     );
 
+    let animations_enabled = config.tui.animations
+        && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
+    let no_color = std::env::var("NO_COLOR").is_ok();
+
+    let mut status_bar = crate::widgets::status_bar::StatusBarWidget::new(
+        config.provider.model.clone(),
+    );
+    status_bar.set_effects_enabled(animations_enabled);
+
     let mut app = App {
         submission_tx,
         app_tx,
@@ -201,9 +211,7 @@ pub async fn run_tui(
         screen: AppScreen::Welcome,
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
-        status_bar: crate::widgets::status_bar::StatusBarWidget::new(
-            config.provider.model.clone(),
-        ),
+        status_bar,
         overlay: None,
         viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
@@ -215,6 +223,13 @@ pub async fn run_tui(
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
+        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color, config.tui.effects.clone()),
+        idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
+            t: 0.0,
+            a: 3.0,
+            b: 2.0,
+            delta: std::f64::consts::FRAC_PI_2,
+        },
         file_completion: crate::widgets::file_completion::FileCompletion::new(),
     };
 
@@ -372,8 +387,19 @@ pub async fn run_tui(
                     break;
                 }
 
-                // Advance status bar animation (sprite / spinner).
+                // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
+
+                // Compute frame delta once — used by both braille patterns and tachyonfx.
+                let frame_dt = app.effects.frame_dt();
+                if animations_enabled {
+                    if matches!(app.screen, AppScreen::Welcome) {
+                        app.welcome.braille_pattern.tick(frame_dt);
+                    }
+                    if !app.turn_running {
+                        app.idle_pattern.tick(frame_dt);
+                    }
+                }
 
                 // Update elapsed time for the current turn.
                 if app.turn_running {
@@ -385,14 +411,36 @@ pub async fn run_tui(
                 if app.clear_after_welcome {
                     let _ = term.clear_all();
                     app.clear_after_welcome = false;
+                    let area = term.viewport_area();
+                    app.effects.start_chat_coalesce(area);
+                    // Start idle effects on the status bar area.
+                    let status_area = Rect {
+                        x: area.x,
+                        y: area.y + area.height.saturating_sub(1),
+                        width: area.width,
+                        height: 1,
+                    };
+                    app.effects.start_idle_effects(status_area);
                 }
 
-                render_frame(&mut term, &mut app);
+                render_frame(&mut term, &mut app, frame_dt);
 
                 // Schedule periodic redraws while animations are active.
-                if app.status_bar.is_animating() {
-                    app.frame_requester
-                        .schedule_frame_in(app.status_bar.animation_interval());
+                let has_tachyonfx = app.effects.is_running();
+                let has_sprite_anim = app.status_bar.is_animating();
+                let has_braille = animations_enabled
+                    && (matches!(app.screen, AppScreen::Welcome)
+                        || (!app.turn_running && matches!(app.screen, AppScreen::Chat)));
+                if has_tachyonfx || has_sprite_anim || has_braille {
+                    let interval = if has_tachyonfx {
+                        std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
+                    } else if has_sprite_anim {
+                        app.status_bar.animation_interval()
+                    } else {
+                        // Idle braille patterns — 200ms (~5fps) is plenty for slow curves
+                        std::time::Duration::from_millis(200)
+                    };
+                    app.frame_requester.schedule_frame_in(interval);
                 }
             }
         }
@@ -410,7 +458,7 @@ pub async fn run_tui(
 ///
 /// When an overlay is active it occupies the full viewport (no status bar).
 /// Otherwise, the chat widget and status bar share the viewport as usual.
-fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
+fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame_dt: std::time::Duration) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -437,6 +485,18 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         AppScreen::Welcome => {
             // Welcome screen occupies the full viewport.
             app.welcome.render(area, buf);
+
+            // Trigger boot sequence on first welcome render.
+            if !app.welcome.boot_triggered() {
+                app.welcome.mark_boot_triggered();
+                let areas = app.welcome.last_areas();
+                app.effects.start_boot_sequence(
+                    areas.title,
+                    areas.portrait,
+                    areas.status,
+                    areas.full,
+                );
+            }
         }
         AppScreen::Chat => {
             // Reserve the final row for status, leave space for a bounded input
@@ -501,6 +561,31 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
 
                 if message_area_height > 0 {
                     app.chat.render_messages(message_area, buf);
+
+                    // Idle braille canvas: show a small Lissajous animation
+                    // below the last message when the agent is idle and there
+                    // is remaining vertical space (at least 5 rows).
+                    const IDLE_CANVAS_HEIGHT: u16 = 5;
+                    const IDLE_CANVAS_WIDTH: u16 = 15;
+                    if !app.turn_running && app.effects.enabled() {
+                        let content_h = app.chat.visible_content_height(area.width);
+                        let remaining = message_area_height.saturating_sub(content_h);
+                        if remaining >= IDLE_CANVAS_HEIGHT {
+                            // Center the canvas horizontally in the message area.
+                            let canvas_x = message_area.x
+                                + message_area.width.saturating_sub(IDLE_CANVAS_WIDTH) / 2;
+                            let canvas_y = message_area.y + content_h
+                                + (remaining.saturating_sub(IDLE_CANVAS_HEIGHT)) / 2;
+                            let idle_area = Rect {
+                                x: canvas_x,
+                                y: canvas_y,
+                                width: IDLE_CANVAS_WIDTH.min(message_area.width),
+                                height: IDLE_CANVAS_HEIGHT,
+                            };
+                            crate::widgets::braille_canvas::BrailleCanvas::new(&app.idle_pattern)
+                                .render(idle_area, buf);
+                        }
+                    }
                 }
 
                 if separator_rows > 0 {
@@ -596,6 +681,9 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
     if let Some(approval) = &app.approval {
         approval.render(area, buf);
     }
+
+    // Apply post-render effects (tachyonfx).
+    app.effects.process(frame_dt, buf, area);
 
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();
