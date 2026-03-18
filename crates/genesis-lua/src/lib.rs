@@ -6,6 +6,8 @@ pub mod personality;
 pub mod runtime;
 pub mod tools;
 
+pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
+pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
 pub use runtime::{LuaRuntime, LuaRuntimeBuilder, LuaRuntimeConfig, LuaRuntimeError};
 
 #[cfg(test)]
