@@ -1084,6 +1084,7 @@ pub(crate) mod tests {
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
+                plugins: genesis_config::PluginsConfig::default(),
                 personality: None,
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
@@ -1091,8 +1092,9 @@ pub(crate) mod tests {
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
-                data_dir,
+                data_dir: data_dir.clone(),
                 database_path,
+                plugin_dir: data_dir.join("plugins"),
             },
         }
     }
@@ -1135,6 +1137,7 @@ pub(crate) mod tests {
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
+                plugins: genesis_config::PluginsConfig::default(),
                 personality: None,
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
@@ -1144,6 +1147,7 @@ pub(crate) mod tests {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
                 data_dir: PathBuf::from("/tmp/genesis"),
                 database_path: PathBuf::from("/tmp/genesis/genesis.db"),
+                plugin_dir: PathBuf::from("/tmp/genesis/plugins"),
             },
         }
     }

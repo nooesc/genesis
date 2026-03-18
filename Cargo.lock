@@ -1167,6 +1167,7 @@ dependencies = [
  "futures-util",
  "genesis-auth",
  "genesis-config",
+ "genesis-lua",
  "genesis-mcp",
  "genesis-provider",
  "genesis-storage",
