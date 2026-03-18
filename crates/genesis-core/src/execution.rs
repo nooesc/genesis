@@ -411,6 +411,37 @@ impl<'a> SessionExecutionService<'a> {
             build_execution_context_from_loaded(self.loaded, session_id, platform);
         let mut tool_runtime = build_default_tool_runtime(&execution_context);
 
+        // Auto-inject the think tool for Anthropic backends.
+        // The think tool is a zero-cost reasoning scratchpad that improves
+        // Claude's performance by 54% on complex tasks (Tau-Bench).
+        // Not injected for other providers to avoid wasting a tool slot.
+        if self.loaded.config.provider.backend == "anthropic" {
+            tool_runtime.registry.register(
+                genesis_types::ToolDefinition {
+                    name: "think".to_owned(),
+                    description:
+                        "Use this tool to think through a problem step-by-step before acting. \
+                         Write your reasoning in the `thought` parameter. The output is always \
+                         empty — the value is in organizing your thoughts, not the response. \
+                         Use this between tool calls when you need to plan, analyze results, \
+                         or reason about the next step."
+                            .to_owned(),
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "thought": {
+                                "type": "string",
+                                "description": "Your step-by-step reasoning, analysis, or plan."
+                            }
+                        },
+                        "required": ["thought"]
+                    })),
+                },
+                genesis_tools::ApprovalPolicy::Never,
+                genesis_tools::builtins::think::ThinkTool,
+            );
+        }
+
         // Attach MCP manager if we connected any servers at service creation
         if let Some(mcp) = &self.mcp {
             tool_runtime.set_mcp(Arc::clone(mcp));

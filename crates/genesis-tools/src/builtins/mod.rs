@@ -25,6 +25,7 @@ pub mod skill;
 pub mod skill_file;
 pub mod ssh;
 pub mod subagent;
+pub mod think;
 pub mod todo;
 pub mod trajectory;
 pub mod transcribe;
