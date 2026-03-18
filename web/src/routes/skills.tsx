@@ -7,6 +7,7 @@ import { useSkills } from '@/lib/api/queries/skills'
 import { useCreateSkill, useDeleteSkill } from '@/lib/api/mutations/skills'
 import { DataTable } from '@/components/shared/data-table'
 import { EmptyState } from '@/components/shared/empty-state'
+import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -27,72 +28,11 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import type { Skill } from '@/lib/api/types'
+import { formatRelativeTime } from '@/lib/utils'
 
 export const Route = createFileRoute('/skills')({
   component: SkillsPage,
 })
-
-function formatRelativeTime(isoString: string): string {
-  const now = Date.now()
-  const then = new Date(isoString).getTime()
-  const diffMs = now - then
-  const diffSec = Math.floor(diffMs / 1000)
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
-}
-
-interface DeleteDialogProps {
-  skill: Skill | null
-  onClose: () => void
-}
-
-function DeleteDialog({ skill, onClose }: DeleteDialogProps) {
-  const deleteSkill = useDeleteSkill()
-
-  function handleDelete() {
-    if (!skill) return
-    deleteSkill.mutate(skill.name, {
-      onSuccess: () => {
-        toast.success(`Skill "${skill.name}" deleted`)
-        onClose()
-      },
-      onError: (err) => {
-        toast.error(`Failed to delete: ${err.message}`)
-      },
-    })
-  }
-
-  return (
-    <Dialog open={Boolean(skill)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="font-mono text-sm">Delete Skill</DialogTitle>
-        </DialogHeader>
-        <p className="font-mono text-xs text-muted-foreground">
-          Delete <span className="text-foreground">{skill?.name}</span>? This cannot be undone.
-        </p>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleDelete}
-            disabled={deleteSkill.isPending}
-          >
-            {deleteSkill.isPending ? 'Deleting...' : 'Delete'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
 
 interface NewSkillDialogProps {
   open: boolean
@@ -204,6 +144,7 @@ function NewSkillDialog({ open, onClose }: NewSkillDialogProps) {
 
 function SkillsPage() {
   const { data: skills, isLoading } = useSkills()
+  const deleteSkill = useDeleteSkill()
   const [search, setSearch] = React.useState('')
   const [tagFilter, setTagFilter] = React.useState<string | null>(null)
   const [newOpen, setNewOpen] = React.useState(false)
@@ -348,7 +289,25 @@ function SkillsPage() {
       )}
 
       <NewSkillDialog open={newOpen} onClose={() => setNewOpen(false)} />
-      <DeleteDialog skill={deleteTarget} onClose={() => setDeleteTarget(null)} />
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return
+          deleteSkill.mutate(deleteTarget.name, {
+            onSuccess: () => {
+              toast.success(`Skill "${deleteTarget.name}" deleted`)
+              setDeleteTarget(null)
+            },
+            onError: (err) => {
+              toast.error(`Failed to delete: ${err.message}`)
+            },
+          })
+        }}
+        isPending={deleteSkill.isPending}
+        title="Delete Skill"
+        description={`Delete "${deleteTarget?.name ?? ''}"? This cannot be undone.`}
+      />
     </div>
   )
 }

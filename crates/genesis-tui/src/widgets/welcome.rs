@@ -34,12 +34,14 @@ pub struct WelcomeInfo {
 /// Welcome screen widget showing text-only session info.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
+    /// Cached lines keyed by the panel width they were built for.
+    cached_lines: Option<(u16, Vec<Line<'static>>)>,
 }
 
 impl WelcomeWidget {
     /// Create a new welcome widget from session info.
     pub fn new(info: WelcomeInfo) -> Self {
-        Self { info }
+        Self { info, cached_lines: None }
     }
 
     /// Render the welcome screen into the given area.
@@ -49,7 +51,14 @@ impl WelcomeWidget {
         }
 
         let panel_width = PANEL_WIDTH.min(area.width);
-        let lines = self.build_lines(panel_width);
+
+        // Rebuild lines only when the panel width changes (separator uses "─".repeat(width)).
+        if self.cached_lines.as_ref().is_none_or(|(w, _)| *w != panel_width) {
+            let lines = self.build_lines(panel_width);
+            self.cached_lines = Some((panel_width, lines));
+        }
+        let lines = self.cached_lines.as_ref().map(|(_, l)| l).unwrap();
+
         if lines.is_empty() {
             return;
         }

@@ -794,17 +794,25 @@ async fn rate_limit_middleware(
     }
 }
 
+/// Shared DB stats used by health, metrics, and prometheus handlers.
+fn fetch_db_stats(db_path: &std::path::Path) -> (usize, usize) {
+    let total_sessions = genesis_storage::SessionStore::new(db_path)
+        .session_count()
+        .unwrap_or(0) as usize;
+    let active_schedules = genesis_storage::ScheduleStore::new(db_path)
+        .list_enabled()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    (total_sessions, active_schedules)
+}
+
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let mcp_count = match &state.mcp {
         Some(mcp) => mcp.server_count().await,
         None => 0,
     };
-    let db_path = &state.loaded.config.storage.database_path;
-    let active_schedules = ScheduleStore::new(db_path)
-        .list_enabled()
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0) as usize;
+    let (total_sessions, active_schedules) =
+        fetch_db_stats(&state.loaded.config.storage.database_path);
     let mcp_tools = match &state.mcp {
         Some(mcp) => mcp.tool_count().await,
         None => 0,
@@ -905,11 +913,9 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
     let stream_reqs = state.stream_requests_total.load(Ordering::Relaxed);
 
     let db_path = &state.loaded.config.storage.database_path;
-    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0);
-    let active_schedules = ScheduleStore::new(db_path)
-        .list_enabled()
-        .map(|s| s.len() as u64)
-        .unwrap_or(0);
+    let (total_sessions, active_schedules_usize) = fetch_db_stats(db_path);
+    let total_sessions = total_sessions as u64;
+    let active_schedules = active_schedules_usize as u64;
 
     let mcp_servers = match &state.mcp {
         Some(mcp) => mcp.server_count().await as u64,
@@ -1011,12 +1017,8 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
 async fn metrics_json_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<MetricsJsonResponse> {
-    let db_path = &state.loaded.config.storage.database_path;
-    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0) as usize;
-    let active_schedules = ScheduleStore::new(db_path)
-        .list_enabled()
-        .map(|s| s.len())
-        .unwrap_or(0);
+    let (total_sessions, active_schedules) =
+        fetch_db_stats(&state.loaded.config.storage.database_path);
 
     Json(MetricsJsonResponse {
         uptime_seconds: state.started_at.elapsed().as_secs(),

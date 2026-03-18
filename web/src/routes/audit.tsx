@@ -7,29 +7,11 @@ import { EmptyState } from '@/components/shared/empty-state'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { AuditEntry } from '@/lib/api/types'
+import { formatRelativeTime, truncate } from '@/lib/utils'
 
 export const Route = createFileRoute('/audit')({
   component: AuditPage,
 })
-
-function formatRelativeTime(isoString: string): string {
-  const now = Date.now()
-  const then = new Date(isoString).getTime()
-  const diffMs = now - then
-  const diffSec = Math.floor(diffMs / 1000)
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
-}
-
-function truncate(text: string, max = 120): string {
-  if (text.length <= max) return text
-  return text.slice(0, max) + '…'
-}
 
 function AuditPage() {
   const { data: entries, isLoading } = useAuditLog({ limit: 200 })
@@ -104,7 +86,7 @@ function AuditPage() {
           if (!details) return <span className="font-mono text-xs text-muted-foreground">—</span>
           return (
             <span className="font-mono text-xs text-muted-foreground" title={details}>
-              {truncate(details)}
+              {truncate(details, 120)}
             </span>
           )
         },

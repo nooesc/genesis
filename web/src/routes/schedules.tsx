@@ -11,6 +11,7 @@ import {
 } from '@/lib/api/mutations/schedules'
 import { DataTable } from '@/components/shared/data-table'
 import { EmptyState } from '@/components/shared/empty-state'
+import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -31,63 +32,11 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import type { Schedule } from '@/lib/api/types'
+import { truncate } from '@/lib/utils'
 
 export const Route = createFileRoute('/schedules')({
   component: SchedulesPage,
 })
-
-function truncate(text: string, max = 80): string {
-  if (text.length <= max) return text
-  return text.slice(0, max) + '…'
-}
-
-interface DeleteDialogProps {
-  schedule: Schedule | null
-  onClose: () => void
-}
-
-function DeleteDialog({ schedule, onClose }: DeleteDialogProps) {
-  const deleteSchedule = useDeleteSchedule()
-
-  function handleDelete() {
-    if (!schedule) return
-    deleteSchedule.mutate(schedule.id, {
-      onSuccess: () => {
-        toast.success(`Schedule "${schedule.id}" deleted`)
-        onClose()
-      },
-      onError: (err) => {
-        toast.error(`Failed to delete: ${err.message}`)
-      },
-    })
-  }
-
-  return (
-    <Dialog open={Boolean(schedule)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="font-mono text-sm">Delete Schedule</DialogTitle>
-        </DialogHeader>
-        <p className="font-mono text-xs text-muted-foreground">
-          Delete schedule <span className="text-foreground">{schedule?.id}</span>? This cannot be undone.
-        </p>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleDelete}
-            disabled={deleteSchedule.isPending}
-          >
-            {deleteSchedule.isPending ? 'Deleting...' : 'Delete'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
 
 interface NewScheduleDialogProps {
   open: boolean
@@ -204,6 +153,7 @@ function NewScheduleDialog({ open, onClose }: NewScheduleDialogProps) {
 function SchedulesPage() {
   const { data: schedules, isLoading } = useSchedules()
   const toggleSchedule = useToggleSchedule()
+  const deleteSchedule = useDeleteSchedule()
   const [newOpen, setNewOpen] = React.useState(false)
   const [deleteTarget, setDeleteTarget] = React.useState<Schedule | null>(null)
 
@@ -218,81 +168,78 @@ function SchedulesPage() {
     )
   }
 
-  const columns: ColumnDef<Schedule, unknown>[] = React.useMemo(
-    () => [
-      {
-        accessorKey: 'id',
-        header: 'ID',
-        cell: ({ row }) => (
-          <span className="font-mono text-xs font-medium">{row.original.id}</span>
-        ),
-      },
-      {
-        accessorKey: 'cron_expression',
-        header: 'Cron',
-        cell: ({ row }) => (
-          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-            {row.original.cron_expression}
-          </code>
-        ),
-      },
-      {
-        accessorKey: 'destination',
-        header: 'Destination',
-        cell: ({ row }) => (
-          <span className="font-mono text-xs text-muted-foreground">
-            {row.original.destination}
-          </span>
-        ),
-      },
-      {
-        accessorKey: 'prompt',
-        header: 'Prompt',
-        cell: ({ row }) => (
-          <span className="font-mono text-xs text-muted-foreground">
-            {truncate(row.original.prompt)}
-          </span>
-        ),
-      },
-      {
-        accessorKey: 'enabled',
-        header: 'Enabled',
-        cell: ({ row }) => (
-          <Switch
-            checked={row.original.enabled}
-            onCheckedChange={() => handleToggle(row.original)}
-            disabled={toggleSchedule.isPending}
-            size="sm"
-          />
-        ),
-      },
-      {
-        id: 'actions',
-        header: '',
-        cell: ({ row }) => (
-          <div className="flex justify-end">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon-sm">
-                  <MoreHorizontalIcon className="size-4" />
-                  <span className="sr-only">Actions</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => setDeleteTarget(row.original)}
-                >
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        ),
-      },
-    ],
-    [toggleSchedule.isPending],
-  )
+  const columns: ColumnDef<Schedule, unknown>[] = [
+    {
+      accessorKey: 'id',
+      header: 'ID',
+      cell: ({ row }) => (
+        <span className="font-mono text-xs font-medium">{row.original.id}</span>
+      ),
+    },
+    {
+      accessorKey: 'cron_expression',
+      header: 'Cron',
+      cell: ({ row }) => (
+        <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+          {row.original.cron_expression}
+        </code>
+      ),
+    },
+    {
+      accessorKey: 'destination',
+      header: 'Destination',
+      cell: ({ row }) => (
+        <span className="font-mono text-xs text-muted-foreground">
+          {row.original.destination}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'prompt',
+      header: 'Prompt',
+      cell: ({ row }) => (
+        <span className="font-mono text-xs text-muted-foreground">
+          {truncate(row.original.prompt, 80)}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'enabled',
+      header: 'Enabled',
+      cell: ({ row }) => (
+        <Switch
+          checked={row.original.enabled}
+          onCheckedChange={() => handleToggle(row.original)}
+          disabled={toggleSchedule.isPending}
+          size="sm"
+        />
+      ),
+    },
+    {
+      id: 'actions',
+      header: '',
+      cell: ({ row }) => (
+        <div className="flex justify-end">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm">
+                <MoreHorizontalIcon className="size-4" />
+                <span className="sr-only">Actions</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => setDeleteTarget(row.original)}
+              >
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      ),
+    },
+  ]
 
   return (
     <div className="flex flex-col gap-4">
@@ -326,7 +273,25 @@ function SchedulesPage() {
       )}
 
       <NewScheduleDialog open={newOpen} onClose={() => setNewOpen(false)} />
-      <DeleteDialog schedule={deleteTarget} onClose={() => setDeleteTarget(null)} />
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return
+          deleteSchedule.mutate(deleteTarget.id, {
+            onSuccess: () => {
+              toast.success(`Schedule "${deleteTarget.id}" deleted`)
+              setDeleteTarget(null)
+            },
+            onError: (err) => {
+              toast.error(`Failed to delete: ${err.message}`)
+            },
+          })
+        }}
+        isPending={deleteSchedule.isPending}
+        title="Delete Schedule"
+        description={`Delete schedule "${deleteTarget?.id ?? ''}"? This cannot be undone.`}
+      />
     </div>
   )
 }

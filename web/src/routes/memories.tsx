@@ -7,88 +7,17 @@ import { useMemories, useSearchMemories } from '@/lib/api/queries/memories'
 import { useDeleteMemory, useEmbedAll } from '@/lib/api/mutations/memories'
 import { DataTable } from '@/components/shared/data-table'
 import { EmptyState } from '@/components/shared/empty-state'
+import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { Memory } from '@/lib/api/types'
+import { formatRelativeTime, truncate } from '@/lib/utils'
 
 export const Route = createFileRoute('/memories')({
   component: MemoriesPage,
 })
 
-function formatRelativeTime(isoString: string): string {
-  const now = Date.now()
-  const then = new Date(isoString).getTime()
-  const diffMs = now - then
-  const diffSec = Math.floor(diffMs / 1000)
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
-}
-
-function truncate(text: string, max = 100): string {
-  if (text.length <= max) return text
-  return text.slice(0, max) + '…'
-}
-
-interface DeleteDialogProps {
-  memory: Memory | null
-  onClose: () => void
-}
-
-function DeleteDialog({ memory, onClose }: DeleteDialogProps) {
-  const deleteMemory = useDeleteMemory()
-
-  function handleDelete() {
-    if (!memory) return
-    deleteMemory.mutate(memory.id, {
-      onSuccess: () => {
-        toast.success('Memory deleted')
-        onClose()
-      },
-      onError: (err) => {
-        toast.error(`Failed to delete: ${err.message}`)
-      },
-    })
-  }
-
-  return (
-    <Dialog open={Boolean(memory)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="font-mono text-sm">Delete Memory</DialogTitle>
-        </DialogHeader>
-        <p className="font-mono text-xs text-muted-foreground">
-          Delete memory <span className="text-foreground">{memory?.id.slice(0, 8)}</span>? This cannot be undone.
-        </p>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleDelete}
-            disabled={deleteMemory.isPending}
-          >
-            {deleteMemory.isPending ? 'Deleting...' : 'Delete'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
 
 function MemoriesPage() {
   const [search, setSearch] = React.useState('')
@@ -96,6 +25,7 @@ function MemoriesPage() {
   const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<Memory | null>(null)
   const embedAll = useEmbedAll()
+  const deleteMemory = useDeleteMemory()
 
   React.useEffect(() => {
     return () => {
@@ -231,7 +161,25 @@ function MemoriesPage() {
         <DataTable columns={columns} data={memories ?? []} />
       )}
 
-      <DeleteDialog memory={deleteTarget} onClose={() => setDeleteTarget(null)} />
+      <ConfirmDeleteDialog
+        open={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return
+          deleteMemory.mutate(deleteTarget.id, {
+            onSuccess: () => {
+              toast.success('Memory deleted')
+              setDeleteTarget(null)
+            },
+            onError: (err) => {
+              toast.error(`Failed to delete: ${err.message}`)
+            },
+          })
+        }}
+        isPending={deleteMemory.isPending}
+        title="Delete Memory"
+        description={`Delete memory ${deleteTarget?.id.slice(0, 8) ?? ''}? This cannot be undone.`}
+      />
     </div>
   )
 }

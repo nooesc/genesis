@@ -16,15 +16,11 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { FilterIcon } from 'lucide-react'
 import type { ToolInfo } from '@/lib/api/types'
+import { truncate } from '@/lib/utils'
 
 export const Route = createFileRoute('/tools')({
   component: ToolsPage,
 })
-
-function truncate(text: string, max = 100): string {
-  if (text.length <= max) return text
-  return text.slice(0, max) + '…'
-}
 
 function ToolsPage() {
   const { data: tools, isLoading } = useTools()

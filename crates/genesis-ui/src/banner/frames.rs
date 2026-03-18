@@ -5,6 +5,8 @@
 //! strings, while the welcome-screen path exposes a crate-agnostic frame model
 //! suitable for ratatui conversion in `genesis-tui`.
 
+use std::sync::OnceLock;
+
 use image::{DynamicImage, GenericImageView, Rgba};
 
 use crate::colors::EVE_AMBER;
@@ -22,6 +24,18 @@ const WELCOME_FRAME_03_PNG: &[u8] = include_bytes!("../../assets/welcome/eve_fra
 
 /// Number of bundled welcome animation frames.
 pub const WELCOME_FRAME_COUNT: usize = 3;
+
+static DECODED_FRAMES: OnceLock<[DynamicImage; 3]> = OnceLock::new();
+
+fn decoded_frames() -> &'static [DynamicImage; 3] {
+    DECODED_FRAMES.get_or_init(|| {
+        [
+            image::load_from_memory(WELCOME_FRAME_01_PNG).expect("embedded frame 1"),
+            image::load_from_memory(WELCOME_FRAME_02_PNG).expect("embedded frame 2"),
+            image::load_from_memory(WELCOME_FRAME_03_PNG).expect("embedded frame 3"),
+        ]
+    })
+}
 
 /// Alpha threshold below which a pixel is considered transparent.
 const ALPHA_THRESHOLD: u8 = 30;
@@ -116,8 +130,8 @@ pub fn compact_image() -> Option<DynamicImage> {
 }
 
 /// Load one of the bundled welcome animation source images.
-pub fn welcome_image(index: usize) -> Option<DynamicImage> {
-    image::load_from_memory(welcome_frame_bytes(index)?).ok()
+pub fn welcome_image(index: usize) -> Option<&'static DynamicImage> {
+    decoded_frames().get(index)
 }
 
 /// Load and render the full-size Eve banner art.
@@ -154,7 +168,7 @@ pub fn render_welcome_frame(
     target_height: u16,
 ) -> Option<HalfBlockFrame> {
     let img = welcome_image(index)?;
-    Some(render_welcome_image(&img, target_width, target_height))
+    Some(render_welcome_image(img, target_width, target_height))
 }
 
 /// Render a decoded welcome image to a target terminal size using a stylized
@@ -188,13 +202,15 @@ fn render_halfblocks_frame_with(
     let line_count = height.div_ceil(2);
     let mut lines = Vec::with_capacity(line_count as usize);
 
+    let rgba = img.to_rgba8();
+
     let mut y = 0u32;
     while y < height {
         let mut line = Vec::with_capacity(width as usize);
         for x in 0..width {
-            let top = pixel_mapper(img.get_pixel(x, y));
+            let top = pixel_mapper(*rgba.get_pixel(x, y));
             let bottom = if y + 1 < height {
-                pixel_mapper(img.get_pixel(x, y + 1))
+                pixel_mapper(*rgba.get_pixel(x, y + 1))
             } else {
                 None
             };
@@ -264,15 +280,6 @@ fn frame_to_ansi_lines(frame: &HalfBlockFrame) -> Vec<String> {
             line
         })
         .collect()
-}
-
-fn welcome_frame_bytes(index: usize) -> Option<&'static [u8]> {
-    match index {
-        0 => Some(WELCOME_FRAME_01_PNG),
-        1 => Some(WELCOME_FRAME_02_PNG),
-        2 => Some(WELCOME_FRAME_03_PNG),
-        _ => None,
-    }
 }
 
 fn source_pixel_color(pixel: Rgba<u8>) -> Option<RgbColor> {

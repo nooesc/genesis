@@ -38,6 +38,16 @@ pub struct ActiveCell {
     pub tool_calls: Vec<ActiveToolCall>,
 }
 
+/// Cache for the active cell's rendered markdown lines.
+struct ActiveCellCache {
+    /// The `text_buffer.len()` when the cache was last built.
+    parsed_len: usize,
+    /// The render width when the cache was last built.
+    parsed_width: u16,
+    /// The cached rendered lines.
+    lines: Vec<Line<'static>>,
+}
+
 /// Composes committed history cells, an optional active streaming cell,
 /// and the input widget into a single renderable unit.
 pub struct ChatWidget {
@@ -52,6 +62,8 @@ pub struct ChatWidget {
     pub active_cell: Option<ActiveCell>,
     /// The text input widget.
     pub input: InputWidget,
+    /// Cache for parsed active-cell markdown lines.
+    active_cell_cache: Option<ActiveCellCache>,
 }
 
 impl ChatWidget {
@@ -62,6 +74,7 @@ impl ChatWidget {
             pending_scrollback: Vec::new(),
             active_cell: None,
             input: InputWidget::new(),
+            active_cell_cache: None,
         }
     }
 
@@ -85,6 +98,7 @@ impl ChatWidget {
             text_buffer: String::new(),
             tool_calls: Vec::new(),
         });
+        self.active_cell_cache = None;
     }
 
     /// Append streaming text to the active cell's text buffer.
@@ -167,8 +181,9 @@ impl ChatWidget {
             ));
         }
 
-        self.committed_cells.extend(new_cells.clone());
-        self.pending_scrollback.extend(new_cells.clone());
+        self.active_cell_cache = None;
+        self.pending_scrollback.extend(new_cells.iter().cloned());
+        self.committed_cells.extend(new_cells.iter().cloned());
         new_cells
     }
 
@@ -192,7 +207,7 @@ impl ChatWidget {
     /// Render the chat widget into the given area.
     ///
     /// Backwards-compatible default path: reserve the last row for input.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -218,7 +233,7 @@ impl ChatWidget {
     }
 
     /// Render only the chat messages (no input row).
-    pub fn render_messages(&self, area: Rect, buf: &mut Buffer) {
+    pub fn render_messages(&mut self, area: Rect, buf: &mut Buffer) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -227,30 +242,50 @@ impl ChatWidget {
         let mut bottom_y = area.y + area.height;
 
         // ── Active cell (if any) ───────────────────────────────────────
-        if let Some(active) = &self.active_cell {
-            if !active.text_buffer.is_empty() {
-                let lines = active_cell_lines(&active.text_buffer, area.width);
-                let wrap_width = area.width.max(1);
-                let cell_height = wrapped_row_count(&lines, wrap_width).max(1);
-                let rows_to_use = cell_height.min(remaining_rows);
+        // Extract text_len while holding the immutable borrow, then drop it
+        // before we potentially update the cache (which requires &mut self).
+        let active_text_info: Option<(usize, u16)> = self
+            .active_cell
+            .as_ref()
+            .filter(|a| !a.text_buffer.is_empty())
+            .map(|a| (a.text_buffer.len(), area.width));
 
-                if rows_to_use > 0 {
-                    let cell_area = Rect {
-                        x: area.x,
-                        y: bottom_y - rows_to_use,
-                        width: area.width,
-                        height: rows_to_use,
-                    };
+        if let Some((text_len, width)) = active_text_info {
+            // Re-parse markdown only when the buffer or width has changed.
+            let needs_reparse = self.active_cell_cache.as_ref().is_none_or(|c| {
+                c.parsed_len != text_len || c.parsed_width != width
+            });
+            if needs_reparse {
+                // Re-borrow text_buffer for the actual parse.
+                let text = self.active_cell.as_ref().unwrap().text_buffer.clone();
+                let lines = active_cell_lines(&text, width);
+                self.active_cell_cache = Some(ActiveCellCache {
+                    parsed_len: text_len,
+                    parsed_width: width,
+                    lines,
+                });
+            }
+            let lines = self.active_cell_cache.as_ref().unwrap().lines.clone();
+            let wrap_width = width.max(1);
+            let cell_height = wrapped_row_count(&lines, wrap_width).max(1);
+            let rows_to_use = cell_height.min(remaining_rows);
 
-                    let skip = cell_height.saturating_sub(rows_to_use);
-                    let paragraph = Paragraph::new(lines)
-                        .wrap(Wrap { trim: false })
-                        .scroll((0, skip));
-                    paragraph.render(cell_area, buf);
+            if rows_to_use > 0 {
+                let cell_area = Rect {
+                    x: area.x,
+                    y: bottom_y - rows_to_use,
+                    width: area.width,
+                    height: rows_to_use,
+                };
 
-                    bottom_y -= rows_to_use;
-                    remaining_rows -= rows_to_use;
-                }
+                let skip = cell_height.saturating_sub(rows_to_use);
+                let paragraph = Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((0, skip));
+                paragraph.render(cell_area, buf);
+
+                bottom_y -= rows_to_use;
+                remaining_rows -= rows_to_use;
             }
         }
 
