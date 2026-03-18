@@ -16,7 +16,12 @@ async fn main() {
         Command::Chat { no_tui: false, .. }
     ) && std::io::stdout().is_terminal();
 
-    init_tracing(tui_active);
+    // Load config to check for telemetry settings.
+    let telemetry_config = genesis_config::load(None)
+        .ok()
+        .and_then(|loaded| loaded.config.telemetry);
+
+    let _otel_guard = init_tracing(tui_active, telemetry_config.as_ref());
 
     match run(cli).await {
         Ok(output) => {
@@ -29,9 +34,33 @@ async fn main() {
             std::process::exit(1);
         }
     }
+
+    // Flush telemetry on exit.
+    #[cfg(feature = "telemetry")]
+    if let Some(guard) = _otel_guard {
+        guard.shutdown();
+    }
 }
 
-fn init_tracing(tui_active: bool) {
+/// Guard that ensures the OTel tracer provider is shut down cleanly.
+#[cfg(feature = "telemetry")]
+struct OtelGuard {
+    provider: opentelemetry_sdk::trace::SdkTracerProvider,
+}
+
+#[cfg(feature = "telemetry")]
+impl OtelGuard {
+    fn shutdown(self) {
+        if let Err(e) = self.provider.shutdown() {
+            eprintln!("OpenTelemetry shutdown error: {e}");
+        }
+    }
+}
+
+fn init_tracing(
+    tui_active: bool,
+    #[allow(unused_variables)] telemetry_config: Option<&genesis_config::TelemetryConfig>,
+) -> Option<OtelGuard> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -58,7 +87,7 @@ fn init_tracing(tui_active: bool) {
                     .with_ansi(false)
                     .with_writer(file)
                     .try_init();
-                return;
+                return None;
             }
         }
         // If file logging setup failed, suppress all output to avoid
@@ -66,7 +95,21 @@ fn init_tracing(tui_active: bool) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new("off"))
             .try_init();
-    } else if use_json {
+        return None;
+    }
+
+    // Non-TUI mode: use registry-based subscriber so we can layer in OTel.
+    #[cfg(feature = "telemetry")]
+    {
+        if let Some(config) = telemetry_config {
+            if config.enabled {
+                return init_with_otel(filter, use_json, config);
+            }
+        }
+    }
+
+    // Default: fmt-only subscriber.
+    if use_json {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .json()
@@ -79,4 +122,82 @@ fn init_tracing(tui_active: bool) {
             .try_init();
     }
     tracing::debug!("tracing initialized");
+    None
+}
+
+/// Dummy type when telemetry feature is disabled.
+#[cfg(not(feature = "telemetry"))]
+struct OtelGuard;
+
+/// Initialize tracing with an OpenTelemetry OTLP export layer.
+#[cfg(feature = "telemetry")]
+fn init_with_otel(
+    filter: EnvFilter,
+    use_json: bool,
+    config: &genesis_config::TelemetryConfig,
+) -> Option<OtelGuard> {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use opentelemetry_sdk::Resource;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // Build the OTLP span exporter.
+    let exporter = match SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&config.otlp_endpoint)
+        .build()
+    {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Failed to create OTLP exporter: {e}");
+            // Fall back to fmt-only.
+            if use_json {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .json()
+                    .try_init();
+            } else {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .compact()
+                    .try_init();
+            }
+            return None;
+        }
+    };
+
+    let resource = Resource::builder()
+        .with_service_name(config.service_name.clone())
+        .build();
+
+    let provider = SdkTracerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build();
+
+    // Create the tracing-opentelemetry layer.
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("genesis"));
+
+    // Build the subscriber with both fmt and OTel layers.
+    let registry = tracing_subscriber::registry().with(filter).with(otel_layer);
+    if use_json {
+        let fmt_layer = tracing_subscriber::fmt::layer().json();
+        let _ = registry.with(fmt_layer).try_init();
+    } else {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .compact();
+        let _ = registry.with(fmt_layer).try_init();
+    }
+
+    tracing::info!(
+        endpoint = config.otlp_endpoint.as_str(),
+        service = config.service_name.as_str(),
+        "OpenTelemetry tracing initialized"
+    );
+
+    Some(OtelGuard { provider })
 }

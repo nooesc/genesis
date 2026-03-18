@@ -275,6 +275,11 @@ impl ChatClient {
         if request.model.is_empty() {
             request.model = self.model.clone();
         }
+        tracing::info!(
+            model = request.model.as_str(),
+            backend = self.backend.as_str(),
+            "provider.complete.start"
+        );
 
         if self.backend == "anthropic" {
             return self.complete_anthropic(request, started_at).await;
@@ -507,6 +512,11 @@ impl ChatClient {
         if request.model.is_empty() {
             request.model = self.model.clone();
         }
+        tracing::info!(
+            model = request.model.as_str(),
+            backend = self.backend.as_str(),
+            "provider.complete_stream.start"
+        );
         request.stream = Some(true);
 
         if self.backend == "anthropic" {

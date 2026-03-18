@@ -657,6 +657,13 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
+        // Record turn-level span attributes via tracing events rather than
+        // holding a non-Send span guard across await points.
+        info!(
+            session_id = self.session_id_str(),
+            image_count = images.len(),
+            "agent.turn.start"
+        );
         let hook_session = self.session_id_str().to_owned();
         self.fire_shell_hooks(
             HookEvent::PreTurn,
@@ -837,6 +844,7 @@ impl AgentLoop {
 
             self.hooks
                 .on_llm_request(&hook_session, self.active_client().model(), turns_used);
+            let llm_started_at = std::time::Instant::now();
             let (mut response, active_model) = if let Some(hit) = cached {
                 debug!(
                     cache_key = cache_key.as_deref().unwrap_or(""),
@@ -920,6 +928,18 @@ impl AgentLoop {
                         cache_cfg.ttl_seconds,
                     );
                 }
+            }
+
+            // Log LLM response metrics as a tracing event.
+            if let Some(usage) = &response.usage {
+                info!(
+                    model = active_model.as_str(),
+                    turn = turns_used,
+                    input_tokens = usage.prompt_tokens,
+                    output_tokens = usage.completion_tokens,
+                    latency_ms = llm_started_at.elapsed().as_millis() as u64,
+                    "agent.llm_response"
+                );
             }
 
             if let Some(usage) = &response.usage {
