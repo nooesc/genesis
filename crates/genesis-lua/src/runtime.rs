@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 #[derive(Debug, Clone, Default)]
@@ -13,6 +15,34 @@ pub struct LuaRuntimeBuilder {
 
 #[derive(Debug, Error)]
 pub enum LuaRuntimeError {
+    #[error("failed to read plugin directory `{path}`: {source}")]
+    ReadPluginDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to inspect plugin entry in `{path}`: {source}")]
+    ReadPluginEntry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid plugin filename `{path}`")]
+    InvalidPluginFilename { path: PathBuf },
+    #[error("failed to read plugin manifest `{path}`: {source}")]
+    ReadPluginManifest {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse plugin manifest `{path}`: {source}")]
+    ParsePluginManifest {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("duplicate plugin name `{name}`")]
+    DuplicatePluginName { name: String },
     #[error("lua runtime initialization is not implemented yet")]
     NotImplemented,
 }
