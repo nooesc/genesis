@@ -61,7 +61,9 @@ static LUA_RUNTIME_BUILD_COUNTS: OnceLock<Mutex<HashMap<LuaRuntimeCacheKey, usiz
 #[cfg(test)]
 fn record_lua_runtime_build(key: &LuaRuntimeCacheKey) {
     let counts = LUA_RUNTIME_BUILD_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut counts = counts.lock().expect("lua runtime build counter should not be poisoned");
+    let mut counts = counts
+        .lock()
+        .expect("lua runtime build counter should not be poisoned");
     *counts.entry(key.clone()).or_insert(0) += 1;
 }
 
@@ -307,13 +309,23 @@ impl<'a> SessionExecutionService<'a> {
         }
     }
 
-    fn lua_runtime_config(&self, session_id: &str, platform: &DeliveryPlatform) -> LuaRuntimeConfig {
+    fn lua_runtime_config(
+        &self,
+        session_id: &str,
+        platform: &DeliveryPlatform,
+    ) -> LuaRuntimeConfig {
         let cache_key = self.lua_runtime_cache_key(session_id, platform);
         let personality = cache_key.personality.clone();
         let mut config_values = BTreeMap::new();
         config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert("provider_backend".to_owned(), cache_key.provider_backend.clone());
-        config_values.insert("provider_model".to_owned(), cache_key.provider_model.clone());
+        config_values.insert(
+            "provider_backend".to_owned(),
+            cache_key.provider_backend.clone(),
+        );
+        config_values.insert(
+            "provider_model".to_owned(),
+            cache_key.provider_model.clone(),
+        );
         config_values.insert(
             "delivery_platform".to_owned(),
             cache_key.delivery_platform.clone(),
@@ -622,6 +634,9 @@ impl<'a> SessionExecutionService<'a> {
             &execution_context.plan.session_id,
             execution_context.plan.platform.clone(),
         );
+        if let Some(runtime) = &lua_runtime {
+            tool_runtime.set_lua_runtime(Arc::clone(runtime));
+        }
 
         // Apply tool filter (allowlist/denylist)
         if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
@@ -1189,7 +1204,11 @@ impl ExecutionSubagentSpawner {
         );
         config_values.insert(
             "database_path".to_owned(),
-            self.loaded.paths.database_path.to_string_lossy().into_owned(),
+            self.loaded
+                .paths
+                .database_path
+                .to_string_lossy()
+                .into_owned(),
         );
         config_values.insert(
             "plugin_dir".to_owned(),
@@ -1688,8 +1707,8 @@ fn terminal_config_to_backend(config: &TerminalConfig) -> genesis_tools::Termina
 mod tests {
     use super::{
         delivery_platform_from_str, generate_session_title, maybe_inject_skill_nudge,
-        persist_new_messages, restore_chat_history, ExecutedTurn, SessionExecutionService,
-        SessionTurnInput, ExecutionSubagentSpawner,
+        persist_new_messages, restore_chat_history, ExecutedTurn, ExecutionSubagentSpawner,
+        SessionExecutionService, SessionTurnInput,
     };
     use crate::agent_loop::{AgentResult, NoopHooks};
     use crate::tests::test_loaded_config;
@@ -2313,8 +2332,11 @@ end)
 
         let db_path = data_dir.join("genesis.db");
         let loaded = Arc::new(test_loaded_config(data_dir, db_path));
-        let execution_context =
-            crate::build_execution_context_from_loaded(&loaded, "parent".to_owned(), DeliveryPlatform::Cli);
+        let execution_context = crate::build_execution_context_from_loaded(
+            &loaded,
+            "parent".to_owned(),
+            DeliveryPlatform::Cli,
+        );
         let spawner = ExecutionSubagentSpawner {
             loaded,
             tool_runtime: Arc::new(crate::build_default_tool_runtime(&execution_context)),
@@ -2369,7 +2391,10 @@ end)
         let first = first.await.expect("first task should finish");
         let second = second.await.expect("second task should finish");
 
-        assert!(Arc::ptr_eq(&first, &second), "same identity should share runtime");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same identity should share runtime"
+        );
         assert_eq!(
             super::lua_runtime_build_count(&cache_key),
             1,

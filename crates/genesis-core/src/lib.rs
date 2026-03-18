@@ -36,6 +36,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
+use genesis_lua::{LuaRuntime, LuaToolOutput};
 use genesis_mcp::McpManager;
 use genesis_provider::resolve;
 use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
@@ -49,6 +50,7 @@ use genesis_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +107,7 @@ pub struct ToolRuntime {
     registry: ToolRegistry,
     context: ToolContext,
     mcp: Option<Arc<McpManager>>,
+    lua_runtime: Option<Arc<LuaRuntime>>,
 }
 
 #[derive(Debug, Error)]
@@ -241,6 +244,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             sandbox_manager: None,
         },
         mcp: None,
+        lua_runtime: None,
     }
 }
 
@@ -563,6 +567,48 @@ fn infer_backend(model: &str) -> (&'static str, &'static str) {
 }
 
 impl ToolRuntime {
+    pub fn set_lua_runtime(&mut self, runtime: Arc<LuaRuntime>) {
+        if self
+            .lua_runtime
+            .as_ref()
+            .is_some_and(|existing| Arc::ptr_eq(existing, &runtime))
+        {
+            return;
+        }
+
+        self.lua_runtime = Some(Arc::clone(&runtime));
+
+        let mut existing = self
+            .registry
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<std::collections::HashSet<_>>();
+
+        for tool in runtime.registered_tools() {
+            if existing.contains(&tool.definition.name)
+                || is_reserved_tool_name(&tool.definition.name)
+            {
+                warn!(
+                    tool_name = %tool.definition.name,
+                    plugin_name = %tool.plugin_name,
+                    "skipping lua tool that collides with an existing tool"
+                );
+                continue;
+            }
+
+            existing.insert(tool.definition.name.clone());
+            self.registry.register(
+                tool.definition.clone(),
+                ApprovalPolicy::Never,
+                LuaToolHandler {
+                    runtime: Arc::clone(&runtime),
+                    tool_name: tool.definition.name.clone(),
+                },
+            );
+        }
+    }
+
     /// Set the default working directory for shell commands.
     /// Used by worktree isolation to redirect tool execution.
     pub fn set_default_working_dir(&mut self, dir: String) {
@@ -1020,7 +1066,40 @@ impl ToolRuntime {
                 ..self.context.clone()
             },
             mcp: self.mcp.clone(),
+            lua_runtime: self.lua_runtime.clone(),
         }
+    }
+}
+
+fn is_reserved_tool_name(name: &str) -> bool {
+    matches!(name, "moa_consult" | "execute_code") || name.starts_with("mcp_")
+}
+
+#[derive(Clone)]
+struct LuaToolHandler {
+    runtime: Arc<LuaRuntime>,
+    tool_name: String,
+}
+
+impl ToolHandler for LuaToolHandler {
+    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let output = self
+            .runtime
+            .invoke_tool(&self.tool_name, call.arguments.clone())
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: self.tool_name.clone(),
+                reason: error.to_string(),
+            })?;
+
+        let content = match output {
+            LuaToolOutput::Text(text) => text,
+            LuaToolOutput::Json(value) => value.to_string(),
+        };
+
+        Ok(ToolOutput {
+            content,
+            metadata: std::collections::BTreeMap::new(),
+        })
     }
 }
 
@@ -1038,10 +1117,13 @@ pub(crate) mod tests {
     use genesis_config::{
         AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
     };
+    use genesis_lua::{LuaRuntime, LuaRuntimeConfig, LuaSessionContext};
     use genesis_tools::ToolCall;
     use genesis_types::{DeliveryPlatform, ModelProviderKind, RuntimeEvent};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     /// Shared test helper: build a minimal `LoadedConfig` with caller-specified paths.
     ///
@@ -1211,6 +1293,282 @@ pub(crate) mod tests {
         assert!(output.content.contains("session=session-42"));
         assert!(output.content.contains("profile=operator"));
         assert!(output.content.contains("data_dir=/tmp/genesis"));
+    }
+
+    #[test]
+    fn default_tool_runtime_exposes_lua_tools_in_definitions() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("word_count.lua"),
+            r#"
+genesis.register_tool({
+    name = "word_count",
+    description = "Count words in a path",
+    parameters = {
+        path = {
+            type = "string",
+            description = "Path to inspect",
+            required = true,
+        },
+    },
+    run = function(args)
+        return args.path
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    config_values: BTreeMap::new(),
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+        assert!(
+            !lua_runtime.registered_tools().is_empty(),
+            "lua runtime should expose tools; errors: {:?}",
+            lua_runtime.plugin_errors()
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let defs = runtime.definitions();
+        let tool_names = defs.iter().map(|def| def.name.clone()).collect::<Vec<_>>();
+        let tool = defs
+            .iter()
+            .find(|def| def.name == "word_count")
+            .unwrap_or_else(|| {
+                panic!(
+                    "lua tool should be registered; found tools: {:?}",
+                    tool_names
+                )
+            });
+        assert_eq!(tool.description, "Count words in a path");
+        assert_eq!(
+            tool.parameters,
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to inspect",
+                    }
+                },
+                "required": ["path"]
+            }))
+        );
+    }
+
+    #[test]
+    fn default_tool_runtime_executes_lua_tool() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("echoer.lua"),
+            r#"
+genesis.register_tool({
+    name = "echoer",
+    description = "Echo a message",
+    run = function(args)
+        return args.message .. ":" .. args.count
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    config_values: BTreeMap::new(),
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let output = runtime
+            .execute(&ToolCall {
+                name: "echoer".to_owned(),
+                arguments: BTreeMap::from([
+                    ("message".to_owned(), "hello".to_owned()),
+                    ("count".to_owned(), "2".to_owned()),
+                ]),
+            })
+            .expect("lua tool should execute");
+
+        assert_eq!(output.content, "hello:2");
+    }
+
+    #[test]
+    fn default_tool_runtime_serializes_structured_lua_tool_output() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("structured.lua"),
+            r#"
+genesis.register_tool({
+    name = "structured",
+    description = "Return a structured result",
+    run = function(args)
+        return {
+            ok = true,
+            echoed = args.message,
+        }
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    config_values: BTreeMap::new(),
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let output = runtime
+            .execute(&ToolCall {
+                name: "structured".to_owned(),
+                arguments: BTreeMap::from([("message".to_owned(), "hello".to_owned())]),
+            })
+            .expect("lua tool should execute");
+
+        assert_eq!(
+            output.content,
+            serde_json::json!({
+                "ok": true,
+                "echoed": "hello",
+            })
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn default_tool_runtime_preserves_builtin_tools_when_lua_collides() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("collision.lua"),
+            r#"
+genesis.register_tool({
+    name = "session_info",
+    description = "Attempt to shadow builtin",
+    run = function(_)
+        return "lua"
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    config_values: BTreeMap::new(),
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let names = runtime
+            .definitions()
+            .into_iter()
+            .filter(|def| def.name == "session_info")
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 1, "builtin tool should not be shadowed");
+
+        let output = runtime
+            .execute(&ToolCall {
+                name: "session_info".to_owned(),
+                arguments: BTreeMap::new(),
+            })
+            .expect("builtin tool should still execute");
+        assert!(
+            output.content.contains("session=session-42"),
+            "builtin tool output should remain intact: {}",
+            output.content
+        );
     }
 
     #[test]
