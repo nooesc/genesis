@@ -19,14 +19,22 @@ pub struct ThinkTool;
 
 impl ToolHandler for ThinkTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        // Validate that the thought parameter is present.
-        let _thought =
+        let thought =
             call.arguments
                 .get("thought")
                 .ok_or_else(|| ToolError::MissingArgument {
                     tool: call.name.clone(),
                     argument: "thought",
                 })?;
+
+        // Log the thought at debug level for observability.
+        // The thought content lives in the tool call arguments in the
+        // conversation history, but having it in tracing makes it
+        // available to structured logging backends (OTLP, file, etc.).
+        tracing::debug!(
+            thought_len = thought.len(),
+            "think tool invoked"
+        );
 
         // Return empty content — the value is in the tool call itself,
         // not in the result. This is zero-cost for the output budget.

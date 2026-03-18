@@ -2563,6 +2563,7 @@ mod tests {
             database_path: "/tmp/genesis/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         AgentLoop::with_history(
@@ -2601,6 +2602,7 @@ mod tests {
             database_path: "/tmp/genesis/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         AgentLoop::with_history(
@@ -3053,6 +3055,7 @@ mod tests {
             database_path: "/tmp/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         let mut agent = AgentLoop::with_history(
@@ -3113,6 +3116,7 @@ mod tests {
             database_path: "/tmp/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         let mut agent = AgentLoop::with_history(
@@ -3263,6 +3267,7 @@ mod tests {
             database_path: "/tmp/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         let mut agent = AgentLoop::new(
@@ -3602,6 +3607,7 @@ mod tests {
             database_path: "/tmp/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         let mut agent = AgentLoop::new(
@@ -3686,6 +3692,7 @@ mod tests {
             database_path: "/tmp/genesis.db".to_owned(),
             max_concurrency: 4,
             allow_destructive_tools: false,
+            provider_backend: "openai".to_owned(),
         });
 
         let mut agent = AgentLoop::new(

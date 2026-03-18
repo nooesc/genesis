@@ -94,6 +94,10 @@ pub struct ExecutionContext {
     pub database_path: String,
     pub max_concurrency: usize,
     pub allow_destructive_tools: bool,
+    /// Provider backend name (e.g. "anthropic", "openai") — used for
+    /// conditional tool injection (think tool for Anthropic).
+    #[serde(default)]
+    pub provider_backend: String,
 }
 
 #[derive(Clone)]
@@ -151,6 +155,7 @@ pub fn build_execution_context_from_loaded(
         database_path: loaded.config.storage.database_path.display().to_string(),
         max_concurrency: loaded.config.runtime.max_concurrency,
         allow_destructive_tools: loaded.config.runtime.allow_destructive_tools,
+        provider_backend: loaded.config.provider.backend.clone(),
     }
 }
 
@@ -192,6 +197,37 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
         ApprovalPolicy::Never,
         MoaToolPlaceholder,
     );
+
+    // Auto-inject the think tool for Anthropic backends.
+    // Zero-cost reasoning scratchpad — 54% improvement on Tau-Bench.
+    // Not injected for other providers to avoid wasting a tool slot.
+    if execution_context.provider_backend == "anthropic" {
+        use genesis_tools::builtins::think::ThinkTool;
+        registry.register(
+            ToolDefinition {
+                name: "think".to_owned(),
+                description:
+                    "Use this tool to think through a problem step-by-step before acting. \
+                     Write your reasoning in the `thought` parameter. The output is always \
+                     empty — the value is in organizing your thoughts, not the response. \
+                     Use this between tool calls when you need to plan, analyze results, \
+                     or reason about the next step."
+                        .to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "thought": {
+                            "type": "string",
+                            "description": "Your step-by-step reasoning, analysis, or plan."
+                        }
+                    },
+                    "required": ["thought"]
+                })),
+            },
+            ApprovalPolicy::Never,
+            ThinkTool,
+        );
+    }
 
     ToolRuntime {
         registry,
