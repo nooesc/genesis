@@ -220,7 +220,9 @@ impl App {
                     self.frame_requester.schedule_frame();
                 }
                 "/help" => {
-                    let _ = self.app_tx.send(AppEvent::ShowOverlay(OverlayKind::Help));
+                    self.command_popup.hide();
+                    self.overlay = Some(ActiveOverlay::Help(HelpOverlay::new()));
+                    self.frame_requester.schedule_frame();
                 }
                 _ => {}
             },
