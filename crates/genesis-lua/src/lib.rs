@@ -91,6 +91,113 @@ mod tests {
     }
 
     #[test]
+    fn runtime_registers_and_runs_pre_turn_hook() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("hooks.lua"),
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "rewritten: " .. ctx.user_message
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("pre turn hook should run");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("rewritten: hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn runtime_vetoes_pre_tool_call() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("hooks.lua"),
+            r#"
+genesis.on("PreToolCall", function(ctx)
+    return false, "blocked"
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let outcome = runtime
+            .run_pre_tool_call("shell_exec", r#"{"command":"rm -rf /"}"#)
+            .expect("pre tool hook should run");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Veto {
+                reason: Some("blocked".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_rewrites_post_tool_call_output() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("hooks.lua"),
+            r#"
+genesis.on("PostToolCall", function(ctx)
+    return ctx.output .. " [rewritten]"
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let output = runtime
+            .run_post_tool_call("echo", "tool output")
+            .expect("post tool hook should run");
+
+        assert_eq!(
+            output,
+            crate::hooks::PostHookOutcome::Rewrite("tool output [rewritten]".to_owned())
+        );
+    }
+
+    #[test]
+    fn runtime_logs_hook_errors_and_keeps_original_value() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("hooks.lua"),
+            r#"
+genesis.on("PreTurn", function(_)
+    error("boom")
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("pre turn hook should not crash");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+        );
+        assert!(
+            runtime.logs().iter().any(|entry| entry.contains("boom")),
+            "hook failure should be recorded in runtime logs: {:?}",
+            runtime.logs()
+        );
+    }
+
+    #[test]
     fn runtime_loads_plugin_that_calls_genesis_log() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(

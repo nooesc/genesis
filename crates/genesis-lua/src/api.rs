@@ -1,21 +1,25 @@
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, UserData, UserDataFields};
+use mlua::{Function, Lua, UserData, UserDataFields};
 
-use crate::{LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext};
+use crate::{
+    hooks::{HookEvent, HookRegistry},
+    LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
+};
 
 #[derive(Debug, Clone)]
 pub struct GenesisApi {
     version: String,
     plugin_dir: String,
-    session: LuaSessionContext,
+    session: Arc<Mutex<LuaSessionContext>>,
     config_values: Arc<std::collections::BTreeMap<String, String>>,
     logs: Arc<Mutex<Vec<String>>>,
+    hooks: Arc<Mutex<HookRegistry>>,
 }
 
 #[derive(Debug, Clone)]
 struct SessionView {
-    ctx: LuaSessionContext,
+    ctx: Arc<Mutex<LuaSessionContext>>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,12 +29,18 @@ struct ConfigView {
 
 impl UserData for SessionView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("id", |_, this| Ok(this.ctx.id.clone()));
-        fields.add_field_method_get("model", |_, this| Ok(this.ctx.model.clone()));
-        fields.add_field_method_get("turn_count", |_, this| Ok(this.ctx.turn_count));
-        fields.add_field_method_get("total_tokens", |_, this| Ok(this.ctx.total_tokens));
-        fields.add_field_method_get("platform", |_, this| Ok(this.ctx.platform.clone()));
-        fields.add_field_method_get("personality", |_, this| Ok(this.ctx.personality.clone()));
+        fields.add_field_method_get("id", |_, this| Ok(this.ctx.lock().unwrap().id.clone()));
+        fields.add_field_method_get("model", |_, this| Ok(this.ctx.lock().unwrap().model.clone()));
+        fields.add_field_method_get("turn_count", |_, this| Ok(this.ctx.lock().unwrap().turn_count));
+        fields.add_field_method_get("total_tokens", |_, this| {
+            Ok(this.ctx.lock().unwrap().total_tokens)
+        });
+        fields.add_field_method_get("platform", |_, this| {
+            Ok(this.ctx.lock().unwrap().platform.clone())
+        });
+        fields.add_field_method_get("personality", |_, this| {
+            Ok(this.ctx.lock().unwrap().personality.clone())
+        });
     }
 }
 
@@ -66,6 +76,21 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("log_error", |lua, this| {
             make_logger(lua, Arc::clone(&this.logs), Some("[error] "))
         });
+        fields.add_field_method_get("on", |lua, this| {
+            let hooks = Arc::clone(&this.hooks);
+            lua.create_function(move |_, (event_name, callback): (String, Function)| {
+                let event = HookEvent::from_name(&event_name).ok_or_else(|| {
+                    mlua::Error::external(LuaRuntimeError::UnsupportedHookEvent {
+                        event: event_name,
+                    })
+                })?;
+                hooks
+                    .lock()
+                    .expect("hook registry mutex should not be poisoned")
+                    .register(event, callback);
+                Ok(())
+            })
+        });
     }
 }
 
@@ -73,13 +98,16 @@ pub(crate) fn install_genesis_api(
     lua: &Lua,
     config: &LuaRuntimeConfig,
     logs: Arc<Mutex<Vec<String>>>,
+    session: Arc<Mutex<LuaSessionContext>>,
+    hooks: Arc<Mutex<HookRegistry>>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         plugin_dir: config.plugin_dir.to_string_lossy().into_owned(),
-        session: config.session.clone(),
+        session,
         config_values: Arc::new(config.config_values.clone()),
         logs,
+        hooks,
     })?)
 }
 

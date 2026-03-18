@@ -618,7 +618,7 @@ impl<'a> SessionExecutionService<'a> {
 
         // Warm the Lua plugin runtime once per session so plugin state survives
         // across turns and later middleware can reuse the cached runtime.
-        let _ = self.lua_runtime_for_session(
+        let lua_runtime = self.lua_runtime_for_session(
             &execution_context.plan.session_id,
             execution_context.plan.platform.clone(),
         );
@@ -745,6 +745,9 @@ impl<'a> SessionExecutionService<'a> {
             hook_runner.clone(),
             history,
         );
+        if let Some(runtime) = lua_runtime {
+            agent.set_lua_runtime(runtime);
+        }
 
         // Set up tool provider routing if configured
         if let Some(tp) = &self.loaded.config.tool_provider {

@@ -20,6 +20,8 @@ use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
+use genesis_lua::hooks::{PostHookOutcome, PreHookOutcome};
+use genesis_lua::LuaRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
 
@@ -303,6 +305,7 @@ pub struct AgentLoop {
     hooks: Arc<dyn AgentHooks>,
     hook_runner: HookRunner,
     hook_results: Vec<HookResult>,
+    lua_runtime: Option<Arc<LuaRuntime>>,
     cost: SessionCost,
     trajectory: TrajectoryRecorder,
     /// Last reported prompt token count from the API. Used for token-aware
@@ -386,6 +389,7 @@ impl AgentLoop {
             hooks: Arc::new(NoopHooks),
             hook_runner,
             hook_results: Vec::new(),
+            lua_runtime: None,
             cost,
             trajectory,
             last_prompt_tokens: 0,
@@ -461,6 +465,11 @@ impl AgentLoop {
     /// Attach lifecycle hooks for monitoring, logging, or integration.
     pub fn set_hooks(&mut self, hooks: Arc<dyn AgentHooks>) {
         self.hooks = hooks;
+    }
+
+    /// Attach the session-scoped Lua runtime used for hook middleware.
+    pub fn set_lua_runtime(&mut self, runtime: Arc<LuaRuntime>) {
+        self.lua_runtime = Some(runtime);
     }
 
     /// Access recorded shell hook executions for inspection/testing.
@@ -658,18 +667,50 @@ impl AgentLoop {
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
         let hook_session = self.session_id_str().to_owned();
-        self.fire_shell_hooks(
-            HookEvent::PreTurn,
-            serde_json::json!({
-                "session_id": hook_session,
-                "user_message": user_message,
-                "image_count": images.len(),
-            }),
-        );
+        let lua_pre_turn = self.run_lua_pre_turn(user_message);
+        let user_message = match lua_pre_turn {
+            PreHookOutcome::Allow(message) => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": message,
+                        "image_count": images.len(),
+                    }),
+                );
+                message
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": user_message,
+                        "image_count": images.len(),
+                        "lua_vetoed": true,
+                        "lua_reason": reason.as_deref(),
+                    }),
+                );
+                let result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by Lua hook: {}",
+                        reason.unwrap_or_else(|| "request rejected".to_owned())
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                return Ok(self.finalize_turn(&hook_session, result, false));
+            }
+        };
 
         // Run input guardrails if configured
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
-            let result = cg.check_input(user_message);
+            let result = cg.check_input(&user_message);
             if !result.passed {
                 let agent_result = AgentResult {
                     response: format!(
@@ -684,12 +725,7 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &agent_result),
-                );
-                self.hooks.on_turn_end(&hook_session, &agent_result);
-                return Ok(agent_result);
+                return Ok(self.finalize_turn(&hook_session, agent_result, false));
             }
             result.content
         } else {
@@ -736,12 +772,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             turns_used += 1;
@@ -765,12 +796,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             // Check iteration budget (lifetime cap across all user turns)
@@ -794,12 +820,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, false));
                 }
             }
             self.iterations_used += 1;
@@ -970,46 +991,50 @@ impl AgentLoop {
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
-
-                    // Record each tool call and fire hooks
-                    for tc in tool_calls {
-                        self.trajectory
-                            .record_tool_call(&tc.function.name, &tc.function.arguments);
-                        self.hooks
-                            .on_tool_call_start(&hook_session, &tc.function.name);
-                        self.fire_shell_hooks(
-                            HookEvent::PreToolCall,
-                            serde_json::json!({
-                                "session_id": hook_session,
-                                "tool_name": tc.function.name,
-                                "tool_call_id": tc.id,
-                                "arguments": tc.function.arguments,
-                            }),
-                        );
-                    }
-
+                    let (effective_tool_calls, veto_reasons) =
+                        self.prepare_tool_calls(&hook_session, tool_calls, false);
+                    let executable_tool_calls: Vec<ToolCallEntry> = effective_tool_calls
+                        .iter()
+                        .zip(veto_reasons.iter())
+                        .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                        .collect();
                     let tool_start = Instant::now();
-                    let results = match execute_tool_calls_parallel(
-                        &self.tools,
-                        &self.subagent_spawner,
-                        tool_calls,
-                        self.config.max_concurrency,
-                        self.config.tool_timeout_secs,
-                    )
-                    .await
-                    {
-                        Ok(results) => results,
-                        Err(err) => {
-                            return Err(self.report_error(&hook_session, "tool_execution", err))
+                    let executed_results = if executable_tool_calls.is_empty() {
+                        Vec::new()
+                    } else {
+                        match execute_tool_calls_parallel(
+                            &self.tools,
+                            &self.subagent_spawner,
+                            &executable_tool_calls,
+                            self.config.max_concurrency,
+                            self.config.tool_timeout_secs,
+                        )
+                        .await
+                        {
+                            Ok(results) => results,
+                            Err(err) => {
+                                return Err(self.report_error(&hook_session, "tool_execution", err))
+                            }
                         }
                     };
                     let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
+                    let mut executed_results = executed_results.into_iter();
                     let mut clarification = None;
-                    for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
-                        let result = sanitize::sanitize_credentials(&result);
-                        self.trajectory
-                            .record_tool_result(&tc.function.name, &result);
+                    for (tc, veto_reason) in effective_tool_calls.iter().zip(veto_reasons.into_iter()) {
+                        let lua_vetoed = veto_reason.is_some();
+                        let (mut result, requires_input) = match veto_reason {
+                            Some(reason) => (
+                                format!("Error: tool call blocked by Lua hook: {reason}"),
+                                false,
+                            ),
+                            None => executed_results
+                                .next()
+                                .expect("executed tool results should align with allowed calls"),
+                        };
+                        result = sanitize::sanitize_credentials(&result);
+                        result = self.run_lua_post_tool_call(&tc.function.name, &result);
+                        self.trajectory.record_tool_result(&tc.function.name, &result);
                         // Track consecutive failures per tool
                         let success = !result.starts_with("Error:");
                         if !success {
@@ -1037,6 +1062,7 @@ impl AgentLoop {
                                 "result": result,
                                 "requires_input": requires_input,
                                 "duration_ms": tool_elapsed_ms,
+                                "lua_vetoed": lua_vetoed,
                             }),
                         );
                         if requires_input {
@@ -1061,12 +1087,7 @@ impl AgentLoop {
                             estimated_cost: Some(self.cost.total_cost),
                             pending_clarification: Some(question),
                         };
-                        self.fire_shell_hooks(
-                            HookEvent::PostTurn,
-                            self.turn_result_context(&hook_session, &result),
-                        );
-                        self.hooks.on_turn_end(&hook_session, &result);
-                        return Ok(result);
+                        return Ok(self.finalize_turn(&hook_session, result, false));
                     }
 
                     // Inject memory nudge if due.
@@ -1112,16 +1133,7 @@ impl AgentLoop {
                 estimated_cost: Some(self.cost.total_cost),
                 pending_clarification: None,
             };
-            self.fire_shell_hooks(
-                HookEvent::PostTurn,
-                self.turn_result_context(&hook_session, &result),
-            );
-            self.fire_shell_hooks(
-                HookEvent::OnComplete,
-                self.turn_result_context(&hook_session, &result),
-            );
-            self.hooks.on_turn_end(&hook_session, &result);
-            return Ok(result);
+            return Ok(self.finalize_turn(&hook_session, result, true));
         }
     }
 
@@ -1148,19 +1160,52 @@ impl AgentLoop {
         F: FnMut(StreamEvent<'_>),
     {
         let hook_session = self.session_id_str().to_owned();
-        self.fire_shell_hooks(
-            HookEvent::PreTurn,
-            serde_json::json!({
-                "session_id": hook_session,
-                "user_message": user_message,
-                "image_count": images.len(),
-                "streaming": true,
-            }),
-        );
+        let lua_pre_turn = self.run_lua_pre_turn(user_message);
+        let user_message = match lua_pre_turn {
+            PreHookOutcome::Allow(message) => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": message,
+                        "image_count": images.len(),
+                        "streaming": true,
+                    }),
+                );
+                message
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": user_message,
+                        "image_count": images.len(),
+                        "streaming": true,
+                        "lua_vetoed": true,
+                        "lua_reason": reason.as_deref(),
+                    }),
+                );
+                let result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by Lua hook: {}",
+                        reason.unwrap_or_else(|| "request rejected".to_owned())
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                return Ok(self.finalize_turn(&hook_session, result, false));
+            }
+        };
 
         // Run input guardrails if configured (streaming path)
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
-            let result = cg.check_input(user_message);
+            let result = cg.check_input(&user_message);
             if !result.passed {
                 let agent_result = AgentResult {
                     response: format!(
@@ -1175,12 +1220,7 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &agent_result),
-                );
-                self.hooks.on_turn_end(&hook_session, &agent_result);
-                return Ok(agent_result);
+                return Ok(self.finalize_turn(&hook_session, agent_result, false));
             }
             result.content
         } else {
@@ -1227,12 +1267,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             turns_used += 1;
@@ -1258,12 +1293,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             // Check iteration budget (lifetime cap across all user turns)
@@ -1289,12 +1319,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, false));
                 }
             }
             self.iterations_used += 1;
@@ -1407,52 +1432,67 @@ impl AgentLoop {
                             streamed_tool_calls.clone(),
                         ));
 
-                        // Emit start events and record tool calls.
+                        let (effective_tool_calls, veto_reasons) =
+                            self.prepare_tool_calls(&hook_session, &streamed_tool_calls, true);
+                        streamed_tool_calls = effective_tool_calls.clone();
+                        // Emit start events and execute tool calls.
+                        tool_calls_made += streamed_tool_calls.len();
                         for tc in &streamed_tool_calls {
                             on_event(StreamEvent::ToolCallStart {
                                 name: &tc.function.name,
                                 call_id: &tc.id,
                                 args_summary: summarize_args(&tc.function.arguments),
                             });
-                            self.trajectory
-                                .record_tool_call(&tc.function.name, &tc.function.arguments);
-                            self.fire_shell_hooks(
-                                HookEvent::PreToolCall,
-                                serde_json::json!({
-                                    "session_id": hook_session,
-                                    "tool_name": tc.function.name,
-                                    "tool_call_id": tc.id,
-                                    "arguments": tc.function.arguments,
-                                    "streaming": true,
-                                }),
-                            );
                         }
 
-                        // Execute tool calls in parallel.
-                        tool_calls_made += streamed_tool_calls.len();
+                        let executable_tool_calls: Vec<ToolCallEntry> = streamed_tool_calls
+                            .iter()
+                            .zip(veto_reasons.iter())
+                            .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                            .collect();
                         let tool_exec_start = Instant::now();
-                        let results = match execute_tool_calls_parallel(
-                            &self.tools,
-                            &self.subagent_spawner,
-                            &streamed_tool_calls,
-                            self.config.max_concurrency,
-                            self.config.tool_timeout_secs,
-                        )
-                        .await
-                        {
-                            Ok(results) => results,
-                            Err(err) => {
-                                return Err(self.report_error(&hook_session, "tool_execution", err))
+                        let executed_results = if executable_tool_calls.is_empty() {
+                            Vec::new()
+                        } else {
+                            match execute_tool_calls_parallel(
+                                &self.tools,
+                                &self.subagent_spawner,
+                                &executable_tool_calls,
+                                self.config.max_concurrency,
+                                self.config.tool_timeout_secs,
+                            )
+                            .await
+                            {
+                                Ok(results) => results,
+                                Err(err) => {
+                                    return Err(self.report_error(
+                                        &hook_session,
+                                        "tool_execution",
+                                        err,
+                                    ))
+                                }
                             }
                         };
                         let tool_exec_duration = tool_exec_start.elapsed();
 
                         let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
-                        let mut clarification = None;
-                        for (tc, (result, requires_input)) in
-                            streamed_tool_calls.iter().zip(results)
-                        {
-                            let result = sanitize::sanitize_credentials(&result);
+                            let mut clarification = None;
+                            let mut executed_results = executed_results.into_iter();
+                            for (tc, veto_reason) in streamed_tool_calls.iter().zip(veto_reasons.into_iter()) {
+                            let lua_vetoed = veto_reason.is_some();
+                            let (mut result, requires_input) = match veto_reason {
+                                Some(reason) => (
+                                    format!(
+                                        "Error: tool call blocked by Lua hook: {reason}"
+                                    ),
+                                    false,
+                                ),
+                                None => executed_results
+                                    .next()
+                                    .expect("executed tool results should align with allowed calls"),
+                            };
+                            result = sanitize::sanitize_credentials(&result);
+                            result = self.run_lua_post_tool_call(&tc.function.name, &result);
                             let tool_success = !result.starts_with("Error:");
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
@@ -1477,12 +1517,13 @@ impl AgentLoop {
                                     "session_id": hook_session,
                                     "tool_name": tc.function.name,
                                     "tool_call_id": tc.id,
-                                    "success": !result.starts_with("Error:"),
-                                    "result": result,
-                                    "requires_input": requires_input,
-                                    "streaming": true,
-                                }),
-                            );
+                                        "success": !result.starts_with("Error:"),
+                                        "result": result,
+                                        "requires_input": requires_input,
+                                        "streaming": true,
+                                        "lua_vetoed": lua_vetoed,
+                                    }),
+                                );
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
@@ -1504,12 +1545,7 @@ impl AgentLoop {
                                 estimated_cost: Some(self.cost.total_cost),
                                 pending_clarification: Some(question),
                             };
-                            self.fire_shell_hooks(
-                                HookEvent::PostTurn,
-                                self.turn_result_context(&hook_session, &result),
-                            );
-                            self.hooks.on_turn_end(&hook_session, &result);
-                            return Ok(result);
+                            return Ok(self.finalize_turn(&hook_session, result, false));
                         }
 
                         self.maybe_inject_memory_nudge(tool_calls_made);
@@ -1532,16 +1568,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.fire_shell_hooks(
-                        HookEvent::OnComplete,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, true));
                 }
                 Err(_) => {
                     warn!(
@@ -1597,6 +1624,10 @@ impl AgentLoop {
                                 self.trajectory.record_assistant_message(text);
                             }
 
+                            let (effective_tool_calls, veto_reasons) =
+                                self.prepare_tool_calls(&hook_session, tool_calls, false);
+                            let tool_calls = effective_tool_calls;
+
                             let mut msg = ChatMessage::assistant_with_tool_calls(
                                 assistant_msg.content.clone(),
                                 tool_calls.clone(),
@@ -1604,54 +1635,65 @@ impl AgentLoop {
                             msg.provider_metadata = assistant_msg.provider_metadata.clone();
                             self.messages.push(msg);
 
-                            // Emit start events and record tool calls.
+                            // Emit start events.
                             for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart {
                                     name: &tc.function.name,
                                     call_id: &tc.id,
                                     args_summary: summarize_args(&tc.function.arguments),
                                 });
-                                self.trajectory
-                                    .record_tool_call(&tc.function.name, &tc.function.arguments);
-                                self.fire_shell_hooks(
-                                    HookEvent::PreToolCall,
-                                    serde_json::json!({
-                                        "session_id": hook_session,
-                                        "tool_name": tc.function.name,
-                                        "tool_call_id": tc.id,
-                                        "arguments": tc.function.arguments,
-                                        "streaming": false,
-                                    }),
-                                );
                             }
 
                             // Execute tool calls in parallel.
                             tool_calls_made += tool_calls.len();
+                            let executable_tool_calls: Vec<ToolCallEntry> = tool_calls
+                                .iter()
+                                .zip(veto_reasons.iter())
+                                .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                                .collect();
                             let tool_exec_start = Instant::now();
-                            let results = match execute_tool_calls_parallel(
-                                &self.tools,
-                                &self.subagent_spawner,
-                                tool_calls,
-                                self.config.max_concurrency,
-                                self.config.tool_timeout_secs,
-                            )
-                            .await
-                            {
-                                Ok(results) => results,
-                                Err(err) => {
-                                    return Err(self.report_error(
-                                        &hook_session,
-                                        "tool_execution",
-                                        err,
-                                    ))
+                            let executed_results = if executable_tool_calls.is_empty() {
+                                Vec::new()
+                            } else {
+                                match execute_tool_calls_parallel(
+                                    &self.tools,
+                                    &self.subagent_spawner,
+                                    &executable_tool_calls,
+                                    self.config.max_concurrency,
+                                    self.config.tool_timeout_secs,
+                                )
+                                .await
+                                {
+                                    Ok(results) => results,
+                                    Err(err) => {
+                                        return Err(self.report_error(
+                                            &hook_session,
+                                            "tool_execution",
+                                            err,
+                                        ))
+                                    }
                                 }
                             };
                             let tool_exec_duration = tool_exec_start.elapsed();
                             let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
 
                             let mut clarification = None;
-                            for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
-                                let result = sanitize::sanitize_credentials(&result);
+                            let mut executed_results = executed_results.into_iter();
+                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter()) {
+                                let lua_vetoed = veto_reason.is_some();
+                                let (mut result, requires_input) = match veto_reason {
+                                    Some(reason) => (
+                                        format!(
+                                            "Error: tool call blocked by Lua hook: {reason}"
+                                        ),
+                                        false,
+                                    ),
+                                    None => executed_results
+                                        .next()
+                                        .expect("executed tool results should align with allowed calls"),
+                                };
+                                result = sanitize::sanitize_credentials(&result);
+                                result = self.run_lua_post_tool_call(&tc.function.name, &result);
                                 let tool_success = !result.starts_with("Error:");
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
@@ -1680,6 +1722,7 @@ impl AgentLoop {
                                         "result": result,
                                         "requires_input": requires_input,
                                         "streaming": false,
+                                        "lua_vetoed": lua_vetoed,
                                     }),
                                 );
                                 if requires_input {
@@ -1705,12 +1748,7 @@ impl AgentLoop {
                                     estimated_cost: Some(self.cost.total_cost),
                                     pending_clarification: Some(question),
                                 };
-                                self.fire_shell_hooks(
-                                    HookEvent::PostTurn,
-                                    self.turn_result_context(&hook_session, &result),
-                                );
-                                self.hooks.on_turn_end(&hook_session, &result);
-                                return Ok(result);
+                                return Ok(self.finalize_turn(&hook_session, result, false));
                             }
 
                             self.maybe_inject_memory_nudge(tool_calls_made);
@@ -1753,16 +1791,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.fire_shell_hooks(
-                        HookEvent::OnComplete,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, true));
                 }
             }
         }
@@ -1869,7 +1898,167 @@ impl AgentLoop {
         self.hook_results.extend(results);
     }
 
+    fn run_lua_pre_turn(&self, user_message: &str) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(user_message.to_owned());
+        };
+
+        match runtime.run_pre_turn(user_message) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, "lua pre-turn hook failed");
+                PreHookOutcome::Allow(user_message.to_owned())
+            }
+        }
+    }
+
+    fn run_lua_pre_tool_call(&self, tool_name: &str, arguments: &str) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(arguments.to_owned());
+        };
+
+        match runtime.run_pre_tool_call(tool_name, arguments) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "lua pre-tool-call hook failed");
+                PreHookOutcome::Allow(arguments.to_owned())
+            }
+        }
+    }
+
+    fn run_lua_post_tool_call(&self, tool_name: &str, output: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return output.to_owned();
+        };
+
+        match runtime.run_post_tool_call(tool_name, output) {
+            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "lua post-tool-call hook failed");
+                output.to_owned()
+            }
+        }
+    }
+
+    fn run_lua_post_turn(&self, response: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return response.to_owned();
+        };
+
+        match runtime.run_post_turn(response) {
+            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
+            Err(error) => {
+                warn!(error = %error, "lua post-turn hook failed");
+                response.to_owned()
+            }
+        }
+    }
+
+    fn record_lua_completed_turn(&self, result: &AgentResult) {
+        if let Some(runtime) = &self.lua_runtime {
+            runtime.record_completed_turn(
+                result
+                    .total_input_tokens
+                    .saturating_add(result.total_output_tokens),
+            );
+        }
+    }
+
+    fn run_lua_on_error(&self, stage: &str, error: &AgentError) {
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(lua_error) = runtime.run_on_error(stage, &error.to_string()) {
+                warn!(error = %lua_error, stage = %stage, "lua on_error hook failed");
+            }
+        }
+    }
+
+    fn run_lua_on_complete(&self) {
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(error) = runtime.run_on_complete() {
+                warn!(error = %error, "lua on_complete hook failed");
+            }
+        }
+    }
+
+    fn finalize_turn(
+        &mut self,
+        session_id: &str,
+        mut result: AgentResult,
+        fire_complete: bool,
+    ) -> AgentResult {
+        self.record_lua_completed_turn(&result);
+        result.response = self.run_lua_post_turn(&result.response);
+        self.fire_shell_hooks(
+            HookEvent::PostTurn,
+            self.turn_result_context(session_id, &result),
+        );
+        if fire_complete {
+            self.run_lua_on_complete();
+            self.fire_shell_hooks(
+                HookEvent::OnComplete,
+                self.turn_result_context(session_id, &result),
+            );
+        }
+        self.hooks.on_turn_end(session_id, &result);
+        result
+    }
+
+    fn prepare_tool_calls(
+        &mut self,
+        hook_session: &str,
+        tool_calls: &[ToolCallEntry],
+        streaming: bool,
+    ) -> (Vec<ToolCallEntry>, Vec<Option<String>>) {
+        let mut effective_calls = Vec::with_capacity(tool_calls.len());
+        let mut veto_reasons = Vec::with_capacity(tool_calls.len());
+
+        for tc in tool_calls {
+            self.trajectory
+                .record_tool_call(&tc.function.name, &tc.function.arguments);
+            self.hooks.on_tool_call_start(hook_session, &tc.function.name);
+
+            match self.run_lua_pre_tool_call(&tc.function.name, &tc.function.arguments) {
+                PreHookOutcome::Allow(arguments) => {
+                    let mut effective = tc.clone();
+                    effective.function.arguments = arguments;
+                    self.fire_shell_hooks(
+                        HookEvent::PreToolCall,
+                        serde_json::json!({
+                            "session_id": hook_session,
+                            "tool_name": &effective.function.name,
+                            "tool_call_id": &effective.id,
+                            "arguments": &effective.function.arguments,
+                            "lua_vetoed": false,
+                            "streaming": streaming,
+                        }),
+                    );
+                    effective_calls.push(effective);
+                    veto_reasons.push(None);
+                }
+                PreHookOutcome::Veto { reason } => {
+                    self.fire_shell_hooks(
+                        HookEvent::PreToolCall,
+                        serde_json::json!({
+                            "session_id": hook_session,
+                            "tool_name": &tc.function.name,
+                            "tool_call_id": &tc.id,
+                            "arguments": &tc.function.arguments,
+                            "lua_vetoed": true,
+                            "lua_reason": reason,
+                            "streaming": streaming,
+                        }),
+                    );
+                    effective_calls.push(tc.clone());
+                    veto_reasons.push(reason);
+                }
+            }
+        }
+
+        (effective_calls, veto_reasons)
+    }
+
     fn report_error(&mut self, session_id: &str, stage: &str, error: AgentError) -> AgentError {
+        self.run_lua_on_error(stage, &error);
         self.fire_shell_hooks(
             HookEvent::OnError,
             serde_json::json!({
@@ -2537,7 +2726,11 @@ fn format_blocked_reasons(result: &crate::guardrails::GuardrailResult) -> String
 mod tests {
     use super::*;
     use crate::hooks::HookConfig;
+    use genesis_lua::{LuaRuntime, LuaRuntimeConfig, LuaSessionContext};
+    use std::fs;
     use std::io::{Read, Write};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     fn test_agent() -> AgentLoop {
         let provider = genesis_provider::ResolvedProvider {
@@ -2576,6 +2769,54 @@ mod tests {
             HookRunner::default(),
             Vec::new(),
         )
+    }
+
+    fn test_lua_runtime(script: &str) -> Arc<LuaRuntime> {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("hooks.lua"), script).expect("lua hook file should write");
+
+        let runtime = LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "session-hooks".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                config_values: BTreeMap::new(),
+            })
+            .build()
+            .expect("lua runtime should build");
+        Arc::new(runtime)
+    }
+
+    fn start_mock_server_with_capture(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buffer = [0u8; 8192];
+                let read = stream.read(&mut buffer).expect("read request");
+                captured_clone
+                    .lock()
+                    .expect("capture mutex")
+                    .push(String::from_utf8_lossy(&buffer[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+                stream.flush().expect("flush");
+            }
+        });
+        (format!("http://{addr}/v1"), captured)
     }
 
     fn test_agent_with_endpoint(base_url: String, hooks: Vec<HookConfig>) -> AgentLoop {
@@ -3571,6 +3812,287 @@ mod tests {
             .find(|result| result.event == HookEvent::OnError)
             .expect("error hook");
         assert!(error_hook.stdout.contains("\"stage\":\"llm_request\""));
+    }
+
+    #[tokio::test]
+    async fn lua_pre_turn_rewrite_updates_request_and_shell_context() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![response]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::PreTurn,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "rewritten: " .. ctx.user_message
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains("rewritten: hello"),
+            "request body should contain the rewritten user message: {request}"
+        );
+
+        let pre_turn = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreTurn)
+            .expect("pre-turn shell hook");
+        assert!(
+            pre_turn.stdout.contains("rewritten: hello"),
+            "shell hook should see the Lua-rewritten message: {}",
+            pre_turn.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_tool_hooks_rewrite_veto_and_update_session_state() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreToolCall", function(ctx)
+    return '{"message":"rewritten"}'
+end)
+
+genesis.on("PostToolCall", function(ctx)
+    return ctx.output .. " [lua]"
+end)
+
+genesis.on("PostTurn", function(_)
+    genesis.log(string.format("post_turn:%d:%d", genesis.session.turn_count, genesis.session.total_tokens))
+end)
+
+genesis.on("OnComplete", function(_)
+    genesis.log(string.format("complete:%d:%d", genesis.session.turn_count, genesis.session.total_tokens))
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime.clone());
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let pre = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreToolCall)
+            .expect("pre tool shell hook");
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool shell hook");
+
+        assert!(
+            pre.stdout.contains(r#""arguments":"{\"message\":\"rewritten\"}""#),
+            "shell hook should see rewritten tool arguments: {}",
+            pre.stdout
+        );
+        assert!(
+            post.stdout.contains("[lua]"),
+            "shell hook should see Lua-rewritten tool output: {}",
+            post.stdout
+        );
+
+        let logs = runtime.logs();
+        assert!(
+            logs.iter().any(|line| line.contains("post_turn:1:30")),
+            "PostTurn should see updated session counters: {:?}",
+            logs
+        );
+        assert!(
+            logs.iter().any(|line| line.contains("complete:1:30")),
+            "OnComplete should see updated session counters: {:?}",
+            logs
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_pre_tool_call_veto_becomes_error_and_shell_context_is_preserved() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreToolCall", function(_)
+    return false, "blocked"
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let pre = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreToolCall)
+            .expect("pre tool shell hook");
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool shell hook");
+
+        assert!(
+            pre.stdout.contains(r#""lua_vetoed":true"#),
+            "shell hook should reflect the Lua veto: {}",
+            pre.stdout
+        );
+        assert!(
+            post.stdout.contains("blocked by Lua hook"),
+            "post tool shell hook should see the synthesized veto output: {}",
+            post.stdout
+        );
     }
 
     // --- Iteration budget tests ---
