@@ -1,4 +1,3 @@
-import { useCallback, useEffect } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { navRoutes } from '@/lib/nav'
 import {
@@ -19,21 +18,7 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
 
-  const toggleOpen = useCallback(() => {
-    onOpenChange(!open)
-  }, [open, onOpenChange])
-
-  // Cmd+K / Ctrl+K shortcut
-  useEffect(() => {
-    function handleKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        toggleOpen()
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [toggleOpen])
+  // Cmd+K shortcut is handled centrally by useKeyboardNav in __root.tsx
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>

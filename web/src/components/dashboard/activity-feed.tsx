@@ -52,7 +52,7 @@ function ActivityItem({ entry }: { entry: AuditEntry }) {
 }
 
 export function ActivityFeed() {
-  const { data: entries, isLoading } = useAuditLog({ limit: 15, refetchInterval: 10_000 })
+  const { data: entries, isLoading } = useAuditLog({ limit: 15 }, { refetchInterval: 10_000 })
 
   if (isLoading) {
     return (

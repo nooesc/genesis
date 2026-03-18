@@ -5,18 +5,21 @@ import type { AuditEntry } from '../types'
 interface AuditParams {
   limit?: number
   offset?: number
+}
+
+interface AuditQueryOptions {
   refetchInterval?: number
 }
 
-export function useAuditLog(params?: AuditParams) {
+export function useAuditLog(params?: AuditParams, options?: AuditQueryOptions) {
   const searchParams = new URLSearchParams()
   if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
   if (params?.offset !== undefined) searchParams.set('offset', String(params.offset))
   const qs = searchParams.toString()
 
   return useQuery({
-    queryKey: ['audit', { limit: params?.limit, offset: params?.offset }],
+    queryKey: ['audit', params],
     queryFn: () => api.get<AuditEntry[]>(`/audit${qs ? `?${qs}` : ''}`),
-    refetchInterval: params?.refetchInterval,
+    refetchInterval: options?.refetchInterval,
   })
 }

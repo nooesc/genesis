@@ -57,7 +57,14 @@ export function useKeyboardNav({ onToggleHelp, onCloseHelp, onToggleCommandPalet
         return
       }
 
-      // Skip if any modifier is held (Cmd+K handled elsewhere)
+      // Cmd+K / Ctrl+K = open command palette (with modifier)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        onToggleCommandPalette()
+        return
+      }
+
+      // Skip other modifier combos
       if (e.metaKey || e.ctrlKey || e.altKey) return
 
       // Number keys: dock navigation

@@ -11,27 +11,11 @@ import { ActivityFeed } from '@/components/dashboard/activity-feed'
 import { ToolHeatmap } from '@/components/dashboard/tool-heatmap'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { formatUptime, formatTokens, isHealthyStatus } from '@/lib/utils'
 
 export const Route = createFileRoute('/')({
   component: DashboardPage,
 })
-
-function formatUptime(seconds: number): string {
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const parts: string[] = []
-  if (d > 0) parts.push(`${d}d`)
-  if (h > 0) parts.push(`${h}h`)
-  parts.push(`${m}m`)
-  return parts.join(' ')
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
-}
 
 function DashboardPage() {
   const { data: health, isLoading: healthLoading } = useHealth()
@@ -59,7 +43,7 @@ function DashboardPage() {
     ? insights.platform_breakdown
     : []
 
-  const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
+  const isHealthy = isHealthyStatus(health?.status)
 
   // Uptime as fraction of 30 days (reasonable gauge max)
   const uptimeFraction = health

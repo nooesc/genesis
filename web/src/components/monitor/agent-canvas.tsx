@@ -1,6 +1,7 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import type { SessionSummary } from '@/lib/api/types'
 import { getPlatformColor } from '@/lib/platforms'
+import { formatTokens } from '@/lib/utils'
 
 interface AgentCanvasProps {
   sessions: SessionSummary[]
@@ -16,6 +17,7 @@ interface SessionNode {
   radius: number
   size: number
   tokens: number
+  updatedAtMs: number
 }
 
 function layoutSessions(sessions: SessionSummary[]): SessionNode[] {
@@ -28,7 +30,7 @@ function layoutSessions(sessions: SessionSummary[]): SessionNode[] {
     const radius = 110 + recency * 70
     const size = 3.5 + (tokens / maxTokens) * 8
 
-    return { session, angle, radius, size, tokens }
+    return { session, angle, radius, size, tokens, updatedAtMs: new Date(session.updated_at).getTime() }
   })
 }
 
@@ -38,32 +40,42 @@ function getToolCategories(toolUsage: [string, number][], max: number = 10): [st
     .slice(0, max)
 }
 
-function formatTokensCompact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
-}
-
 export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, toolUsage }: AgentCanvasProps) {
   const [tick, setTick] = useState(0)
-  const rafRef = useRef<number>(0)
   const uid = useId()
 
   const nodes = useMemo(() => layoutSessions(sessions.slice(0, 16)), [sessions])
   const tools = useMemo(() => getToolCategories(toolUsage), [toolUsage])
   const maxToolCount = tools.length > 0 ? tools[0][1] : 1
 
+  // Animation loop with visibility gate — pauses when tab is hidden
   useEffect(() => {
     let lastTime = 0
+    let rafId = 0
+
     function animate(time: number) {
-      if (time - lastTime > 33) {
+      if (!document.hidden && time - lastTime > 33) {
         setTick((t: number) => t + 1)
         lastTime = time
       }
-      rafRef.current = requestAnimationFrame(animate)
+      rafId = requestAnimationFrame(animate)
     }
-    rafRef.current = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(rafRef.current)
+
+    function onVisibilityChange() {
+      if (document.hidden) {
+        cancelAnimationFrame(rafId)
+      } else {
+        rafId = requestAnimationFrame(animate)
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    rafId = requestAnimationFrame(animate)
+
+    return () => {
+      cancelAnimationFrame(rafId)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [])
 
   const W = 640
@@ -243,13 +255,15 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
       })}
 
       {/* === LAYER 4: Session connections + nodes === */}
-      {nodes.map(({ session, angle, radius, size, tokens }) => {
+      {(() => {
+        const nowMs = Date.now()
+        return nodes.map(({ session, angle, radius, size, tokens, updatedAtMs }) => {
         const a = angle + (rot * Math.PI) / 180
         const nx = cx + radius * Math.cos(a)
         const ny = cy + radius * Math.sin(a)
         const color = getPlatformColor(session.platform)
 
-        const ageMs = Date.now() - new Date(session.updated_at).getTime()
+        const ageMs = nowMs - updatedAtMs
         const ageHours = ageMs / (1000 * 60 * 60)
         const nodeOpacity = Math.max(0.15, 1 - ageHours / 72)
         const isRecent = ageHours < 2
@@ -320,7 +334,7 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
                 fontFamily="var(--font-mono)"
                 opacity={0.6}
               >
-                {formatTokensCompact(tokens)}
+                {formatTokens(tokens)}
               </text>
             </g>
 
@@ -335,7 +349,8 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
             )}
           </g>
         )
-      })}
+      })
+      })()}
 
       {/* === LAYER 5: Central core — Eve === */}
       {/* Ambient glow */}

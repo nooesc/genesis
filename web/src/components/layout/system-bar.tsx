@@ -1,21 +1,7 @@
 import { useHealth } from '@/lib/api/queries/health'
 import { useInsights } from '@/lib/api/queries/analytics'
-import { useEffect, useState } from 'react'
-
-function formatUptime(seconds: number): string {
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
-}
+import { formatUptime, formatTokens, isHealthyStatus } from '@/lib/utils'
+import { useEffect, useMemo, useState } from 'react'
 
 function SystemClock() {
   const [time, setTime] = useState(() => new Date())
@@ -36,11 +22,12 @@ export function SystemBar() {
   const { data: health, isError } = useHealth()
   const { data: insights } = useInsights(7)
 
-  const totalTokens7d = insights
-    ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0)
-    : 0
+  const totalTokens7d = useMemo(
+    () => insights ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0) : 0,
+    [insights],
+  )
 
-  const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
+  const isHealthy = isHealthyStatus(health?.status)
 
   return (
     <header className="system-bar flex h-9 items-center justify-between border-b border-border/50 bg-[#0c0c0c] px-4">
@@ -71,32 +58,17 @@ export function SystemBar() {
       <div className="flex items-center gap-1">
         {health && (
           <>
-            <StatusChip
-              label="UP"
-              value={formatUptime(health.uptime_seconds)}
-            />
+            <StatusChip label="UP" value={formatUptime(health.uptime_seconds)} />
             <Divider />
-            <StatusChip
-              label="SESSIONS"
-              value={String(health.total_sessions)}
-            />
+            <StatusChip label="SESSIONS" value={String(health.total_sessions)} />
             <Divider />
-            <StatusChip
-              label="TOOLS"
-              value={String(health.total_tools)}
-            />
+            <StatusChip label="TOOLS" value={String(health.total_tools)} />
             <Divider />
-            <StatusChip
-              label="7D TOK"
-              value={formatTokens(totalTokens7d)}
-            />
+            <StatusChip label="7D TOK" value={formatTokens(totalTokens7d)} />
             {health.active_schedules > 0 && (
               <>
                 <Divider />
-                <StatusChip
-                  label="SCHED"
-                  value={String(health.active_schedules)}
-                />
+                <StatusChip label="SCHED" value={String(health.active_schedules)} />
               </>
             )}
           </>
