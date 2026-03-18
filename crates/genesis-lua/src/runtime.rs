@@ -8,9 +8,10 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use thiserror::Error;
 
 use crate::{
-    api::install_genesis_api,
+    api::{install_genesis_api, PluginContext},
     discovery::discover_plugins_best_effort,
     hooks::{parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome, PreHookOutcome},
+    tools::{LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +38,7 @@ pub struct LuaRuntime {
     plugin_errors: Vec<String>,
     session_state: Arc<Mutex<LuaSessionContext>>,
     hook_registry: Arc<Mutex<HookRegistry>>,
+    tool_registry: Arc<Mutex<LuaToolRegistry>>,
 }
 
 impl std::fmt::Debug for LuaRuntime {
@@ -92,6 +94,19 @@ pub enum LuaRuntimeError {
     DuplicatePluginName { name: String },
     #[error("unsupported hook event `{event}`")]
     UnsupportedHookEvent { event: String },
+    #[error("duplicate lua tool name `{name}`")]
+    DuplicateLuaToolName { name: String },
+    #[error("invalid lua tool definition from plugin `{plugin_name}`: {reason}")]
+    InvalidLuaToolDefinition { plugin_name: String, reason: String },
+    #[error("lua tool registration is only available during plugin load")]
+    ToolRegistrationUnavailable,
+    #[error("unknown lua tool `{name}`")]
+    UnknownLuaTool { name: String },
+    #[error("invalid lua tool result from `{tool_name}`: unsupported `{value_type}` value")]
+    InvalidLuaToolResult {
+        tool_name: String,
+        value_type: String,
+    },
     #[error("lua execution failed: {source}")]
     Lua {
         #[from]
@@ -124,12 +139,15 @@ impl LuaRuntime {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let session_state = Arc::new(Mutex::new(config.session.clone()));
         let hook_registry = Arc::new(Mutex::new(HookRegistry::default()));
+        let tool_registry = Arc::new(Mutex::new(LuaToolRegistry::default()));
         let genesis = install_genesis_api(
             &lua,
             &config,
             Arc::clone(&logs),
             Arc::clone(&session_state),
             Arc::clone(&hook_registry),
+            Arc::clone(&tool_registry),
+            None,
         )?;
         lua.globals().set("genesis", genesis)?;
 
@@ -140,6 +158,7 @@ impl LuaRuntime {
             plugin_errors: Vec::new(),
             session_state,
             hook_registry,
+            tool_registry,
         };
         runtime.load_plugins(&config)?;
         Ok(runtime)
@@ -178,7 +197,7 @@ impl LuaRuntime {
                     continue;
                 }
             };
-            let plugin_env = self.plugin_environment()?;
+            let plugin_env = self.plugin_environment(config, &plugin)?;
             if let Err(err) = self
                 .lua
                 .load(&source)
@@ -213,6 +232,24 @@ impl LuaRuntime {
 
     pub fn plugin_errors(&self) -> &[String] {
         &self.plugin_errors
+    }
+
+    pub fn registered_tools(&self) -> Vec<LuaRegisteredTool> {
+        self.tool_registry
+            .lock()
+            .expect("tool registry mutex should not be poisoned")
+            .registered_tools()
+    }
+
+    pub fn invoke_tool(
+        &self,
+        name: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> Result<LuaToolOutput, LuaRuntimeError> {
+        self.tool_registry
+            .lock()
+            .expect("tool registry mutex should not be poisoned")
+            .invoke(&self.lua, name, arguments)
     }
 
     pub fn register_hook(
@@ -286,10 +323,27 @@ impl LuaRuntime {
         self.run_observe_hook(HookEvent::OnComplete, context)
     }
 
-    fn plugin_environment(&self) -> Result<Table, LuaRuntimeError> {
+    fn plugin_environment(
+        &self,
+        config: &LuaRuntimeConfig,
+        plugin: &crate::DiscoveredPlugin,
+    ) -> Result<Table, LuaRuntimeError> {
         let globals = self.lua.globals();
         let mut cloned_tables = HashMap::new();
         let env = self.clone_table(&globals, &mut cloned_tables)?;
+        let plugin_genesis = install_genesis_api(
+            &self.lua,
+            config,
+            Arc::clone(&self.logs),
+            Arc::clone(&self.session_state),
+            Arc::clone(&self.hook_registry),
+            Arc::clone(&self.tool_registry),
+            Some(PluginContext {
+                name: plugin.name.clone(),
+                permissions: plugin.manifest.permissions.clone(),
+            }),
+        )?;
+        env.set("genesis", plugin_genesis)?;
         env.set("_G", env.clone())?;
         env.set("_ENV", env.clone())?;
         Ok(env)

@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use mlua::{Function, Lua, UserData, UserDataFields};
+use mlua::{Function, Lua, Table, UserData, UserDataFields};
 
 use crate::{
     hooks::{HookEvent, HookRegistry},
+    manifest::PluginPermissions,
+    tools::LuaToolRegistry,
     LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
 
@@ -15,6 +17,8 @@ pub struct GenesisApi {
     config_values: Arc<std::collections::BTreeMap<String, String>>,
     logs: Arc<Mutex<Vec<String>>>,
     hooks: Arc<Mutex<HookRegistry>>,
+    tools: Arc<Mutex<LuaToolRegistry>>,
+    plugin_context: Option<PluginContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +29,12 @@ struct SessionView {
 #[derive(Debug, Clone)]
 struct ConfigView {
     values: Arc<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginContext {
+    pub name: String,
+    pub permissions: PluginPermissions,
 }
 
 impl UserData for SessionView {
@@ -91,6 +101,21 @@ impl UserData for GenesisApi {
                 Ok(())
             })
         });
+        fields.add_field_method_get("register_tool", |lua, this| {
+            let tools = Arc::clone(&this.tools);
+            let plugin_context = this.plugin_context.clone();
+            lua.create_function(move |lua, spec: Table| {
+                let plugin_context = plugin_context.clone().ok_or_else(|| {
+                    mlua::Error::external(LuaRuntimeError::ToolRegistrationUnavailable)
+                })?;
+                tools
+                    .lock()
+                    .expect("tool registry mutex should not be poisoned")
+                    .register(lua, &plugin_context.name, &plugin_context.permissions, spec)
+                    .map_err(mlua::Error::external)?;
+                Ok(())
+            })
+        });
     }
 }
 
@@ -100,6 +125,8 @@ pub(crate) fn install_genesis_api(
     logs: Arc<Mutex<Vec<String>>>,
     session: Arc<Mutex<LuaSessionContext>>,
     hooks: Arc<Mutex<HookRegistry>>,
+    tools: Arc<Mutex<LuaToolRegistry>>,
+    plugin_context: Option<PluginContext>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -108,6 +135,8 @@ pub(crate) fn install_genesis_api(
         config_values: Arc::new(config.config_values.clone()),
         logs,
         hooks,
+        tools,
+        plugin_context,
     })?)
 }
 

@@ -1229,6 +1229,7 @@ dependencies = [
 name = "genesis-lua"
 version = "0.1.0"
 dependencies = [
+ "genesis-types",
  "mlua",
  "serde",
  "serde_json",

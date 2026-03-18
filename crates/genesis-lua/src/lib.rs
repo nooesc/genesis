@@ -11,6 +11,7 @@ pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissi
 pub use runtime::{
     LuaRuntime, LuaRuntimeBuilder, LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
+pub use tools::{LuaRegisteredTool, LuaToolOutput, LuaToolRegistry};
 
 #[cfg(test)]
 mod tests {
@@ -213,6 +214,176 @@ end)
             runtime.logs(),
             vec!["plugin booted".to_owned()],
             "plugin should be able to call genesis.log during load"
+        );
+    }
+
+    #[test]
+    fn runtime_registers_lua_tools_with_owner_and_permissions() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("word-tools");
+        fs::create_dir(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "word-tools"
+version = "0.1.0"
+
+[permissions]
+tools = ["read_file"]
+"#,
+        )
+        .expect("plugin manifest should write");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_tool({
+    name = "word_count",
+    description = "Count words in a path",
+    parameters = {
+        path = {
+            type = "string",
+            description = "Path to inspect",
+            required = true,
+        },
+    },
+    run = function(args)
+        return args.path
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let tools = runtime.registered_tools();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].definition.name, "word_count");
+        assert_eq!(tools[0].definition.description, "Count words in a path");
+        assert_eq!(tools[0].plugin_name, "word-tools");
+        assert_eq!(tools[0].permissions.tools, vec!["read_file"]);
+        assert_eq!(
+            tools[0].definition.parameters,
+            Some(json!({
+                "path": {
+                    "type": "string",
+                    "description": "Path to inspect",
+                    "required": true,
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_duplicate_tool_names_without_overwriting_first_registration() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("first.lua"),
+            r#"
+genesis.register_tool({
+    name = "echoer",
+    description = "First echoer",
+    run = function(args)
+        return "first:" .. args.message
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(
+            dir.path().join("second.lua"),
+            r#"
+genesis.register_tool({
+    name = "echoer",
+    description = "Second echoer",
+    run = function(args)
+        return "second:" .. args.message
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert_eq!(runtime.registered_tools().len(), 1);
+        assert_eq!(runtime.registered_tools()[0].plugin_name, "first");
+        assert!(
+            runtime
+                .plugin_errors()
+                .iter()
+                .any(|entry| entry.contains("duplicate lua tool name `echoer`")),
+            "duplicate tool registration should be recorded: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
+    fn runtime_invokes_lua_tool_with_string_arguments() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("echoer.lua"),
+            r#"
+genesis.register_tool({
+    name = "echoer",
+    description = "Echo a string argument",
+    run = function(args)
+        return args.message .. ":" .. args.count
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let output = runtime
+            .invoke_tool(
+                "echoer",
+                BTreeMap::from([
+                    ("message".to_owned(), "hello".to_owned()),
+                    ("count".to_owned(), "2".to_owned()),
+                ]),
+            )
+            .expect("tool should run");
+
+        assert_eq!(output, crate::tools::LuaToolOutput::Text("hello:2".to_owned()));
+    }
+
+    #[test]
+    fn runtime_returns_structured_json_from_lua_tool() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("structured.lua"),
+            r#"
+genesis.register_tool({
+    name = "structured",
+    description = "Return structured data",
+    run = function(args)
+        return {
+            ok = true,
+            echoed = args.message,
+        }
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let output = runtime
+            .invoke_tool(
+                "structured",
+                BTreeMap::from([("message".to_owned(), "hello".to_owned())]),
+            )
+            .expect("tool should run");
+
+        assert_eq!(
+            output,
+            crate::tools::LuaToolOutput::Json(json!({
+                "ok": true,
+                "echoed": "hello",
+            }))
         );
     }
 
