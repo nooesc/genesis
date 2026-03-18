@@ -412,19 +412,30 @@ impl App {
 
             match self.file_completion.handle_key(key) {
                 FileCompletionAction::Select(path) => {
-                    // Replace @query with the selected path.
-                    // Find the last @ in the input and replace everything after it.
+                    // Replace @query with the selected path, preserving
+                    // any text before and after the @-query token.
                     let text = self.chat.input.text().to_owned();
                     if let Some(at_pos) = text.rfind('@') {
-                        self.chat.input.clear();
+                        // Find end of the @-query: next space or end of text.
+                        let query_end = text[at_pos + 1..]
+                            .find(' ')
+                            .map(|p| at_pos + 1 + p)
+                            .unwrap_or(text.len());
                         let before = &text[..at_pos];
-                        let new_text = format!("{before}{path} ");
-                        for c in new_text.chars() {
+                        let after = &text[query_end..];
+                        self.chat.input.clear();
+                        let new_text = format!("{before}{path} {}", after.trim_start());
+                        for c in new_text.trim_end().chars() {
                             self.chat.input.handle_key(KeyEvent::new(
                                 KeyCode::Char(c),
                                 KeyModifiers::NONE,
                             ));
                         }
+                        // Add trailing space.
+                        self.chat.input.handle_key(KeyEvent::new(
+                            KeyCode::Char(' '),
+                            KeyModifiers::NONE,
+                        ));
                     }
                 }
                 FileCompletionAction::Dismiss => {}
@@ -472,13 +483,11 @@ impl App {
                     self.command_popup.hide();
                 }
 
-                // Check for @ to trigger file completion.
-                if input_text.contains('@') && !self.file_completion.is_visible() {
+                // Check for @ at the end of input to trigger file completion.
+                // Only triggers when @ was just typed (last char), not when the
+                // buffer just happens to contain @ from earlier.
+                if input_text.ends_with('@') && !self.file_completion.is_visible() {
                     self.file_completion.show();
-                    if let Some(at_pos) = input_text.rfind('@') {
-                        let query = &input_text[at_pos + 1..];
-                        self.file_completion.update_query(query);
-                    }
                 }
 
                 match action {
