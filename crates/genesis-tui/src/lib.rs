@@ -192,6 +192,10 @@ pub async fn run_tui(
         &compact_art,
     );
 
+    let animations_enabled = config.tui.animations
+        && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
+    let no_color = std::env::var("NO_COLOR").is_ok();
+
     let mut app = App {
         submission_tx,
         app_tx,
@@ -216,6 +220,7 @@ pub async fn run_tui(
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
+        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -356,9 +361,13 @@ pub async fn run_tui(
                 render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                if app.status_bar.is_animating() {
-                    app.frame_requester
-                        .schedule_frame_in(app.status_bar.animation_interval());
+                if app.status_bar.is_animating() || app.effects.is_running() {
+                    let interval = if app.effects.is_running() {
+                        std::time::Duration::from_millis(16) // ~60fps for smooth effects
+                    } else {
+                        app.status_bar.animation_interval()
+                    };
+                    app.frame_requester.schedule_frame_in(interval);
                 }
             }
         }
@@ -556,6 +565,10 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
     if let Some(approval) = &app.approval {
         approval.render(area, buf);
     }
+
+    // Apply post-render effects (tachyonfx).
+    let dt = app.effects.frame_dt();
+    app.effects.process(dt, buf, area);
 
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();

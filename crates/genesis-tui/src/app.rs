@@ -73,6 +73,8 @@ pub struct App {
     pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
     /// Queue of pending approval requests (processed one at a time).
     pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
+    /// Post-render visual effects (tachyonfx).
+    pub effects: crate::effects::GenesisEffects,
 }
 
 impl App {
@@ -481,6 +483,7 @@ mod tests {
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
+            effects: crate::effects::GenesisEffects::new(false, false),
         };
         (app, submission_rx, app_rx)
     }
