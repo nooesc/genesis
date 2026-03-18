@@ -18,9 +18,13 @@ function RootLayout() {
   const toggleHelp = useCallback(() => setHelpOpen(v => !v), [])
   const toggleCommand = useCallback(() => setCommandOpen(v => !v), [])
 
+  const closeHelp = useCallback(() => setHelpOpen(false), [])
+
   useKeyboardNav({
     onToggleHelp: toggleHelp,
+    onCloseHelp: closeHelp,
     onToggleCommandPalette: toggleCommand,
+    helpOpen,
   })
 
   return (

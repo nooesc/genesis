@@ -9,7 +9,10 @@ const shortcutMap = new Map(
 
 interface UseKeyboardNavOptions {
   onToggleHelp: () => void
+  onCloseHelp: () => void
   onToggleCommandPalette: () => void
+  /** When true, only ? and Escape are active (other shortcuts suppressed) */
+  helpOpen: boolean
 }
 
 /**
@@ -17,12 +20,32 @@ interface UseKeyboardNavOptions {
  * - 1-9, 0: navigate to dock items
  * - ?: toggle shortcut help
  * - /: focus search input on current page
+ * - Escape: close overlays
  */
-export function useKeyboardNav({ onToggleHelp, onToggleCommandPalette }: UseKeyboardNavOptions) {
+export function useKeyboardNav({ onToggleHelp, onCloseHelp, onToggleCommandPalette, helpOpen }: UseKeyboardNavOptions) {
   const navigate = useNavigate()
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      // Escape always works — closes help overlay
+      if (e.key === 'Escape') {
+        if (helpOpen) {
+          e.preventDefault()
+          onCloseHelp()
+        }
+        return
+      }
+
+      // ? toggles help regardless of state
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        onToggleHelp()
+        return
+      }
+
+      // When help overlay is open, suppress all other shortcuts
+      if (helpOpen) return
+
       // Skip if user is typing in an input/textarea/contenteditable
       const target = e.target as HTMLElement
       if (
@@ -34,7 +57,7 @@ export function useKeyboardNav({ onToggleHelp, onToggleCommandPalette }: UseKeyb
         return
       }
 
-      // Skip if any modifier is held (except for Cmd+K which is handled elsewhere)
+      // Skip if any modifier is held (Cmd+K handled elsewhere)
       if (e.metaKey || e.ctrlKey || e.altKey) return
 
       // Number keys: dock navigation
@@ -42,13 +65,6 @@ export function useKeyboardNav({ onToggleHelp, onToggleCommandPalette }: UseKeyb
       if (route) {
         e.preventDefault()
         void navigate({ to: route })
-        return
-      }
-
-      // ? = toggle help overlay
-      if (e.key === '?') {
-        e.preventDefault()
-        onToggleHelp()
         return
       }
 
@@ -70,5 +86,5 @@ export function useKeyboardNav({ onToggleHelp, onToggleCommandPalette }: UseKeyb
 
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [navigate, onToggleHelp, onToggleCommandPalette])
+  }, [navigate, onToggleHelp, onCloseHelp, onToggleCommandPalette, helpOpen])
 }
