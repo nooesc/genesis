@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import type { StoredMessage } from '@/lib/api/types'
 import { ToolCallBlock } from './tool-call-block'
+import { User, Bot, Wrench, Terminal } from 'lucide-react'
 
 function formatTime(isoString: string): string {
   const d = new Date(isoString)
@@ -12,34 +13,36 @@ function formatDate(isoString: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-function roleMeta(role: StoredMessage['role']): { label: string; borderClass: string; labelClass: string } {
-  switch (role) {
-    case 'user':
-      return {
-        label: 'user',
-        borderClass: 'border-l-2 border-primary',
-        labelClass: 'text-primary',
-      }
-    case 'assistant':
-      return {
-        label: 'assistant',
-        borderClass: 'border-l-2 border-[#a855f7]',
-        labelClass: 'text-[#a855f7]',
-      }
-    case 'tool':
-      return {
-        label: 'tool',
-        borderClass: 'border-l-2 border-muted-foreground/40',
-        labelClass: 'text-muted-foreground',
-      }
-    case 'system':
-      return {
-        label: 'system',
-        borderClass: 'border-l-2 border-yellow-500/40',
-        labelClass: 'text-yellow-500/70',
-      }
-  }
-}
+const ROLE_CONFIG = {
+  user: {
+    label: 'USER',
+    color: '#0891b2',
+    icon: User,
+    nodeClass: 'bg-[#0891b2] ring-[#0891b2]/20',
+    lineClass: 'text-[#0891b2]',
+  },
+  assistant: {
+    label: 'EVE',
+    color: '#a855f7',
+    icon: Bot,
+    nodeClass: 'bg-[#a855f7] ring-[#a855f7]/20',
+    lineClass: 'text-[#a855f7]',
+  },
+  tool: {
+    label: 'TOOL',
+    color: '#525252',
+    icon: Wrench,
+    nodeClass: 'bg-[#525252] ring-[#525252]/20',
+    lineClass: 'text-muted-foreground',
+  },
+  system: {
+    label: 'SYS',
+    color: '#eab308',
+    icon: Terminal,
+    nodeClass: 'bg-[#eab308]/60 ring-[#eab308]/10',
+    lineClass: 'text-[#eab308]/60',
+  },
+} as const
 
 interface MessageThreadProps {
   messages: StoredMessage[]
@@ -54,103 +57,119 @@ export function MessageThread({ messages }: MessageThreadProps) {
     )
   }
 
-  // Group messages by date for visual separation
   let lastDate = ''
 
   return (
-    <div className="flex flex-col gap-3">
-      {messages.map((msg) => {
-        const meta = roleMeta(msg.role)
-        const dateStr = formatDate(msg.created_at)
-        const showDateSeparator = dateStr !== lastDate
-        lastDate = dateStr
+    <div className="relative">
+      {/* Timeline track */}
+      <div className="absolute left-[11px] top-0 bottom-0 w-px bg-border/30" />
 
-        if (msg.role === 'system') {
+      <div className="flex flex-col">
+        {messages.map((msg, idx) => {
+          const config = ROLE_CONFIG[msg.role]
+          const Icon = config.icon
+          const dateStr = formatDate(msg.created_at)
+          const showDateSeparator = dateStr !== lastDate
+          lastDate = dateStr
+          const isLast = idx === messages.length - 1
+          const hasToolCalls = msg.tool_calls_json != null && msg.tool_calls_json !== '[]'
+
           return (
             <div key={msg.id}>
-              {showDateSeparator && <DateSeparator label={dateStr} />}
-              <div className="flex items-start gap-2 py-1">
-                <span className={cn('font-mono text-[10px] uppercase tracking-wider', meta.labelClass)}>
-                  system
-                </span>
-                <p className="font-mono text-[10px] text-muted-foreground/60 line-clamp-2">
-                  {msg.content}
-                </p>
+              {showDateSeparator && <DateMarker label={dateStr} />}
+
+              <div className="group relative flex gap-3 py-1.5">
+                {/* Timeline node */}
+                <div className="relative z-10 flex shrink-0 flex-col items-center">
+                  <div className={cn(
+                    'flex h-[22px] w-[22px] items-center justify-center rounded-full ring-2',
+                    config.nodeClass,
+                  )}>
+                    <Icon className="h-[10px] w-[10px] text-white" strokeWidth={2.5} />
+                  </div>
+                  {/* Connecting line below node (hidden for last) */}
+                  {!isLast && (
+                    <div className="w-px flex-1 bg-border/20" />
+                  )}
+                </div>
+
+                {/* Content */}
+                <div className="min-w-0 flex-1 pb-4">
+                  {/* Header row */}
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className={cn(
+                      'font-mono text-[10px] font-semibold uppercase tracking-widest',
+                      config.lineClass,
+                    )}>
+                      {config.label}
+                    </span>
+                    <span className="font-mono text-[9px] tabular-nums text-muted-foreground/30">
+                      {formatTime(msg.created_at)}
+                    </span>
+                    {msg.role === 'tool' && msg.tool_call_id && (
+                      <span className="font-mono text-[9px] text-muted-foreground/20">
+                        {msg.tool_call_id.slice(0, 12)}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* System messages: compact inline */}
+                  {msg.role === 'system' ? (
+                    <p className="font-mono text-[10px] leading-relaxed text-muted-foreground/40 line-clamp-2">
+                      {msg.content}
+                    </p>
+                  ) : (
+                    <>
+                      {/* Message content */}
+                      {msg.content && (
+                        <div className="rounded-md bg-card/50 px-3 py-2 ring-1 ring-border/20">
+                          <p className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/80">
+                            {msg.content}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Tool calls */}
+                      {hasToolCalls && (
+                        <div className={cn('mt-2', msg.content && 'mt-2.5')}>
+                          <ToolCallBlock
+                            toolCallsJson={msg.tool_calls_json}
+                            result={msg.role === 'tool' ? msg.content : null}
+                            durationMs={null}
+                            isSuccess={true}
+                          />
+                        </div>
+                      )}
+
+                      {/* Tool result (for tool role messages without tool_calls) */}
+                      {msg.role === 'tool' && !hasToolCalls && msg.content && (
+                        <ToolCallBlock
+                          toolCallsJson={null}
+                          result={msg.content}
+                          durationMs={null}
+                          isSuccess={true}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )
-        }
-
-        if (msg.role === 'tool') {
-          return (
-            <div key={msg.id}>
-              {showDateSeparator && <DateSeparator label={dateStr} />}
-              <div className={cn('rounded-r-md pl-3', meta.borderClass)}>
-                <div className="mb-1 flex items-center gap-2">
-                  <span className={cn('font-mono text-[10px] uppercase tracking-wider', meta.labelClass)}>
-                    tool result
-                  </span>
-                  <span className="font-mono text-[10px] text-muted-foreground/40">
-                    {formatTime(msg.created_at)}
-                  </span>
-                </div>
-                <ToolCallBlock
-                  toolCallsJson={null}
-                  result={msg.content}
-                  durationMs={null}
-                  isSuccess={true}
-                />
-              </div>
-            </div>
-          )
-        }
-
-        // user or assistant
-        const hasToolCalls = msg.tool_calls_json != null && msg.tool_calls_json !== '[]'
-
-        return (
-          <div key={msg.id}>
-            {showDateSeparator && <DateSeparator label={dateStr} />}
-            <div className={cn('rounded-r-md py-2 pl-3 pr-2', meta.borderClass)}>
-              <div className="mb-1 flex items-center gap-2">
-                <span className={cn('font-mono text-[10px] uppercase tracking-wider', meta.labelClass)}>
-                  {meta.label}
-                </span>
-                <span className="font-mono text-[10px] text-muted-foreground/40">
-                  {formatTime(msg.created_at)}
-                </span>
-              </div>
-
-              {msg.content && (
-                <p className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-foreground/80">
-                  {msg.content}
-                </p>
-              )}
-
-              {hasToolCalls && (
-                <div className={cn('mt-2', msg.content && 'mt-3')}>
-                  <ToolCallBlock
-                    toolCallsJson={msg.tool_calls_json}
-                    result={null}
-                    durationMs={null}
-                    isSuccess={true}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        )
-      })}
+        })}
+      </div>
     </div>
   )
 }
 
-function DateSeparator({ label }: { label: string }) {
+function DateMarker({ label }: { label: string }) {
   return (
-    <div className="my-4 flex items-center gap-3">
-      <div className="h-px flex-1 bg-border" />
-      <span className="font-mono text-[10px] text-muted-foreground/40">{label}</span>
-      <div className="h-px flex-1 bg-border" />
+    <div className="relative my-3 flex items-center gap-3 pl-7">
+      <div className="h-px flex-1 bg-border/20" />
+      <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/30">
+        {label}
+      </span>
+      <div className="h-px flex-1 bg-border/20" />
     </div>
   )
 }

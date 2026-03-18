@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { DownloadIcon, GitForkIcon, Trash2Icon } from 'lucide-react'
+import { GitForkIcon, Trash2Icon, Copy } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -21,9 +21,21 @@ interface SessionHeaderProps {
   messageCount?: number
 }
 
+function formatAge(isoString: string): string {
+  const ms = Date.now() - new Date(isoString).getTime()
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}s ago`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.floor(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  return `${Math.floor(hr / 24)}d ago`
+}
+
 export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
   const navigate = useNavigate()
   const [deleteOpen, setDeleteOpen] = React.useState(false)
+  const [copied, setCopied] = React.useState(false)
   const deleteMutation = useDeleteSession()
   const forkMutation = useForkSession()
 
@@ -46,47 +58,51 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
     })
   }
 
+  function handleCopyId() {
+    void navigator.clipboard.writeText(session.id)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
-    <div className="flex flex-col gap-3 border-b border-border pb-4">
+    <div className="rounded-lg border border-border/40 bg-card/30 p-4">
+      {/* Top: Title + Actions */}
       <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-mono text-base font-semibold">
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate font-mono text-sm font-semibold text-foreground">
             {session.title ?? (
-              <span className="italic text-muted-foreground">Untitled</span>
+              <span className="italic text-muted-foreground/50">Untitled Session</span>
             )}
           </h1>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[10px] text-muted-foreground">
-              {session.id}
-            </span>
-            <Badge variant="outline" className="font-mono text-[10px]">
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              onClick={handleCopyId}
+              className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground/40 transition-colors hover:text-muted-foreground"
+              title="Copy session ID"
+            >
+              <Copy className="h-2.5 w-2.5" />
+              {copied ? 'copied' : session.id.slice(0, 12)}
+            </button>
+            <Badge variant="outline" className="font-mono text-[9px] uppercase">
               {session.platform}
             </Badge>
+            {session.parent_session_id && (
+              <span className="font-mono text-[9px] text-muted-foreground/30">
+                fork of {session.parent_session_id.slice(0, 8)}
+              </span>
+            )}
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleFork}
-            disabled={forkMutation.isPending}
-          >
-            <GitForkIcon className="mr-1" />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button variant="outline" size="sm" onClick={handleFork} disabled={forkMutation.isPending} className="h-7 px-2 font-mono text-[10px]">
+            <GitForkIcon className="mr-1 h-3 w-3" />
             Fork
           </Button>
-
-          <Button variant="outline" size="sm" asChild>
-            <a href={`/api/sessions/${session.id}/export`} download>
-              <DownloadIcon className="mr-1" />
-              Export
-            </a>
-          </Button>
-
           <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
             <DialogTrigger asChild>
-              <Button variant="destructive" size="sm">
-                <Trash2Icon className="mr-1" />
+              <Button variant="outline" size="sm" className="h-7 px-2 font-mono text-[10px] text-destructive hover:bg-destructive/10">
+                <Trash2Icon className="mr-1 h-3 w-3" />
                 Delete
               </Button>
             </DialogTrigger>
@@ -94,18 +110,12 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
               <DialogHeader>
                 <DialogTitle>Delete session?</DialogTitle>
                 <DialogDescription>
-                  This will permanently delete the session and all its messages. This action
-                  cannot be undone.
+                  This will permanently delete the session and all its messages.
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleDelete}
-                  disabled={deleteMutation.isPending}
-                >
-                  {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+                <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleteMutation.isPending}>
+                  {deleteMutation.isPending ? 'Deleting…' : 'Confirm Delete'}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -113,44 +123,37 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-4">
-        <Stat label="Turns" value={messageCount != null ? String(messageCount) : '—'} />
-        <Stat label="Tokens" value={formatTokens(totalTokens)} />
-        <Stat
-          label="Input"
-          value={formatTokens(session.total_input_tokens)}
-          sub="tokens"
-        />
-        <Stat
-          label="Output"
-          value={formatTokens(session.total_output_tokens)}
-          sub="tokens"
-        />
-        {session.parent_session_id && (
-          <div className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/60">
-              Forked from
-            </span>
-            <span className="font-mono text-xs text-muted-foreground">
-              {session.parent_session_id.slice(0, 8)}
-            </span>
-          </div>
-        )}
+      {/* Bottom: Metrics strip */}
+      <div className="mt-3 flex items-center gap-1 border-t border-border/20 pt-3">
+        <MetricChip label="TURNS" value={messageCount != null ? String(messageCount) : '—'} />
+        <ChipDivider />
+        <MetricChip label="TOKENS" value={formatTokens(totalTokens)} />
+        <ChipDivider />
+        <MetricChip label="IN" value={formatTokens(session.total_input_tokens)} dim />
+        <ChipDivider />
+        <MetricChip label="OUT" value={formatTokens(session.total_output_tokens)} dim />
+        <ChipDivider />
+        <MetricChip label="CREATED" value={formatAge(session.created_at)} dim />
+        <ChipDivider />
+        <MetricChip label="UPDATED" value={formatAge(session.updated_at)} dim />
       </div>
     </div>
   )
 }
 
-function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function MetricChip({ label, value, dim }: { label: string; value: string; dim?: boolean }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/60">
+    <div className="flex items-center gap-1.5 px-2">
+      <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
         {label}
       </span>
-      <span className="font-mono text-sm font-medium">
+      <span className={`font-mono text-[11px] tabular-nums ${dim ? 'text-foreground/50' : 'text-foreground/80'}`}>
         {value}
-        {sub && <span className="ml-1 text-[10px] text-muted-foreground/60">{sub}</span>}
       </span>
     </div>
   )
+}
+
+function ChipDivider() {
+  return <div className="h-3 w-px bg-border/20" />
 }
