@@ -5,6 +5,7 @@ use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
+use crate::widgets::help_overlay::{HelpAction, HelpOverlay};
 use crate::widgets::input_widget::InputAction;
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
@@ -19,6 +20,14 @@ pub enum AppScreen {
     Welcome,
     /// The interactive chat screen.
     Chat,
+}
+
+/// Active fullscreen overlay.
+pub enum ActiveOverlay {
+    /// Scrollable conversation transcript.
+    Transcript(TranscriptOverlay),
+    /// Keybinding and command reference.
+    Help(HelpOverlay),
 }
 
 /// Central application state for the TUI event loop.
@@ -43,7 +52,7 @@ pub struct App {
     /// Single-row status bar rendered at the bottom of the viewport.
     pub status_bar: StatusBarWidget,
     /// Active fullscreen overlay, if any.
-    pub overlay: Option<TranscriptOverlay>,
+    pub overlay: Option<ActiveOverlay>,
     /// Last known viewport height (used to pass visible_rows to the overlay).
     pub viewport_height: u16,
     /// Slash command popup (shown when input starts with `/`).
@@ -186,11 +195,16 @@ impl App {
                 self.command_popup.hide();
                 let visible_rows = self.viewport_height.saturating_sub(2).max(1);
                 let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
-                self.overlay = Some(TranscriptOverlay::from_cells(
+                self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                     self.chat.committed_cells(),
                     width,
                     visible_rows,
-                ));
+                )));
+                self.frame_requester.schedule_frame();
+            }
+            AppEvent::ShowOverlay(OverlayKind::Help) => {
+                self.command_popup.hide();
+                self.overlay = Some(ActiveOverlay::Help(HelpOverlay::new()));
                 self.frame_requester.schedule_frame();
             }
             AppEvent::CloseOverlay => {
@@ -205,9 +219,15 @@ impl App {
                     self.chat = ChatWidget::new();
                     self.frame_requester.schedule_frame();
                 }
+                "/help" => {
+                    let _ = self.app_tx.send(AppEvent::ShowOverlay(OverlayKind::Help));
+                }
                 _ => {}
             },
-            AppEvent::ModelChanged(_) => {}
+            AppEvent::ModelChanged(model) => {
+                self.status_bar.set_model(model);
+                self.frame_requester.schedule_frame();
+            }
         }
     }
 
@@ -230,10 +250,16 @@ impl App {
 
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
-            // visible rows = viewport height minus header row inside the overlay
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
-            let action = overlay.handle_key(key, visible_rows);
-            if matches!(action, TranscriptAction::Close) {
+            let should_close = match overlay {
+                ActiveOverlay::Transcript(t) => {
+                    matches!(t.handle_key(key, visible_rows), TranscriptAction::Close)
+                }
+                ActiveOverlay::Help(h) => {
+                    matches!(h.handle_key(key, visible_rows), HelpAction::Close)
+                }
+            };
+            if should_close {
                 self.overlay = None;
             }
             self.frame_requester.schedule_frame();
@@ -261,11 +287,11 @@ impl App {
             self.command_popup.hide();
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
             let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
-            self.overlay = Some(TranscriptOverlay::from_cells(
+            self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                 self.chat.committed_cells(),
                 width,
                 visible_rows,
-            ));
+            )));
             self.frame_requester.schedule_frame();
             return;
         }
