@@ -140,6 +140,17 @@ impl App {
                 duration,
             } => {
                 self.chat.tool_call_end(&call_id, success, duration);
+                if !success {
+                    // Flash a brief glitch effect over the message area to
+                    // signal the tool failure visually.
+                    let chat_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        width: self.viewport_width,
+                        height: self.viewport_height.saturating_sub(1),
+                    };
+                    self.effects.flash_error(chat_area);
+                }
             }
             AgentEvent::TurnComplete {
                 input_tokens,

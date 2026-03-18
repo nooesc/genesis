@@ -155,6 +155,36 @@ impl GenesisEffects {
             .add_unique_effect(EffectId::TransitionIn, transitions::chat_coalesce_in(area));
     }
 
+    /// Trigger a brief glitch flash over `area` when a tool call fails.
+    ///
+    /// Plays a 50 ms dissolve followed by a 100 ms coalesce, giving the
+    /// impression that cells briefly corrupt then snap back to normal.
+    /// No-op when effects are disabled.
+    pub fn flash_error(&mut self, area: Rect) {
+        if !self.enabled {
+            return;
+        }
+        self.manager
+            .add_unique_effect(EffectId::ErrorFlash, transitions::error_flash(area));
+    }
+
+    /// Play a dim sweep across `area` to signal context compression.
+    ///
+    /// A dark overlay sweeps in over ~400 ms, indicating that the agent has
+    /// condensed the conversation history to stay within its token budget.
+    /// No-op when effects are disabled.
+    ///
+    /// TODO: wire this to a `ContextCompressed` agent event once one is added
+    /// to `AgentEvent` in genesis-core. Until then this method exists and is
+    /// tested, but is not called from the main event handler.
+    pub fn sweep_compression(&mut self, area: Rect) {
+        if !self.enabled {
+            return;
+        }
+        self.manager
+            .add_unique_effect(EffectId::CompressionSweep, transitions::compression_sweep(area));
+    }
+
     /// Launch the boot sequence animation across the four target areas.
     ///
     /// No-op when effects are disabled.  Safe to call multiple times — each
@@ -389,6 +419,38 @@ mod tests {
         let area = Rect::new(0, 0, 120, 24);
         effects.start_chat_coalesce(area);
         assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn flash_error_creates_effect_without_panic() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.flash_error(area);
+        assert!(effects.is_running(), "error flash should be running");
+    }
+
+    #[test]
+    fn flash_error_is_noop_when_disabled() {
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.flash_error(area);
+        assert!(!effects.is_running(), "flash_error should be no-op when disabled");
+    }
+
+    #[test]
+    fn sweep_compression_creates_effect_without_panic() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.sweep_compression(area);
+        assert!(effects.is_running(), "compression sweep should be running");
+    }
+
+    #[test]
+    fn sweep_compression_is_noop_when_disabled() {
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.sweep_compression(area);
+        assert!(!effects.is_running(), "sweep_compression should be no-op when disabled");
     }
 
     #[test]
