@@ -129,6 +129,29 @@ impl GenesisEffects {
     pub fn manager(&self) -> &EffectManager<EffectId> {
         &self.manager
     }
+
+    /// Launch the boot sequence animation across the four target areas.
+    ///
+    /// No-op when effects are disabled.  Safe to call multiple times — each
+    /// call replaces any in-flight boot effects via the unique-effect system.
+    pub fn start_boot_sequence(
+        &mut self,
+        title_area: Rect,
+        portrait_area: Rect,
+        status_area: Rect,
+        full_area: Rect,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        boot::start_boot_sequence(
+            &mut self.manager,
+            title_area,
+            portrait_area,
+            status_area,
+            full_area,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -183,5 +206,29 @@ mod tests {
         assert!(!GenesisEffects::new(true, true).color_effects_enabled());
         assert!(!GenesisEffects::new(false, false).color_effects_enabled());
         assert!(!GenesisEffects::new(false, true).color_effects_enabled());
+    }
+
+    #[test]
+    fn start_boot_sequence_makes_is_running_true() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 120, 24);
+        let title = Rect::new(5, 1, 40, 4);
+        let portrait = Rect::new(5, 6, 30, 14);
+        let status = Rect::new(5, 20, 40, 4);
+
+        effects.start_boot_sequence(title, portrait, status, area);
+        assert!(effects.is_running());
+    }
+
+    #[test]
+    fn start_boot_sequence_noop_when_disabled() {
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 120, 24);
+        let title = Rect::new(5, 1, 40, 4);
+        let portrait = Rect::new(5, 6, 30, 14);
+        let status = Rect::new(5, 20, 40, 4);
+
+        effects.start_boot_sequence(title, portrait, status, area);
+        assert!(!effects.is_running());
     }
 }
