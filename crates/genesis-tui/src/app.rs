@@ -11,6 +11,7 @@ use crate::widgets::input_widget::InputAction;
 use crate::widgets::model_picker::{ModelPicker, ModelPickerAction};
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
+use crate::widgets::braille_canvas::Pattern;
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -77,6 +78,10 @@ pub struct App {
     pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
     /// Queue of pending approval requests (processed one at a time).
     pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
+    /// Post-render visual effects (tachyonfx).
+    pub effects: crate::effects::GenesisEffects,
+    /// Lissajous pattern shown below messages when idle.
+    pub idle_pattern: Pattern,
     /// @-file completion popup.
     pub file_completion: FileCompletion,
 }
@@ -141,6 +146,17 @@ impl App {
                 duration,
             } => {
                 self.chat.tool_call_end(&call_id, success, duration);
+                if !success {
+                    // Flash a brief glitch effect over the message area to
+                    // signal the tool failure visually.
+                    let chat_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        width: self.viewport_width,
+                        height: self.viewport_height.saturating_sub(1),
+                    };
+                    self.effects.flash_error(chat_area);
+                }
             }
             AgentEvent::TurnComplete {
                 input_tokens,
@@ -153,6 +169,7 @@ impl App {
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
+                self.status_bar.record_turn_tokens(input_tokens, output_tokens);
 
                 // Update context usage percentage. Use the latest turn's
                 // input_tokens (not the cumulative sum) because each LLM call
@@ -202,6 +219,20 @@ impl App {
             }
             AppEvent::UpdateStatus(state) => {
                 self.status_bar.set_state(state);
+
+                // Trigger transition effects if the state actually changed.
+                if let Some((from, to)) = self.status_bar.last_state_change() {
+                    if from != to {
+                        // Compute status bar area from viewport dimensions.
+                        let status_area = ratatui::layout::Rect {
+                            x: 0,
+                            y: self.viewport_height.saturating_sub(1),
+                            width: self.viewport_width,
+                            height: 1,
+                        };
+                        self.effects.on_status_change(from, to, status_area);
+                    }
+                }
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
@@ -270,6 +301,7 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         // On the welcome screen, any key dismisses it and transitions to chat.
         if matches!(self.screen, AppScreen::Welcome) {
+            self.effects.cancel_all();
             self.screen = AppScreen::Chat;
             self.clear_after_welcome = true;
             self.frame_requester.schedule_frame();
@@ -593,6 +625,13 @@ mod tests {
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
+            effects: crate::effects::GenesisEffects::new(false, false, Default::default()),
+            idle_pattern: Pattern::Lissajous {
+                t: 0.0,
+                a: 3.0,
+                b: 2.0,
+                delta: std::f64::consts::FRAC_PI_2,
+            },
             file_completion: FileCompletion::new(),
         };
         (app, submission_rx, app_rx)

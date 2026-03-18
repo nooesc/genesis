@@ -28,6 +28,9 @@ export function Dock({ onCommandPalette }: DockProps) {
               {isHovered && (
                 <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-card px-2 py-0.5 font-mono text-[10px] text-foreground/80 shadow-lg ring-1 ring-border/50 pointer-events-none" role="tooltip">
                   {label}
+                  {navRoutes[index].shortcut && (
+                    <span className="ml-1.5 text-muted-foreground/40">{navRoutes[index].shortcut}</span>
+                  )}
                 </div>
               )}
 

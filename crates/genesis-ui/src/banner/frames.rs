@@ -9,8 +9,6 @@ use std::sync::OnceLock;
 
 use image::{DynamicImage, GenericImageView, Rgba};
 
-use crate::colors::EVE_AMBER;
-
 /// Embedded Eve art (full size).
 const EVE_FULL_PNG: &[u8] = include_bytes!("eve_full.png");
 
@@ -40,18 +38,8 @@ fn decoded_frames() -> &'static [DynamicImage; 3] {
 /// Alpha threshold below which a pixel is considered transparent.
 const ALPHA_THRESHOLD: u8 = 30;
 
-/// Monochrome ramp used for stylized welcome rendering.
-const WELCOME_MONOCHROME_RAMP: [RgbColor; 6] = [
-    RgbColor::new(20, 21, 27),
-    RgbColor::new(44, 47, 56),
-    RgbColor::new(73, 78, 90),
-    RgbColor::new(111, 116, 131),
-    RgbColor::new(164, 169, 180),
-    RgbColor::new(231, 233, 238),
-];
-
 /// A simple RGB color used by half-block cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RgbColor {
     pub r: u8,
     pub g: u8,
@@ -182,9 +170,11 @@ pub fn render_welcome_image(
         return HalfBlockFrame::empty(target_width, target_height);
     }
 
-    let resized = img.resize_to_fill(
-        target_width as u32,
-        u32::from(target_height).saturating_mul(2),
+    let pixel_width = target_width as u32;
+    let pixel_height = u32::from(target_height).saturating_mul(2);
+    let resized = img.resize_exact(
+        pixel_width,
+        pixel_height,
         image::imageops::FilterType::Triangle,
     );
 
@@ -306,28 +296,7 @@ fn welcome_pixel_color(pixel: Rgba<u8>) -> Option<RgbColor> {
         return None;
     }
 
-    if is_welcome_accent(r, g, b, chroma, luminance) {
-        return Some(RgbColor::from_tuple(EVE_AMBER));
-    }
-
-    let ramp_index = match luminance {
-        0..=31 => 0,
-        32..=63 => 1,
-        64..=95 => 2,
-        96..=135 => 3,
-        136..=183 => 4,
-        _ => 5,
-    };
-    Some(WELCOME_MONOCHROME_RAMP[ramp_index])
-}
-
-fn is_welcome_accent(r: u8, g: u8, b: u8, chroma: u8, luminance: u8) -> bool {
-    chroma >= 45
-        && luminance <= 185
-        && (
-            (r > g.saturating_add(28) && r > b.saturating_add(28))
-                || (r > 150 && g > 80 && g < 170 && b < 110)
-        )
+    Some(RgbColor::new(r, g, b))
 }
 
 fn is_welcome_background_key(
@@ -398,19 +367,40 @@ mod tests {
     }
 
     #[test]
-    fn render_welcome_frame_contains_sparse_accent() {
-        let frame = render_welcome_frame(1, 24, 12).expect("frame should load");
-        let accent = RgbColor::from_tuple(EVE_AMBER);
+    fn render_welcome_image_preserves_full_frame_without_cropping() {
+        let img = DynamicImage::ImageRgba8(image::RgbaImage::from_fn(10, 10, |x, y| {
+            if x == 0 || y == 0 || x == 9 || y == 9 {
+                Rgba([255, 255, 255, 255])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        }));
 
-        let accent_count = frame
+        let frame = render_welcome_image(&img, 8, 4);
+        let left_edge_has_content = frame
+            .lines
+            .iter()
+            .any(|row| row.first().is_some_and(|cell| cell.symbol != ' '));
+        let right_edge_has_content = frame
+            .lines
+            .iter()
+            .any(|row| row.last().is_some_and(|cell| cell.symbol != ' '));
+
+        assert!(left_edge_has_content);
+        assert!(right_edge_has_content);
+    }
+
+    #[test]
+    fn render_welcome_frame_preserves_color_detail() {
+        let frame = render_welcome_frame(1, 24, 12).expect("frame should load");
+        let unique_colors = frame
             .lines
             .iter()
             .flatten()
-            .filter(|cell| cell.fg == Some(accent) || cell.bg == Some(accent))
-            .count();
-        let total_cells = usize::from(frame.width) * usize::from(frame.height);
+            .flat_map(|cell| [cell.fg, cell.bg])
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
 
-        assert!(accent_count > 0);
-        assert!(accent_count < total_cells / 4);
+        assert!(unique_colors.len() > 8);
     }
 }

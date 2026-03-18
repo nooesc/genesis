@@ -202,6 +202,29 @@ impl ChatWidget {
         &self.committed_cells
     }
 
+    /// Compute the total visible content height (committed cells + active cell)
+    /// for the given width, without actually rendering anything.
+    ///
+    /// Returns 0 when there are no cells and no active turn.
+    pub fn visible_content_height(&self, width: u16) -> u16 {
+        if width == 0 {
+            return 0;
+        }
+        let mut total: u16 = 0;
+        for cell in &self.committed_cells {
+            total = total.saturating_add(cell.height(width).max(1));
+        }
+        if let Some(active) = &self.active_cell {
+            if !active.text_buffer.is_empty() {
+                // Rough estimate: use line count based on prefix_markdown_lines.
+                let lines = crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
+                let h = wrapped_row_count(&lines, width).max(1);
+                total = total.saturating_add(h);
+            }
+        }
+        total
+    }
+
     // ── Rendering ─────────────────────────────────────────────────────────
 
     /// Render the chat widget into the given area.
@@ -527,5 +550,25 @@ mod tests {
         assert!(matches!(pending[0], HistoryCell::User(_)));
         assert!(matches!(pending[1], HistoryCell::Agent(_)));
         assert!(matches!(pending[2], HistoryCell::Tool(_)));
+    }
+
+    #[test]
+    fn visible_content_height_returns_zero_for_empty_widget() {
+        let cw = ChatWidget::new();
+        assert_eq!(cw.visible_content_height(80), 0);
+    }
+
+    #[test]
+    fn visible_content_height_returns_zero_for_zero_width() {
+        let cw = ChatWidget::new();
+        assert_eq!(cw.visible_content_height(0), 0);
+    }
+
+    #[test]
+    fn visible_content_height_counts_committed_cells() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hello".to_string());
+        let h = cw.visible_content_height(80);
+        assert!(h >= 1, "should have at least 1 row for user message, got {h}");
     }
 }
