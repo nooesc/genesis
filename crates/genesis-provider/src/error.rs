@@ -20,4 +20,6 @@ pub enum ProviderError {
     StreamDecode(String),
     #[error("all {count} providers failed (primary + fallbacks)")]
     AllProvidersFailed { count: usize },
+    #[error("circuit breaker is open for provider (consecutive failures: {failures}, cooldown: {cooldown_secs}s)")]
+    CircuitOpen { failures: u32, cooldown_secs: u64 },
 }
