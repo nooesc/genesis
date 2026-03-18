@@ -54,7 +54,8 @@ impl genesis_tools::ApprovalHandler for TuiApprovalHandler {
         }
 
         // Block until the user responds. The TUI event loop will send
-        // true/false on the oneshot channel when the user presses y/n.
+        // true/false on the mpsc response channel when the user presses y/n.
+        // If the tool timeout fires first, the channel drops and we deny.
         match rx.recv() {
             Ok(approved) => {
                 tracing::info!(tool_name, approved, "tool approval response");

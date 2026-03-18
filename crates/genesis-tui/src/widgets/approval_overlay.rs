@@ -76,7 +76,8 @@ impl ApprovalOverlay {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => ApprovalAction::Deny,
             // Scroll
             (KeyCode::Down | KeyCode::Char('j'), _) => {
-                self.scroll = self.scroll.saturating_add(1);
+                let max = self.arg_lines.len().saturating_sub(1);
+                self.scroll = self.scroll.saturating_add(1).min(max);
                 ApprovalAction::None
             }
             (KeyCode::Up | KeyCode::Char('k'), _) => {

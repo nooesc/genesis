@@ -71,6 +71,8 @@ pub struct App {
     pub approval: Option<crate::widgets::approval_overlay::ApprovalOverlay>,
     /// Channel to send approval responses back to the tool execution thread.
     pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
+    /// Queue of pending approval requests (processed one at a time).
+    pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
 }
 
 impl App {
@@ -259,17 +261,14 @@ impl App {
             use crate::widgets::approval_overlay::ApprovalAction;
             let action = approval.handle_key(key);
             match action {
-                ApprovalAction::Approve => {
+                ApprovalAction::Approve | ApprovalAction::Deny => {
+                    let approved = matches!(action, ApprovalAction::Approve);
                     if let Some(tx) = self.approval_response.take() {
-                        let _ = tx.send(true);
+                        let _ = tx.send(approved);
                     }
                     self.approval = None;
-                }
-                ApprovalAction::Deny => {
-                    if let Some(tx) = self.approval_response.take() {
-                        let _ = tx.send(false);
-                    }
-                    self.approval = None;
+                    // Process next queued approval request, if any.
+                    self.pop_next_approval();
                 }
                 ApprovalAction::None => {}
             }
@@ -405,6 +404,19 @@ impl App {
         self.frame_requester.schedule_frame();
     }
 
+    /// Pop the next queued approval request and show it, if any.
+    fn pop_next_approval(&mut self) {
+        if let Some(req) = self.approval_queue.pop_front() {
+            self.approval = Some(
+                crate::widgets::approval_overlay::ApprovalOverlay::new(
+                    req.tool_name,
+                    &req.arguments,
+                ),
+            );
+            self.approval_response = Some(req.response_tx);
+        }
+    }
+
     /// Submit a user message: record it in the chat widget and send to agent.
     fn submit_text(&mut self, text: String) {
         if text.is_empty() {
@@ -468,6 +480,7 @@ mod tests {
             viewport_width: 80,
             approval: None,
             approval_response: None,
+            approval_queue: std::collections::VecDeque::new(),
         };
         (app, submission_rx, app_rx)
     }

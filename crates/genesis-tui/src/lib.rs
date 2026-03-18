@@ -214,6 +214,7 @@ pub async fn run_tui(
         viewport_width: viewport_area.width,
         approval: None,
         approval_response: None,
+        approval_queue: std::collections::VecDeque::new(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -300,13 +301,19 @@ pub async fn run_tui(
             // ── Tool approval requests ───────────────────────────────
             approval = approval_rx.recv() => {
                 if let Some(req) = approval {
-                    app.approval = Some(
-                        crate::widgets::approval_overlay::ApprovalOverlay::new(
-                            req.tool_name,
-                            &req.arguments,
-                        ),
-                    );
-                    app.approval_response = Some(req.response_tx);
+                    if app.approval.is_some() {
+                        // Already showing an approval — queue this one.
+                        app.approval_queue.push_back(req);
+                    } else {
+                        // Show immediately.
+                        app.approval = Some(
+                            crate::widgets::approval_overlay::ApprovalOverlay::new(
+                                req.tool_name,
+                                &req.arguments,
+                            ),
+                        );
+                        app.approval_response = Some(req.response_tx);
+                    }
                     app.frame_requester.schedule_frame();
                 }
             }
