@@ -14,6 +14,6 @@ export function useMcpStatus() {
   return useQuery({
     queryKey: ['health', 'mcp'],
     queryFn: () => api.get<McpStatusResponse>('/health/mcp'),
-    refetchInterval: 5_000,
+    refetchInterval: 30_000,
   })
 }

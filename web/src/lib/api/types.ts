@@ -14,12 +14,13 @@ export interface HealthResponse {
 export interface McpServerStatus {
   name: string
   connected: boolean
-  tool_count: number
-  error?: string
 }
 
 export interface McpStatusResponse {
   servers: McpServerStatus[]
+  total_tools: number
+  total_resources: number
+  total_prompts: number
 }
 
 export interface MetricsJsonResponse {

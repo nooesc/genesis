@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { SessionSummary } from '@/lib/api/types'
+import { formatRelativeTime, formatTokens } from '@/lib/utils'
 
 const searchSchema = z.object({
   search: z.string().optional(),
@@ -17,26 +18,6 @@ export const Route = createFileRoute('/sessions/')({
   validateSearch: searchSchema,
   component: SessionsPage,
 })
-
-function formatRelativeTime(isoString: string): string {
-  const now = Date.now()
-  const then = new Date(isoString).getTime()
-  const diffMs = now - then
-  const diffSec = Math.floor(diffMs / 1000)
-  if (diffSec < 60) return `${diffSec}s ago`
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  return `${diffDay}d ago`
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
-}
 
 const columns: ColumnDef<SessionSummary, unknown>[] = [
   {

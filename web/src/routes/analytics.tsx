@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { useInsights, useUsage } from '@/lib/api/queries/analytics'
+import { formatTokens } from '@/lib/utils'
 import { TokenChart } from '@/components/dashboard/token-chart'
 import { PlatformBreakdown } from '@/components/dashboard/platform-breakdown'
 import { KpiCard } from '@/components/dashboard/kpi-card'
@@ -29,12 +30,6 @@ function formatDateLabel(dateStr: string): string {
   } catch {
     return dateStr
   }
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
-  return String(n)
 }
 
 function SessionsPerDayChart({ sessionsPerDay }: { sessionsPerDay: Record<string, number> }) {

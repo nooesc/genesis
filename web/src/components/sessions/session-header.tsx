@@ -14,12 +14,7 @@ import {
 } from '@/components/ui/dialog'
 import { useDeleteSession, useForkSession } from '@/lib/api/mutations/sessions'
 import type { SessionSummary } from '@/lib/api/types'
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
-}
+import { formatTokens } from '@/lib/utils'
 
 interface SessionHeaderProps {
   session: SessionSummary

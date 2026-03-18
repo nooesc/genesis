@@ -138,9 +138,6 @@ function McpServersSection() {
                   <TableHead className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
                     Status
                   </TableHead>
-                  <TableHead className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                    Tools
-                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -156,9 +153,6 @@ function McpServersSection() {
                       >
                         {server.connected ? 'connected' : 'disconnected'}
                       </Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {server.tool_count}
                     </TableCell>
                   </TableRow>
                 ))}

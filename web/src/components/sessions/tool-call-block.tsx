@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { ChevronDownIcon, ChevronRightIcon, WrenchIcon } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, truncate } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 
 interface ToolCall {
@@ -29,11 +29,6 @@ function parseToolCalls(json: string | null): ToolCall[] {
   } catch {
     return []
   }
-}
-
-function truncate(s: string, max = 300): string {
-  if (s.length <= max) return s
-  return s.slice(0, max) + '…'
 }
 
 function formatJson(s: string): string {
@@ -104,7 +99,7 @@ export function ToolCallBlock({ toolCallsJson, result, durationMs, isSuccess = t
                       Params
                     </p>
                     <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[10px] text-foreground/70">
-                      {truncate(formatJson(args))}
+                      {truncate(formatJson(args), 300)}
                     </pre>
                   </div>
                 )}
@@ -118,7 +113,7 @@ export function ToolCallBlock({ toolCallsJson, result, durationMs, isSuccess = t
                 Result
               </p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[10px] text-foreground/70">
-                {truncate(result)}
+                {truncate(result, 300)}
               </pre>
             </div>
           )}
