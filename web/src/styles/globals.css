@@ -192,3 +192,50 @@
   backdrop-filter: blur(8px) saturate(120%);
   background: rgba(0, 0, 0, 0.6);
 }
+
+/* === Page transitions === */
+
+/* Route content enters with fade + subtle upward slide */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.page-enter {
+  animation: page-enter 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+}
+
+/* Staggered card reveal — use on grid children for cascading entrance */
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.card-stagger > * {
+  animation: card-enter 250ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+}
+
+.card-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.card-stagger > *:nth-child(2) { animation-delay: 40ms; }
+.card-stagger > *:nth-child(3) { animation-delay: 80ms; }
+.card-stagger > *:nth-child(4) { animation-delay: 120ms; }
+.card-stagger > *:nth-child(5) { animation-delay: 160ms; }
+.card-stagger > *:nth-child(6) { animation-delay: 200ms; }
+.card-stagger > *:nth-child(7) { animation-delay: 240ms; }
+.card-stagger > *:nth-child(8) { animation-delay: 280ms; }
+.card-stagger > *:nth-child(9) { animation-delay: 320ms; }
+.card-stagger > *:nth-child(10) { animation-delay: 360ms; }
+.card-stagger > *:nth-child(11) { animation-delay: 400ms; }
+.card-stagger > *:nth-child(12) { animation-delay: 440ms; }
