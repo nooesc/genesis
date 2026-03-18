@@ -120,6 +120,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_vision: true,
                 supports_strict_mode: true,
                 supports_parallel_tools: false, // nano models: disable parallel
+                supports_predicted_outputs: true,
                 supports_batch_api: true,
                 ..cap()
             },
@@ -131,6 +132,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             capabilities: ModelCapabilities {
                 supports_vision: true,
                 supports_thinking: true,
+                supports_parallel_tools: false, // reasoning models: disable parallel
                 supports_strict_mode: true,
                 supports_batch_api: true,
                 ..cap()
@@ -208,6 +210,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             max_output_tokens: Some(8_192),
             capabilities: ModelCapabilities {
                 supports_vision: true,
+                supports_citations: true,
                 supports_context_caching: true,
                 ..cap()
             },
@@ -361,11 +364,6 @@ pub fn lookup(model: &str) -> Option<ModelMetadata> {
 /// Returns the default context length for unknown models.
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 
-/// Returns default capabilities for unknown models (conservative: tools only).
-pub fn default_capabilities() -> ModelCapabilities {
-    ModelCapabilities::default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,9 +457,11 @@ mod tests {
     }
 
     #[test]
-    fn nano_model_disables_parallel_tools() {
+    fn nano_and_reasoning_models_disable_parallel_tools() {
         let db = known_metadata();
         assert!(!db["gpt-4.1-nano"].capabilities.supports_parallel_tools);
+        assert!(!db["o4-mini"].capabilities.supports_parallel_tools);
+        assert!(!db["deepseek-r1"].capabilities.supports_parallel_tools);
     }
 
     #[test]
@@ -484,6 +484,7 @@ mod tests {
         let db = known_metadata();
         assert!(db["gpt-4.1"].capabilities.supports_predicted_outputs);
         assert!(db["gpt-4.1-mini"].capabilities.supports_predicted_outputs);
+        assert!(db["gpt-4.1-nano"].capabilities.supports_predicted_outputs);
     }
 
     #[test]
@@ -515,5 +516,23 @@ mod tests {
         assert_eq!(meta.supports_tools(), meta.capabilities.supports_tools);
         assert_eq!(meta.supports_vision(), meta.capabilities.supports_vision);
         assert_eq!(meta.supports_thinking(), meta.capabilities.supports_thinking);
+    }
+
+    #[test]
+    fn no_model_has_parallel_tools_without_tools() {
+        for (name, meta) in known_metadata() {
+            if !meta.capabilities.supports_tools {
+                assert!(
+                    !meta.capabilities.supports_parallel_tools,
+                    "{name} has supports_parallel_tools=true but supports_tools=false"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_haiku_35_supports_citations() {
+        let db = known_metadata();
+        assert!(db["claude-haiku-3.5-20241022"].capabilities.supports_citations);
     }
 }
