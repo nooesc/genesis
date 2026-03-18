@@ -2,7 +2,8 @@
 //!
 //! Displays a bordered welcome screen with a responsive portrait and session
 //! info. Layout mode is selected explicitly by terminal width:
-//! - Wide (>= 100 cols): split portrait on the left, metadata on the right
+//! - Wide (>= 100 cols): big-text title at top, portrait left, metadata right,
+//!   boot status below portrait
 //! - Medium (60-99 cols): compact portrait above metadata
 //! - Narrow (< 60 cols): text-only title with no portrait
 
@@ -13,8 +14,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
+use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
+use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
 
 /// Minimum width for the wide side-by-side layout.
 const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
@@ -27,6 +30,12 @@ const WIDE_INFO_MIN_WIDTH: u16 = 56;
 
 /// Gap between portrait and metadata in wide mode.
 const WIDE_LAYOUT_GAP: u16 = 2;
+
+/// Height of the big-text title in rows (Quadrant pixel size: 8px / 2 = 4 rows).
+const BIG_TEXT_HEIGHT: u16 = 4;
+
+/// Gap between the title and the portrait/info row.
+const TITLE_GAP: u16 = 1;
 
 const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
     "          .-''''-.          ",
@@ -67,6 +76,19 @@ pub struct WelcomeInfo {
     pub skill_count: usize,
 }
 
+/// Computed regions from the last render, used to target boot effects.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WelcomeAreas {
+    /// The big-text title area (or small title area in non-wide modes).
+    pub title: Rect,
+    /// The portrait art area.
+    pub portrait: Rect,
+    /// The boot status lines area.
+    pub status: Rect,
+    /// The full welcome screen area.
+    pub full: Rect,
+}
+
 /// Welcome screen widget showing portrait art with session info.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
@@ -74,6 +96,10 @@ pub struct WelcomeWidget {
     split_art: Vec<Line<'static>>,
     /// Compact portrait lines used in medium mode.
     compact_art: Vec<Line<'static>>,
+    /// Whether the boot sequence has been triggered.
+    boot_triggered: bool,
+    /// Areas computed during the last render for effect targeting.
+    last_areas: WelcomeAreas,
 }
 
 impl WelcomeWidget {
@@ -86,6 +112,8 @@ impl WelcomeWidget {
             info,
             split_art: parse_portrait_art(full_art, DEFAULT_SPLIT_PORTRAIT_ART),
             compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
+            boot_triggered: false,
+            last_areas: WelcomeAreas::default(),
         }
     }
 
@@ -99,11 +127,44 @@ impl WelcomeWidget {
         &self.compact_art
     }
 
+    /// Returns `true` if the boot sequence has already been triggered.
+    pub fn boot_triggered(&self) -> bool {
+        self.boot_triggered
+    }
+
+    /// Mark the boot sequence as triggered. Called by the render loop after
+    /// starting boot effects.
+    pub fn mark_boot_triggered(&mut self) {
+        self.boot_triggered = true;
+    }
+
+    /// Return the areas computed during the last render call.
+    ///
+    /// The caller uses these to target boot effects at the correct screen
+    /// regions.
+    pub fn last_areas(&self) -> WelcomeAreas {
+        self.last_areas
+    }
+
+    /// Build a [`BootStatusInfo`] from the current [`WelcomeInfo`].
+    pub fn boot_status_info(&self) -> BootStatusInfo {
+        BootStatusInfo {
+            // Provider and storage are assumed OK if we got this far.
+            provider_ok: true,
+            storage_ok: true,
+            tool_count: self.info.tool_count_builtin + self.info.tool_count_mcp,
+            mcp_count: self.info.tool_count_mcp,
+            skill_count: self.info.skill_count,
+        }
+    }
+
     /// Render the welcome screen into the given area.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
+
+        self.last_areas.full = area;
 
         if area.width >= WIDE_LAYOUT_MIN_WIDTH {
             self.render_full(area, buf);
@@ -114,8 +175,9 @@ impl WelcomeWidget {
         }
     }
 
-    /// Full layout: bordered box with art on left, info on right.
-    fn render_full(&self, area: Rect, buf: &mut Buffer) {
+    /// Full layout: bordered box with big-text title at top, art on left,
+    /// info on right, boot status below portrait.
+    fn render_full(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
@@ -127,7 +189,36 @@ impl WelcomeWidget {
             return;
         }
 
-        let art = self.current_full_art();
+        // ── Big-text title at the top ──────────────────────────────
+        let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
+        let title_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: title_available_height,
+        };
+        self.last_areas.title = title_area;
+
+        let big_title = BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .style(Style::default().fg(Color::Rgb(180, 167, 214)))
+            .lines(vec!["GENESIS".into()])
+            .centered()
+            .build();
+        big_title.render(title_area, buf);
+
+        // ── Remaining area below title ─────────────────────────────
+        let below_title_y = inner.y + title_available_height + TITLE_GAP;
+        let remaining_height = inner
+            .height
+            .saturating_sub(title_available_height + TITLE_GAP);
+        if remaining_height == 0 {
+            return;
+        }
+
+        // ── Portrait + info side by side ───────────────────────────
+        // Clone art lines up front to release the borrow on `self`.
+        let art: Vec<Line<'static>> = self.current_full_art().to_vec();
         let art_width = art
             .iter()
             .map(|l| line_visual_width(l))
@@ -140,33 +231,63 @@ impl WelcomeWidget {
         let info_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
         let info_col_width = inner.width.saturating_sub(art_col_width + WIDE_LAYOUT_GAP);
 
-        let art_y = inner.y + inner.height.saturating_sub(art_height) / 2;
+        // Boot status lines
+        let boot_status = BootStatusWidget::new(self.boot_status_info());
+        let status_lines = boot_status.lines();
+        let status_height = status_lines.len() as u16;
+        let status_gap = 1u16;
 
+        // Total left-column content: art + gap + status
+        let left_total = art_height + status_gap + status_height;
+        let left_start_y =
+            below_title_y + remaining_height.saturating_sub(left_total) / 2;
+
+        // Portrait area
+        let art_render_height = art_height.min(remaining_height);
         let art_area = Rect {
             x: inner.x,
-            y: art_y,
+            y: left_start_y,
             width: art_col_width,
-            height: art_height.min(inner.height),
+            height: art_render_height,
         };
-        let art_paragraph = Paragraph::new(art.to_vec());
+        self.last_areas.portrait = art_area;
+        let art_paragraph = Paragraph::new(art);
         art_paragraph.render(art_area, buf);
 
+        // Boot status area (below portrait)
+        let status_y = left_start_y + art_render_height + status_gap;
+        let status_render_height = status_height.min(
+            (below_title_y + remaining_height).saturating_sub(status_y),
+        );
+        if status_render_height > 0 {
+            let status_area = Rect {
+                x: inner.x,
+                y: status_y,
+                width: art_col_width.max(30),
+                height: status_render_height,
+            };
+            self.last_areas.status = status_area;
+            boot_status.render(status_area, buf);
+        }
+
+        // Info panel (right column, vertically centered)
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
-        let info_y = inner.y + inner.height.saturating_sub(info_height) / 2;
+        let info_y =
+            below_title_y + remaining_height.saturating_sub(info_height) / 2;
 
         let info_area = Rect {
             x: info_col_x,
             y: info_y,
             width: info_col_width,
-            height: info_height.min(inner.height),
+            height: info_height.min(remaining_height),
         };
         let info_paragraph = Paragraph::new(info_lines);
         info_paragraph.render(info_area, buf);
     }
 
     /// Compact layout: bordered box with art centered above info.
-    fn render_compact(&self, area: Rect, buf: &mut Buffer) {
+    fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
@@ -178,7 +299,8 @@ impl WelcomeWidget {
             return;
         }
 
-        let art_lines = self.current_compact_art();
+        // Clone art lines up front to release the borrow on `self`.
+        let art_lines: Vec<Line<'static>> = self.current_compact_art().to_vec();
         let art_height = art_lines.len() as u16;
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
@@ -199,7 +321,9 @@ impl WelcomeWidget {
             width: art_visual_width.min(inner.width),
             height: art_height.min(inner.height),
         };
-        let art_paragraph = Paragraph::new(art_lines.to_vec());
+        self.last_areas.portrait = art_area;
+        self.last_areas.title = art_area; // No big-text in compact mode
+        let art_paragraph = Paragraph::new(art_lines);
         art_paragraph.render(art_area, buf);
 
         let info_visual_width = info_lines
@@ -216,13 +340,14 @@ impl WelcomeWidget {
                 width: info_visual_width.min(inner.width),
                 height: info_height.min(inner.y + inner.height - info_y),
             };
+            self.last_areas.status = info_area;
             let info_paragraph = Paragraph::new(info_lines);
             info_paragraph.render(info_area, buf);
         }
     }
 
     /// Text-only layout: just ">_ Eve v{version}" in accent color.
-    fn render_text_only(&self, area: Rect, buf: &mut Buffer) {
+    fn render_text_only(&mut self, area: Rect, buf: &mut Buffer) {
         let accent = rgb(genesis_ui::colors::UI_ACCENT);
         let text = format!(">_ Eve v{}", self.info.version);
         let line = Line::from(Span::styled(text, Style::default().fg(accent)));
@@ -236,6 +361,9 @@ impl WelcomeWidget {
                 width: area.width.saturating_sub(x - area.x),
                 height: 1,
             };
+            self.last_areas.title = text_area;
+            self.last_areas.portrait = text_area;
+            self.last_areas.status = text_area;
             let paragraph = Paragraph::new(vec![line]);
             paragraph.render(text_area, buf);
         }
@@ -559,7 +687,7 @@ mod tests {
 
     #[test]
     fn welcome_widget_width_100_uses_split_layout() {
-        let area = Rect::new(0, 0, 120, 24);
+        let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         sample_widget().render(area, &mut buf);
 
@@ -596,7 +724,8 @@ mod tests {
 
     #[test]
     fn welcome_metadata_renders_all_fields() {
-        let area = Rect::new(0, 0, 100, 24);
+        // Use a taller area to accommodate the new title + portrait + info layout.
+        let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
@@ -681,5 +810,72 @@ mod tests {
         assert!(rendered_lines
             .iter()
             .any(|line| line.contains("model: claude-4")));
+    }
+
+    #[test]
+    fn wide_layout_renders_boot_status_lines() {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        default_widget().render(area, &mut buf);
+
+        let rendered = buffer_rows(&buf, area.width).join("\n");
+        assert!(
+            rendered.contains("provider"),
+            "wide layout should render boot status 'provider' line"
+        );
+        assert!(
+            rendered.contains("storage"),
+            "wide layout should render boot status 'storage' line"
+        );
+    }
+
+    #[test]
+    fn wide_layout_renders_big_text_title() {
+        // BigText uses block characters. At Quadrant pixel size, "GENESIS"
+        // should produce visible characters in the top rows.
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        default_widget().render(area, &mut buf);
+
+        // The big text uses block/half-block characters. Check that the title
+        // area has non-space content.
+        let title_rows: Vec<String> = buffer_rows(&buf, area.width)
+            .into_iter()
+            .take(5) // Title occupies the top ~5 rows
+            .collect();
+        let has_content = title_rows
+            .iter()
+            .any(|row| row.chars().any(|c| c != ' ' && c != '╭' && c != '╮' && c != '─'));
+        assert!(
+            has_content,
+            "big-text title area should have non-space content"
+        );
+    }
+
+    #[test]
+    fn last_areas_populated_after_render() {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut widget = default_widget();
+        widget.render(area, &mut buf);
+
+        let areas = widget.last_areas();
+        assert_eq!(areas.full, area, "full area should match viewport");
+        assert!(areas.title.width > 0, "title area should have width");
+        assert!(areas.portrait.width > 0, "portrait area should have width");
+        assert!(areas.status.width > 0, "status area should have width");
+    }
+
+    #[test]
+    fn boot_triggered_starts_false() {
+        let widget = default_widget();
+        assert!(!widget.boot_triggered());
+    }
+
+    #[test]
+    fn mark_boot_triggered_sets_flag() {
+        let mut widget = default_widget();
+        widget.mark_boot_triggered();
+        assert!(widget.boot_triggered());
     }
 }

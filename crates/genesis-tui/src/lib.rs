@@ -411,6 +411,18 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         AppScreen::Welcome => {
             // Welcome screen occupies the full viewport.
             app.welcome.render(area, buf);
+
+            // Trigger boot sequence on first welcome render.
+            if !app.welcome.boot_triggered() {
+                app.welcome.mark_boot_triggered();
+                let areas = app.welcome.last_areas();
+                app.effects.start_boot_sequence(
+                    areas.title,
+                    areas.portrait,
+                    areas.status,
+                    areas.full,
+                );
+            }
         }
         AppScreen::Chat => {
             // Reserve the final row for status, leave space for a bounded input
