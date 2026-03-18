@@ -196,6 +196,11 @@ pub async fn run_tui(
         && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
     let no_color = std::env::var("NO_COLOR").is_ok();
 
+    let mut status_bar = crate::widgets::status_bar::StatusBarWidget::new(
+        config.provider.model.clone(),
+    );
+    status_bar.set_effects_enabled(animations_enabled);
+
     let mut app = App {
         submission_tx,
         app_tx,
@@ -206,9 +211,7 @@ pub async fn run_tui(
         screen: AppScreen::Welcome,
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
-        status_bar: crate::widgets::status_bar::StatusBarWidget::new(
-            config.provider.model.clone(),
-        ),
+        status_bar,
         overlay: None,
         viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
@@ -358,12 +361,26 @@ pub async fn run_tui(
                     app.clear_after_welcome = false;
                     let area = term.viewport_area();
                     app.effects.start_chat_coalesce(area);
+                    // Start idle effects on the status bar area.
+                    let status_area = Rect {
+                        x: area.x,
+                        y: area.y + area.height.saturating_sub(1),
+                        width: area.width,
+                        height: 1,
+                    };
+                    app.effects.start_idle_effects(status_area);
                 }
 
                 render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                if app.status_bar.is_animating() || app.effects.is_running() {
+                // Idle effects (border glow, breathing) also need ticking.
+                let needs_redraw = app.status_bar.is_animating()
+                    || app.effects.is_running()
+                    || (app.effects.enabled()
+                        && matches!(app.screen, AppScreen::Chat)
+                        && matches!(app.status_bar.state, crate::events::StatusState::Idle));
+                if needs_redraw {
                     let interval = if app.effects.is_running() {
                         std::time::Duration::from_millis(16) // ~60fps for smooth effects
                     } else {

@@ -205,13 +205,19 @@ impl GenesisEffects {
                     EffectId::StatusTransition,
                     ambient::status_activate(status_area),
                 );
+                // Start the active pulse.
+                self.start_active_pulse(status_area);
+                // Cancel idle effects.
+                self.stop_idle_effects();
             }
-            // Any active → Idle: fade-out.
+            // Any active → Idle: fade-out and stop pulse, start idle effects.
             (_, StatusState::Idle) => {
                 self.manager.add_unique_effect(
                     EffectId::StatusTransition,
                     ambient::status_deactivate(status_area),
                 );
+                self.stop_active_pulse();
+                self.start_idle_effects(status_area);
             }
             // Active → ToolRunning: tool name flash.
             (_, StatusState::ToolRunning { .. }) => {
@@ -223,6 +229,34 @@ impl GenesisEffects {
             // Other transitions (e.g., Thinking → Streaming): no extra effect.
             _ => {}
         }
+    }
+
+    /// Start the active background pulse.
+    pub fn start_active_pulse(&mut self, area: Rect) {
+        if !self.color_effects_enabled() {
+            return;
+        }
+        ambient::start_active_pulse(&mut self.manager, area);
+    }
+
+    /// Stop the active background pulse.
+    pub fn stop_active_pulse(&mut self) {
+        self.manager.cancel_unique_effect(EffectId::ActivePulse);
+    }
+
+    /// Start idle ambient effects (border glow + breathing).
+    pub fn start_idle_effects(&mut self, area: Rect) {
+        if !self.color_effects_enabled() {
+            return;
+        }
+        ambient::start_idle_glow(&mut self.manager, area);
+        ambient::start_idle_breathing(&mut self.manager, area);
+    }
+
+    /// Stop idle ambient effects.
+    pub fn stop_idle_effects(&mut self) {
+        self.manager.cancel_unique_effect(EffectId::IdleGlow);
+        self.manager.cancel_unique_effect(EffectId::IdleBreathing);
     }
 
     /// Whether effects are enabled.
@@ -358,23 +392,23 @@ mod tests {
     }
 
     #[test]
-    fn on_status_change_idle_to_thinking_starts_transition() {
+    fn on_status_change_idle_to_thinking_starts_effects() {
         use crate::events::StatusState;
 
         let mut effects = GenesisEffects::new(true, false);
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
-        assert!(effects.is_running(), "transition should be running");
+        assert!(effects.is_running(), "transition + pulse should be running");
     }
 
     #[test]
-    fn on_status_change_thinking_to_idle_starts_deactivate() {
+    fn on_status_change_thinking_to_idle_starts_idle_effects() {
         use crate::events::StatusState;
 
         let mut effects = GenesisEffects::new(true, false);
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Thinking, &StatusState::Idle, area);
-        assert!(effects.is_running(), "deactivate should be running");
+        assert!(effects.is_running(), "deactivate + idle effects should be running");
     }
 
     #[test]
@@ -394,6 +428,39 @@ mod tests {
         let mut effects = GenesisEffects::new(true, true);
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
+        assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn start_idle_effects_makes_running() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.start_idle_effects(area);
+        assert!(effects.is_running(), "idle effects should be running");
+    }
+
+    #[test]
+    fn stop_idle_effects_cancels() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 24);
+        effects.start_idle_effects(area);
+        effects.stop_idle_effects();
+        // Process one frame to clear cancelled effects.
+        let mut buf = Buffer::empty(area);
+        effects.process(std::time::Duration::from_millis(16), &mut buf, area);
+        assert!(!effects.is_running(), "idle effects should be stopped");
+    }
+
+    #[test]
+    fn active_pulse_starts_and_stops() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 1);
+        effects.start_active_pulse(area);
+        assert!(effects.is_running());
+
+        effects.stop_active_pulse();
+        let mut buf = Buffer::empty(area);
+        effects.process(std::time::Duration::from_millis(16), &mut buf, area);
         assert!(!effects.is_running());
     }
 }
