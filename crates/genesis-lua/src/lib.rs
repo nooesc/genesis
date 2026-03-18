@@ -231,6 +231,31 @@ version = "0.1.0"
     }
 
     #[test]
+    fn runtime_isolates_shared_library_table_mutation_between_plugins() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("first.lua"),
+            "string.plugin_marker = 'leaked'",
+        )
+        .expect("plugin should write");
+        fs::write(
+            dir.path().join("second.lua"),
+            "assert(string.plugin_marker == nil, 'string table mutation leaked across plugins')\ngenesis.log('second loaded')",
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(runtime.plugin_names(), vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
+        assert!(
+            runtime.plugin_errors().is_empty(),
+            "shared library mutations should not leak across plugins: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
     fn runtime_protects_genesis_root_from_plugin_mutation() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(

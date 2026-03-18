@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt, Table};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 use thiserror::Error;
 
 use crate::{api::install_genesis_api, discovery::discover_plugins_best_effort};
@@ -198,12 +199,49 @@ impl LuaRuntime {
 
     fn plugin_environment(&self) -> Result<Table, LuaRuntimeError> {
         let globals = self.lua.globals();
-        let env = self.lua.create_table()?;
-        let metatable = self.lua.create_table()?;
-        metatable.set("__index", globals)?;
-        env.set_metatable(Some(metatable))?;
+        let mut cloned_tables = HashMap::new();
+        let env = self.clone_table(&globals, &mut cloned_tables)?;
         env.set("_G", env.clone())?;
         env.set("_ENV", env.clone())?;
         Ok(env)
+    }
+
+    fn clone_table(
+        &self,
+        source: &Table,
+        cloned_tables: &mut HashMap<*const c_void, Table>,
+    ) -> mlua::Result<Table> {
+        let pointer = source.to_pointer();
+        if let Some(cloned) = cloned_tables.get(&pointer) {
+            return Ok(cloned.clone());
+        }
+
+        let cloned = self.lua.create_table()?;
+        cloned_tables.insert(pointer, cloned.clone());
+
+        for pair in source.pairs::<Value, Value>() {
+            let (key, value) = pair?;
+            let cloned_key = self.clone_value(key, cloned_tables)?;
+            let cloned_value = self.clone_value(value, cloned_tables)?;
+            cloned.raw_set(cloned_key, cloned_value)?;
+        }
+
+        if let Some(metatable) = source.metatable() {
+            let cloned_metatable = self.clone_table(&metatable, cloned_tables)?;
+            cloned.set_metatable(Some(cloned_metatable))?;
+        }
+
+        Ok(cloned)
+    }
+
+    fn clone_value(
+        &self,
+        value: Value,
+        cloned_tables: &mut HashMap<*const c_void, Table>,
+    ) -> mlua::Result<Value> {
+        match value {
+            Value::Table(table) => Ok(Value::Table(self.clone_table(&table, cloned_tables)?)),
+            other => Ok(other),
+        }
     }
 }
