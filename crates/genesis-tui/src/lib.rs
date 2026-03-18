@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 pub mod app;
 pub mod approval;
 pub mod custom_terminal;
+pub mod effects;
 pub mod events;
 pub mod frame_requester;
 pub mod history;

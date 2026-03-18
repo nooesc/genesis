@@ -1,0 +1,1 @@
+//! Boot sequence effect choreography.
