@@ -13,13 +13,41 @@ use thiserror::Error;
 
 /// Directories that are typically noise and should be skipped by file traversal tools.
 pub const NOISE_DIRS: &[&str] = &[
-    ".git", "node_modules", "target", "__pycache__", ".venv", "venv",
-    ".tox", "dist", "build", ".hg", ".svn", ".mypy_cache",
-    ".pytest_cache", ".next", ".nuxt",
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    "dist",
+    "build",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    ".nuxt",
 ];
 
 /// Maximum output size for tool results (64 KiB).
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Truncate a string to at most `limit` bytes on a valid UTF-8 boundary,
+/// appending `suffix` if truncation occurred.
+pub fn truncate_at(s: &str, limit: usize, suffix: &str) -> String {
+    if s.len() <= limit {
+        return s.to_owned();
+    }
+    // Walk back to char boundary
+    let mut end = limit;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut result = s[..end].to_owned();
+    result.push_str(suffix);
+    result
+}
 
 /// Truncate output to MAX_OUTPUT_BYTES, cutting at a newline boundary
 /// and ensuring safe UTF-8 boundaries.
@@ -49,17 +77,7 @@ pub fn truncate_output(output: &str) -> String {
 /// character boundaries.
 pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    if s.len() > MAX_OUTPUT_BYTES {
-        let mut end = MAX_OUTPUT_BYTES;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut truncated = s[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    } else {
-        s.into_owned()
-    }
+    truncate_at(&s, MAX_OUTPUT_BYTES, "\n... (output truncated)")
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -92,7 +110,10 @@ impl std::fmt::Debug for ToolContext {
             .field("allow_destructive_tools", &self.allow_destructive_tools)
             .field("terminal_backend", &self.terminal_backend)
             .field("default_working_dir", &self.default_working_dir)
-            .field("sandbox_manager", &self.sandbox_manager.as_ref().map(|_| ".."))
+            .field(
+                "sandbox_manager",
+                &self.sandbox_manager.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -255,7 +276,10 @@ pub enum ToolError {
     #[error("tool not found: {0}")]
     ToolNotFound(String),
     #[error("missing required argument `{argument}` for tool `{tool}`")]
-    MissingArgument { tool: String, argument: &'static str },
+    MissingArgument {
+        tool: String,
+        argument: &'static str,
+    },
     #[error("tool `{tool}` requires approval: {reason}")]
     ApprovalDenied { tool: String, reason: String },
     #[error("tool `{tool}` execution failed: {reason}")]
@@ -314,11 +338,7 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn execute(
-        &self,
-        call: &ToolCall,
-        context: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
+    pub fn execute(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let registration = self
             .tools
             .get(&call.name)
@@ -1618,14 +1638,14 @@ struct EchoTool;
 
 impl ToolHandler for EchoTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let content = call
-            .arguments
-            .get("message")
-            .cloned()
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "message",
-            })?;
+        let content =
+            call.arguments
+                .get("message")
+                .cloned()
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "message",
+                })?;
 
         Ok(ToolOutput {
             content,
@@ -1652,6 +1672,35 @@ impl ToolHandler for SessionInfoTool {
 }
 
 #[cfg(test)]
+pub mod test_utils {
+    use super::ToolContext;
+
+    /// Create a test `ToolContext` with standard defaults.
+    ///
+    /// Uses `allow_destructive_tools: false`. For tests requiring destructive
+    /// tool access, use [`test_ctx_destructive`] instead.
+    pub fn test_ctx() -> ToolContext {
+        ToolContext {
+            session_id: "test".to_owned(),
+            profile: "test".to_owned(),
+            data_dir: "/tmp".to_owned(),
+            allow_destructive_tools: false,
+            terminal_backend: None,
+            default_working_dir: None,
+            sandbox_manager: None,
+        }
+    }
+
+    /// Create a test `ToolContext` with destructive tool access enabled.
+    pub fn test_ctx_destructive() -> ToolContext {
+        ToolContext {
+            allow_destructive_tools: true,
+            ..test_ctx()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler,
@@ -1663,11 +1712,7 @@ mod tests {
     struct DangerousTool;
 
     impl ToolHandler for DangerousTool {
-        fn run(
-            &self,
-            _call: &ToolCall,
-            _context: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
+        fn run(&self, _call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput {
                 content: "danger acknowledged".to_owned(),
                 metadata: BTreeMap::new(),
@@ -1676,15 +1721,7 @@ mod tests {
     }
 
     fn sample_context() -> ToolContext {
-        ToolContext {
-            session_id: "session-42".to_owned(),
-            profile: "operator".to_owned(),
-            data_dir: "/tmp/genesis".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     #[test]
@@ -1708,24 +1745,40 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "skill_create"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_list"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_get"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_view_file"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_store_file"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_list_files"));
-        assert!(definitions.iter().any(|tool| tool.name == "skill_delete_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_view_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_store_file"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_list_files"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "skill_delete_file"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_delete"));
         assert!(definitions.iter().any(|tool| tool.name == "user_observe"));
         assert!(definitions.iter().any(|tool| tool.name == "user_model"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_navigate"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_snapshot"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_navigate"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_snapshot"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_click"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_type"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_scroll"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_back"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_press"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_close"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_get_images"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_get_images"));
         assert!(definitions.iter().any(|tool| tool.name == "browser_vision"));
-        assert!(definitions.iter().any(|tool| tool.name == "browser_console"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "browser_console"));
     }
 
     #[test]

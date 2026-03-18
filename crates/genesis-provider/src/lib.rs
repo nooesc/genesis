@@ -3,21 +3,22 @@ mod api_types;
 mod client;
 mod error;
 mod gemini_types;
-pub mod model_metadata;
+#[allow(dead_code)]
+pub(crate) mod model_metadata;
 pub mod parsers;
 pub mod pricing;
 mod resolve;
 pub(crate) mod responses_types;
 
 pub use api_types::{
-    ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatChoice, ChatMessage, ChatTool, ChatToolFunction, ChatUsage,
-    ContentPart, FunctionCall, ImageUrl, JsonSchemaSpec, MessageContent, ResponseFormat,
-    ThinkingConfig, ToolCallEntry, ToolChoice,
+    ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, ChatMessage, ChatTool, ChatToolFunction, ChatUsage, ContentPart,
+    FunctionCall, ImageUrl, JsonSchemaSpec, MessageContent, ResponseFormat, ThinkingConfig,
+    ToolCallEntry, ToolChoice,
 };
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
-pub use resolve::{resolve, ResolvedProvider};
+pub use resolve::{resolve, ResolvedProvider, OPENAI_BASE_URL};
 
 use std::collections::BTreeMap;
 
@@ -33,31 +34,32 @@ pub async fn client_from_config(
     base_url: Option<&str>,
     api_key_env: Option<&str>,
 ) -> Result<ChatClient, ProviderError> {
+    let backend = backend.trim().to_ascii_lowercase();
+    let backend = backend.as_str();
+
     // For openai-codex backend, try OAuth credentials first
-    if backend.trim().eq_ignore_ascii_case("openai-codex") {
+    if backend == "openai-codex" {
         match genesis_auth::default_auth_path() {
-            Ok(auth_path) => {
-                match genesis_auth::codex::resolve_credentials(&auth_path).await {
-                    Ok(creds) => {
-                        tracing::debug!(source = ?creds.source, "resolved OAuth credentials for openai-codex");
-                        let provider = ResolvedProvider {
-                            base_url: base_url.map(str::to_owned).unwrap_or(creds.base_url),
-                            api_key: creds.api_key,
-                            model: model.to_owned(),
-                            backend: "openai-codex".to_owned(),
-                        };
-                        let client = ChatClient::new(&provider)?;
-                        spawn_warmup(&client);
-                        return Ok(client);
-                    }
-                    Err(genesis_auth::AuthError::NotLoggedIn) => {
-                        tracing::debug!("no OAuth session for openai-codex, falling back to env vars");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "OAuth resolution failed for openai-codex, falling back to env vars");
-                    }
+            Ok(auth_path) => match genesis_auth::codex::resolve_credentials(&auth_path).await {
+                Ok(creds) => {
+                    tracing::debug!(source = ?creds.source, "resolved OAuth credentials for openai-codex");
+                    let provider = ResolvedProvider {
+                        base_url: base_url.map(str::to_owned).unwrap_or(creds.base_url),
+                        api_key: creds.api_key,
+                        model: model.to_owned(),
+                        backend: "openai-codex".to_owned(),
+                    };
+                    let client = ChatClient::new(&provider)?;
+                    spawn_warmup(&client);
+                    return Ok(client);
                 }
-            }
+                Err(genesis_auth::AuthError::NotLoggedIn) => {
+                    tracing::debug!("no OAuth session for openai-codex, falling back to env vars");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OAuth resolution failed for openai-codex, falling back to env vars");
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "could not determine auth store path, falling back to env vars");
             }
@@ -85,7 +87,10 @@ fn spawn_warmup(client: &ChatClient) {
     }
 
     let endpoint = client.endpoint();
-    if endpoint.contains("localhost") || endpoint.contains("127.0.0.1") || endpoint.contains("[::1]") {
+    if endpoint.contains("localhost")
+        || endpoint.contains("127.0.0.1")
+        || endpoint.contains("[::1]")
+    {
         tracing::debug!(endpoint = %endpoint, "skipping connection warmup for local endpoint");
         return;
     }

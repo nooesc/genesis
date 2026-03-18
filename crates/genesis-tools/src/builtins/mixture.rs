@@ -75,8 +75,7 @@ impl ToolHandler for MixtureOfAgentsTool {
         // Query all models in parallel using threads (since ToolHandler::run is sync).
         let env: BTreeMap<String, String> = std::env::vars().collect();
         type MoaResult = Vec<(String, String, Result<String, String>)>;
-        let responses: Arc<Mutex<MoaResult>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let responses: Arc<Mutex<MoaResult>> = Arc::new(Mutex::new(Vec::new()));
 
         let prompt_owned = prompt.clone();
         let system_owned = system.map(|s| s.to_owned());
@@ -98,10 +97,7 @@ impl ToolHandler for MixtureOfAgentsTool {
             }
         });
 
-        let results = Arc::try_unwrap(responses)
-            .unwrap()
-            .into_inner()
-            .unwrap();
+        let results = Arc::try_unwrap(responses).unwrap().into_inner().unwrap();
 
         // Format individual responses.
         let mut individual_parts = Vec::new();
@@ -110,13 +106,11 @@ impl ToolHandler for MixtureOfAgentsTool {
         for (backend, model, result) in &results {
             match result {
                 Ok(text) => {
-                    individual_parts
-                        .push(format!("### {backend}/{model}\n{text}"));
+                    individual_parts.push(format!("### {backend}/{model}\n{text}"));
                     successful_responses.push((backend.as_str(), model.as_str(), text.as_str()));
                 }
                 Err(e) => {
-                    individual_parts
-                        .push(format!("### {backend}/{model}\n[Error: {e}]"));
+                    individual_parts.push(format!("### {backend}/{model}\n[Error: {e}]"));
                 }
             }
         }
@@ -225,15 +219,7 @@ mod tests {
     use crate::ToolContext;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     #[test]

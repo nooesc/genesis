@@ -37,9 +37,7 @@ pub fn append_delivery_mirror_to_session(
         Ok(message_id) => {
             debug!(
                 session_id,
-                message_id,
-                source,
-                "delivery mirror appended (direct)"
+                message_id, source, "delivery mirror appended (direct)"
             );
         }
         Err(e) => {
@@ -153,13 +151,7 @@ mod tests {
         let db_path = dir.path().join("genesis.db");
         bootstrap(&db_path).expect("bootstrap");
 
-        append_delivery_mirror(
-            &db_path,
-            "telegram",
-            "12345",
-            "Hello from CLI",
-            "cli",
-        );
+        append_delivery_mirror(&db_path, "telegram", "12345", "Hello from CLI", "cli");
 
         let store = SessionStore::new(&db_path);
         let session = store
@@ -198,9 +190,7 @@ mod tests {
             "schedule",
         );
 
-        let messages = store
-            .load_messages("slack-general")
-            .expect("load_messages");
+        let messages = store.load_messages("slack-general").expect("load_messages");
         assert_eq!(messages.len(), 2);
 
         // First message is the original user message
@@ -211,11 +201,7 @@ mod tests {
         assert_eq!(messages[1].role, "assistant");
         assert!(messages[1].mirror);
         assert_eq!(messages[1].mirror_source.as_deref(), Some("schedule"));
-        assert!(messages[1]
-            .content
-            .as_deref()
-            .unwrap()
-            .contains("standup"));
+        assert!(messages[1].content.as_deref().unwrap().contains("standup"));
     }
 
     #[test]
@@ -251,9 +237,7 @@ mod tests {
         append_delivery_mirror(&db_path, "discord", "chan1", "Message C", "schedule");
 
         let store = SessionStore::new(&db_path);
-        let messages = store
-            .load_messages("discord-chan1")
-            .expect("load_messages");
+        let messages = store.load_messages("discord-chan1").expect("load_messages");
         assert_eq!(messages.len(), 3);
         assert!(messages.iter().all(|m| m.mirror));
         assert_eq!(messages[0].mirror_source.as_deref(), Some("cli"));

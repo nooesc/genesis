@@ -97,11 +97,10 @@ fn send_slack(
             reason: format!("HTTP request failed: {e}"),
         })?;
 
-    let resp_body: serde_json::Value =
-        resp.json().map_err(|e| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: format!("failed to parse response: {e}"),
-        })?;
+    let resp_body: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("failed to parse response: {e}"),
+    })?;
 
     if resp_body["ok"].as_bool() != Some(true) {
         return Err(ToolError::ExecutionFailed {
@@ -113,10 +112,7 @@ fn send_slack(
         });
     }
 
-    let ts = resp_body["ts"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_owned();
+    let ts = resp_body["ts"].as_str().unwrap_or("unknown").to_owned();
 
     Ok(ToolOutput {
         content: format!("Message sent to Slack channel {channel} (ts: {ts})"),
@@ -135,11 +131,10 @@ fn send_telegram(
     reply_to: Option<&String>,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let token =
-        std::env::var("TELEGRAM_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: "TELEGRAM_BOT_TOKEN environment variable not set".to_owned(),
-        })?;
+    let token = std::env::var("TELEGRAM_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "TELEGRAM_BOT_TOKEN environment variable not set".to_owned(),
+    })?;
 
     // Telegram messages have a 4096 character limit; split if needed.
     let chunks = split_message(text, 4096);
@@ -168,11 +163,10 @@ fn send_telegram(
                 reason: format!("HTTP request failed: {e}"),
             })?;
 
-        let resp_body: serde_json::Value =
-            resp.json().map_err(|e| ToolError::ExecutionFailed {
-                tool: tool_name.to_owned(),
-                reason: format!("failed to parse response: {e}"),
-            })?;
+        let resp_body: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("failed to parse response: {e}"),
+        })?;
 
         if resp_body["ok"].as_bool() != Some(true) {
             return Err(ToolError::ExecutionFailed {
@@ -206,27 +200,14 @@ fn send_telegram(
     })
 }
 
-fn send_discord(
-    channel_id: &str,
-    content: &str,
-    tool_name: &str,
-) -> Result<ToolOutput, ToolError> {
-    let token =
-        std::env::var("DISCORD_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
-        })?;
+fn send_discord(channel_id: &str, content: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
+    let token = std::env::var("DISCORD_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+    })?;
 
     // Discord has a 2000 character limit
-    let truncated = if content.len() > 2000 {
-        let mut end = 1997;
-        while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &content[..end])
-    } else {
-        content.to_owned()
-    };
+    let truncated = crate::truncate_at(content, 1997, "...");
 
     let resp = platform_client()
         .post(format!(
@@ -249,16 +230,12 @@ fn send_discord(
         });
     }
 
-    let resp_body: serde_json::Value =
-        resp.json().map_err(|e| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: format!("failed to parse response: {e}"),
-        })?;
+    let resp_body: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("failed to parse response: {e}"),
+    })?;
 
-    let msg_id = resp_body["id"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_owned();
+    let msg_id = resp_body["id"].as_str().unwrap_or("unknown").to_owned();
 
     Ok(ToolOutput {
         content: format!("Message sent to Discord channel {channel_id} (id: {msg_id})"),
@@ -271,11 +248,7 @@ fn send_discord(
     })
 }
 
-fn send_whatsapp(
-    recipient: &str,
-    text: &str,
-    tool_name: &str,
-) -> Result<ToolOutput, ToolError> {
+fn send_whatsapp(recipient: &str, text: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
     let token = std::env::var("WHATSAPP_TOKEN").map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
@@ -288,19 +261,9 @@ fn send_whatsapp(
         })?;
 
     // WhatsApp has a 4096 character limit
-    let truncated = if text.len() > 4096 {
-        let mut end = 4093;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &text[..end])
-    } else {
-        text.to_owned()
-    };
+    let truncated = crate::truncate_at(text, 4093, "...");
 
-    let url = format!(
-        "https://graph.facebook.com/v21.0/{phone_number_id}/messages"
-    );
+    let url = format!("https://graph.facebook.com/v21.0/{phone_number_id}/messages");
 
     let body = serde_json::json!({
         "messaging_product": "whatsapp",
@@ -328,11 +291,10 @@ fn send_whatsapp(
         });
     }
 
-    let resp_body: serde_json::Value =
-        resp.json().map_err(|e| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: format!("failed to parse WhatsApp response: {e}"),
-        })?;
+    let resp_body: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("failed to parse WhatsApp response: {e}"),
+    })?;
 
     let msg_id = resp_body["messages"][0]["id"]
         .as_str()
@@ -355,11 +317,10 @@ fn send_homeassistant(
     message: &str,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let ha_url =
-        std::env::var("HOMEASSISTANT_URL").map_err(|_| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
-        })?;
+    let ha_url = std::env::var("HOMEASSISTANT_URL").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
+    })?;
 
     let ha_token = std::env::var("HOMEASSISTANT_LONG_LIVED_TOKEN").map_err(|_| {
         ToolError::ExecutionFailed {
@@ -407,9 +368,7 @@ fn send_homeassistant(
     }
 
     Ok(ToolOutput {
-        content: format!(
-            "Message sent via Home Assistant service {domain}.{service}"
-        ),
+        content: format!("Message sent via Home Assistant service {domain}.{service}"),
         metadata: BTreeMap::from([
             ("tool".to_owned(), tool_name.to_owned()),
             ("platform".to_owned(), "homeassistant".to_owned()),
@@ -444,11 +403,7 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             .last()
             .unwrap_or_else(|| {
                 // First char is wider than max_len; take it to avoid infinite loop.
-                remaining
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0)
+                remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0)
             });
 
         let safe_slice = &remaining[..safe_end];
@@ -474,15 +429,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     #[test]

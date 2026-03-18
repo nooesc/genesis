@@ -234,8 +234,16 @@ mod tests {
     #[test]
     fn all_templates_have_descriptions() {
         for t in list_templates() {
-            assert!(!t.description.is_empty(), "Template '{}' has empty description", t.name);
-            assert!(!t.system_instructions.is_empty(), "Template '{}' has empty instructions", t.name);
+            assert!(
+                !t.description.is_empty(),
+                "Template '{}' has empty description",
+                t.name
+            );
+            assert!(
+                !t.system_instructions.is_empty(),
+                "Template '{}' has empty instructions",
+                t.name
+            );
         }
     }
 }

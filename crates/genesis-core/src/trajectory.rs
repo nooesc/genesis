@@ -355,8 +355,7 @@ impl TrajectoryRecorder {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(&self.trajectory)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&self.trajectory).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -403,7 +402,8 @@ mod tests {
 
     #[test]
     fn new_recorder_is_enabled_with_correct_metadata() {
-        let recorder = TrajectoryRecorder::new("session-1", "gpt-4", "You are a helpful assistant.");
+        let recorder =
+            TrajectoryRecorder::new("session-1", "gpt-4", "You are a helpful assistant.");
         assert!(recorder.is_enabled());
         assert_eq!(recorder.trajectory().session_id, "session-1");
         assert_eq!(recorder.trajectory().model, "gpt-4");
@@ -540,7 +540,10 @@ mod tests {
         recorder.set_outcome(TrajectoryOutcome::Success);
         recorder.finish();
 
-        assert_eq!(recorder.trajectory().outcome, Some(TrajectoryOutcome::Success));
+        assert_eq!(
+            recorder.trajectory().outcome,
+            Some(TrajectoryOutcome::Success)
+        );
         assert!(recorder.trajectory().completed_at.is_some());
     }
 
@@ -622,10 +625,7 @@ mod tests {
         assert_eq!(entries[0]["value"], "What files are in /tmp?");
 
         assert_eq!(entries[1]["from"], "tool_call");
-        assert!(entries[1]["value"]
-            .as_str()
-            .unwrap()
-            .contains("shell_exec"));
+        assert!(entries[1]["value"].as_str().unwrap().contains("shell_exec"));
 
         assert_eq!(entries[2]["from"], "tool_result");
         assert!(entries[2]["value"]
@@ -634,10 +634,7 @@ mod tests {
             .contains("foo.txt\nbar.txt"));
 
         assert_eq!(entries[3]["from"], "gpt");
-        assert!(entries[3]["value"]
-            .as_str()
-            .unwrap()
-            .contains("two files"));
+        assert!(entries[3]["value"].as_str().unwrap().contains("two files"));
     }
 
     #[test]
@@ -668,7 +665,8 @@ mod tests {
 
     #[test]
     fn full_conversation_trajectory() {
-        let mut recorder = TrajectoryRecorder::new("session-42", "claude-sonnet-4-20250514", "You are Eve.");
+        let mut recorder =
+            TrajectoryRecorder::new("session-42", "claude-sonnet-4-20250514", "You are Eve.");
         recorder.add_tag("demo");
 
         recorder.record_user_message("Read the config file.");
@@ -757,7 +755,9 @@ mod tests {
         recorder.record_assistant_message("hi");
         recorder.finish();
 
-        recorder.save_to_file(&path).expect("save_to_file should succeed");
+        recorder
+            .save_to_file(&path)
+            .expect("save_to_file should succeed");
         assert!(path.exists(), "trajectory file should exist");
     }
 
@@ -767,8 +767,13 @@ mod tests {
         let path = dir.path().join("should_not_exist.json");
 
         let recorder = TrajectoryRecorder::disabled();
-        recorder.save_to_file(&path).expect("save_to_file should succeed for disabled");
-        assert!(!path.exists(), "file should not be created for disabled recorder");
+        recorder
+            .save_to_file(&path)
+            .expect("save_to_file should succeed for disabled");
+        assert!(
+            !path.exists(),
+            "file should not be created for disabled recorder"
+        );
     }
 
     #[test]
@@ -776,7 +781,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("should create temp dir");
         let path = dir.path().join("valid.json");
 
-        let mut recorder = TrajectoryRecorder::new("s-42", "claude-sonnet-4-20250514", "You are Eve.");
+        let mut recorder =
+            TrajectoryRecorder::new("s-42", "claude-sonnet-4-20250514", "You are Eve.");
         recorder.record_user_message("What files are here?");
         recorder.record_tool_call("shell_exec", r#"{"command":"ls"}"#);
         recorder.record_tool_result("shell_exec", "foo.txt\nbar.txt");
@@ -784,11 +790,13 @@ mod tests {
         recorder.set_outcome(TrajectoryOutcome::Success);
         recorder.finish();
 
-        recorder.save_to_file(&path).expect("save_to_file should succeed");
+        recorder
+            .save_to_file(&path)
+            .expect("save_to_file should succeed");
 
         let contents = std::fs::read_to_string(&path).expect("should read file");
-        let parsed: Trajectory =
-            serde_json::from_str(&contents).expect("file contents should deserialize as Trajectory");
+        let parsed: Trajectory = serde_json::from_str(&contents)
+            .expect("file contents should deserialize as Trajectory");
 
         assert_eq!(parsed.session_id, "s-42");
         assert_eq!(parsed.model, "claude-sonnet-4-20250514");
@@ -800,7 +808,9 @@ mod tests {
     #[test]
     fn export_json_empty_trajectory() {
         let recorder = TrajectoryRecorder::new("s-1", "m-1", "sys");
-        let json = recorder.export_json().expect("should work for empty trajectory");
+        let json = recorder
+            .export_json()
+            .expect("should work for empty trajectory");
         let parsed: Trajectory = serde_json::from_str(&json).expect("should parse");
         assert!(parsed.steps.is_empty());
         assert!(parsed.outcome.is_none());

@@ -17,13 +17,13 @@ impl ToolHandler for TextToSpeechTool {
                 argument: "text",
             })?;
 
-        let output_path = call
-            .arguments
-            .get("output_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "output_path",
-            })?;
+        let output_path =
+            call.arguments
+                .get("output_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "output_path",
+                })?;
 
         let voice = call
             .arguments
@@ -82,15 +82,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     #[test]

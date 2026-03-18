@@ -60,7 +60,13 @@ const CORE_TOOLS: &[&str] = &[
 ];
 
 // Git tools for development-oriented distributions.
-const GIT_TOOLS: &[&str] = &["git_status", "git_diff", "git_log", "git_commit", "git_branch"];
+const GIT_TOOLS: &[&str] = &[
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_commit",
+    "git_branch",
+];
 
 // Web/research tools.
 const WEB_TOOLS: &[&str] = &["web_search", "web_request", "browse"];
@@ -170,7 +176,10 @@ pub fn builtin_distribution_names() -> Vec<&'static str> {
 }
 
 /// Create a distribution from a config-defined tool probability map.
-pub fn from_config(name: &str, tools: &std::collections::HashMap<String, f64>) -> ToolsetDistribution {
+pub fn from_config(
+    name: &str,
+    tools: &std::collections::HashMap<String, f64>,
+) -> ToolsetDistribution {
     ToolsetDistribution {
         name: name.to_owned(),
         description: format!("Custom distribution '{name}' from config."),

@@ -38,9 +38,7 @@ pub enum SkillSource {
         path: String,
     },
     /// From a registry URL (reserved for future use).
-    Registry {
-        url: String,
-    },
+    Registry { url: String },
 }
 
 impl std::fmt::Display for SkillSource {
@@ -119,7 +117,11 @@ pub struct Tap {
 
 impl std::fmt::Display for Tap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (github:{}/{}:{})", self.name, self.owner, self.repo, self.path)
+        write!(
+            f,
+            "{} (github:{}/{}:{})",
+            self.name, self.owner, self.repo, self.path
+        )
     }
 }
 
@@ -133,58 +135,28 @@ pub struct TapsConfig {
 // Error type
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SkillHubError {
-    Io(std::io::Error),
-    Json(serde_json::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("parse error: {0}")]
     Parse(String),
+    #[error("skill not found: {0}")]
     NotFound(String),
+    #[error("network error: {0}")]
     Network(String),
+    #[error("security blocked: {0}")]
     SecurityBlocked(String),
+    #[error("source type is not supported yet: {0}")]
     UnsupportedSource(&'static str),
+    #[error("integrity mismatch for {name}: expected {expected}, got {actual}")]
     IntegrityMismatch {
         name: String,
         expected: String,
         actual: String,
     },
-}
-
-impl std::fmt::Display for SkillHubError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "io error: {err}"),
-            Self::Json(err) => write!(f, "json error: {err}"),
-            Self::Parse(err) => write!(f, "parse error: {err}"),
-            Self::NotFound(name) => write!(f, "skill not found: {name}"),
-            Self::Network(msg) => write!(f, "network error: {msg}"),
-            Self::SecurityBlocked(msg) => write!(f, "security blocked: {msg}"),
-            Self::UnsupportedSource(kind) => {
-                write!(f, "source type is not supported yet: {kind}")
-            }
-            Self::IntegrityMismatch {
-                name,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "integrity mismatch for {name}: expected {expected}, got {actual}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SkillHubError {}
-
-impl From<std::io::Error> for SkillHubError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-impl From<serde_json::Error> for SkillHubError {
-    fn from(value: serde_json::Error) -> Self {
-        Self::Json(value)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,8 +221,8 @@ impl SkillSourceProvider for OptionalSkillSource {
             return Ok(Vec::new());
         }
 
-        let entries = scan_skills_dir(&self.dir)
-            .map_err(|err| SkillHubError::Parse(err.to_string()))?;
+        let entries =
+            scan_skills_dir(&self.dir).map_err(|err| SkillHubError::Parse(err.to_string()))?;
         let mut manifests = Vec::new();
 
         for entry in entries {
@@ -272,8 +244,8 @@ impl SkillSourceProvider for OptionalSkillSource {
     }
 
     fn fetch(&self, manifest: &SkillManifest, dest: &Path) -> Result<(), SkillHubError> {
-        let entries = scan_skills_dir(&self.dir)
-            .map_err(|err| SkillHubError::Parse(err.to_string()))?;
+        let entries =
+            scan_skills_dir(&self.dir).map_err(|err| SkillHubError::Parse(err.to_string()))?;
         for entry in entries {
             if entry.name == manifest.name {
                 let source_dir = entry
@@ -352,8 +324,9 @@ impl GitHubSource {
         let skill_content = github_download(&client, &download_url)?;
         let skill_text = String::from_utf8_lossy(&skill_content);
 
-        let parsed = crate::skill_manifest::parse_skill_md(&skill_text)
-            .map_err(|e| SkillHubError::Parse(format!("failed to parse SKILL.md at {skill_path}: {e}")))?;
+        let parsed = crate::skill_manifest::parse_skill_md(&skill_text).map_err(|e| {
+            SkillHubError::Parse(format!("failed to parse SKILL.md at {skill_path}: {e}"))
+        })?;
 
         Ok(Some(SkillManifest {
             name: parsed.frontmatter.name,
@@ -473,7 +446,8 @@ impl SkillsHub {
 
     /// Register the optional bundled skills source.
     pub fn add_optional_source(&mut self, dir: &Path) {
-        self.sources.push(Box::new(OptionalSkillSource::new("optional", dir)));
+        self.sources
+            .push(Box::new(OptionalSkillSource::new("optional", dir)));
     }
 
     /// Load taps from config and register them as GitHub sources.
@@ -552,7 +526,11 @@ impl SkillsHub {
     /// Install a skill: fetch -> quarantine -> scan -> install.
     ///
     /// If `force` is true, installs even if the guard reports `Dangerous`.
-    pub fn install(&self, name: &str, force: bool) -> Result<(SkillLock, GuardReport), SkillHubError> {
+    pub fn install(
+        &self,
+        name: &str,
+        force: bool,
+    ) -> Result<(SkillLock, GuardReport), SkillHubError> {
         let (manifest, source) = self.find_manifest_and_source(name)?;
 
         // Step 1: Fetch into quarantine
@@ -650,19 +628,20 @@ impl SkillsHub {
 
             // Re-scan
             let trust = trust_level_for_source(&lock.source);
-            let report = match skills_guard::scan_skill_directory(&lock.name, &installed_path, trust) {
-                Ok(r) => r,
-                Err(e) => {
-                    results.push(AuditResult {
-                        name: lock.name.clone(),
-                        verdict: "error".to_owned(),
-                        finding_count: 0,
-                        summary: format!("scan failed: {e}"),
-                        integrity_ok,
-                    });
-                    continue;
-                }
-            };
+            let report =
+                match skills_guard::scan_skill_directory(&lock.name, &installed_path, trust) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        results.push(AuditResult {
+                            name: lock.name.clone(),
+                            verdict: "error".to_owned(),
+                            finding_count: 0,
+                            summary: format!("scan failed: {e}"),
+                            integrity_ok,
+                        });
+                        continue;
+                    }
+                };
 
             results.push(AuditResult {
                 name: lock.name.clone(),
@@ -1086,12 +1065,7 @@ fn github_download(
 }
 
 /// Fetch a directory from GitHub using the Contents API and write files to `dest`.
-fn fetch_github_dir(
-    owner: &str,
-    repo: &str,
-    path: &str,
-    dest: &Path,
-) -> Result<(), SkillHubError> {
+fn fetch_github_dir(owner: &str, repo: &str, path: &str, dest: &Path) -> Result<(), SkillHubError> {
     let client = build_github_client()?;
 
     let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
@@ -1158,8 +1132,7 @@ fn collect_files_for_hash(
     if !current.is_dir() {
         return Ok(result);
     }
-    let mut entries: Vec<_> = fs::read_dir(current)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
@@ -1186,8 +1159,7 @@ fn checksum_dir(path: &Path) -> Result<String, SkillHubError> {
 
 fn hash_path(root: &Path, path: &Path, hasher: &mut DefaultHasher) -> Result<(), SkillHubError> {
     if path.is_dir() {
-        let mut entries = fs::read_dir(path)?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
             hash_path(root, &entry.path(), hasher)?;
@@ -1214,8 +1186,7 @@ fn now_unix_timestamp() -> u64 {
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), SkillHubError> {
     fs::create_dir_all(destination)?;
-    let mut entries = fs::read_dir(source)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries = fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
@@ -1363,7 +1334,9 @@ mod tests {
         let manifest = client.list_available().unwrap().remove(0);
         client.install(&manifest).expect("install should succeed");
 
-        client.uninstall("deploy").expect("uninstall should succeed");
+        client
+            .uninstall("deploy")
+            .expect("uninstall should succeed");
         assert!(!installed.path().join("deploy").exists());
         assert!(load_lock_file(&installed.path().join("skills.lock.json"))
             .expect("load lock")
@@ -1417,7 +1390,9 @@ mod tests {
             },
         };
 
-        let err = client.install(&manifest).expect_err("registry install should fail");
+        let err = client
+            .install(&manifest)
+            .expect_err("registry install should fail");
         assert!(matches!(err, SkillHubError::UnsupportedSource("registry")));
     }
 
@@ -1440,7 +1415,9 @@ mod tests {
             },
         };
 
-        let err = client.install(&manifest).expect_err("should fail for nonexistent repo");
+        let err = client
+            .install(&manifest)
+            .expect_err("should fail for nonexistent repo");
         assert!(matches!(err, SkillHubError::Network(_)));
     }
 
@@ -1533,14 +1510,12 @@ mod tests {
         let path = dir.path().join("taps.json");
 
         let config = TapsConfig {
-            taps: vec![
-                Tap {
-                    name: "community".to_owned(),
-                    owner: "nooesc".to_owned(),
-                    repo: "genesis-skills".to_owned(),
-                    path: "skills".to_owned(),
-                },
-            ],
+            taps: vec![Tap {
+                name: "community".to_owned(),
+                owner: "nooesc".to_owned(),
+                repo: "genesis-skills".to_owned(),
+                path: "skills".to_owned(),
+            }],
         };
 
         save_taps_config(&path, &config).unwrap();

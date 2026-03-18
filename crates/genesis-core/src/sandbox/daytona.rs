@@ -85,8 +85,11 @@ impl DaytonaSandbox {
             .unwrap_or_else(|_| "https://app.daytona.io/api".into());
 
         let mut default_headers = HeaderMap::new();
-        let auth_value = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|e| SandboxError::AuthError { reason: e.to_string() })?;
+        let auth_value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
+            SandboxError::AuthError {
+                reason: e.to_string(),
+            }
+        })?;
         default_headers.insert(header::AUTHORIZATION, auth_value);
 
         let client = reqwest::Client::builder()
@@ -103,16 +106,11 @@ impl DaytonaSandbox {
 
     /// Map an HTTP status to a `SandboxError`, falling back to a generic
     /// message that includes the status code.
-    async fn map_error_response(
-        &self,
-        resp: reqwest::Response,
-    ) -> SandboxError {
+    async fn map_error_response(&self, resp: reqwest::Response) -> SandboxError {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
 
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return SandboxError::AuthError {
                 reason: format!("HTTP {status}: {body}"),
             };
@@ -165,8 +163,7 @@ impl SandboxBackend for DaytonaSandbox {
             {
                 // Only start if not already running
                 if existing.state != "running" {
-                    let start_url =
-                        format!("{}/sandbox/{}/start", self.base_url, existing.id);
+                    let start_url = format!("{}/sandbox/{}/start", self.base_url, existing.id);
                     let start_resp = self.client.post(&start_url).send().await?;
                     if !start_resp.status().is_success() {
                         return Err(self.map_error_response(start_resp).await);
@@ -263,7 +260,11 @@ impl SandboxBackend for DaytonaSandbox {
         Ok(None)
     }
 
-    async fn cleanup(&self, instance: &SandboxInstance, persistent: bool) -> Result<(), SandboxError> {
+    async fn cleanup(
+        &self,
+        instance: &SandboxInstance,
+        persistent: bool,
+    ) -> Result<(), SandboxError> {
         if persistent {
             let stop_url = format!("{}/sandbox/{}/stop", self.base_url, instance.id);
             let resp = self.client.post(&stop_url).send().await?;
@@ -317,7 +318,11 @@ mod tests {
                 .into_iter()
                 .collect(),
             auto_stop_interval: 0,
-            resources: DaytonaResources { cpu: 1, memory: 5, disk: 10 },
+            resources: DaytonaResources {
+                cpu: 1,
+                memory: 5,
+                disk: 10,
+            },
         };
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["resources"]["memory"], 5);
@@ -343,7 +348,10 @@ mod tests {
             std::env::set_var("DAYTONA_API_KEY", val);
         }
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), super::super::SandboxError::AuthError { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            super::super::SandboxError::AuthError { .. }
+        ));
     }
 
     #[test]

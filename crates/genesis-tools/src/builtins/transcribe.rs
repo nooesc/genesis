@@ -16,10 +16,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .build()
-            .expect("failed to build HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| b)
     })
 }
 
@@ -31,13 +28,13 @@ pub struct TranscribeTool;
 
 impl ToolHandler for TranscribeTool {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let file_path = call
-            .arguments
-            .get("file_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "file_path",
-            })?;
+        let file_path =
+            call.arguments
+                .get("file_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "file_path",
+                })?;
 
         let model = call
             .arguments
@@ -52,7 +49,7 @@ impl ToolHandler for TranscribeTool {
             .get("api_base")
             .cloned()
             .or_else(|| std::env::var("OPENAI_API_BASE").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+            .unwrap_or_else(|| genesis_provider::OPENAI_BASE_URL.to_owned());
 
         let api_key = call
             .arguments
@@ -184,15 +181,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     fn make_call(args: Vec<(&str, &str)>) -> ToolCall {

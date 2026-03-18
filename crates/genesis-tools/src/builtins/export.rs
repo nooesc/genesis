@@ -26,7 +26,10 @@ impl ToolHandler for SessionExportTool {
         let output_path = call.arguments.get("path");
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         // Load session title
@@ -37,12 +40,13 @@ impl ToolHandler for SessionExportTool {
             .and_then(|s| s.title);
 
         // Load messages via storage layer
-        let stored_messages = store.load_messages(&session_id).map_err(|e| {
-            ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to load messages: {e}"),
-            }
-        })?;
+        let stored_messages =
+            store
+                .load_messages(&session_id)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to load messages: {e}"),
+                })?;
 
         if stored_messages.is_empty() {
             return Err(ToolError::ExecutionFailed {
@@ -65,8 +69,8 @@ impl ToolHandler for SessionExportTool {
                 return Err(ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!(
-                        "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
-                    ),
+                    "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
+                ),
                 })
             }
         };
@@ -361,7 +365,9 @@ mod tests {
         match err {
             ToolError::ExecutionFailed { reason, .. } => {
                 assert!(
-                    reason.contains("messages") || reason.contains("database") || reason.contains("open"),
+                    reason.contains("messages")
+                        || reason.contains("database")
+                        || reason.contains("open"),
                     "unexpected error: {reason}"
                 );
             }
@@ -395,7 +401,9 @@ mod tests {
         let jsonl = export_jsonl(&messages);
         let parsed: serde_json::Value =
             serde_json::from_str(jsonl.trim()).expect("should be valid JSON");
-        let msgs = parsed["messages"].as_array().expect("should have messages array");
+        let msgs = parsed["messages"]
+            .as_array()
+            .expect("should have messages array");
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["role"], "user");

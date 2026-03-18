@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -13,10 +14,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, info, info_span, warn};
 
-use std::sync::Arc;
-
 use crate::cost::{BudgetStatus, SessionCost};
 use crate::hooks::{HookEvent, HookResult, HookRunner};
+use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
@@ -182,14 +182,6 @@ would be valuable in future sessions — not session-specific details.";
 /// Number of tool calls in a single turn that triggers a skill creation nudge.
 const SKILL_CREATION_THRESHOLD: usize = 8;
 
-/// The skill creation nudge message injected as a system message.
-const SKILL_CREATION_NUDGE: &str = "\
-[Skill creation opportunity] The task you just completed was multi-step and \
-complex. Consider whether the approach you used could be distilled into a \
-reusable skill. If so, call `skill_create` with a descriptive name, clear \
-instructions for how to handle this type of task, and relevant tags. Good \
-skills capture durable patterns — not one-off details.";
-
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
@@ -346,6 +338,11 @@ impl AgentLoop {
         hook_runner: HookRunner,
     ) -> Self {
         Self::with_history(client, tools, config, hook_runner, Vec::new())
+    }
+
+    /// Return the session ID as a `&str`, defaulting to `""` when unset.
+    fn session_id_str(&self) -> &str {
+        self.config.session_id.as_deref().unwrap_or_default()
     }
 
     pub fn with_history(
@@ -660,7 +657,7 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.fire_shell_hooks(
             HookEvent::PreTurn,
             serde_json::json!({
@@ -1150,7 +1147,7 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.fire_shell_hooks(
             HookEvent::PreTurn,
             serde_json::json!({
@@ -1813,12 +1810,13 @@ impl AgentLoop {
             return;
         }
 
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         for tool in &stuck_tools {
             let count = self.tool_failure_counts[tool];
             warn!(
                 tool_name = tool.as_str(),
-                "tool has failed {count} consecutive times, injecting stuck-loop nudge",
+                failure_count = count,
+                "tool has repeated failures, injecting stuck-loop nudge",
             );
             self.hooks.on_stuck_loop(&hook_session, tool, count);
             // Reset the counter so we don't spam nudges
@@ -2051,7 +2049,7 @@ impl AgentLoop {
             self.messages.insert(drop_start, summary_msg);
         }
 
-        let hook_session = self.config.session_id.clone().unwrap_or_default();
+        let hook_session = self.session_id_str().to_owned();
         self.hooks
             .on_context_prune(&hook_session, messages_before, self.messages.len());
     }
@@ -2272,7 +2270,12 @@ async fn execute_tool_calls_parallel(
             let sem = Arc::clone(&semaphore);
             let tool_name = tc.function.name.clone();
             async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
+                let Ok(_permit) = sem.acquire().await else {
+                    return Ok((
+                        format!("Error: tool `{tool_name}` skipped — concurrency semaphore closed"),
+                        false,
+                    ));
+                };
                 match tokio::time::timeout(
                     timeout_duration,
                     execute_single_tool(tools, subagent_spawner, tc),

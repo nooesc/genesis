@@ -87,10 +87,17 @@ mod session_store_tests {
             .create_session("session-tok", "cli", None)
             .expect("session should be created");
 
-        store.add_usage("session-tok", 100, 50).expect("first add_usage");
-        store.add_usage("session-tok", 200, 75).expect("second add_usage");
+        store
+            .add_usage("session-tok", 100, 50)
+            .expect("first add_usage");
+        store
+            .add_usage("session-tok", 200, 75)
+            .expect("second add_usage");
 
-        let session = store.get_session("session-tok").expect("get should work").expect("session should exist");
+        let session = store
+            .get_session("session-tok")
+            .expect("get should work")
+            .expect("session should exist");
         assert_eq!(session.total_input_tokens, 300);
         assert_eq!(session.total_output_tokens, 125);
     }
@@ -107,9 +114,14 @@ mod session_store_tests {
             .expect("session should be created");
 
         // Should be a no-op
-        store.add_usage("session-zero", 0, 0).expect("zero add_usage");
+        store
+            .add_usage("session-zero", 0, 0)
+            .expect("zero add_usage");
 
-        let session = store.get_session("session-zero").expect("get should work").expect("session should exist");
+        let session = store
+            .get_session("session-zero")
+            .expect("get should work")
+            .expect("session should exist");
         assert_eq!(session.total_input_tokens, 0);
         assert_eq!(session.total_output_tokens, 0);
     }
@@ -139,7 +151,9 @@ mod session_store_tests {
         bootstrap(&database_path).expect("bootstrap should succeed");
 
         let store = SessionStore::new(&database_path);
-        store.create_session("s1", "cli", Some("Original")).expect("create");
+        store
+            .create_session("s1", "cli", Some("Original"))
+            .expect("create");
 
         let session = store.get_session("s1").unwrap().unwrap();
         assert_eq!(session.title.as_deref(), Some("Original"));
@@ -271,6 +285,115 @@ mod session_store_tests {
             .expect("lookup should succeed");
         assert!(missing.is_none());
     }
+
+    #[test]
+    fn truncate_messages_keeps_only_recent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-trunc", "cli", None)
+            .expect("session should be created");
+
+        for i in 1..=5 {
+            store
+                .append_message(
+                    "session-trunc",
+                    "user",
+                    Some(&format!("message {i}")),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("message should be stored");
+        }
+
+        let deleted = store
+            .truncate_messages("session-trunc", 2)
+            .expect("truncate should succeed");
+        assert_eq!(deleted, 3);
+
+        let messages = store
+            .load_messages("session-trunc")
+            .expect("messages should load");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("message 4"));
+        assert_eq!(messages[1].content.as_deref(), Some("message 5"));
+    }
+
+    #[test]
+    fn truncate_messages_noop_when_fewer_than_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-few", "cli", None)
+            .expect("session should be created");
+
+        for i in 1..=3 {
+            store
+                .append_message(
+                    "session-few",
+                    "user",
+                    Some(&format!("message {i}")),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("message should be stored");
+        }
+
+        let deleted = store
+            .truncate_messages("session-few", 10)
+            .expect("truncate should succeed");
+        assert_eq!(deleted, 0);
+
+        let messages = store
+            .load_messages("session-few")
+            .expect("messages should load");
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn search_messages_finds_matching_content() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("session-search", "cli", Some("Search Test"))
+            .expect("session should be created");
+
+        store
+            .append_message("session-search", "user", Some("hello world"), None, None, None)
+            .expect("first message should be stored");
+        store
+            .append_message(
+                "session-search",
+                "assistant",
+                Some("goodbye moon"),
+                None,
+                None,
+                None,
+            )
+            .expect("second message should be stored");
+        store
+            .append_message("session-search", "user", Some("hello again"), None, None, None)
+            .expect("third message should be stored");
+
+        let results = store
+            .search_messages("hello", 10)
+            .expect("search should succeed");
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.session_id == "session-search"));
+        assert!(results.iter().all(|r| r.content.contains("hello")));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +452,33 @@ pub enum StorageError {
     UnknownImportStatus(String),
 }
 
+/// Collect mapped rows into a Vec, converting any SQLite error into a StorageError.
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+    database_path: &Path,
+) -> Result<Vec<T>, StorageError> {
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })
+}
+
+/// Check whether a column exists in a table (used for idempotent migrations).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
+        .is_ok()
+}
+
+/// Run a batch of SQL statements as a migration step.
+fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), StorageError> {
+    conn.execute_batch(sql)
+        .map_err(|source| StorageError::Sqlite {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent).map_err(|source| StorageError::CreateDirectory {
@@ -339,9 +489,10 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
 
     let connection = open(database_path)?;
 
-    connection
-        .execute_batch(
-            "
+    exec_migration(
+        &connection,
+        database_path,
+        "
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
@@ -386,6 +537,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_messages_session_id
+                ON messages(session_id);
             CREATE TABLE IF NOT EXISTS legacy_import_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 legacy_root TEXT NOT NULL,
@@ -522,11 +675,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 UNIQUE(backend, task_id)
             );
             ",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
+    )?;
 
     // Run migrations for existing databases.
     migrate_to_v2(&connection, database_path)?;
@@ -544,7 +693,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
             INSERT INTO metadata (key, value) VALUES ('schema_version', ?1)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             ",
-            params![SCHEMA_VERSION.to_string()],
+            params![SCHEMA_VERSION],
         )
         .map_err(|source| StorageError::Sqlite {
             path: database_path.to_path_buf(),
@@ -559,172 +708,120 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
 
 /// Migrate v1 → v2: add token tracking columns to sessions table.
 fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    // Check if columns already exist (idempotent).
-    let has_column: bool = connection
-        .prepare("SELECT total_input_tokens FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "total_input_tokens") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0;",
+    )
 }
 
 /// Migrate v2 → v3: add parent_session_id for conversation forking.
 fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT parent_session_id FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "parent_session_id") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;",
+    )
 }
 
 /// Migrate v3 → v4: add tags column to sessions for categorization.
 fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT tags FROM sessions LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "sessions", "tags") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE sessions ADD COLUMN tags TEXT NOT NULL DEFAULT '';",
+    )
 }
 
 /// Migrate v4 → v5: add mirror columns to messages for delivery mirroring.
 fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let has_column: bool = connection
-        .prepare("SELECT mirror FROM messages LIMIT 0")
-        .is_ok();
-
-    if has_column {
+    if column_exists(connection, "messages", "mirror") {
         return Ok(());
     }
 
-    connection
-        .execute_batch(
-            "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "ALTER TABLE messages ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE messages ADD COLUMN mirror_source TEXT;",
+    )
 }
 
 /// Migrate v5 → v6: add response_cache and audit_log tables.
 fn migrate_to_v6(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS response_cache (
-                cache_key TEXT PRIMARY KEY,
-                model TEXT NOT NULL,
-                response TEXT NOT NULL,
-                tool_calls_json TEXT,
-                input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0,
-                hit_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                expires_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                event_type TEXT NOT NULL,
-                details TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_audit_log_session
-                ON audit_log(session_id);
-            CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
-                ON audit_log(event_type);
-            CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
-                ON audit_log(created_at);",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS response_cache (
+            cache_key TEXT PRIMARY KEY,
+            model TEXT NOT NULL,
+            response TEXT NOT NULL,
+            tool_calls_json TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            event_type TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_session
+            ON audit_log(session_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
+            ON audit_log(event_type);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
+            ON audit_log(created_at);",
+    )
 }
 
 /// Migrate v6 → v7: add channels table for platform channel caching.
 fn migrate_to_v7(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS channels (
-                platform TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
-                channel_name TEXT NOT NULL,
-                channel_type TEXT NOT NULL DEFAULT 'channel',
-                is_member INTEGER NOT NULL DEFAULT 0,
-                cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (platform, channel_id)
-            );",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS channels (
+            platform TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            channel_name TEXT NOT NULL,
+            channel_type TEXT NOT NULL DEFAULT 'channel',
+            is_member INTEGER NOT NULL DEFAULT 0,
+            cached_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (platform, channel_id)
+        );",
+    )
 }
 
 /// Migrate v7 → v8: add sticker_cache table for Telegram sticker descriptions.
 fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS sticker_cache (
-                file_unique_id TEXT PRIMARY KEY,
-                description TEXT NOT NULL,
-                emoji TEXT NOT NULL DEFAULT '',
-                sticker_set TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );",
-        )
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-
-    Ok(())
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS sticker_cache (
+            file_unique_id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            emoji TEXT NOT NULL DEFAULT '',
+            sticker_set TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
 }
 
 /// Migrate v8 → v9: add provider_metadata column and sandboxes table.
@@ -1030,6 +1127,23 @@ impl SessionStore {
         &self.database_path
     }
 
+    /// Map a database row to a `SessionSummary`.
+    ///
+    /// Expects columns in order: id, title, platform, total_input_tokens,
+    /// total_output_tokens, parent_session_id, created_at, updated_at.
+    fn row_to_session_summary(row: &rusqlite::Row) -> rusqlite::Result<SessionSummary> {
+        Ok(SessionSummary {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            platform: row.get(2)?,
+            total_input_tokens: row.get(3)?,
+            total_output_tokens: row.get(4)?,
+            parent_session_id: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
     /// Create a new session record.
     pub fn create_session(
         &self,
@@ -1275,7 +1389,11 @@ impl SessionStore {
     /// Remove a tag from a session.
     pub fn remove_tag(&self, session_id: &str, tag: &str) -> Result<bool, StorageError> {
         let tags = self.get_tags(session_id)?;
-        let filtered: Vec<&str> = tags.iter().filter(|t| t.as_str() != tag).map(|t| t.as_str()).collect();
+        let filtered: Vec<&str> = tags
+            .iter()
+            .filter(|t| t.as_str() != tag)
+            .map(|t| t.as_str())
+            .collect();
         if filtered.len() == tags.len() {
             return Ok(false); // Tag wasn't present
         }
@@ -1296,29 +1414,13 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let summaries = stmt
-            .query_map(params![pattern], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
+        let rows = stmt
+            .query_map(params![pattern], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List all sessions that were forked from a given parent session.
@@ -1335,35 +1437,19 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        let summaries = stmt
-            .query_map(params![parent_id], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
+        let rows = stmt
+            .query_map(params![parent_id], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a session and all its messages and search index entries.
     pub fn delete_session(&self, session_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
-        // Delete FTS entries
+        // Delete FTS entries (virtual table — no ON DELETE CASCADE support).
         connection
             .execute(
                 "DELETE FROM session_search WHERE session_id = ?1",
@@ -1373,22 +1459,9 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        // Delete messages
-        connection
-            .execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![session_id],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        // Delete session
+        // Delete session; ON DELETE CASCADE removes associated messages.
         let deleted = connection
-            .execute(
-                "DELETE FROM sessions WHERE id = ?1",
-                params![session_id],
-            )
+            .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -1458,14 +1531,6 @@ impl SessionStore {
         let connection = open(&self.database_path)?;
         let cutoff = format!("-{days} days");
 
-        // Enable foreign keys so ON DELETE CASCADE removes messages automatically.
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON")
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-
         let tx = connection
             .unchecked_transaction()
             .map_err(|source| StorageError::Sqlite {
@@ -1521,7 +1586,7 @@ impl SessionStore {
                 source,
             })?;
 
-        let messages = stmt
+        let rows = stmt
             .query_map(params![session_id], |row| {
                 Ok(StoredMessage {
                     id: row.get(0)?,
@@ -1539,14 +1604,9 @@ impl SessionStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(messages)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete messages older than the N most recent for a session.
@@ -1635,30 +1695,14 @@ impl SessionStore {
                 source,
             })?;
 
-        let summaries = stmt
-            .query_map(params![query], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
+        let rows = stmt
+            .query_map(params![query], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(summaries)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Search message content across all sessions using FTS5.
@@ -1686,7 +1730,7 @@ impl SessionStore {
                 source,
             })?;
 
-        let results = stmt
+        let rows = stmt
             .query_map(params![query, max_results as i64], |row| {
                 Ok(MessageSearchResult {
                     session_id: row.get(0)?,
@@ -1699,14 +1743,9 @@ impl SessionStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(results)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Count total sessions.
@@ -1731,18 +1770,7 @@ impl SessionStore {
                 "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(SessionSummary {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        platform: row.get(2)?,
-                        total_input_tokens: row.get(3)?,
-                        total_output_tokens: row.get(4)?,
-                        parent_session_id: row.get(5)?,
-                        created_at: row.get(6)?,
-                        updated_at: row.get(7)?,
-                    })
-                },
+                Self::row_to_session_summary,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -1765,30 +1793,14 @@ impl SessionStore {
                 source,
             })?;
 
-        let sessions = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(SessionSummary {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    platform: row.get(2)?,
-                    total_input_tokens: row.get(3)?,
-                    total_output_tokens: row.get(4)?,
-                    parent_session_id: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
+        let rows = stmt
+            .query_map(params![limit as i64], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(sessions)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Count total number of sessions.
@@ -1826,13 +1838,14 @@ impl SessionStore {
     /// Gather usage insights for the last N days.
     pub fn insights(&self, days: u32) -> Result<InsightsData, StorageError> {
         let connection = open(&self.database_path)?;
+        let period = format!("-{days} days");
 
         // Aggregate totals for the period
         let (count, input, output): (i64, i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) \
                  FROM sessions WHERE created_at >= datetime('now', ?)",
-                [format!("-{days} days")],
+                [&period],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|source| StorageError::Sqlite {
@@ -1852,15 +1865,18 @@ impl SessionStore {
                 source,
             })?;
         let sessions_per_day: Vec<(String, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Platform breakdown
         let mut stmt = connection
@@ -1874,15 +1890,18 @@ impl SessionStore {
                 source,
             })?;
         let platform_breakdown: Vec<(String, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Tokens per day
         let mut stmt = connection
@@ -1898,7 +1917,7 @@ impl SessionStore {
                 source,
             })?;
         let tokens_per_day: Vec<(String, u64, u64)> = stmt
-            .query_map([format!("-{days} days")], |row| {
+            .query_map([&period], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)? as u64,
@@ -1909,8 +1928,11 @@ impl SessionStore {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         // Tool usage breakdown — extract tool names from tool_calls_json
         let mut stmt = connection
@@ -1925,15 +1947,16 @@ impl SessionStore {
                 source,
             })?;
         let tool_jsons: Vec<String> = stmt
-            .query_map([format!("-{days} days")], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map([&period], |row| row.get::<_, String>(0))
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let mut tool_counts: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
@@ -2043,11 +2066,10 @@ impl ScheduleStore {
                 source,
             })?;
 
-        self.get(id)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(id)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a schedule by ID.
@@ -2090,7 +2112,7 @@ impl ScheduleStore {
                 source,
             })?;
 
-        let schedules = stmt
+        let rows = stmt
             .query_map([], |row| {
                 Ok(StoredSchedule {
                     id: row.get(0)?,
@@ -2104,14 +2126,9 @@ impl ScheduleStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(schedules)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List all schedules (enabled and disabled).
@@ -2128,7 +2145,7 @@ impl ScheduleStore {
                 source,
             })?;
 
-        let schedules = stmt
+        let rows = stmt
             .query_map([], |row| {
                 Ok(StoredSchedule {
                     id: row.get(0)?,
@@ -2142,14 +2159,9 @@ impl ScheduleStore {
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
             })?;
 
-        Ok(schedules)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Enable or disable a schedule.
@@ -2267,11 +2279,10 @@ impl UserModelStore {
                 source,
             })?;
 
-        self.get(trait_key)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(trait_key)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a specific user trait by key.
@@ -2304,19 +2315,14 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
-            .query_map([], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        let rows =
+            stmt.query_map([], Self::row_to_trait)
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// List traits in a specific category.
@@ -2332,19 +2338,14 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
+        let rows = stmt
             .query_map(params![category], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Get high-confidence traits (>= threshold) for prompt injection.
@@ -2360,26 +2361,24 @@ impl UserModelStore {
                 source,
             })?;
 
-        let traits = stmt
+        let rows = stmt
             .query_map(params![threshold], Self::row_to_trait)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(traits)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a user trait.
     pub fn delete(&self, trait_key: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let rows = connection
-            .execute("DELETE FROM user_model WHERE trait_key = ?1", params![trait_key])
+            .execute(
+                "DELETE FROM user_model WHERE trait_key = ?1",
+                params![trait_key],
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -2476,11 +2475,10 @@ impl SkillStore {
                 source,
             })?;
 
-        self.get(name)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(name)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a skill by name.
@@ -2513,19 +2511,14 @@ impl SkillStore {
                 source,
             })?;
 
-        let skills = stmt
-            .query_map([], Self::row_to_skill)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        let rows =
+            stmt.query_map([], Self::row_to_skill)
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
 
-        Ok(skills)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Find skills matching any of the given tags.
@@ -2543,25 +2536,24 @@ impl SkillStore {
                 source,
             })?;
 
-        let skills = stmt
+        let rows = stmt
             .query_map(params![pattern], Self::row_to_skill)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(skills)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Find skills whose trigger hints, names, descriptions, or tags match the
     /// given user prompt. Uses simple keyword overlap scoring to rank results.
     /// Returns up to `limit` matching skills, ordered by relevance score.
-    pub fn find_matching(&self, prompt: &str, limit: usize) -> Result<Vec<StoredSkill>, StorageError> {
+    pub fn find_matching(
+        &self,
+        prompt: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredSkill>, StorageError> {
         let all_skills = self.list_all()?;
         if all_skills.is_empty() {
             return Ok(Vec::new());
@@ -2570,7 +2562,11 @@ impl SkillStore {
         // Tokenize the prompt into lowercase words.
         let prompt_words: Vec<String> = prompt
             .split_whitespace()
-            .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphanumeric()).to_owned())
+            .map(|w| {
+                w.to_lowercase()
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_owned()
+            })
             .filter(|w| w.len() >= 2)
             .collect();
 
@@ -2679,11 +2675,7 @@ impl SkillFileStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     pub fn delete_file(&self, skill_name: &str, file_path: &str) -> Result<bool, StorageError> {
@@ -2741,11 +2733,7 @@ fn skill_match_score(skill: &StoredSkill, prompt_words: &[String]) -> f64 {
         .map(|w| w.to_lowercase())
         .collect();
 
-    let tag_words: Vec<String> = skill
-        .tags
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let tag_words: Vec<String> = skill.tags.iter().map(|t| t.to_lowercase()).collect();
 
     for word in prompt_words {
         // Trigger hint matches are weighted highest (3x).
@@ -2817,11 +2805,10 @@ impl SubagentStore {
                 source,
             })?;
 
-        self.get(id)?
-            .ok_or_else(|| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source: rusqlite::Error::QueryReturnedNoRows,
-            })
+        self.get(id)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
     }
 
     /// Get a subagent by ID.
@@ -2842,7 +2829,10 @@ impl SubagentStore {
     }
 
     /// List all subagents for a parent session.
-    pub fn list_by_parent(&self, parent_session_id: &str) -> Result<Vec<StoredSubagent>, StorageError> {
+    pub fn list_by_parent(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<StoredSubagent>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -2855,19 +2845,14 @@ impl SubagentStore {
                 source,
             })?;
 
-        let subagents = stmt
+        let rows = stmt
             .query_map(params![parent_session_id], Self::row_to_subagent)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(subagents)
+        collect_rows(rows, &self.database_path)
     }
 
     /// Mark a subagent as running.
@@ -3067,19 +3052,14 @@ impl SkillUsageStore {
                 source,
             })?;
 
-        let usages = stmt
+        let rows = stmt
             .query_map(params![skill_name, limit as i64], Self::row_to_usage)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        Ok(usages)
+        collect_rows(rows, &self.database_path)
     }
 
     fn row_to_usage(row: &rusqlite::Row) -> Result<StoredSkillUsage, rusqlite::Error> {
@@ -3117,6 +3097,19 @@ impl MemoryStore {
         }
     }
 
+    /// Map a database row to a `StoredMemory`.
+    ///
+    /// Expects columns in order: id, session_id, kind, content, created_at.
+    fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<StoredMemory> {
+        Ok(StoredMemory {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            kind: row.get(2)?,
+            content: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }
+
     /// List all stored memories, most recent first.
     pub fn list(&self, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3130,24 +3123,12 @@ impl MemoryStore {
                 source,
             })?;
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Get a single memory by ID. Returns `None` if not found.
@@ -3158,15 +3139,7 @@ impl MemoryStore {
                 "SELECT id, session_id, kind, content, created_at
                  FROM memories WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(StoredMemory {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        content: row.get(3)?,
-                        created_at: row.get(4)?,
-                    })
-                },
+                Self::row_to_memory,
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -3180,16 +3153,13 @@ impl MemoryStore {
         let connection = open(&self.database_path)?;
 
         // Ensure FTS index exists (memory tools also create it, but this is defensive)
-        connection
-            .execute_batch(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
-                    memory_row_id UNINDEXED, kind, content
-                );",
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        exec_migration(
+            &connection,
+            &self.database_path,
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )?;
 
         let mut stmt = connection
             .prepare(
@@ -3205,24 +3175,12 @@ impl MemoryStore {
                 source,
             })?;
         let rows = stmt
-            .query_map(params![query, limit as i64], |row| {
-                Ok(StoredMemory {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    content: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![query, limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a memory by ID.
@@ -3300,11 +3258,7 @@ impl EmbeddingStore {
                 path: self.database_path.clone(),
                 source,
             })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete an embedding by memory ID.
@@ -3342,11 +3296,9 @@ impl EmbeddingStore {
     pub fn count(&self) -> Result<usize, StorageError> {
         let connection = open(&self.database_path)?;
         let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM memory_embeddings",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| {
+                row.get(0)
+            })
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
@@ -3380,11 +3332,13 @@ fn open(database_path: &Path) -> Result<Connection, StorageError> {
     // Performance PRAGMAs — WAL mode enables concurrent readers + single writer,
     // NORMAL sync is crash-safe in WAL mode, busy_timeout prevents SQLITE_BUSY
     // under concurrent access from gateway + CLI.
+    // foreign_keys enables ON DELETE CASCADE for all connections (required per-connection).
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;
-         PRAGMA temp_store = MEMORY;",
+         PRAGMA temp_store = MEMORY;
+         PRAGMA foreign_keys = ON;",
     )
     .map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
@@ -3496,6 +3450,25 @@ impl PairingStore {
         }
     }
 
+    /// Delete pending pairing codes that have exceeded their TTL.
+    fn cleanup_expired_codes(
+        connection: &Connection,
+        database_path: &Path,
+        expiry: &str,
+    ) -> Result<(), StorageError> {
+        connection
+            .execute(
+                "DELETE FROM pairing_pending
+                 WHERE created_at < datetime('now', ?1)",
+                params![expiry],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: database_path.to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Check if a user is approved (paired) on a platform.
     pub fn is_approved(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3514,13 +3487,13 @@ impl PairingStore {
     }
 
     /// List all approved users, optionally filtered by platform.
-    pub fn list_approved(
-        &self,
-        platform: Option<&str>,
-    ) -> Result<Vec<ApprovedUser>, StorageError> {
+    pub fn list_approved(&self, platform: Option<&str>) -> Result<Vec<ApprovedUser>, StorageError> {
         let connection = open(&self.database_path)?;
         let db = &self.database_path;
-        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
 
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<ApprovedUser> {
             Ok(ApprovedUser {
@@ -3539,11 +3512,8 @@ impl PairingStore {
                      ORDER BY approved_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map(params![p], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map(params![p], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3552,11 +3522,8 @@ impl PairingStore {
                      ORDER BY platform, approved_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map([], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map([], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         };
 
         Ok(users)
@@ -3580,16 +3547,11 @@ impl PairingStore {
         let connection = open(&self.database_path)?;
 
         // Clean up expired codes
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         // Check if we've hit the max pending for this platform
         let pending_count: i64 = connection
@@ -3636,16 +3598,11 @@ impl PairingStore {
         let connection = open(&self.database_path)?;
 
         // Clean up expired codes first
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         // Find the pending code
         let pending = connection
@@ -3653,12 +3610,7 @@ impl PairingStore {
                 "SELECT user_id, user_name FROM pairing_pending
                  WHERE platform = ?1 AND code = ?2",
                 params![platform, &code],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
@@ -3725,16 +3677,17 @@ impl PairingStore {
     ) -> Result<Vec<PendingPairing>, StorageError> {
         let connection = open(&self.database_path)?;
         let db = &self.database_path;
-        let me = |source: rusqlite::Error| StorageError::Sqlite { path: db.clone(), source };
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
 
         // Clean up expired first
-        connection
-            .execute(
-                "DELETE FROM pairing_pending
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{PAIRING_CODE_TTL_SECS} seconds")],
-            )
-            .map_err(me)?;
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
 
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<PendingPairing> {
             Ok(PendingPairing {
@@ -3754,11 +3707,8 @@ impl PairingStore {
                      ORDER BY created_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map(params![p], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map(params![p], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -3767,22 +3717,15 @@ impl PairingStore {
                      ORDER BY platform, created_at DESC",
                 )
                 .map_err(me)?;
-            let rows = stmt.query_map([], map_row)
-                .map_err(me)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(me)?;
-            rows
+            let rows = stmt.query_map([], map_row).map_err(me)?;
+            collect_rows(rows, &self.database_path)?
         };
 
         Ok(pending)
     }
 
     /// Revoke an approved user's access.
-    pub fn revoke(
-        &self,
-        platform: &str,
-        user_id: &str,
-    ) -> Result<bool, StorageError> {
+    pub fn revoke(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let rows = connection
             .execute(
@@ -3846,10 +3789,7 @@ impl ChannelStore {
     }
 
     /// List cached channels, optionally filtered by platform.
-    pub fn list(
-        &self,
-        platform: Option<&str>,
-    ) -> Result<Vec<CachedChannel>, StorageError> {
+    pub fn list(&self, platform: Option<&str>) -> Result<Vec<CachedChannel>, StorageError> {
         let connection = open(&self.database_path)?;
 
         let (sql, param): (&str, Option<&str>) = if platform.is_some() {
@@ -3867,10 +3807,12 @@ impl ChannelStore {
             )
         };
 
-        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
-        })?;
+        let mut stmt = connection
+            .prepare(sql)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let row_mapper = |row: &rusqlite::Row| {
             Ok(CachedChannel {
@@ -3883,7 +3825,7 @@ impl ChannelStore {
             })
         };
 
-        let channels: Vec<CachedChannel> = if let Some(p) = param {
+        let mapped_rows = if let Some(p) = param {
             stmt.query_map(params![p], row_mapper)
         } else {
             stmt.query_map([], row_mapper)
@@ -3891,14 +3833,9 @@ impl ChannelStore {
         .map_err(|source| StorageError::Sqlite {
             path: self.database_path.clone(),
             source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
         })?;
 
-        Ok(channels)
+        collect_rows(mapped_rows, &self.database_path)
     }
 
     /// Upsert a batch of channels for a platform, replacing stale entries.
@@ -3943,11 +3880,7 @@ impl ChannelStore {
     }
 
     /// Check if channels for a platform are cached and fresh (within max_age_secs).
-    pub fn is_fresh(
-        &self,
-        platform: &str,
-        max_age_secs: i64,
-    ) -> Result<bool, StorageError> {
+    pub fn is_fresh(&self, platform: &str, max_age_secs: i64) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
         let fresh: bool = connection
             .query_row(
@@ -4014,6 +3947,19 @@ impl AuditLogStore {
         }
     }
 
+    /// Map a database row to an `AuditEntry`.
+    ///
+    /// Expects columns in order: id, session_id, event_type, details, created_at.
+    fn row_to_audit_entry(row: &rusqlite::Row) -> rusqlite::Result<AuditEntry> {
+        Ok(AuditEntry {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            event_type: row.get(2)?,
+            details: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }
+
     /// Record an audit event.
     pub fn log(
         &self,
@@ -4037,7 +3983,11 @@ impl AuditLogStore {
     }
 
     /// Query audit entries for a specific session.
-    pub fn by_session(&self, session_id: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+    pub fn by_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -4053,29 +4003,21 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![session_id, limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![session_id, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Query audit entries by event type.
-    pub fn by_event_type(&self, event_type: &str, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
+    pub fn by_event_type(
+        &self,
+        event_type: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, StorageError> {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
@@ -4091,25 +4033,13 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![event_type, limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![event_type, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Query recent audit entries across all sessions.
@@ -4128,25 +4058,13 @@ impl AuditLogStore {
             })?;
 
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(AuditEntry {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    details: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })
+            .query_map(params![limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Count total audit entries and entries per event type.
@@ -4173,11 +4091,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Aggregate tool usage analytics from tool_call_end audit events.
@@ -4219,11 +4133,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Aggregate LLM usage analytics from llm_response audit events.
@@ -4264,11 +4174,7 @@ impl AuditLogStore {
                 source,
             })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete audit entries older than the given number of days.
@@ -4381,8 +4287,15 @@ impl ResponseCacheStore {
                   hit_count, created_at, expires_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, datetime('now'),
                          datetime('now', '+' || ?7 || ' seconds'))",
-                params![cache_key, model, response, tool_calls_json,
-                        input_tokens, output_tokens, ttl_seconds],
+                params![
+                    cache_key,
+                    model,
+                    response,
+                    tool_calls_json,
+                    input_tokens,
+                    output_tokens,
+                    ttl_seconds
+                ],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
@@ -4662,10 +4575,12 @@ impl SandboxStore {
             )
         };
 
-        let mut stmt = connection.prepare(sql).map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
-        })?;
+        let mut stmt = connection
+            .prepare(sql)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
 
         let row_mapper = |row: &rusqlite::Row| {
             Ok(SandboxRow {
@@ -4678,7 +4593,7 @@ impl SandboxStore {
             })
         };
 
-        let rows: Vec<SandboxRow> = if let Some(b) = param {
+        let mapped_rows = if let Some(b) = param {
             stmt.query_map(params![b], row_mapper)
         } else {
             stmt.query_map([], row_mapper)
@@ -4686,14 +4601,9 @@ impl SandboxStore {
         .map_err(|source| StorageError::Sqlite {
             path: self.database_path.clone(),
             source,
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
-            source,
         })?;
 
-        Ok(rows)
+        collect_rows(mapped_rows, &self.database_path)
     }
 
     /// Delete sandbox records that have not been active for more than `days` days.
@@ -4792,9 +4702,15 @@ mod sandbox_store_tests {
         bootstrap(&db_path).expect("bootstrap should succeed");
 
         let store = SandboxStore::new(&db_path);
-        store.upsert("sb-a1", "singularity", "task-a1", None).expect("upsert a1");
-        store.upsert("sb-a2", "singularity", "task-a2", None).expect("upsert a2");
-        store.upsert("sb-b1", "modal", "task-b1", None).expect("upsert b1");
+        store
+            .upsert("sb-a1", "singularity", "task-a1", None)
+            .expect("upsert a1");
+        store
+            .upsert("sb-a2", "singularity", "task-a2", None)
+            .expect("upsert a2");
+        store
+            .upsert("sb-b1", "modal", "task-b1", None)
+            .expect("upsert b1");
 
         let singularity_rows = store
             .list(Some("singularity"))
@@ -4813,8 +4729,12 @@ mod sandbox_store_tests {
         bootstrap(&db_path).expect("bootstrap should succeed");
 
         let store = SandboxStore::new(&db_path);
-        store.upsert("sb-fresh", "singularity", "task-fresh", None).expect("upsert fresh");
-        store.upsert("sb-stale", "singularity", "task-stale", None).expect("upsert stale");
+        store
+            .upsert("sb-fresh", "singularity", "task-fresh", None)
+            .expect("upsert fresh");
+        store
+            .upsert("sb-stale", "singularity", "task-stale", None)
+            .expect("upsert stale");
 
         // Backdate the stale record's last_active by 10 days.
         let connection = open(&db_path).expect("open should succeed");
@@ -4916,7 +4836,9 @@ mod sticker_cache_tests {
         bootstrap(&db_path).unwrap();
 
         let store = StickerCacheStore::new(&db_path);
-        store.set("del-1", "A bird flying", "🐦", "BirdPack").unwrap();
+        store
+            .set("del-1", "A bird flying", "🐦", "BirdPack")
+            .unwrap();
 
         assert!(store.delete("del-1").unwrap());
         assert!(store.get("del-1").unwrap().is_none());
@@ -4990,11 +4912,16 @@ mod tests {
             root: dir.path().join("legacy-hermes"),
             config_path: Some(dir.path().join("legacy-hermes").join("cli-config.yaml")),
             data_dir: Some(dir.path().join("legacy-hermes").join("data")),
-            database_path: Some(dir.path().join("legacy-hermes").join("data").join("genesis.db")),
+            database_path: Some(
+                dir.path()
+                    .join("legacy-hermes")
+                    .join("data")
+                    .join("genesis.db"),
+            ),
         };
 
-        let recorded =
-            record_import_run(&database_path, &source, ImportStatus::Planned).expect("recording should work");
+        let recorded = record_import_run(&database_path, &source, ImportStatus::Planned)
+            .expect("recording should work");
         let latest = latest_import_run(&database_path)
             .expect("query should work")
             .expect("latest import run should exist");
@@ -5051,9 +4978,7 @@ mod tests {
             .append_message("s-2", "tool", Some("test"), Some("call_1"), None, None)
             .expect("append tool result should work");
 
-        let messages = store
-            .load_messages("s-2")
-            .expect("load should work");
+        let messages = store.load_messages("s-2").expect("load should work");
 
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "user");
@@ -5173,7 +5098,10 @@ mod tests {
         assert_eq!(skill.description, "Reviews code for bugs and style issues");
         assert_eq!(skill.version, 1);
         assert_eq!(skill.tags, vec!["dev", "review"]);
-        assert_eq!(skill.trigger_hint.as_deref(), Some("when user asks to review code"));
+        assert_eq!(
+            skill.trigger_hint.as_deref(),
+            Some("when user asks to review code")
+        );
 
         let fetched = store.get("code_review").unwrap().expect("should exist");
         assert_eq!(fetched.name, "code_review");
@@ -5192,7 +5120,13 @@ mod tests {
         assert_eq!(v1.version, 1);
 
         let v2 = store
-            .upsert("deploy", "Deploy to production (improved)", "run deploy script v2", None, &["ops"])
+            .upsert(
+                "deploy",
+                "Deploy to production (improved)",
+                "run deploy script v2",
+                None,
+                &["ops"],
+            )
             .expect("v2");
         assert_eq!(v2.version, 2);
         assert_eq!(v2.description, "Deploy to production (improved)");
@@ -5206,8 +5140,12 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("alpha", "A skill", "do A", None, &["a"]).unwrap();
-        store.upsert("beta", "B skill", "do B", None, &["b"]).unwrap();
+        store
+            .upsert("alpha", "A skill", "do A", None, &["a"])
+            .unwrap();
+        store
+            .upsert("beta", "B skill", "do B", None, &["b"])
+            .unwrap();
 
         let all = store.list_all().unwrap();
         assert_eq!(all.len(), 2);
@@ -5229,9 +5167,33 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("web_scrape", "Scrape web", "use curl", None, &["web", "data"]).unwrap();
-        store.upsert("deploy", "Deploy", "kubectl apply", None, &["ops", "deploy"]).unwrap();
-        store.upsert("test_runner", "Run tests", "cargo test", None, &["dev", "test"]).unwrap();
+        store
+            .upsert(
+                "web_scrape",
+                "Scrape web",
+                "use curl",
+                None,
+                &["web", "data"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy",
+                "kubectl apply",
+                None,
+                &["ops", "deploy"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "test_runner",
+                "Run tests",
+                "cargo test",
+                None,
+                &["dev", "test"],
+            )
+            .unwrap();
 
         let web_skills = store.find_by_tag("web").unwrap();
         assert_eq!(web_skills.len(), 1);
@@ -5249,11 +5211,37 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("deploy", "Deploy app to production", "kubectl apply", Some("deploy production"), &["ops", "deploy"]).unwrap();
-        store.upsert("review", "Review code for bugs", "check bugs", Some("review code"), &["dev", "review"]).unwrap();
-        store.upsert("unrelated", "Unrelated skill", "do nothing", Some("bake cookies"), &["cooking"]).unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy app to production",
+                "kubectl apply",
+                Some("deploy production"),
+                &["ops", "deploy"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "review",
+                "Review code for bugs",
+                "check bugs",
+                Some("review code"),
+                &["dev", "review"],
+            )
+            .unwrap();
+        store
+            .upsert(
+                "unrelated",
+                "Unrelated skill",
+                "do nothing",
+                Some("bake cookies"),
+                &["cooking"],
+            )
+            .unwrap();
 
-        let matches = store.find_matching("please deploy to production", 5).unwrap();
+        let matches = store
+            .find_matching("please deploy to production", 5)
+            .unwrap();
         assert!(!matches.is_empty(), "should find deploy skill");
         assert_eq!(matches[0].name, "deploy");
     }
@@ -5265,7 +5253,15 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::SkillStore::new(&db_path);
-        store.upsert("deploy", "Deploy app", "run deploy", Some("deploy"), &["ops"]).unwrap();
+        store
+            .upsert(
+                "deploy",
+                "Deploy app",
+                "run deploy",
+                Some("deploy"),
+                &["ops"],
+            )
+            .unwrap();
 
         let matches = store.find_matching("quantum physics lecture", 5).unwrap();
         assert!(matches.is_empty());
@@ -5280,7 +5276,15 @@ mod tests {
         let store = super::SkillStore::new(&db_path);
         for i in 0..10 {
             let name = format!("deploy_{i}");
-            store.upsert(&name, "Deploy variant", "run it", Some("deploy app"), &["deploy"]).unwrap();
+            store
+                .upsert(
+                    &name,
+                    "Deploy variant",
+                    "run it",
+                    Some("deploy app"),
+                    &["deploy"],
+                )
+                .unwrap();
         }
 
         let matches = store.find_matching("deploy my app", 3).unwrap();
@@ -5295,7 +5299,12 @@ mod tests {
 
         let store = super::UserModelStore::new(&db_path);
         let t = store
-            .observe("prefers_rust", "preference", "User prefers Rust over Python", Some("s1"))
+            .observe(
+                "prefers_rust",
+                "preference",
+                "User prefers Rust over Python",
+                Some("s1"),
+            )
             .expect("observe");
 
         assert_eq!(t.trait_key, "prefers_rust");
@@ -5311,9 +5320,30 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
-        store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
-        let t = store.observe("likes_concise", "communication_style", "Prefers short answers", None).unwrap();
+        store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
+        store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
+        let t = store
+            .observe(
+                "likes_concise",
+                "communication_style",
+                "Prefers short answers",
+                None,
+            )
+            .unwrap();
 
         assert_eq!(t.evidence_count, 3);
         assert!((t.confidence - 0.7).abs() < 0.01); // 0.5 + 0.1 + 0.1 = 0.7
@@ -5328,7 +5358,14 @@ mod tests {
         let store = super::UserModelStore::new(&db_path);
         // Observe 10 times: 0.5 + 9*0.1 = 1.4 -> capped at 1.0
         for _ in 0..10 {
-            store.observe("expert_rust", "expertise", "Expert-level Rust developer", None).unwrap();
+            store
+                .observe(
+                    "expert_rust",
+                    "expertise",
+                    "Expert-level Rust developer",
+                    None,
+                )
+                .unwrap();
         }
         let t = store.get("expert_rust").unwrap().expect("should exist");
         assert!(t.confidence <= 1.0);
@@ -5342,9 +5379,15 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("pref_dark_mode", "preference", "Likes dark mode", None).unwrap();
-        store.observe("pref_vim", "preference", "Uses vim bindings", None).unwrap();
-        store.observe("style_formal", "communication_style", "Formal tone", None).unwrap();
+        store
+            .observe("pref_dark_mode", "preference", "Likes dark mode", None)
+            .unwrap();
+        store
+            .observe("pref_vim", "preference", "Uses vim bindings", None)
+            .unwrap();
+        store
+            .observe("style_formal", "communication_style", "Formal tone", None)
+            .unwrap();
 
         let prefs = store.list_by_category("preference").unwrap();
         assert_eq!(prefs.len(), 2);
@@ -5360,10 +5403,14 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("low_conf", "preference", "Maybe likes X", None).unwrap();
+        store
+            .observe("low_conf", "preference", "Maybe likes X", None)
+            .unwrap();
         // Observe "high_conf" 4 times: confidence = 0.5 + 3*0.1 = 0.8
         for _ in 0..4 {
-            store.observe("high_conf", "preference", "Definitely likes Y", None).unwrap();
+            store
+                .observe("high_conf", "preference", "Definitely likes Y", None)
+                .unwrap();
         }
 
         let confident = store.confident_traits(0.7).unwrap();
@@ -5378,7 +5425,9 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::UserModelStore::new(&db_path);
-        store.observe("temp", "preference", "Temporary", None).unwrap();
+        store
+            .observe("temp", "preference", "Temporary", None)
+            .unwrap();
         assert!(store.delete("temp").unwrap());
         assert!(!store.delete("temp").unwrap());
         assert!(store.get("temp").unwrap().is_none());
@@ -5427,7 +5476,9 @@ mod tests {
         session_store.create_session("c", "subagent", None).unwrap();
 
         let store = super::SubagentStore::new(&db_path);
-        store.create("sub-2", "p", "c", "runner", "build it").unwrap();
+        store
+            .create("sub-2", "p", "c", "runner", "build it")
+            .unwrap();
 
         // pending -> running
         assert!(store.set_running("sub-2").unwrap());
@@ -5451,9 +5502,15 @@ mod tests {
         let session_store = SessionStore::new(&db_path);
         session_store.create_session("p1", "cli", None).unwrap();
         session_store.create_session("p2", "cli", None).unwrap();
-        session_store.create_session("c1", "subagent", None).unwrap();
-        session_store.create_session("c2", "subagent", None).unwrap();
-        session_store.create_session("c3", "subagent", None).unwrap();
+        session_store
+            .create_session("c1", "subagent", None)
+            .unwrap();
+        session_store
+            .create_session("c2", "subagent", None)
+            .unwrap();
+        session_store
+            .create_session("c3", "subagent", None)
+            .unwrap();
 
         let store = super::SubagentStore::new(&db_path);
         store.create("s1", "p1", "c1", "a", "task a").unwrap();
@@ -5525,7 +5582,9 @@ mod tests {
         let store = super::SkillUsageStore::new(&db_path);
         store.record_usage("test", None, "success", None).unwrap();
         store.record_usage("test", None, "success", None).unwrap();
-        store.record_usage("test", None, "failure", Some("Flaky")).unwrap();
+        store
+            .record_usage("test", None, "failure", Some("Flaky"))
+            .unwrap();
 
         let stats = store.stats("test").unwrap();
         assert_eq!(stats.total_uses, 3);
@@ -5624,12 +5683,8 @@ mod tests {
             .unwrap();
 
         let store = super::SkillFileStore::new(&db_path);
-        store
-            .store_file("review", "refs/a.md", "a")
-            .unwrap();
-        store
-            .store_file("review", "refs/b.md", "b")
-            .unwrap();
+        store.store_file("review", "refs/a.md", "a").unwrap();
+        store.store_file("review", "refs/b.md", "b").unwrap();
 
         assert!(store.delete_file("review", "refs/a.md").unwrap());
         assert_eq!(store.get_file("review", "refs/a.md").unwrap(), None);
@@ -5651,12 +5706,8 @@ mod tests {
             .unwrap();
 
         let store = super::SkillFileStore::new(&db_path);
-        store
-            .store_file("test", "refs/doc.md", "v1")
-            .unwrap();
-        store
-            .store_file("test", "refs/doc.md", "v2")
-            .unwrap();
+        store.store_file("test", "refs/doc.md", "v1").unwrap();
+        store.store_file("test", "refs/doc.md", "v2").unwrap();
 
         let content = store
             .get_file("test", "refs/doc.md")
@@ -5707,7 +5758,10 @@ mod tests {
         assert_eq!(forked_id, "s-fork");
 
         // Check the forked session exists
-        let session = store.get_session("s-fork").unwrap().expect("forked session should exist");
+        let session = store
+            .get_session("s-fork")
+            .unwrap()
+            .expect("forked session should exist");
         assert_eq!(session.title.as_deref(), Some("Original (fork)"));
         assert_eq!(session.platform, "cli");
         assert_eq!(session.parent_session_id.as_deref(), Some("s-orig"));
@@ -5845,7 +5899,9 @@ mod tests {
             .expect("import should succeed");
         assert_eq!(id, "import-empty");
 
-        let stored = store.load_messages("import-empty").expect("load should work");
+        let stored = store
+            .load_messages("import-empty")
+            .expect("load should work");
         assert_eq!(stored.len(), 0);
     }
 
@@ -5919,7 +5975,10 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let store = super::PairingStore::new(&db_path);
-        let code = store.generate_code("slack", "u2", "Carol").unwrap().unwrap();
+        let code = store
+            .generate_code("slack", "u2", "Carol")
+            .unwrap()
+            .unwrap();
         store.approve_code("slack", &code).unwrap();
 
         assert!(store.is_approved("slack", "u2").unwrap());
@@ -6019,7 +6078,10 @@ mod tests {
             .set("key-1", "gpt-4", "Hello world", None, 100, 20, 3600)
             .unwrap();
 
-        let entry = cache.get("key-1").unwrap().expect("should find cached entry");
+        let entry = cache
+            .get("key-1")
+            .unwrap()
+            .expect("should find cached entry");
         assert_eq!(entry.model, "gpt-4");
         assert_eq!(entry.response, "Hello world");
         assert_eq!(entry.input_tokens, 100);
@@ -6045,7 +6107,9 @@ mod tests {
         bootstrap(&db_path).expect("bootstrap");
 
         let cache = super::ResponseCacheStore::new(&db_path);
-        cache.set("key-2", "gpt-4", "cached", None, 50, 10, 3600).unwrap();
+        cache
+            .set("key-2", "gpt-4", "cached", None, 50, 10, 3600)
+            .unwrap();
 
         let _ = cache.get("key-2").unwrap();
         let _ = cache.get("key-2").unwrap();
@@ -6063,7 +6127,9 @@ mod tests {
 
         let cache = super::ResponseCacheStore::new(&db_path);
         // TTL of 0 seconds = immediately expired
-        cache.set("expired", "gpt-4", "old", None, 10, 5, 0).unwrap();
+        cache
+            .set("expired", "gpt-4", "old", None, 10, 5, 0)
+            .unwrap();
 
         let result = cache.get("expired").unwrap();
         assert!(result.is_none(), "expired entry should not be returned");
@@ -6130,8 +6196,20 @@ mod tests {
         let store = super::AuditLogStore::new(&db_path);
         let details = serde_json::json!({"tool": "shell_execute", "args": "ls"});
         store.log(Some("s1"), "tool_call", &details).unwrap();
-        store.log(Some("s1"), "llm_request", &serde_json::json!({"model": "gpt-4"})).unwrap();
-        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "memory_create"})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_request",
+                &serde_json::json!({"model": "gpt-4"}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s2"),
+                "tool_call",
+                &serde_json::json!({"tool": "memory_create"}),
+            )
+            .unwrap();
 
         let entries = store.by_session("s1", 100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -6147,9 +6225,15 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "tool_call", &serde_json::json!({"tool": "a"})).unwrap();
-        store.log(Some("s2"), "tool_call", &serde_json::json!({"tool": "b"})).unwrap();
-        store.log(Some("s1"), "llm_request", &serde_json::json!({})).unwrap();
+        store
+            .log(Some("s1"), "tool_call", &serde_json::json!({"tool": "a"}))
+            .unwrap();
+        store
+            .log(Some("s2"), "tool_call", &serde_json::json!({"tool": "b"}))
+            .unwrap();
+        store
+            .log(Some("s1"), "llm_request", &serde_json::json!({}))
+            .unwrap();
 
         let entries = store.by_event_type("tool_call", 100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -6162,8 +6246,12 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(None, "config_change", &serde_json::json!({"key": "model"})).unwrap();
-        store.log(Some("s1"), "tool_call", &serde_json::json!({})).unwrap();
+        store
+            .log(None, "config_change", &serde_json::json!({"key": "model"}))
+            .unwrap();
+        store
+            .log(Some("s1"), "tool_call", &serde_json::json!({}))
+            .unwrap();
 
         let entries = store.recent(100).unwrap();
         assert_eq!(entries.len(), 2);
@@ -6176,9 +6264,15 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
-        store.log(None, "tool_call", &serde_json::json!({})).unwrap();
-        store.log(None, "llm_request", &serde_json::json!({})).unwrap();
+        store
+            .log(None, "tool_call", &serde_json::json!({}))
+            .unwrap();
+        store
+            .log(None, "tool_call", &serde_json::json!({}))
+            .unwrap();
+        store
+            .log(None, "llm_request", &serde_json::json!({}))
+            .unwrap();
 
         let stats = store.stats().unwrap();
         assert_eq!(stats.len(), 2);
@@ -6210,7 +6304,9 @@ mod tests {
 
         let store = super::AuditLogStore::new(&db_path);
         for i in 0..10 {
-            store.log(Some("s1"), "tool_call", &serde_json::json!({"i": i})).unwrap();
+            store
+                .log(Some("s1"), "tool_call", &serde_json::json!({"i": i}))
+                .unwrap();
         }
 
         let entries = store.by_session("s1", 3).unwrap();
@@ -6224,9 +6320,27 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 100})).unwrap();
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 200})).unwrap();
-        store.log(Some("s1"), "tool_call_end", &serde_json::json!({"tool": "file_read", "success": false, "duration_ms": 50})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 100}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "shell_execute", "success": true, "duration_ms": 200}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "tool_call_end",
+                &serde_json::json!({"tool": "file_read", "success": false, "duration_ms": 50}),
+            )
+            .unwrap();
 
         let analytics = store.tool_analytics(30).unwrap();
         assert_eq!(analytics.len(), 2);
@@ -6248,8 +6362,20 @@ mod tests {
         super::bootstrap(&db_path).unwrap();
 
         let store = super::AuditLogStore::new(&db_path);
-        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 100, "output_tokens": 50})).unwrap();
-        store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "gpt-4", "input_tokens": 200, "output_tokens": 80})).unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_response",
+                &serde_json::json!({"model": "gpt-4", "input_tokens": 100, "output_tokens": 50}),
+            )
+            .unwrap();
+        store
+            .log(
+                Some("s1"),
+                "llm_response",
+                &serde_json::json!({"model": "gpt-4", "input_tokens": 200, "output_tokens": 80}),
+            )
+            .unwrap();
         store.log(Some("s1"), "llm_response", &serde_json::json!({"model": "claude-3", "input_tokens": 300, "output_tokens": 100})).unwrap();
 
         let analytics = store.llm_analytics(30).unwrap();
@@ -6300,10 +6426,7 @@ mod tests {
             )
             .expect("response_cache should exist");
         connection
-            .execute(
-                "INSERT INTO audit_log (event_type) VALUES ('test')",
-                [],
-            )
+            .execute("INSERT INTO audit_log (event_type) VALUES ('test')", [])
             .expect("audit_log should exist");
     }
 
@@ -6488,7 +6611,9 @@ mod embedding_store_tests {
         let store = EmbeddingStore::new(&db_path);
 
         let embedding = vec![0.1_f32, 0.2, 0.3, 0.4, 0.5];
-        store.store("mem1", &embedding, "text-embedding-3-small").unwrap();
+        store
+            .store("mem1", &embedding, "text-embedding-3-small")
+            .unwrap();
 
         assert!(store.has_embedding("mem1").unwrap());
         assert!(!store.has_embedding("mem2").unwrap());

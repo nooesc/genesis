@@ -24,9 +24,15 @@ pub fn format_skills_for_prompt_with_stats(
 
     let mut section = String::from("## Available Skills\n\n");
     section.push_str("You have the following learned skills available. ");
-    section.push_str("When a user's request matches a skill's trigger, follow the skill's instructions.\n\n");
-    section.push_str("**Self-improvement:** After using a skill, call `skill_record_usage` with the outcome ");
-    section.push_str("(success/partial/failure) and feedback. If a skill's instructions can be improved ");
+    section.push_str(
+        "When a user's request matches a skill's trigger, follow the skill's instructions.\n\n",
+    );
+    section.push_str(
+        "**Self-improvement:** After using a skill, call `skill_record_usage` with the outcome ",
+    );
+    section.push_str(
+        "(success/partial/failure) and feedback. If a skill's instructions can be improved ",
+    );
     section.push_str("based on what you learned, update it with `skill_create`.\n\n");
 
     for skill in skills {
@@ -97,7 +103,8 @@ pub fn load_skills_prompt_for_prompt(
 
     let mut section = String::from("## Available Skills\n\n");
     section.push_str("You have the following learned skills. ");
-    section.push_str("Use `skill_get` to load full instructions for any skill not shown below.\n\n");
+    section
+        .push_str("Use `skill_get` to load full instructions for any skill not shown below.\n\n");
     section.push_str("**Self-improvement:** After using a skill, call `skill_record_usage` with the outcome.\n\n");
 
     // Brief listing
@@ -118,7 +125,9 @@ pub fn load_skills_prompt_for_prompt(
     // Full instructions for matched skills
     if !matched.is_empty() {
         section.push_str("### Auto-Loaded Skill Instructions\n\n");
-        section.push_str("The following skills were automatically loaded because they match your request:\n\n");
+        section.push_str(
+            "The following skills were automatically loaded because they match your request:\n\n",
+        );
         for skill in &matched {
             section.push_str(&format!("#### {} (v{})\n", skill.name, skill.version));
             if let Some(trigger) = &skill.trigger_hint {
@@ -227,9 +236,10 @@ mod tests {
 
     #[test]
     fn match_skills_returns_empty_for_no_match() {
-        let skills = vec![
-            sample_skill("deploy", Some("when user wants to deploy to production")),
-        ];
+        let skills = vec![sample_skill(
+            "deploy",
+            Some("when user wants to deploy to production"),
+        )];
 
         let matches = match_skills(&skills, "What is the weather today?");
         assert!(matches.is_empty());
@@ -237,9 +247,7 @@ mod tests {
 
     #[test]
     fn match_skills_is_case_insensitive() {
-        let skills = vec![
-            sample_skill("deploy", Some("Deploy to production")),
-        ];
+        let skills = vec![sample_skill("deploy", Some("Deploy to production"))];
 
         let matches = match_skills(&skills, "can you DEPLOY this?");
         assert_eq!(matches.len(), 1);
@@ -259,7 +267,13 @@ mod tests {
 
         let store = SkillStore::new(&db_path);
         store
-            .upsert("greet", "Greet the user", "Say hello warmly", Some("greeting"), &["social"])
+            .upsert(
+                "greet",
+                "Greet the user",
+                "Say hello warmly",
+                Some("greeting"),
+                &["social"],
+            )
             .expect("upsert");
 
         let prompt = load_skills_prompt(&db_path).expect("should have prompt");
@@ -279,8 +293,12 @@ mod tests {
             .expect("upsert");
 
         let usage_store = SkillUsageStore::new(&db_path);
-        usage_store.record_usage("deploy", None, "success", None).unwrap();
-        usage_store.record_usage("deploy", None, "failure", Some("Timed out")).unwrap();
+        usage_store
+            .record_usage("deploy", None, "success", None)
+            .unwrap();
+        usage_store
+            .record_usage("deploy", None, "failure", Some("Timed out"))
+            .unwrap();
 
         let skills = skill_store.list_all().unwrap();
         let prompt = format_skills_for_prompt_with_stats(&skills, Some(&usage_store))
@@ -295,8 +313,8 @@ mod tests {
     fn format_skills_with_stats_omits_zero_usage() {
         let skills = vec![sample_skill("new_skill", None)];
         // Pass None for usage store — no stats available
-        let prompt = format_skills_for_prompt_with_stats(&skills, None)
-            .expect("should have prompt");
+        let prompt =
+            format_skills_for_prompt_with_stats(&skills, None).expect("should have prompt");
         assert!(!prompt.contains("Usage:"));
     }
 
@@ -308,14 +326,26 @@ mod tests {
 
         let store = SkillStore::new(&db_path);
         store
-            .upsert("deploy", "Deploy app", "Run deploy", Some("deploy production"), &["ops"])
+            .upsert(
+                "deploy",
+                "Deploy app",
+                "Run deploy",
+                Some("deploy production"),
+                &["ops"],
+            )
             .expect("upsert");
         store
-            .upsert("review", "Review code", "Check bugs", Some("review code"), &["dev"])
+            .upsert(
+                "review",
+                "Review code",
+                "Check bugs",
+                Some("review code"),
+                &["dev"],
+            )
             .expect("upsert");
 
-        let prompt = load_skills_prompt_for_prompt(&db_path, "deploy this app")
-            .expect("should have prompt");
+        let prompt =
+            load_skills_prompt_for_prompt(&db_path, "deploy this app").expect("should have prompt");
         // With ≤10 skills, all get full instructions
         assert!(prompt.contains("### deploy"));
         assert!(prompt.contains("### review"));
@@ -336,11 +366,19 @@ mod tests {
             let desc = format!("Description for skill {i}");
             let instructions = format!("Instructions for skill {i}");
             let trigger = format!("trigger for skill {i}");
-            store.upsert(&name, &desc, &instructions, Some(&trigger), &[]).unwrap();
+            store
+                .upsert(&name, &desc, &instructions, Some(&trigger), &[])
+                .unwrap();
         }
         // Create a skill that will match
         store
-            .upsert("deploy_app", "Deploy application", "Run kubectl apply", Some("deploy production app"), &["ops", "deploy"])
+            .upsert(
+                "deploy_app",
+                "Deploy application",
+                "Run kubectl apply",
+                Some("deploy production app"),
+                &["ops", "deploy"],
+            )
             .unwrap();
 
         let prompt = load_skills_prompt_for_prompt(&db_path, "please deploy my app to production")

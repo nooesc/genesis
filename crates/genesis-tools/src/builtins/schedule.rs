@@ -43,12 +43,12 @@ impl ToolHandler for ScheduleCreateTool {
 
         let id = format!("sched-{}", &uuid_v4()[..8]);
         let store = ScheduleStore::new(&context.db_path());
-        let schedule = store
-            .create(&id, cron, destination, prompt)
-            .map_err(|e| ToolError::ExecutionFailed {
+        let schedule = store.create(&id, cron, destination, prompt).map_err(|e| {
+            ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!("failed to create schedule: {e}"),
-            })?;
+            }
+        })?;
 
         Ok(ToolOutput {
             content: format!(
@@ -69,12 +69,10 @@ pub struct ScheduleListTool;
 impl ToolHandler for ScheduleListTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let store = ScheduleStore::new(&context.db_path());
-        let schedules = store
-            .list_all()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to list schedules: {e}"),
-            })?;
+        let schedules = store.list_all().map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("failed to list schedules: {e}"),
+        })?;
 
         if schedules.is_empty() {
             return Ok(ToolOutput {
@@ -116,12 +114,10 @@ impl ToolHandler for ScheduleDeleteTool {
             })?;
 
         let store = ScheduleStore::new(&context.db_path());
-        let deleted = store
-            .delete(id)
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to delete schedule: {e}"),
-            })?;
+        let deleted = store.delete(id).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("failed to delete schedule: {e}"),
+        })?;
 
         if deleted {
             Ok(ToolOutput {

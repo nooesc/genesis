@@ -36,7 +36,10 @@ pub trait ToolCallParser: Send + Sync {
 fn gen_call_id() -> String {
     let mut buf = [0u8; 32];
     Uuid::new_v4().simple().encode_lower(&mut buf);
-    format!("call_{}", std::str::from_utf8(&buf[..8]).expect("encode_lower writes valid ASCII"))
+    format!(
+        "call_{}",
+        std::str::from_utf8(&buf[..8]).expect("encode_lower writes valid ASCII")
+    )
 }
 
 /// Build a [`ToolCallEntry`] from name and arguments JSON string.
@@ -153,9 +156,8 @@ impl ToolCallParser for LongcatParser {
 // v11+: tool_name{"arg": "val"} segments
 // ---------------------------------------------------------------------------
 
-static MISTRAL_PRE_V11_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[?\s*(\{.*?\})\s*\]?").unwrap()
-});
+static MISTRAL_PRE_V11_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[?\s*(\{.*?\})\s*\]?").unwrap());
 
 pub struct MistralParser;
 
@@ -195,7 +197,8 @@ impl ToolCallParser for MistralParser {
                 // Fallback: extract individual JSON objects with regex
                 for cap in MISTRAL_PRE_V11_RE.captures_iter(after) {
                     if let Some(json_str) = cap.get(1) {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.as_str())
+                        if let Ok(val) =
+                            serde_json::from_str::<serde_json::Value>(json_str.as_str())
                         {
                             if let Some(tc) = extract_mistral_tool_call(&val) {
                                 tool_calls.push(tc);
@@ -257,10 +260,7 @@ impl ToolCallParser for LlamaParser {
 
     fn parse(&self, text: &str) -> Option<ParseResult> {
         // Strip <|python_tag|> prefix if present
-        let clean = text
-            .strip_prefix("<|python_tag|>")
-            .unwrap_or(text)
-            .trim();
+        let clean = text.strip_prefix("<|python_tag|>").unwrap_or(text).trim();
 
         let mut tool_calls = Vec::new();
         let mut first_match_pos: Option<usize> = None;
@@ -281,7 +281,11 @@ impl ToolCallParser for LlamaParser {
                         first_match_pos = Some(i);
                     }
 
-                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned();
                     let arguments = val
                         .get("arguments")
                         .or_else(|| val.get("parameters"))
@@ -510,13 +514,11 @@ impl ToolCallParser for KimiK2Parser {
 // </tool_call>
 // ---------------------------------------------------------------------------
 
-static GLM_TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<tool_call>.*?</tool_call>").unwrap()
-});
+static GLM_TOOL_CALL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<tool_call>.*?</tool_call>").unwrap());
 
-static GLM_DETAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<tool_call>([^\n]*)\n(.*)</tool_call>").unwrap()
-});
+static GLM_DETAIL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<tool_call>([^\n]*)\n(.*)</tool_call>").unwrap());
 
 static GLM_ARG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>").unwrap()
@@ -571,8 +573,7 @@ fn parse_glm_format(text: &str, detail_re: &Regex, arg_re: &Regex) -> Option<Par
             }
 
             if !name.is_empty() {
-                let arguments =
-                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_owned());
+                let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_owned());
                 tool_calls.push(make_tool_call(name, arguments));
             }
         }
@@ -604,9 +605,8 @@ impl ToolCallParser for Glm45Parser {
 // GLM 4.7 parser: extends GLM 4.5 with more flexible whitespace handling
 // ---------------------------------------------------------------------------
 
-static GLM47_DETAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)<tool_call>(.*?)(<arg_key>.*?)?</tool_call>").unwrap()
-});
+static GLM47_DETAIL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?s)<tool_call>(.*?)(<arg_key>.*?)?</tool_call>").unwrap());
 
 static GLM47_ARG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>").unwrap()
@@ -668,9 +668,7 @@ fn extract_qwen3_functions(text: &str) -> Vec<Qwen3Function> {
         let after_name = &remaining[gt_pos + 1..];
 
         // Find end of function block
-        let fn_end = after_name
-            .find("</function>")
-            .unwrap_or(after_name.len());
+        let fn_end = after_name.find("</function>").unwrap_or(after_name.len());
         let fn_body = &after_name[..fn_end];
 
         // Extract parameters from the function body
@@ -895,7 +893,10 @@ mod tests {
         assert_eq!(result.content.as_deref(), Some("Let me search for that."));
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].function.name, "web_search");
-        assert!(result.tool_calls[0].function.arguments.contains("rust programming"));
+        assert!(result.tool_calls[0]
+            .function
+            .arguments
+            .contains("rust programming"));
     }
 
     #[test]
@@ -947,10 +948,7 @@ mod tests {
 [TOOL_CALLS] [{"name": "get_weather", "arguments": {"city": "NYC"}}]"#;
 
         let result = MistralParser.parse(text).expect("should parse");
-        assert_eq!(
-            result.content.as_deref(),
-            Some("Here's what I found.")
-        );
+        assert_eq!(result.content.as_deref(), Some("Here's what I found."));
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].function.name, "get_weather");
     }
@@ -1082,7 +1080,9 @@ mod tests {
     fn qwen3_coder_handles_truncated() {
         let text = "<tool_call>\n<function=search>\n<parameter=query>rust</parameter>";
 
-        let result = Qwen3CoderParser.parse(text).expect("should parse truncated");
+        let result = Qwen3CoderParser
+            .parse(text)
+            .expect("should parse truncated");
         assert_eq!(result.tool_calls[0].function.name, "search");
     }
 

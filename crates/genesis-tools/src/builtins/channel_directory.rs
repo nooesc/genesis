@@ -26,10 +26,7 @@ pub struct ListChannelsTool;
 
 impl ToolHandler for ListChannelsTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let platform = call
-            .arguments
-            .get("platform")
-            .map(|s| s.to_lowercase());
+        let platform = call.arguments.get("platform").map(|s| s.to_lowercase());
 
         let refresh = call
             .arguments
@@ -56,8 +53,7 @@ impl ToolHandler for ListChannelsTool {
 
         // Fetch/refresh channels for each platform.
         for p in &platforms {
-            let fresh = !refresh
-                && store.is_fresh(p, CACHE_TTL_SECS).unwrap_or(false);
+            let fresh = !refresh && store.is_fresh(p, CACHE_TTL_SECS).unwrap_or(false);
 
             if !fresh {
                 let fetched = fetch_channels(p, &call.name)?;
@@ -157,11 +153,10 @@ fn fetch_slack_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError
                 reason: format!("Slack API request failed: {e}"),
             })?;
 
-        let body: serde_json::Value =
-            resp.json().map_err(|e| ToolError::ExecutionFailed {
-                tool: tool_name.to_owned(),
-                reason: format!("failed to parse Slack response: {e}"),
-            })?;
+        let body: serde_json::Value = resp.json().map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: format!("failed to parse Slack response: {e}"),
+        })?;
 
         if body["ok"].as_bool() != Some(true) {
             return Err(ToolError::ExecutionFailed {
@@ -217,11 +212,10 @@ fn fetch_slack_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError
 
 /// Fetch Discord channels: first get guilds the bot is in, then channels per guild.
 fn fetch_discord_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
-    let token =
-        std::env::var("DISCORD_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
-        })?;
+    let token = std::env::var("DISCORD_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+    })?;
 
     let auth = format!("Bot {token}");
 
@@ -274,8 +268,7 @@ fn fetch_discord_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolErr
             continue; // Skip guilds we can't read
         }
 
-        let channels: Vec<serde_json::Value> =
-            channels_resp.json().unwrap_or_default();
+        let channels: Vec<serde_json::Value> = channels_resp.json().unwrap_or_default();
 
         for ch in &channels {
             // type 0 = text, 2 = voice, 4 = category, 5 = announcement, 15 = forum
@@ -366,11 +359,10 @@ fn fetch_homeassistant_services(tool_name: &str) -> Result<Vec<CachedChannel>, T
         });
     }
 
-    let services: Vec<serde_json::Value> =
-        resp.json().map_err(|e| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: format!("failed to parse Home Assistant services: {e}"),
-        })?;
+    let services: Vec<serde_json::Value> = resp.json().map_err(|e| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: format!("failed to parse Home Assistant services: {e}"),
+    })?;
 
     let mut channels = Vec::new();
 
@@ -437,13 +429,8 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         genesis_storage::bootstrap(&dir.join("genesis.db")).ok();
         ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
             data_dir: dir.to_string_lossy().to_string(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx()
         }
     }
 

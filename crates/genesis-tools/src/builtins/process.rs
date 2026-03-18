@@ -47,13 +47,14 @@ impl ToolHandler for ListProcessesTool {
             });
         }
 
-        let output = Command::new("ps")
-            .args(["aux"])
-            .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to execute ps: {e}"),
-            })?;
+        let output =
+            Command::new("ps")
+                .args(["aux"])
+                .output()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to execute ps: {e}"),
+                })?;
 
         if !output.status.success() {
             return Err(ToolError::ExecutionFailed {
@@ -87,8 +88,16 @@ impl ToolHandler for ListProcessesTool {
 
         // Sort.
         match sort_by {
-            "cpu" => entries.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
-            "mem" => entries.sort_by(|a, b| b.mem.partial_cmp(&a.mem).unwrap_or(std::cmp::Ordering::Equal)),
+            "cpu" => entries.sort_by(|a, b| {
+                b.cpu
+                    .partial_cmp(&a.cpu)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            "mem" => entries.sort_by(|a, b| {
+                b.mem
+                    .partial_cmp(&a.mem)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
             "pid" => entries.sort_by(|a, b| {
                 let a_pid: i64 = a.pid.parse().unwrap_or(0);
                 let b_pid: i64 = b.pid.parse().unwrap_or(0);
@@ -385,8 +394,10 @@ fn get_memory_info_macos() -> String {
         }
     }
 
-    let free_gb = (free_pages + speculative_pages) as f64 * page_size as f64 / (1024.0 * 1024.0 * 1024.0);
-    let used_gb = (active_pages + wired_pages + compressed_pages) as f64 * page_size as f64 / (1024.0 * 1024.0 * 1024.0);
+    let free_gb =
+        (free_pages + speculative_pages) as f64 * page_size as f64 / (1024.0 * 1024.0 * 1024.0);
+    let used_gb = (active_pages + wired_pages + compressed_pages) as f64 * page_size as f64
+        / (1024.0 * 1024.0 * 1024.0);
     let inactive_gb = inactive_pages as f64 * page_size as f64 / (1024.0 * 1024.0 * 1024.0);
 
     info.push_str(&format!("Used: {used_gb:.1} GB\n"));
@@ -440,21 +451,17 @@ fn get_memory_info_linux() -> String {
         / (1024.0 * 1024.0);
     let used_gb = total_gb - avail_gb;
 
-    format!(
-        "Total: {total_gb:.1} GB\nUsed: {used_gb:.1} GB\nAvailable: {avail_gb:.1} GB\n"
-    )
+    format!("Total: {total_gb:.1} GB\nUsed: {used_gb:.1} GB\nAvailable: {avail_gb:.1} GB\n")
 }
 
 fn extract_meminfo_value(line: &str, key: &str) -> Option<u64> {
     if line.starts_with(key) {
         // Format: "MemTotal:       16384000 kB"
-        line.split(':')
-            .nth(1)
-            .and_then(|v| {
-                v.split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse::<u64>().ok())
-            })
+        line.split(':').nth(1).and_then(|v| {
+            v.split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+        })
     } else {
         None
     }
@@ -465,7 +472,10 @@ fn get_disk_info() -> String {
         // On macOS, exclude noisy filesystem types.
         run_cmd("df", &["-h", "-T", "apfs,hfs"])
     } else {
-        run_cmd("df", &["-h", "--exclude-type=tmpfs", "--exclude-type=devtmpfs"])
+        run_cmd(
+            "df",
+            &["-h", "--exclude-type=tmpfs", "--exclude-type=devtmpfs"],
+        )
     }
 }
 
@@ -542,15 +552,7 @@ mod tests {
     use crate::MAX_OUTPUT_BYTES;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     // -----------------------------------------------------------------------
@@ -683,12 +685,7 @@ mod tests {
         };
 
         let output = tool.run(&call, &ctx()).expect("should succeed");
-        let displayed: usize = output
-            .metadata
-            .get("displayed")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let displayed: usize = output.metadata.get("displayed").unwrap().parse().unwrap();
         assert!(displayed <= 2);
     }
 

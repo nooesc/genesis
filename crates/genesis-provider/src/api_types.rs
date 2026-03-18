@@ -118,9 +118,7 @@ pub enum ResponseFormat {
     JsonObject,
     /// Model output follows a specific JSON Schema.
     #[serde(rename = "json_schema")]
-    JsonSchema {
-        json_schema: JsonSchemaSpec,
-    },
+    JsonSchema { json_schema: JsonSchemaSpec },
     /// Default text mode — no format constraint.
     #[serde(rename = "text")]
     Text,
@@ -163,7 +161,9 @@ impl MessageContent {
     pub fn has_images(&self) -> bool {
         match self {
             MessageContent::Text(_) => false,
-            MessageContent::Parts(parts) => parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
         }
     }
 }
@@ -298,9 +298,7 @@ impl ChatMessage {
 
     /// Create a user message with text and one or more images.
     pub fn user_with_images(text: impl Into<String>, image_urls: Vec<ImageUrl>) -> Self {
-        let mut parts = vec![ContentPart::Text {
-            text: text.into(),
-        }];
+        let mut parts = vec![ContentPart::Text { text: text.into() }];
         for img in image_urls {
             parts.push(ContentPart::ImageUrl { image_url: img });
         }
@@ -688,14 +686,8 @@ mod tests {
             serde_json::from_str(raw).expect("should deserialize");
         assert_eq!(response.id, "chatcmpl-test");
         assert_eq!(response.choices.len(), 1);
-        assert_eq!(
-            response.choices[0].message.content_text(),
-            Some("Hello!")
-        );
-        assert_eq!(
-            response.choices[0].finish_reason.as_deref(),
-            Some("stop")
-        );
+        assert_eq!(response.choices[0].message.content_text(), Some("Hello!"));
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(response.usage.as_ref().unwrap().total_tokens, 15);
     }
 
@@ -888,7 +880,10 @@ mod tests {
             .with_json_schema("answer_schema", schema.clone());
         let json = serde_json::to_value(&request).expect("should serialize");
         assert_eq!(json["response_format"]["type"], "json_schema");
-        assert_eq!(json["response_format"]["json_schema"]["name"], "answer_schema");
+        assert_eq!(
+            json["response_format"]["json_schema"]["name"],
+            "answer_schema"
+        );
         assert_eq!(json["response_format"]["json_schema"]["strict"], true);
         assert_eq!(json["response_format"]["json_schema"]["schema"], schema);
     }

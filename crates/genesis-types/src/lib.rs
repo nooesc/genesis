@@ -54,59 +54,86 @@ pub struct ToolDefinition {
     pub parameters: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ProviderTurnRequest {
-    pub session_id: String,
-    pub model: ModelSelection,
-    pub messages: Vec<ConversationMessage>,
-    pub tools: Vec<ToolDefinition>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    EndTurn,
-    ToolCall,
-    MaxTokens,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UsageStats {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProviderTurnResponse {
-    pub message: ConversationMessage,
-    pub stop_reason: StopReason,
-    pub usage: UsageStats,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RuntimeEvent {
-    SessionStarted { session_id: String },
-    ModelSelected { provider: String, model: String },
+    SessionStarted {
+        session_id: String,
+    },
+    ModelSelected {
+        provider: String,
+        model: String,
+    },
     SessionPlanned {
         session_id: String,
         platform: DeliveryPlatform,
         provider: String,
         model: String,
     },
-    TokenStream { chunk: String },
-    ToolCallRequested { tool_name: String },
-    ToolCallCompleted { tool_name: String, success: bool },
-    SchedulerTick { job_id: String },
-    DeliveryQueued { platform: DeliveryPlatform, destination: String },
+    TokenStream {
+        chunk: String,
+    },
+    ToolCallRequested {
+        tool_name: String,
+    },
+    ToolCallCompleted {
+        tool_name: String,
+        success: bool,
+    },
+    SchedulerTick {
+        job_id: String,
+    },
+    DeliveryQueued {
+        platform: DeliveryPlatform,
+        destination: String,
+    },
+}
+
+// These types were originally public but have zero callers outside this crate's
+// test module. They are kept behind #[cfg(test)] until an external consumer needs them.
+#[cfg(test)]
+mod provider_types {
+    use super::{ConversationMessage, ModelSelection, ToolDefinition};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct ProviderTurnRequest {
+        pub session_id: String,
+        pub model: ModelSelection,
+        pub messages: Vec<ConversationMessage>,
+        pub tools: Vec<ToolDefinition>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum StopReason {
+        EndTurn,
+        ToolCall,
+        MaxTokens,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct UsageStats {
+        pub input_tokens: u32,
+        pub output_tokens: u32,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ProviderTurnResponse {
+        pub message: ConversationMessage,
+        pub stop_reason: StopReason,
+        pub usage: UsageStats,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::provider_types::{
+        ProviderTurnRequest, ProviderTurnResponse, StopReason, UsageStats,
+    };
     use super::{
         ConversationMessage, ConversationRole, DeliveryPlatform, ModelProviderKind, ModelSelection,
-        ProviderTurnRequest, ProviderTurnResponse, RuntimeEvent, StopReason, ToolDefinition,
-        UsageStats,
+        RuntimeEvent, ToolDefinition,
     };
 
     #[test]

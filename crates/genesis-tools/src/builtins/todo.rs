@@ -43,7 +43,9 @@ fn parse_status(s: &str) -> Result<TodoStatus, String> {
         "pending" => Ok(TodoStatus::Pending),
         "in_progress" => Ok(TodoStatus::InProgress),
         "done" => Ok(TodoStatus::Done),
-        other => Err(format!("invalid status `{other}`: expected pending, in_progress, or done")),
+        other => Err(format!(
+            "invalid status `{other}`: expected pending, in_progress, or done"
+        )),
     }
 }
 
@@ -63,15 +65,18 @@ impl ToolHandler for TodoTool {
 
         match action.as_str() {
             "add" => {
-                let text = call
-                    .arguments
-                    .get("text")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "text",
-                    })?;
+                let text =
+                    call.arguments
+                        .get("text")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "text",
+                        })?;
 
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let id = list.len() + 1;
                 list.push(TodoItem {
@@ -89,30 +94,33 @@ impl ToolHandler for TodoTool {
                 })
             }
             "update" => {
-                let id_str = call
-                    .arguments
-                    .get("id")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "id",
-                    })?;
+                let id_str =
+                    call.arguments
+                        .get("id")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "id",
+                        })?;
                 let id: usize = id_str.parse().map_err(|_| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("invalid id `{id_str}`: expected a number"),
                 })?;
-                let status_str = call
-                    .arguments
-                    .get("status")
-                    .ok_or_else(|| ToolError::MissingArgument {
-                        tool: call.name.clone(),
-                        argument: "status",
-                    })?;
+                let status_str =
+                    call.arguments
+                        .get("status")
+                        .ok_or_else(|| ToolError::MissingArgument {
+                            tool: call.name.clone(),
+                            argument: "status",
+                        })?;
                 let status = parse_status(status_str).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: e,
                 })?;
 
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let item = list.iter_mut().find(|item| item.id == id).ok_or_else(|| {
                     ToolError::ExecutionFailed {
@@ -131,7 +139,10 @@ impl ToolHandler for TodoTool {
                 })
             }
             "list" => {
-                let lists = TODO_LISTS.lock().unwrap();
+                let lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let empty = Vec::new();
                 let list = lists.get(session_id).unwrap_or(&empty);
                 if list.is_empty() {
@@ -162,7 +173,8 @@ impl ToolHandler for TodoTool {
                     }
                 }
 
-                let summary = format!("\n({pending} pending, {in_progress} in progress, {done} done)");
+                let summary =
+                    format!("\n({pending} pending, {in_progress} in progress, {done} done)");
 
                 Ok(ToolOutput {
                     content: format!("{}{summary}", lines.join("\n")),
@@ -173,7 +185,10 @@ impl ToolHandler for TodoTool {
                 })
             }
             "clear" => {
-                let mut lists = TODO_LISTS.lock().unwrap();
+                let mut lists = TODO_LISTS.lock().map_err(|_| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "todo list lock poisoned".to_owned(),
+                })?;
                 let list = lists.entry(session_id.clone()).or_default();
                 let count = list.len();
                 list.clear();
@@ -185,9 +200,7 @@ impl ToolHandler for TodoTool {
             }
             other => Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "unknown action `{other}`: expected add, update, list, or clear"
-                ),
+                reason: format!("unknown action `{other}`: expected add, update, list, or clear"),
             }),
         }
     }
@@ -199,26 +212,13 @@ mod tests {
     use crate::ToolContext;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     fn ctx_with_session(session_id: &str) -> ToolContext {
         ToolContext {
             session_id: session_id.to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx_destructive()
         }
     }
 
@@ -275,7 +275,11 @@ mod tests {
         };
         let output = tool.run(&call, &ctx()).unwrap();
         // Extract ID from "#N [ ] text"
-        let id = output.content.lines().next().unwrap()
+        let id = output
+            .content
+            .lines()
+            .next()
+            .unwrap()
             .trim_start_matches('#')
             .split_whitespace()
             .next()

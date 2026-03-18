@@ -36,11 +36,7 @@ fn validate_path(call: &ToolCall, path: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn run_git(
-    call: &ToolCall,
-    path: &str,
-    args: &[&str],
-) -> Result<std::process::Output, ToolError> {
+fn run_git(call: &ToolCall, path: &str, args: &[&str]) -> Result<std::process::Output, ToolError> {
     Command::new("git")
         .args(args)
         .current_dir(path)
@@ -102,7 +98,10 @@ impl ToolHandler for GitStatusTool {
             content,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                (
+                    "exit_code".to_owned(),
+                    output.status.code().unwrap_or(-1).to_string(),
+                ),
             ]),
         })
     }
@@ -161,7 +160,10 @@ impl ToolHandler for GitDiffTool {
             content,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                (
+                    "exit_code".to_owned(),
+                    output.status.code().unwrap_or(-1).to_string(),
+                ),
             ]),
         })
     }
@@ -231,7 +233,10 @@ impl ToolHandler for GitLogTool {
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
                 ("commit_count".to_owned(), commit_count.to_string()),
-                ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                (
+                    "exit_code".to_owned(),
+                    output.status.code().unwrap_or(-1).to_string(),
+                ),
             ]),
         })
     }
@@ -252,9 +257,7 @@ impl ToolHandler for GitCommitTool {
 
         let message = require_arg(call, "message")?;
 
-        let all = opt_arg(call, "all")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let all = opt_arg(call, "all").map(|v| v == "true").unwrap_or(false);
 
         let mut args: Vec<&str> = vec!["commit"];
         if all {
@@ -278,7 +281,10 @@ impl ToolHandler for GitCommitTool {
             content: truncate_output(&combined),
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                (
+                    "exit_code".to_owned(),
+                    output.status.code().unwrap_or(-1).to_string(),
+                ),
             ]),
         })
     }
@@ -312,7 +318,10 @@ impl ToolHandler for GitBranchTool {
                     metadata: BTreeMap::from([
                         ("tool".to_owned(), call.name.clone()),
                         ("action".to_owned(), "list".to_owned()),
-                        ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                        (
+                            "exit_code".to_owned(),
+                            output.status.code().unwrap_or(-1).to_string(),
+                        ),
                     ]),
                 })
             }
@@ -340,7 +349,10 @@ impl ToolHandler for GitBranchTool {
                         ("tool".to_owned(), call.name.clone()),
                         ("action".to_owned(), "create".to_owned()),
                         ("branch".to_owned(), name.to_owned()),
-                        ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                        (
+                            "exit_code".to_owned(),
+                            output.status.code().unwrap_or(-1).to_string(),
+                        ),
                     ]),
                 })
             }
@@ -368,7 +380,10 @@ impl ToolHandler for GitBranchTool {
                         ("tool".to_owned(), call.name.clone()),
                         ("action".to_owned(), "switch".to_owned()),
                         ("branch".to_owned(), name.to_owned()),
-                        ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                        (
+                            "exit_code".to_owned(),
+                            output.status.code().unwrap_or(-1).to_string(),
+                        ),
                     ]),
                 })
             }
@@ -398,7 +413,10 @@ impl ToolHandler for GitBranchTool {
                         ("tool".to_owned(), call.name.clone()),
                         ("action".to_owned(), "delete".to_owned()),
                         ("branch".to_owned(), name.to_owned()),
-                        ("exit_code".to_owned(), output.status.code().unwrap_or(-1).to_string()),
+                        (
+                            "exit_code".to_owned(),
+                            output.status.code().unwrap_or(-1).to_string(),
+                        ),
                     ]),
                 })
             }
@@ -425,22 +443,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     fn ctx_no_destructive() -> ToolContext {
-        ToolContext {
-            allow_destructive_tools: false,
-            ..ctx()
-        }
+        crate::test_utils::test_ctx()
     }
 
     /// Initialise a temporary git repo with one commit so that tools have
@@ -508,9 +515,7 @@ mod tests {
         );
         let output = tool.run(&call, &ctx()).expect("should succeed");
         // Branch header is always present, so content should not be the empty fallback.
-        assert!(
-            output.content.contains("branch") || output.content.contains("working tree clean"),
-        );
+        assert!(output.content.contains("branch") || output.content.contains("working tree clean"),);
     }
 
     #[test]
@@ -661,10 +666,7 @@ mod tests {
     fn log_shows_commits() {
         let dir = init_repo();
         let tool = GitLogTool;
-        let call = make_call(
-            "git_log",
-            vec![("path", &dir.path().display().to_string())],
-        );
+        let call = make_call("git_log", vec![("path", &dir.path().display().to_string())]);
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert!(output.content.contains("initial commit"));
         assert_eq!(output.metadata.get("commit_count").unwrap(), "1");
@@ -809,8 +811,7 @@ mod tests {
         );
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert!(
-            output.content.contains("auto-stage commit")
-                || output.content.contains("README.md")
+            output.content.contains("auto-stage commit") || output.content.contains("README.md")
         );
     }
 
@@ -948,10 +949,7 @@ mod tests {
             ],
         );
         let output = tool.run(&call, &ctx()).expect("should succeed");
-        assert!(
-            output.content.contains("other-branch")
-                || output.content.contains("Switched"),
-        );
+        assert!(output.content.contains("other-branch") || output.content.contains("Switched"),);
         assert_eq!(output.metadata.get("action").unwrap(), "switch");
     }
 
@@ -992,10 +990,7 @@ mod tests {
             ],
         );
         let output = tool.run(&call, &ctx()).expect("should succeed");
-        assert!(
-            output.content.contains("to-delete")
-                || output.content.contains("Deleted"),
-        );
+        assert!(output.content.contains("to-delete") || output.content.contains("Deleted"),);
         assert_eq!(output.metadata.get("action").unwrap(), "delete");
     }
 

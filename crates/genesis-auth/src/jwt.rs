@@ -54,8 +54,7 @@ mod tests {
             .encode(r#"{"alg":"RS256","typ":"JWT"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_string(claims).unwrap());
-        let signature =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("fake-signature");
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("fake-signature");
         format!("{header}.{payload}.{signature}")
     }
 

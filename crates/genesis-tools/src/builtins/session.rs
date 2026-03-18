@@ -18,7 +18,10 @@ impl ToolHandler for SessionSearchTool {
             })?;
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         let sessions = store
@@ -38,7 +41,10 @@ impl ToolHandler for SessionSearchTool {
             });
         }
 
-        let mut lines = vec![format!("Found {} sessions matching \"{query}\":", sessions.len())];
+        let mut lines = vec![format!(
+            "Found {} sessions matching \"{query}\":",
+            sessions.len()
+        )];
         for session in &sessions {
             let title = session.title.as_deref().unwrap_or("(untitled)");
             lines.push(format!(
@@ -63,13 +69,13 @@ pub struct SessionHistoryTool;
 
 impl ToolHandler for SessionHistoryTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let session_id = call
-            .arguments
-            .get("session_id")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "session_id",
-            })?;
+        let session_id =
+            call.arguments
+                .get("session_id")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "session_id",
+                })?;
 
         let limit = call
             .arguments
@@ -84,7 +90,10 @@ impl ToolHandler for SessionHistoryTool {
             .unwrap_or(20);
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = SessionStore::new(&db_path);
 
         let messages = store
@@ -119,7 +128,8 @@ impl ToolHandler for SessionHistoryTool {
         for msg in recent {
             let content = msg.content.as_deref().unwrap_or("[tool call]");
             let truncated = if content.len() > 300 {
-                format!("{}...", &content[..300])
+                let end = content.floor_char_boundary(300);
+                format!("{}...", &content[..end])
             } else {
                 content.to_owned()
             };
@@ -141,7 +151,6 @@ impl ToolHandler for SessionHistoryTool {
 mod tests {
     use super::*;
     use genesis_storage::{bootstrap, SessionStore};
-    use std::collections::BTreeMap;
     use tempfile::tempdir;
 
     fn ctx_with_dir(data_dir: &str) -> ToolContext {
@@ -267,5 +276,34 @@ mod tests {
         };
         let output = SessionHistoryTool.run(&call, &ctx).expect("history");
         assert!(output.content.contains("no messages"));
+    }
+
+    #[test]
+    fn session_history_truncates_multibyte_content_without_panic() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let store = SessionStore::new(&db_path);
+        store
+            .create_session("s-utf8", "cli", None)
+            .expect("create session");
+
+        // Build a string >300 bytes where byte 300 falls inside a multi-byte
+        // character. Each emoji is 4 bytes; 76 emojis = 304 bytes.
+        let emoji_content = "\u{1F30D}".repeat(76);
+        assert!(emoji_content.len() > 300);
+        store
+            .append_message("s-utf8", "user", Some(&emoji_content), None, None, None)
+            .expect("append");
+
+        let call = ToolCall {
+            name: "session_history".to_owned(),
+            arguments: BTreeMap::from([("session_id".to_owned(), "s-utf8".to_owned())]),
+        };
+        // This used to panic with `&content[..300]` on a multi-byte boundary.
+        let output = SessionHistoryTool.run(&call, &ctx).expect("history");
+        assert!(output.content.contains("..."));
     }
 }

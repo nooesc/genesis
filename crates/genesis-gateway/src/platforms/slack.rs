@@ -168,7 +168,9 @@ pub async fn events_handler(
             let channel2 = channel.clone();
             let ts = thread_ts.clone();
             tokio::spawn(async move {
-                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
+                if let Err(e) =
+                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
+                {
                     error!(error = %e, "failed to send pairing reply");
                 }
             });
@@ -181,7 +183,9 @@ pub async fn events_handler(
             let channel2 = channel.clone();
             let ts = thread_ts.clone();
             tokio::spawn(async move {
-                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
+                if let Err(e) =
+                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
+                {
                     error!(error = %e, "failed to send capacity reply");
                 }
             });
@@ -201,7 +205,9 @@ pub async fn events_handler(
             let channel2 = channel.clone();
             let ts = thread_ts.clone();
             tokio::spawn(async move {
-                if let Err(e) = post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await {
+                if let Err(e) =
+                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
+                {
                     error!(error = %e, "failed to send command reply");
                 }
             });
@@ -233,23 +239,16 @@ pub async fn events_handler(
                 })
                 .await;
 
-            let reply_text = match result {
-                Ok(outcome) => {
-                    info!(
-                        turns_used = outcome.result.turns_used,
-                        tool_calls_made = outcome.result.tool_calls_made,
-                        "slack turn completed"
-                    );
-                    outcome.result.response
-                }
-                Err(e) => {
-                    error!(error = %e, "slack turn failed");
-                    format!("Sorry, I encountered an error: {e}")
-                }
-            };
+            let reply_text = super::extract_reply(result, "slack");
 
-            if let Err(e) =
-                post_message(&state.http_client, &token, &channel, &reply_text, thread_ts.as_deref()).await
+            if let Err(e) = post_message(
+                &state.http_client,
+                &token,
+                &channel,
+                &reply_text,
+                thread_ts.as_deref(),
+            )
+            .await
             {
                 error!(error = %e, "failed to post slack message");
             }

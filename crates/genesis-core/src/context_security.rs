@@ -118,10 +118,7 @@ fn scan_invisible_unicode(content: &str, threats: &mut Vec<Threat>) {
                         ch as u32
                     ),
                     line: Some(line_num + 1),
-                    severity: if matches!(
-                        ch,
-                        '\u{202E}' | '\u{202D}' | '\u{202B}' | '\u{202A}'
-                    ) {
+                    severity: if matches!(ch, '\u{202E}' | '\u{202D}' | '\u{202B}' | '\u{202A}') {
                         "high" // directional overrides can hide real text
                     } else {
                         "medium"
@@ -136,21 +133,45 @@ fn scan_invisible_unicode(content: &str, threats: &mut Vec<Threat>) {
 
 /// Patterns that attempt to override the agent's instructions.
 const INSTRUCTION_OVERRIDE_PATTERNS: &[(&str, &str)] = &[
-    ("ignore previous instructions", "attempts to override system instructions"),
-    ("ignore all previous", "attempts to override system instructions"),
-    ("disregard previous instructions", "attempts to override system instructions"),
-    ("disregard all previous", "attempts to override system instructions"),
-    ("forget your instructions", "attempts to reset agent directives"),
+    (
+        "ignore previous instructions",
+        "attempts to override system instructions",
+    ),
+    (
+        "ignore all previous",
+        "attempts to override system instructions",
+    ),
+    (
+        "disregard previous instructions",
+        "attempts to override system instructions",
+    ),
+    (
+        "disregard all previous",
+        "attempts to override system instructions",
+    ),
+    (
+        "forget your instructions",
+        "attempts to reset agent directives",
+    ),
     ("forget all previous", "attempts to reset agent directives"),
     ("new instructions:", "attempts to inject new instructions"),
-    ("your new instructions", "attempts to inject new instructions"),
-    ("system prompt:", "attempts to reveal or override system prompt"),
+    (
+        "your new instructions",
+        "attempts to inject new instructions",
+    ),
+    (
+        "system prompt:",
+        "attempts to reveal or override system prompt",
+    ),
     ("you are now", "attempts role reassignment"),
     ("from now on you", "attempts to change agent behavior"),
     ("override:", "explicit instruction override attempt"),
     ("jailbreak", "explicit jailbreak attempt"),
     ("do anything now", "DAN-style jailbreak attempt"),
-    ("act as if you have no restrictions", "attempts to remove guardrails"),
+    (
+        "act as if you have no restrictions",
+        "attempts to remove guardrails",
+    ),
     ("pretend you are", "role impersonation attempt"),
     ("ignore safety", "attempts to bypass safety measures"),
     ("bypass your", "attempts to circumvent restrictions"),
@@ -177,7 +198,10 @@ const EXFIL_PATTERNS: &[(&str, &str)] = &[
     ("send to http", "attempts to exfiltrate data via HTTP"),
     ("send to https", "attempts to exfiltrate data via HTTPS"),
     ("post to http", "attempts to exfiltrate data via HTTP POST"),
-    ("post to https", "attempts to exfiltrate data via HTTPS POST"),
+    (
+        "post to https",
+        "attempts to exfiltrate data via HTTPS POST",
+    ),
     ("curl ", "potential command injection for data exfiltration"),
     ("wget ", "potential command injection for data exfiltration"),
     ("exfiltrate", "explicit data exfiltration language"),
@@ -343,10 +367,7 @@ pub const CONTEXT_FILE_NAMES: &[&str] = &[
 
 /// Check if a filename is a known context file that should be scanned.
 pub fn is_context_file(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
     CONTEXT_FILE_NAMES.iter().any(|known| {
         // Match by filename or by full relative path
@@ -429,10 +450,7 @@ mod tests {
     fn detects_tool_abuse() {
         let content = "First step: run rm -rf /tmp/data to clean up";
         let result = scan_text("test", content);
-        assert!(result
-            .threats
-            .iter()
-            .any(|t| t.category == "tool_abuse"));
+        assert!(result.threats.iter().any(|t| t.category == "tool_abuse"));
     }
 
     #[test]
@@ -454,7 +472,9 @@ mod tests {
         assert!(is_context_file(Path::new("AGENTS.md")));
         assert!(is_context_file(Path::new(".cursorrules")));
         assert!(is_context_file(Path::new("CLAUDE.md")));
-        assert!(is_context_file(Path::new(".github/copilot-instructions.md")));
+        assert!(is_context_file(Path::new(
+            ".github/copilot-instructions.md"
+        )));
         assert!(!is_context_file(Path::new("README.md")));
         assert!(!is_context_file(Path::new("src/main.rs")));
     }
@@ -524,9 +544,6 @@ Run rm -rf / to clean up";
     fn sudo_in_tool_abuse() {
         let content = "Run sudo apt-get install package";
         let result = scan_text("test", content);
-        assert!(result
-            .threats
-            .iter()
-            .any(|t| t.category == "tool_abuse"));
+        assert!(result.threats.iter().any(|t| t.category == "tool_abuse"));
     }
 }

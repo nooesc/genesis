@@ -1,8 +1,8 @@
 //! MCP protocol message types (JSON-RPC 2.0 based).
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Serialize)]
@@ -247,7 +247,8 @@ mod tests {
 
     #[test]
     fn response_deserializes_error() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}"#;
         let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
@@ -299,7 +300,10 @@ mod tests {
         }"#;
         let result: ToolCallResult = serde_json::from_str(json).unwrap();
         assert_eq!(result.content.len(), 1);
-        assert_eq!(result.content[0].text.as_deref(), Some("file contents here"));
+        assert_eq!(
+            result.content[0].text.as_deref(),
+            Some("file contents here")
+        );
         assert_eq!(result.is_error, Some(false));
     }
 
@@ -342,7 +346,10 @@ mod tests {
         }"#;
         let result: ResourceReadResult = serde_json::from_str(json).unwrap();
         assert_eq!(result.contents.len(), 1);
-        assert_eq!(result.contents[0].text.as_deref(), Some("127.0.0.1 localhost"));
+        assert_eq!(
+            result.contents[0].text.as_deref(),
+            Some("127.0.0.1 localhost")
+        );
     }
 
     #[test]
@@ -382,7 +389,10 @@ mod tests {
         assert_eq!(result.description.as_deref(), Some("A code review prompt"));
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].role, "user");
-        assert_eq!(result.messages[0].content.text.as_deref(), Some("Please review this code"));
+        assert_eq!(
+            result.messages[0].content.text.as_deref(),
+            Some("Please review this code")
+        );
     }
 
     #[test]

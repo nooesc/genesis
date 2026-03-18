@@ -39,9 +39,9 @@ impl ToolHandler for WebRequestTool {
         let headers_json = call.arguments.get("headers");
 
         // SSRF protection: validate URL before making request
-        crate::url_safety::validate_url(url).map_err(|reason| ToolError::ExecutionFailed {
+        crate::url_safety::validate_url(url).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason,
+            reason: e.to_string(),
         })?;
 
         let client = http_client();
@@ -100,9 +100,7 @@ impl ToolHandler for WebRequestTool {
                     "content-type" | "content-length" | "location" | "server"
                 )
             })
-            .map(|(name, value)| {
-                format!("{}: {}", name, value.to_str().unwrap_or("<binary>"))
-            })
+            .map(|(name, value)| format!("{}: {}", name, value.to_str().unwrap_or("<binary>")))
             .collect();
 
         let response_body = response.text().map_err(|e| ToolError::ExecutionFailed {
@@ -110,18 +108,11 @@ impl ToolHandler for WebRequestTool {
             reason: format!("failed to read response body: {e}"),
         })?;
 
-        let truncated = if response_body.len() > MAX_RESPONSE_BYTES {
-            // Find the nearest char boundary at or before the byte limit
-            let mut end = MAX_RESPONSE_BYTES;
-            while end > 0 && !response_body.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut t = response_body[..end].to_string();
-            t.push_str("\n... (response truncated)");
-            t
-        } else {
-            response_body
-        };
+        let truncated = crate::truncate_at(
+            &response_body,
+            MAX_RESPONSE_BYTES,
+            "\n... (response truncated)",
+        );
 
         let mut content = format!("HTTP {status}\n");
         for header in &headers {
@@ -146,15 +137,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     #[test]

@@ -5,9 +5,21 @@
 //! model observations, and creating skills from repeated patterns.
 
 use genesis_config::LoadedConfig;
-use genesis_storage::{bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore};
+use genesis_storage::{
+    bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore,
+};
 
 use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTurnInput};
+
+/// The skill creation nudge message injected as a system message after complex
+/// turns. Shared between the agent loop (in-flight nudge) and execution service
+/// (persisted nudge for the next turn).
+pub const SKILL_CREATION_NUDGE: &str = "\
+[Skill creation opportunity] The task you just completed was multi-step and \
+complex. Consider whether the approach you used could be distilled into a \
+reusable skill. If so, call `skill_create` with a descriptive name, clear \
+instructions for how to handle this type of task, and relevant tags. Good \
+skills capture durable patterns — not one-off details.";
 
 /// Build a reflection prompt from the agent's current knowledge state.
 ///
@@ -15,7 +27,14 @@ use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTu
 /// then composes a prompt that asks the agent to reflect and consolidate.
 pub fn build_nudge_prompt(loaded: &LoadedConfig) -> String {
     let db_path = &loaded.config.storage.database_path;
-    let _ = bootstrap(db_path);
+    if let Err(e) = bootstrap(db_path) {
+        tracing::warn!(error = %e, "failed to bootstrap database for nudge prompt");
+        return String::from(
+            "Perform a self-reflection on your accumulated knowledge.\n\n\
+             No accumulated knowledge yet. This is normal for early sessions. \
+             Focus on learning about the user and their needs as you interact.\n",
+        );
+    }
 
     let memories_section = load_memories_section(db_path);
     let user_model_section = load_user_model_section(db_path);
@@ -221,7 +240,9 @@ mod tests {
 
         // Create session for FK constraint, then store a memory
         let session_store = SessionStore::new(&db_path);
-        session_store.create_session("test-s", "cli", None).expect("session");
+        session_store
+            .create_session("test-s", "cli", None)
+            .expect("session");
 
         let connection = rusqlite::Connection::open(&db_path).expect("open");
         connection
@@ -325,10 +346,18 @@ mod tests {
 
         let usage_store = SkillUsageStore::new(&db_path);
         // 1 success, 3 failures = 75% failure rate
-        usage_store.record_usage("flaky", None, "success", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
-        usage_store.record_usage("flaky", None, "failure", None).unwrap();
+        usage_store
+            .record_usage("flaky", None, "success", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
+        usage_store
+            .record_usage("flaky", None, "failure", None)
+            .unwrap();
 
         let loaded = test_loaded_config(data_dir, db_path);
         let prompt = build_nudge_prompt(&loaded);

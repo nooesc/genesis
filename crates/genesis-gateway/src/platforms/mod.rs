@@ -5,9 +5,35 @@ pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
 
+use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
+use genesis_storage::PairingStore;
 use std::collections::HashSet;
 use std::path::Path;
-use genesis_storage::PairingStore;
+
+/// Extract the reply text from a `run_turn` result, logging success or failure.
+///
+/// Every platform handler performs the same match on `Result<SessionTurnOutcome, _>`
+/// to log turn metrics and produce a user-facing reply string. This helper
+/// centralises that logic.
+pub fn extract_reply(
+    result: Result<SessionTurnOutcome, SessionExecutionError>,
+    platform: &str,
+) -> String {
+    match result {
+        Ok(outcome) => {
+            tracing::info!(
+                turns_used = outcome.result.turns_used,
+                tool_calls_made = outcome.result.tool_calls_made,
+                "{platform} turn completed"
+            );
+            outcome.result.response
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "{platform} turn failed");
+            format!("Sorry, I encountered an error: {e}")
+        }
+    }
+}
 
 /// Result of a pairing check for an incoming platform message.
 pub enum PairingCheck {
@@ -20,9 +46,10 @@ pub enum PairingCheck {
 }
 
 /// Pairing check errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PairingCheckError {
     /// The pairing store is unavailable or returned an unexpected error.
+    #[error("pairing store is unavailable")]
     StoreUnavailable,
 }
 
@@ -55,8 +82,8 @@ pub fn check_pairing(
         return Ok(PairingCheck::Approved);
     }
 
-    let platform_allowlist = std::env::var(platform_allowlist_env(platform.as_str()))
-        .unwrap_or_default();
+    let platform_allowlist =
+        std::env::var(platform_allowlist_env(platform.as_str())).unwrap_or_default();
     let global_allowlist = std::env::var("GATEWAY_ALLOWED_USERS").unwrap_or_default();
 
     if platform_allowlist.is_empty() && global_allowlist.is_empty() {
@@ -155,4 +182,98 @@ pub fn pairing_reply(code: &str) -> String {
 /// Format a reply for when pairing is at capacity.
 pub fn pairing_capacity_reply() -> &'static str {
     "Too many pending pairing requests. Please try again later or contact the agent owner."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_truthy_env_recognizes_true_values() {
+        std::env::set_var("_TEST_TRUTHY_1", "1");
+        std::env::set_var("_TEST_TRUTHY_TRUE", "true");
+        std::env::set_var("_TEST_TRUTHY_TRUE_UPPER", "TRUE");
+        std::env::set_var("_TEST_TRUTHY_YES", "yes");
+        std::env::set_var("_TEST_TRUTHY_ON", "on");
+        std::env::set_var("_TEST_TRUTHY_0", "0");
+        std::env::set_var("_TEST_TRUTHY_FALSE", "false");
+        std::env::set_var("_TEST_TRUTHY_NO", "no");
+        std::env::set_var("_TEST_TRUTHY_EMPTY", "");
+        std::env::set_var("_TEST_TRUTHY_RANDOM", "random");
+
+        assert!(is_truthy_env("_TEST_TRUTHY_1"));
+        assert!(is_truthy_env("_TEST_TRUTHY_TRUE"));
+        assert!(is_truthy_env("_TEST_TRUTHY_TRUE_UPPER"));
+        assert!(is_truthy_env("_TEST_TRUTHY_YES"));
+        assert!(is_truthy_env("_TEST_TRUTHY_ON"));
+        assert!(!is_truthy_env("_TEST_TRUTHY_0"));
+        assert!(!is_truthy_env("_TEST_TRUTHY_FALSE"));
+        assert!(!is_truthy_env("_TEST_TRUTHY_NO"));
+        assert!(!is_truthy_env("_TEST_TRUTHY_EMPTY"));
+        assert!(!is_truthy_env("_TEST_TRUTHY_RANDOM"));
+        assert!(!is_truthy_env(""));
+    }
+
+    #[test]
+    fn parse_env_id_set_splits_comma_delimited() {
+        let set = parse_env_id_set("123,456,789");
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("123"));
+        assert!(set.contains("456"));
+        assert!(set.contains("789"));
+    }
+
+    #[test]
+    fn parse_env_id_set_handles_empty_string() {
+        let set = parse_env_id_set("");
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn parse_env_id_set_trims_whitespace() {
+        let set = parse_env_id_set("  abc , def , ghi  ");
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("abc"));
+        assert!(set.contains("def"));
+        assert!(set.contains("ghi"));
+    }
+
+    #[test]
+    fn is_user_in_allowlist_matches_exact_id() {
+        let allowed: HashSet<String> = ["user1", "user2"].iter().map(|s| s.to_string()).collect();
+        assert!(is_user_in_allowlist(&allowed, "user1"));
+        assert!(is_user_in_allowlist(&allowed, "user2"));
+        assert!(!is_user_in_allowlist(&allowed, "user3"));
+    }
+
+    #[test]
+    fn is_user_in_allowlist_matches_short_id_before_at() {
+        let allowed: HashSet<String> = ["alice"].iter().map(|s| s.to_string()).collect();
+        assert!(is_user_in_allowlist(&allowed, "alice@example.com"));
+        assert!(!is_user_in_allowlist(&allowed, "bob@example.com"));
+    }
+
+    #[test]
+    fn is_user_in_allowlist_ignores_empty_short_id() {
+        let allowed: HashSet<String> = [""].iter().map(|s| s.to_string()).collect();
+        // "@domain.com" has an empty short id — should not match the empty string in the set
+        assert!(!is_user_in_allowlist(&allowed, "@domain.com"));
+    }
+
+    #[test]
+    fn platform_allowlist_env_maps_known_platforms() {
+        assert_eq!(platform_allowlist_env("telegram"), "TELEGRAM_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_env("discord"), "DISCORD_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_env("whatsapp"), "WHATSAPP_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_env("slack"), "SLACK_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_env("signal"), "SIGNAL_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_env("unknown"), "");
+    }
+
+    #[test]
+    fn pairing_reply_contains_code() {
+        let reply = pairing_reply("ABCD1234");
+        assert!(reply.contains("ABCD1234"));
+        assert!(reply.contains("genesis pairing approve"));
+    }
 }

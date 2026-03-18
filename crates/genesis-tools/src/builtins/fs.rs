@@ -23,18 +23,7 @@ impl ToolHandler for ReadFileTool {
             reason: format!("failed to read `{path}`: {e}"),
         })?;
 
-        let content = if content.len() > MAX_READ_BYTES {
-            // Walk back from MAX_READ_BYTES to find a valid UTF-8 char boundary
-            let mut end = MAX_READ_BYTES;
-            while end > 0 && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut truncated = content[..end].to_string();
-            truncated.push_str("\n... (file truncated)");
-            truncated
-        } else {
-            content
-        };
+        let content = crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
 
         Ok(ToolOutput {
             content,
@@ -68,7 +57,7 @@ impl ToolHandler for WriteFileTool {
 
         // Create parent directories if needed.
         if let Some(parent) = Path::new(path).parent() {
-            if !parent.exists() {
+            if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("failed to create directories for `{path}`: {e}"),
@@ -153,15 +142,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     #[test]

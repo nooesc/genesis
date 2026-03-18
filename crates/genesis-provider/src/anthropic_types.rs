@@ -79,9 +79,7 @@ pub(crate) enum AnthropicContentBlock {
         cache_control: Option<CacheControl>,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -94,9 +92,7 @@ pub(crate) enum AnthropicContentBlock {
         content: String,
     },
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -315,9 +311,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
             }
             "user" => {
                 let content = match &msg.content {
-                    Some(MessageContent::Text(text)) => {
-                        AnthropicMessageContent::Text(text.clone())
-                    }
+                    Some(MessageContent::Text(text)) => AnthropicMessageContent::Text(text.clone()),
                     Some(MessageContent::Parts(parts)) => {
                         let blocks: Vec<AnthropicContentBlock> = parts
                             .iter()
@@ -567,21 +561,19 @@ pub(crate) fn anthropic_event_to_chunk(
         "content_block_delta" => {
             if let Some(ref delta) = event.delta {
                 match delta.delta_type.as_deref() {
-                    Some("text_delta") => {
-                        Ok(Some(ChatCompletionChunk {
-                            id: msg_id.clone(),
-                            choices: vec![ChatChunkChoice {
-                                index: 0,
-                                delta: ChatChunkDelta {
-                                    role: None,
-                                    content: delta.text.clone(),
-                                    tool_calls: None,
-                                },
-                                finish_reason: None,
-                            }],
-                            usage: None,
-                        }))
-                    }
+                    Some("text_delta") => Ok(Some(ChatCompletionChunk {
+                        id: msg_id.clone(),
+                        choices: vec![ChatChunkChoice {
+                            index: 0,
+                            delta: ChatChunkDelta {
+                                role: None,
+                                content: delta.text.clone(),
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                        }],
+                        usage: None,
+                    })),
                     Some("input_json_delta") => {
                         // Streaming tool call arguments
                         Ok(Some(ChatCompletionChunk {
@@ -650,9 +642,7 @@ pub(crate) fn anthropic_event_to_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_types::{
-        ChatCompletionRequest, ChatMessage, ChatTool, ChatToolFunction, ThinkingConfig, ToolChoice,
-    };
+    use crate::api_types::{ChatTool, ChatToolFunction, ThinkingConfig, ToolChoice};
 
     #[test]
     fn system_message_extracted_to_top_level() {
@@ -707,7 +697,10 @@ mod tests {
         // Tool result should be user role with tool_result block
         assert_eq!(anthropic.messages[2].role, "user");
         if let AnthropicMessageContent::Blocks(blocks) = &anthropic.messages[2].content {
-            assert!(matches!(blocks[0], AnthropicContentBlock::ToolResult { .. }));
+            assert!(matches!(
+                blocks[0],
+                AnthropicContentBlock::ToolResult { .. }
+            ));
         } else {
             panic!("expected Blocks content for tool result");
         }
@@ -761,10 +754,7 @@ mod tests {
         );
         req.tool_choice = Some(ToolChoice::Required);
         let anthropic = to_anthropic_request(&req);
-        assert_eq!(
-            anthropic.tool_choice.as_ref().unwrap().choice_type,
-            "any"
-        );
+        assert_eq!(anthropic.tool_choice.as_ref().unwrap().choice_type, "any");
 
         req.tool_choice = Some(ToolChoice::Function("search".to_owned()));
         let anthropic = to_anthropic_request(&req);
@@ -817,10 +807,7 @@ mod tests {
         let openai = from_anthropic_response(resp);
         assert_eq!(openai.id, "msg_123");
         assert_eq!(openai.choices[0].message.content_text(), Some("Hello!"));
-        assert_eq!(
-            openai.choices[0].finish_reason.as_deref(),
-            Some("stop")
-        );
+        assert_eq!(openai.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = openai.usage.as_ref().unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
@@ -958,8 +945,14 @@ mod tests {
         assert_eq!(anthropic.messages.len(), 3); // user, assistant, user(tool_results)
         if let AnthropicMessageContent::Blocks(blocks) = &anthropic.messages[2].content {
             assert_eq!(blocks.len(), 2);
-            assert!(matches!(blocks[0], AnthropicContentBlock::ToolResult { .. }));
-            assert!(matches!(blocks[1], AnthropicContentBlock::ToolResult { .. }));
+            assert!(matches!(
+                blocks[0],
+                AnthropicContentBlock::ToolResult { .. }
+            ));
+            assert!(matches!(
+                blocks[1],
+                AnthropicContentBlock::ToolResult { .. }
+            ));
         } else {
             panic!("expected Blocks content for coalesced tool results");
         }

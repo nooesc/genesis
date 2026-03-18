@@ -33,16 +33,19 @@ impl ToolHandler for BrowseTool {
             })?;
 
         // SSRF protection: validate URL before making request
-        crate::url_safety::validate_url(url).map_err(|reason| ToolError::ExecutionFailed {
+        crate::url_safety::validate_url(url).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason,
+            reason: e.to_string(),
         })?;
 
         let client = http_client();
-        let response = client.get(url).send().map_err(|e| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: format!("failed to fetch URL: {e}"),
-        })?;
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to fetch URL: {e}"),
+            })?;
 
         let status = response.status().as_u16();
         let content_type = response
@@ -58,28 +61,19 @@ impl ToolHandler for BrowseTool {
         })?;
 
         // Extract readable text based on content type
-        let text = if content_type.contains("text/html") || content_type.contains("application/xhtml") {
-            let selector = call.arguments.get("selector").map(|s| s.as_str());
-            extract_text_from_html(&body, selector)
-        } else if content_type.contains("text/") || content_type.contains("application/json") {
-            // Plain text or JSON — return as-is
-            body
-        } else {
-            format!("(binary content: {content_type}, {} bytes)", body.len())
-        };
+        let text =
+            if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+                let selector = call.arguments.get("selector").map(|s| s.as_str());
+                extract_text_from_html(&body, selector)
+            } else if content_type.contains("text/") || content_type.contains("application/json") {
+                // Plain text or JSON — return as-is
+                body
+            } else {
+                format!("(binary content: {content_type}, {} bytes)", body.len())
+            };
 
         // Truncate at char boundary
-        let truncated = if text.len() > MAX_RESPONSE_BYTES {
-            let mut end = MAX_RESPONSE_BYTES;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            let mut t = text[..end].to_string();
-            t.push_str("\n... (content truncated)");
-            t
-        } else {
-            text
-        };
+        let truncated = crate::truncate_at(&text, MAX_RESPONSE_BYTES, "\n... (content truncated)");
 
         let content = {
             let raw = format!("URL: {url}\nHTTP {status}\n\n{truncated}");
@@ -124,7 +118,10 @@ fn extract_text_from_html(html: &str, selector: Option<&str>) -> String {
 
     // Remove script, style, and navigation blocks entirely.
     // Pre-compute lowercase once and pass it through to avoid re-lowercasing on each call.
-    let cleaned = remove_tag_blocks_multi(&working_html, &["script", "style", "nav", "header", "footer"]);
+    let cleaned = remove_tag_blocks_multi(
+        &working_html,
+        &["script", "style", "nav", "header", "footer"],
+    );
 
     // Strip all remaining HTML tags
     let text = strip_tags(&cleaned);
@@ -285,15 +282,7 @@ mod tests {
     use crate::ToolContext;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     #[test]

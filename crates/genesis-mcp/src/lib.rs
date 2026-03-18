@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 pub use client::{McpClient, McpServerConfig};
 pub use protocol::{McpPromptDef, McpResourceDef, PromptGetResult, ResourceReadResult};
-pub use server::{McpServeConfig, McpToolBackend, McpServerToolDef, run_stdio_server};
+pub use server::{run_stdio_server, McpServeConfig, McpServerToolDef, McpToolBackend};
 
 /// Read a single newline-delimited line from an async reader, enforcing a
 /// maximum byte limit. Returns `Ok(None)` on EOF.
@@ -136,7 +136,7 @@ impl McpManager {
             None => return false,
         };
 
-        warn!(server = server_name, "attempting MCP server reconnection");
+        info!(server = server_name, "attempting MCP server reconnection");
 
         match McpClient::connect(config).await {
             Ok(client) => {
@@ -182,7 +182,11 @@ impl McpManager {
     ) -> Result<String, McpError> {
         let (server_name, tool_name) = parse_mcp_tool_name(prefixed_name)?;
 
-        // First attempt
+        // First attempt.
+        // Clone `arguments` because `call_tool` takes ownership, and we may
+        // need the value again for the retry path below. Moving the clone to
+        // the retry branch isn't feasible: the first call consumes `arguments`
+        // inside this block, so we must preserve a copy before entering it.
         let first_err = {
             let clients = self.clients.read().await;
             let client = clients
@@ -238,11 +242,7 @@ impl McpManager {
         let clients = self.clients.read().await;
         clients
             .iter()
-            .flat_map(|(name, c)| {
-                c.resources()
-                    .iter()
-                    .map(move |r| (name.clone(), r.clone()))
-            })
+            .flat_map(|(name, c)| c.resources().iter().map(move |r| (name.clone(), r.clone())))
             .collect()
     }
 
@@ -253,11 +253,7 @@ impl McpManager {
         let clients = self.clients.read().await;
         clients
             .iter()
-            .flat_map(|(name, c)| {
-                c.prompts()
-                    .iter()
-                    .map(move |p| (name.clone(), p.clone()))
-            })
+            .flat_map(|(name, c)| c.prompts().iter().map(move |p| (name.clone(), p.clone())))
             .collect()
     }
 

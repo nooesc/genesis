@@ -270,8 +270,7 @@ pub fn execute_code_ptc(
     }
 
     // Create UDS socket
-    let sock_path =
-        std::env::temp_dir().join(format!("genesis-ptc-{}.sock", uuid::Uuid::new_v4()));
+    let sock_path = std::env::temp_dir().join(format!("genesis-ptc-{}.sock", uuid::Uuid::new_v4()));
 
     let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
         Ok(l) => l,
@@ -405,10 +404,7 @@ pub fn execute_code_ptc(
             ("status".to_owned(), status.to_owned()),
             ("exit_code".to_owned(), exit_code.to_string()),
             ("tool_calls_made".to_owned(), tool_calls_made.to_string()),
-            (
-                "duration_seconds".to_owned(),
-                format!("{duration:.2}"),
-            ),
+            ("duration_seconds".to_owned(), format!("{duration:.2}")),
         ]),
     }
 }
@@ -437,9 +433,7 @@ fn rpc_server_loop(
         Some(s) => s,
         None => return,
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(300)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(300))).ok();
 
     let mut reader = std::io::BufReader::new(&stream);
     let mut writer = &stream;
@@ -473,7 +467,9 @@ fn rpc_server_loop(
             .unwrap_or(serde_json::json!({}));
 
         // Check sandbox allow-list
-        let allowed = SANDBOX_TOOLS.iter().any(|(_, genesis)| *genesis == tool_name);
+        let allowed = SANDBOX_TOOLS
+            .iter()
+            .any(|(_, genesis)| *genesis == tool_name);
         if !allowed {
             let available: Vec<&str> = SANDBOX_TOOLS.iter().map(|(py, _)| *py).collect();
             let resp = serde_json::json!({
@@ -666,11 +662,30 @@ def browse(url: str):
 /// Build a minimal, secret-free environment for the child process.
 fn build_sandbox_env(sock_path: &std::path::Path) -> Vec<(String, String)> {
     let safe_prefixes = [
-        "PATH", "HOME", "USER", "LANG", "LC_", "TERM", "TMPDIR", "TMP", "TEMP", "SHELL",
-        "LOGNAME", "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "LC_",
+        "TERM",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SHELL",
+        "LOGNAME",
+        "XDG_",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "CONDA",
     ];
     let secret_substrings = [
-        "KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH",
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "CREDENTIAL",
+        "PASSWD",
+        "AUTH",
     ];
 
     let mut env: Vec<(String, String)> = Vec::new();
@@ -693,11 +708,7 @@ fn build_sandbox_env(sock_path: &std::path::Path) -> Vec<(String, String)> {
 }
 
 /// Drain a pipe into a byte buffer, capped at max_bytes.
-fn drain_pipe(
-    pipe: Option<impl std::io::Read>,
-    chunks: Arc<Mutex<Vec<u8>>>,
-    max_bytes: usize,
-) {
+fn drain_pipe(pipe: Option<impl std::io::Read>, chunks: Arc<Mutex<Vec<u8>>>, max_bytes: usize) {
     let Some(mut pipe) = pipe else { return };
     let mut buf = [0u8; 4096];
     let mut total = 0usize;
@@ -723,10 +734,7 @@ fn ptc_error(error: &str, tool_calls: usize, start: std::time::Instant) -> ToolO
         metadata: BTreeMap::from([
             ("tool".to_owned(), "execute_code".to_owned()),
             ("status".to_owned(), "error".to_owned()),
-            (
-                "tool_calls_made".to_owned(),
-                tool_calls.to_string(),
-            ),
+            ("tool_calls_made".to_owned(), tool_calls.to_string()),
             (
                 "duration_seconds".to_owned(),
                 format!("{:.2}", start.elapsed().as_secs_f64()),
@@ -745,15 +753,7 @@ mod tests {
     use crate::ToolContext;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx_destructive()
     }
 
     // --- Basic code execution tests (non-PTC) ---
@@ -832,7 +832,10 @@ mod tests {
         let err = tool.run(&call, &ctx()).unwrap_err();
         match err {
             ToolError::ExecutionFailed { reason, .. } => {
-                assert!(reason.contains("timed out"), "expected timeout, got: {reason}");
+                assert!(
+                    reason.contains("timed out"),
+                    "expected timeout, got: {reason}"
+                );
             }
             _ => panic!("expected ExecutionFailed, got: {err:?}"),
         }
@@ -854,7 +857,10 @@ mod tests {
                 assert_eq!(output.metadata.get("language").unwrap(), "node");
             }
             Err(ToolError::ExecutionFailed { reason, .. }) => {
-                assert!(reason.contains("failed to spawn"), "unexpected error: {reason}");
+                assert!(
+                    reason.contains("failed to spawn"),
+                    "unexpected error: {reason}"
+                );
             }
             Err(e) => panic!("unexpected error type: {e:?}"),
         }
@@ -1017,8 +1023,7 @@ print(result)
 
         let result = execute_code_ptc(code, &registry, &context);
         assert!(
-            result.content.contains("not available")
-                || result.content.contains("error"),
+            result.content.contains("not available") || result.content.contains("error"),
             "should reject disallowed tool: {}",
             result.content
         );

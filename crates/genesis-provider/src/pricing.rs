@@ -33,47 +33,239 @@ impl std::fmt::Display for CostEstimate {
 /// Prices as of early 2026. Models not in the table return None.
 const PRICING: &[(&str, ModelPricing)] = &[
     // OpenAI GPT-4.1 family
-    ("gpt-4.1", ModelPricing { input_per_million: 2.0, output_per_million: 8.0 }),
-    ("gpt-4.1-mini", ModelPricing { input_per_million: 0.40, output_per_million: 1.60 }),
-    ("gpt-4.1-nano", ModelPricing { input_per_million: 0.10, output_per_million: 0.40 }),
+    (
+        "gpt-4.1",
+        ModelPricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+        },
+    ),
+    (
+        "gpt-4.1-mini",
+        ModelPricing {
+            input_per_million: 0.40,
+            output_per_million: 1.60,
+        },
+    ),
+    (
+        "gpt-4.1-nano",
+        ModelPricing {
+            input_per_million: 0.10,
+            output_per_million: 0.40,
+        },
+    ),
     // OpenAI GPT-4o family
-    ("gpt-4o", ModelPricing { input_per_million: 2.50, output_per_million: 10.0 }),
-    ("gpt-4o-mini", ModelPricing { input_per_million: 0.15, output_per_million: 0.60 }),
+    (
+        "gpt-4o",
+        ModelPricing {
+            input_per_million: 2.50,
+            output_per_million: 10.0,
+        },
+    ),
+    (
+        "gpt-4o-mini",
+        ModelPricing {
+            input_per_million: 0.15,
+            output_per_million: 0.60,
+        },
+    ),
     // OpenAI o-series reasoning
-    ("o3", ModelPricing { input_per_million: 2.0, output_per_million: 8.0 }),
-    ("o3-mini", ModelPricing { input_per_million: 1.10, output_per_million: 4.40 }),
-    ("o4-mini", ModelPricing { input_per_million: 1.10, output_per_million: 4.40 }),
+    (
+        "o3",
+        ModelPricing {
+            input_per_million: 2.0,
+            output_per_million: 8.0,
+        },
+    ),
+    (
+        "o3-mini",
+        ModelPricing {
+            input_per_million: 1.10,
+            output_per_million: 4.40,
+        },
+    ),
+    (
+        "o4-mini",
+        ModelPricing {
+            input_per_million: 1.10,
+            output_per_million: 4.40,
+        },
+    ),
     // Anthropic Claude
-    ("claude-opus-4", ModelPricing { input_per_million: 15.0, output_per_million: 75.0 }),
-    ("claude-sonnet-4", ModelPricing { input_per_million: 3.0, output_per_million: 15.0 }),
-    ("claude-haiku-4", ModelPricing { input_per_million: 0.80, output_per_million: 4.0 }),
-    ("claude-3.5-sonnet", ModelPricing { input_per_million: 3.0, output_per_million: 15.0 }),
-    ("claude-3.5-haiku", ModelPricing { input_per_million: 0.80, output_per_million: 4.0 }),
+    (
+        "claude-opus-4",
+        ModelPricing {
+            input_per_million: 15.0,
+            output_per_million: 75.0,
+        },
+    ),
+    (
+        "claude-sonnet-4",
+        ModelPricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+    ),
+    (
+        "claude-haiku-4",
+        ModelPricing {
+            input_per_million: 0.80,
+            output_per_million: 4.0,
+        },
+    ),
+    (
+        "claude-3.5-sonnet",
+        ModelPricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+    ),
+    (
+        "claude-3.5-haiku",
+        ModelPricing {
+            input_per_million: 0.80,
+            output_per_million: 4.0,
+        },
+    ),
     // Google Gemini
-    ("gemini-2.5-pro", ModelPricing { input_per_million: 1.25, output_per_million: 10.0 }),
-    ("gemini-2.5-flash", ModelPricing { input_per_million: 0.15, output_per_million: 0.60 }),
-    ("gemini-2.0-flash", ModelPricing { input_per_million: 0.10, output_per_million: 0.40 }),
+    (
+        "gemini-2.5-pro",
+        ModelPricing {
+            input_per_million: 1.25,
+            output_per_million: 10.0,
+        },
+    ),
+    (
+        "gemini-2.5-flash",
+        ModelPricing {
+            input_per_million: 0.15,
+            output_per_million: 0.60,
+        },
+    ),
+    (
+        "gemini-2.0-flash",
+        ModelPricing {
+            input_per_million: 0.10,
+            output_per_million: 0.40,
+        },
+    ),
     // DeepSeek
-    ("deepseek-chat", ModelPricing { input_per_million: 0.27, output_per_million: 1.10 }),
-    ("deepseek-reasoner", ModelPricing { input_per_million: 0.55, output_per_million: 2.19 }),
-    ("deepseek-r1", ModelPricing { input_per_million: 0.55, output_per_million: 2.19 }),
-    ("deepseek-v3", ModelPricing { input_per_million: 0.27, output_per_million: 1.10 }),
+    (
+        "deepseek-chat",
+        ModelPricing {
+            input_per_million: 0.27,
+            output_per_million: 1.10,
+        },
+    ),
+    (
+        "deepseek-reasoner",
+        ModelPricing {
+            input_per_million: 0.55,
+            output_per_million: 2.19,
+        },
+    ),
+    (
+        "deepseek-r1",
+        ModelPricing {
+            input_per_million: 0.55,
+            output_per_million: 2.19,
+        },
+    ),
+    (
+        "deepseek-v3",
+        ModelPricing {
+            input_per_million: 0.27,
+            output_per_million: 1.10,
+        },
+    ),
     // Mistral
-    ("mistral-large", ModelPricing { input_per_million: 2.0, output_per_million: 6.0 }),
-    ("mistral-small", ModelPricing { input_per_million: 0.10, output_per_million: 0.30 }),
-    ("codestral", ModelPricing { input_per_million: 0.30, output_per_million: 0.90 }),
+    (
+        "mistral-large",
+        ModelPricing {
+            input_per_million: 2.0,
+            output_per_million: 6.0,
+        },
+    ),
+    (
+        "mistral-small",
+        ModelPricing {
+            input_per_million: 0.10,
+            output_per_million: 0.30,
+        },
+    ),
+    (
+        "codestral",
+        ModelPricing {
+            input_per_million: 0.30,
+            output_per_million: 0.90,
+        },
+    ),
     // Meta Llama (via API providers)
-    ("llama-4-maverick", ModelPricing { input_per_million: 0.20, output_per_million: 0.60 }),
-    ("llama-4-scout", ModelPricing { input_per_million: 0.15, output_per_million: 0.40 }),
-    ("llama-3.3-70b", ModelPricing { input_per_million: 0.18, output_per_million: 0.36 }),
+    (
+        "llama-4-maverick",
+        ModelPricing {
+            input_per_million: 0.20,
+            output_per_million: 0.60,
+        },
+    ),
+    (
+        "llama-4-scout",
+        ModelPricing {
+            input_per_million: 0.15,
+            output_per_million: 0.40,
+        },
+    ),
+    (
+        "llama-3.3-70b",
+        ModelPricing {
+            input_per_million: 0.18,
+            output_per_million: 0.36,
+        },
+    ),
     // Qwen (via API providers)
-    ("qwen-2.5-72b", ModelPricing { input_per_million: 0.35, output_per_million: 0.70 }),
-    ("qwen-2.5-coder-32b", ModelPricing { input_per_million: 0.15, output_per_million: 0.30 }),
-    ("qwen-3-235b", ModelPricing { input_per_million: 0.50, output_per_million: 1.00 }),
-    ("qwen-3-30b", ModelPricing { input_per_million: 0.15, output_per_million: 0.30 }),
+    (
+        "qwen-2.5-72b",
+        ModelPricing {
+            input_per_million: 0.35,
+            output_per_million: 0.70,
+        },
+    ),
+    (
+        "qwen-2.5-coder-32b",
+        ModelPricing {
+            input_per_million: 0.15,
+            output_per_million: 0.30,
+        },
+    ),
+    (
+        "qwen-3-235b",
+        ModelPricing {
+            input_per_million: 0.50,
+            output_per_million: 1.00,
+        },
+    ),
+    (
+        "qwen-3-30b",
+        ModelPricing {
+            input_per_million: 0.15,
+            output_per_million: 0.30,
+        },
+    ),
     // xAI Grok
-    ("grok-3", ModelPricing { input_per_million: 3.0, output_per_million: 15.0 }),
-    ("grok-3-mini", ModelPricing { input_per_million: 0.30, output_per_million: 0.50 }),
+    (
+        "grok-3",
+        ModelPricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+    ),
+    (
+        "grok-3-mini",
+        ModelPricing {
+            input_per_million: 0.30,
+            output_per_million: 0.50,
+        },
+    ),
 ];
 
 /// Look up pricing for a model by name.
@@ -82,10 +274,7 @@ const PRICING: &[(&str, ModelPricing)] = &[
 /// Strips common provider prefixes like `openai/`, `anthropic/`.
 pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
     // Strip provider prefix (e.g., "openai/gpt-4.1-mini" -> "gpt-4.1-mini")
-    let model_name = model
-        .split('/')
-        .next_back()
-        .unwrap_or(model);
+    let model_name = model.split('/').next_back().unwrap_or(model);
 
     // Exact match
     if let Some(entry) = PRICING.iter().find(|(name, _)| *name == model_name) {

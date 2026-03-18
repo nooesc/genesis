@@ -13,10 +13,7 @@ use super::{ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInst
 
 fn detect_binary() -> Result<String, SandboxError> {
     for name in &["apptainer", "singularity"] {
-        let output = std::process::Command::new("which")
-            .arg(name)
-            .output()
-            .ok();
+        let output = std::process::Command::new("which").arg(name).output().ok();
         if let Some(out) = output {
             if out.status.success() {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -39,9 +36,7 @@ fn detect_binary() -> Result<String, SandboxError> {
 /// Example: `docker://nikolaik/python-nodejs:python3.11-nodejs20`
 ///       -> `nikolaik-python-nodejs-python3.11-nodejs20.sif`
 pub fn sif_cache_key(image_url: &str) -> String {
-    let stripped = image_url
-        .strip_prefix("docker://")
-        .unwrap_or(image_url);
+    let stripped = image_url.strip_prefix("docker://").unwrap_or(image_url);
     let sanitized = stripped.replace(['/', ':'], "-");
     format!("{sanitized}.sif")
 }
@@ -206,9 +201,7 @@ impl SandboxBackend for SingularitySandbox {
                         .into_owned()
                 });
             std::fs::create_dir_all(&dir).map_err(|e| {
-                SandboxError::Other(format!(
-                    "failed to create overlay dir {dir}: {e}",
-                ))
+                SandboxError::Other(format!("failed to create overlay dir {dir}: {e}",))
             })?;
             Some(dir)
         } else {
@@ -236,14 +229,11 @@ impl SandboxBackend for SingularitySandbox {
                         ])
                         .output()
                         .await
-                        .map_err(|e| {
-                            SandboxError::SubprocessFailed {
-                                reason: format!("SIF build spawn failed: {e}"),
-                            }
+                        .map_err(|e| SandboxError::SubprocessFailed {
+                            reason: format!("SIF build spawn failed: {e}"),
                         })?;
                     if !build_output.status.success() {
-                        let stderr =
-                            String::from_utf8_lossy(&build_output.stderr).into_owned();
+                        let stderr = String::from_utf8_lossy(&build_output.stderr).into_owned();
                         return Err(SandboxError::SubprocessFailed {
                             reason: format!("SIF build failed: {stderr}"),
                         });
@@ -328,9 +318,11 @@ impl SandboxBackend for SingularitySandbox {
                     reason: format!("exec spawn failed: {e}"),
                 })?
         } else {
-            exec_future.await.map_err(|e| SandboxError::SubprocessFailed {
-                reason: format!("exec spawn failed: {e}"),
-            })?
+            exec_future
+                .await
+                .map_err(|e| SandboxError::SubprocessFailed {
+                    reason: format!("exec spawn failed: {e}"),
+                })?
         };
 
         let exit_code = output.status.code().unwrap_or(-1);
@@ -348,10 +340,7 @@ impl SandboxBackend for SingularitySandbox {
         })
     }
 
-    async fn snapshot(
-        &self,
-        instance: &SandboxInstance,
-    ) -> Result<Option<String>, SandboxError> {
+    async fn snapshot(&self, instance: &SandboxInstance) -> Result<Option<String>, SandboxError> {
         Ok(instance.snapshot_data.clone())
     }
 
@@ -401,10 +390,7 @@ mod tests {
             sif_cache_key("docker://nikolaik/python-nodejs:python3.11-nodejs20"),
             "nikolaik-python-nodejs-python3.11-nodejs20.sif"
         );
-        assert_eq!(
-            sif_cache_key("docker://ubuntu:22.04"),
-            "ubuntu-22.04.sif"
-        );
+        assert_eq!(sif_cache_key("docker://ubuntu:22.04"), "ubuntu-22.04.sif");
         // No docker:// prefix — just sanitize
         assert_eq!(sif_cache_key("myimage:latest"), "myimage-latest.sif");
     }
@@ -461,20 +447,35 @@ mod tests {
             512,
         );
         assert!(!args.contains(&"--writable-tmpfs".to_string()));
-        let overlay_pos = args.iter().position(|a| a == "--overlay").expect("--overlay missing");
-        assert_eq!(args[overlay_pos + 1], "/scratch/overlays/genesis_abc123456789");
+        let overlay_pos = args
+            .iter()
+            .position(|a| a == "--overlay")
+            .expect("--overlay missing");
+        assert_eq!(
+            args[overlay_pos + 1],
+            "/scratch/overlays/genesis_abc123456789"
+        );
         // memory
-        let mem_pos = args.iter().position(|a| a == "--memory").expect("--memory missing");
+        let mem_pos = args
+            .iter()
+            .position(|a| a == "--memory")
+            .expect("--memory missing");
         assert_eq!(args[mem_pos + 1], "512M");
         // cpu
-        let cpu_pos = args.iter().position(|a| a == "--cpus").expect("--cpus missing");
+        let cpu_pos = args
+            .iter()
+            .position(|a| a == "--cpus")
+            .expect("--cpus missing");
         assert_eq!(args[cpu_pos + 1], "2");
     }
 
     #[test]
     fn test_build_start_args_fractional_cpu() {
         let args = build_start_args("img", "id", false, None, 0.5, 0);
-        let cpu_pos = args.iter().position(|a| a == "--cpus").expect("--cpus missing");
+        let cpu_pos = args
+            .iter()
+            .position(|a| a == "--cpus")
+            .expect("--cpus missing");
         assert_eq!(args[cpu_pos + 1], "0.5");
     }
 

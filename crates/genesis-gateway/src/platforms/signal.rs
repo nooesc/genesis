@@ -38,8 +38,7 @@ use crate::AppState;
 
 /// Base URL of the signal-cli HTTP daemon.
 fn signal_http_url() -> String {
-    std::env::var("SIGNAL_HTTP_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
+    std::env::var("SIGNAL_HTTP_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
 }
 
 /// The registered Signal account (phone number) this agent uses.
@@ -187,9 +186,7 @@ pub async fn webhook_handler(
 ) -> StatusCode {
     // Authenticate the webhook request when a shared secret is configured.
     if let Some(expected) = webhook_secret() {
-        let provided = headers
-            .get("x-signal-secret")
-            .and_then(|v| v.to_str().ok());
+        let provided = headers.get("x-signal-secret").and_then(|v| v.to_str().ok());
         if !verify_secret_token(&expected, provided) {
             warn!("signal webhook secret verification failed");
             return StatusCode::UNAUTHORIZED;
@@ -223,9 +220,7 @@ pub async fn webhook_handler(
 ///
 /// Call `POST /signal/poll` to trigger a one-shot receive. This is useful
 /// when signal-cli isn't configured to push webhooks.
-pub async fn poll_handler(
-    State(state): State<Arc<AppState>>,
-) -> StatusCode {
+pub async fn poll_handler(State(state): State<Arc<AppState>>) -> StatusCode {
     let account = match signal_account() {
         Some(a) => a,
         None => {
@@ -235,11 +230,7 @@ pub async fn poll_handler(
     };
 
     let base_url = signal_http_url();
-    let receive_url = format!(
-        "{}/v1/receive/{}",
-        base_url.trim_end_matches('/'),
-        account
-    );
+    let receive_url = format!("{}/v1/receive/{}", base_url.trim_end_matches('/'), account);
 
     let resp = match state.http_client.get(&receive_url).send().await {
         Ok(r) => r,
@@ -384,8 +375,15 @@ async fn process_envelope(
                 let account_clone = account.to_owned();
                 let source_clone = source.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        send_message(&client, &base_url, &account_clone, &source_clone, &reply, None).await
+                    if let Err(e) = send_message(
+                        &client,
+                        &base_url,
+                        &account_clone,
+                        &source_clone,
+                        &reply,
+                        None,
+                    )
+                    .await
                     {
                         error!(error = %e, "failed to send signal pairing reply");
                     }
@@ -399,8 +397,15 @@ async fn process_envelope(
                 let account_clone = account.to_owned();
                 let source_clone = source.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        send_message(&client, &base_url, &account_clone, &source_clone, &reply, None).await
+                    if let Err(e) = send_message(
+                        &client,
+                        &base_url,
+                        &account_clone,
+                        &source_clone,
+                        &reply,
+                        None,
+                    )
+                    .await
                     {
                         error!(error = %e, "failed to send signal capacity reply");
                     }
@@ -479,20 +484,7 @@ async fn process_envelope(
                 })
                 .await;
 
-            let reply_text = match result {
-                Ok(outcome) => {
-                    info!(
-                        turns_used = outcome.result.turns_used,
-                        tool_calls_made = outcome.result.tool_calls_made,
-                        "signal turn completed"
-                    );
-                    outcome.result.response
-                }
-                Err(e) => {
-                    error!(error = %e, "signal turn failed");
-                    format!("Sorry, I encountered an error: {e}")
-                }
-            };
+            let reply_text = super::extract_reply(result, "signal");
 
             // Stop typing indicator.
             let _ = send_typing_stop(
@@ -554,12 +546,16 @@ fn describe_attachments(data_message: &SignalDataMessage) -> String {
     let mut parts = Vec::new();
     for (i, att) in attachments.iter().enumerate() {
         let content_type = att.content_type.as_deref().unwrap_or("unknown");
-        let filename = att
-            .filename
+        let filename = att.filename.as_deref().unwrap_or("unnamed");
+        let size = att
+            .size
+            .map(|s| format!(" ({s} bytes)"))
+            .unwrap_or_default();
+        let id_info = att
+            .id
             .as_deref()
-            .unwrap_or("unnamed");
-        let size = att.size.map(|s| format!(" ({s} bytes)")).unwrap_or_default();
-        let id_info = att.id.as_deref().map(|id| format!(", id={id}")).unwrap_or_default();
+            .map(|id| format!(", id={id}"))
+            .unwrap_or_default();
         parts.push(format!(
             "[Attachment {}: {content_type}, \"{filename}\"{size}{id_info}]",
             i + 1
@@ -586,11 +582,7 @@ async fn send_message(
 
     for (i, chunk) in chunks.iter().enumerate() {
         // Only quote on the first chunk.
-        let quote = if i == 0 {
-            quote_timestamp
-        } else {
-            None
-        };
+        let quote = if i == 0 { quote_timestamp } else { None };
 
         let mut params = serde_json::json!({
             "account": account,
@@ -929,7 +921,7 @@ mod tests {
         // middle of a multi-byte character when using naive byte indexing.
         let emoji = "\u{1F600}"; // 4 bytes
         let text = emoji.repeat(30); // 120 bytes total
-        // max_len=50 would land inside an emoji at byte 50 if not handled.
+                                     // max_len=50 would land inside an emoji at byte 50 if not handled.
         let chunks = split_message(&text, 50);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {

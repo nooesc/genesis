@@ -299,8 +299,7 @@ mod tests {
         } else if cfg!(target_os = "linux") {
             let platform = result.unwrap();
             assert!(
-                platform == DisplayPlatform::LinuxWayland
-                    || platform == DisplayPlatform::LinuxX11
+                platform == DisplayPlatform::LinuxWayland || platform == DisplayPlatform::LinuxX11
             );
         } else {
             assert!(result.is_err());

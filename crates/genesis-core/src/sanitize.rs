@@ -115,11 +115,18 @@ struct SecretPattern {
     label: &'static str,
 }
 
+/// Minimum length for a Bearer token to be considered a real credential.
+const MIN_BEARER_TOKEN_LEN: usize = 10;
+
 /// Sanitize text by replacing known credential patterns with redaction markers.
 ///
 /// Returns a new string with all detected credentials replaced by
 /// `[REDACTED:<label>]`.
 pub fn sanitize_credentials(text: &str) -> String {
+    // Fast path: skip allocation and pattern scanning when no credentials are present.
+    if !contains_credentials(text) {
+        return text.to_owned();
+    }
     let mut result = text.to_owned();
 
     // Process patterns from longest prefix to shortest to avoid partial matches.
@@ -174,7 +181,7 @@ fn sanitize_bearer_tokens(text: &mut String) {
             .unwrap_or(text.len());
 
         let token_len = token_end - token_start;
-        if token_len >= 10 {
+        if token_len >= MIN_BEARER_TOKEN_LEN {
             text.replace_range(start..token_end, "[REDACTED:bearer-token]");
         } else {
             break;
@@ -243,7 +250,7 @@ pub fn contains_credentials(text: &str) -> bool {
             .find(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')')
             .map(|i| token_start + i)
             .unwrap_or(text.len());
-        if token_end - token_start >= 10 {
+        if token_end - token_start >= MIN_BEARER_TOKEN_LEN {
             return true;
         }
     }
@@ -312,7 +319,8 @@ mod tests {
 
     #[test]
     fn redacts_bearer_token() {
-        let input = r#"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.very-long-token-here"#;
+        let input =
+            r#"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.very-long-token-here"#;
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:bearer-token]"));
         assert!(!result.contains("eyJhb"));
@@ -320,7 +328,8 @@ mod tests {
 
     #[test]
     fn redacts_pem_private_key() {
-        let input = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n";
+        let input =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n";
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:private-key]"));
         assert!(!result.contains("MIIEowI"));
@@ -346,8 +355,12 @@ mod tests {
         assert!(contains_credentials(
             "token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn"
         ));
-        assert!(contains_credentials("key: sk-proj-1234567890abcdefghijklmno"));
-        assert!(contains_credentials("Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.token"));
+        assert!(contains_credentials(
+            "key: sk-proj-1234567890abcdefghijklmno"
+        ));
+        assert!(contains_credentials(
+            "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.token"
+        ));
         assert!(!contains_credentials("normal text with no secrets"));
         assert!(!contains_credentials("sk-short"));
     }
@@ -371,7 +384,8 @@ mod tests {
 
     #[test]
     fn redacts_github_fine_grained_pat() {
-        let input = "token: github_pat_11ABCDEFG0AbCdEfGhIjKl_MNOPQRSTUVWXYZ1234567890abcdefghijklmnopqr";
+        let input =
+            "token: github_pat_11ABCDEFG0AbCdEfGhIjKl_MNOPQRSTUVWXYZ1234567890abcdefghijklmnopqr";
         let result = sanitize_credentials(input);
         assert!(result.contains("[REDACTED:github-pat]"));
     }

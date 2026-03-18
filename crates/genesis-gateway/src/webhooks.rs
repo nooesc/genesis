@@ -4,6 +4,7 @@
 //! and exponential backoff. Failed deliveries after all retries are logged as
 //! dead-letter entries for later inspection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -67,12 +68,15 @@ pub struct WebhookMetrics {
     pub failed: AtomicU64,
 }
 
+/// Maximum number of entries retained in the dead-letter queue.
+const MAX_DEAD_LETTER_ENTRIES: usize = 1000;
+
 /// Dispatcher that sends events to configured webhooks with retry and dead-letter.
 #[derive(Clone)]
 pub struct WebhookDispatcher {
     client: Client,
     configs: Vec<WebhookConfig>,
-    dead_letters: Arc<Mutex<Vec<DeadLetterEntry>>>,
+    dead_letters: Arc<Mutex<VecDeque<DeadLetterEntry>>>,
     metrics: Arc<WebhookMetrics>,
 }
 
@@ -86,7 +90,7 @@ impl WebhookDispatcher {
         Self {
             client,
             configs,
-            dead_letters: Arc::new(Mutex::new(Vec::new())),
+            dead_letters: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(WebhookMetrics::default()),
         }
     }
@@ -107,7 +111,7 @@ impl WebhookDispatcher {
 
     /// Return a snapshot of the dead-letter queue.
     pub async fn dead_letters(&self) -> Vec<DeadLetterEntry> {
-        self.dead_letters.lock().await.clone()
+        Vec::from(self.dead_letters.lock().await.clone())
     }
 
     /// Clear the dead-letter queue, returning how many entries were removed.
@@ -130,9 +134,7 @@ impl WebhookDispatcher {
 
         for config in &self.configs {
             // Filter by event type if the webhook has a filter
-            if !config.events.is_empty()
-                && !config.events.iter().any(|e| e == event_str)
-            {
+            if !config.events.is_empty() && !config.events.iter().any(|e| e == event_str) {
                 continue;
             }
 
@@ -230,11 +232,11 @@ impl WebhookDispatcher {
                     failed_at: chrono::Utc::now().to_rfc3339(),
                 };
                 let mut dl = dead_letters.lock().await;
-                // Cap the dead-letter queue at 1000 entries
-                if dl.len() >= 1000 {
-                    dl.remove(0);
+                // Cap the dead-letter queue
+                if dl.len() >= MAX_DEAD_LETTER_ENTRIES {
+                    dl.pop_front();
                 }
-                dl.push(entry);
+                dl.push_back(entry);
             });
         }
     }
@@ -260,13 +262,13 @@ impl WebhookDispatcher {
 
 /// Compute HMAC-SHA256 signature for webhook payload verification.
 fn compute_hmac(secret: &str, body: &str) -> String {
-    use sha2::Sha256;
     use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());
     let result = mac.finalize();
     format!("sha256={}", hex::encode(result.into_bytes()))
@@ -363,7 +365,7 @@ mod tests {
         // Add a dead letter manually for testing
         {
             let mut dl = dispatcher.dead_letters.lock().await;
-            dl.push(DeadLetterEntry {
+            dl.push_back(DeadLetterEntry {
                 url: "http://example.com".into(),
                 event_type: "test".into(),
                 payload: "{}".into(),

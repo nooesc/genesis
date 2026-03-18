@@ -15,13 +15,11 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use genesis_mcp::McpManager;
 
 use crate::agent_loop::{AgentError, AgentLoop, AgentLoopConfig, AgentResult, SubagentSpawner};
-use crate::prompt::{SystemPromptBuilder, load_context_file};
+use crate::nudge::SKILL_CREATION_NUDGE;
+use crate::prompt::{load_context_file, SystemPromptBuilder};
 use crate::sandbox::{
-    BackendSpecific, SandboxBackend, SandboxConfig,
-    manager::SandboxManager,
-    singularity::SingularitySandbox,
-    modal::ModalSandbox,
-    daytona::DaytonaSandbox,
+    daytona::DaytonaSandbox, manager::SandboxManager, modal::ModalSandbox,
+    singularity::SingularitySandbox, BackendSpecific, SandboxBackend, SandboxConfig,
 };
 use crate::skills::{load_skills_prompt, load_skills_prompt_for_prompt};
 use crate::{build_default_tool_runtime, build_execution_context_from_loaded, ToolRuntime};
@@ -122,7 +120,17 @@ pub enum SessionExecutionError {
 
 impl<'a> SessionExecutionService<'a> {
     pub fn new(loaded: &'a LoadedConfig) -> Self {
-        Self { loaded, mcp: None, system_prompt_override: None, response_format: None, approval_handler: None, default_working_dir: None, model_override: None, personality_override: None, sandbox: std::sync::OnceLock::new() }
+        Self {
+            loaded,
+            mcp: None,
+            system_prompt_override: None,
+            response_format: None,
+            approval_handler: None,
+            default_working_dir: None,
+            model_override: None,
+            personality_override: None,
+            sandbox: std::sync::OnceLock::new(),
+        }
     }
 
     /// Create a service with MCP servers connected.
@@ -264,7 +272,10 @@ impl<'a> SessionExecutionService<'a> {
         Ok(true)
     }
 
-    pub fn load_history(&self, session_id: &str) -> Result<Vec<ChatMessage>, SessionExecutionError> {
+    pub fn load_history(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ChatMessage>, SessionExecutionError> {
         let _span = info_span!("session.load_history", session_id = session_id).entered();
         bootstrap(&self.loaded.config.storage.database_path)?;
         let store = self.session_store();
@@ -289,19 +300,20 @@ impl<'a> SessionExecutionService<'a> {
         let prompt = input.prompt.to_owned();
         let images = std::mem::take(&mut input.images);
 
-        let outcome = self.run_turn_with_runner(input, |history| async move {
-            let mut agent = self
-                .build_agent_loop(session_id, platform, history, Some(&prompt))
-                .await?;
-            let start_index = agent.messages().len();
-            let result = agent.run_turn_with_images(&prompt, images).await?;
-            Ok(ExecutedTurn {
-                result,
-                emitted_messages: agent.messages()[start_index..].to_vec(),
+        let outcome = self
+            .run_turn_with_runner(input, |history| async move {
+                let mut agent = self
+                    .build_agent_loop(session_id, platform, history, Some(&prompt))
+                    .await?;
+                let start_index = agent.messages().len();
+                let result = agent.run_turn_with_images(&prompt, images).await?;
+                Ok(ExecutedTurn {
+                    result,
+                    emitted_messages: agent.messages()[start_index..].to_vec(),
+                })
             })
-        })
-        .instrument(span)
-        .await?;
+            .instrument(span)
+            .await?;
         info!(
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "session run_turn latency recorded"
@@ -328,19 +340,22 @@ impl<'a> SessionExecutionService<'a> {
         let prompt = input.prompt.to_owned();
         let images = std::mem::take(&mut input.images);
 
-        let outcome = self.run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
-            let mut agent = self
-                .build_agent_loop(session_id, platform, history, Some(&prompt))
-                .await?;
-            let start_index = agent.messages().len();
-            let result = agent.run_turn_streaming_with_images(&prompt, images, on_chunk).await?;
-            Ok(ExecutedTurn {
-                result,
-                emitted_messages: agent.messages()[start_index..].to_vec(),
+        let outcome = self
+            .run_turn_streaming_with_runner(input, on_chunk, |history, on_chunk| async move {
+                let mut agent = self
+                    .build_agent_loop(session_id, platform, history, Some(&prompt))
+                    .await?;
+                let start_index = agent.messages().len();
+                let result = agent
+                    .run_turn_streaming_with_images(&prompt, images, on_chunk)
+                    .await?;
+                Ok(ExecutedTurn {
+                    result,
+                    emitted_messages: agent.messages()[start_index..].to_vec(),
+                })
             })
-        })
-        .instrument(span)
-        .await?;
+            .instrument(span)
+            .await?;
         info!(
             elapsed_ms = started_at.elapsed().as_millis() as u64,
             "session run_turn_streaming latency recorded"
@@ -373,9 +388,10 @@ impl<'a> SessionExecutionService<'a> {
             return None;
         }
 
+        use std::fmt::Write;
         let mut section = String::new();
         for mem in &memories {
-            section.push_str(&format!("- [{}] {}\n", mem.kind, mem.content));
+            let _ = writeln!(section, "- [{}] {}", mem.kind, mem.content);
         }
         Some(section)
     }
@@ -410,17 +426,18 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_terminal_backend(terminal_config_to_backend(terminal));
 
             // Wire up lifecycle-managed sandbox execution (persists across turns)
-            let components = self.sandbox.get_or_init(|| {
-                create_sandbox_components(self.loaded)
-            });
+            let components = self
+                .sandbox
+                .get_or_init(|| create_sandbox_components(self.loaded));
             if let Some(c) = components {
                 let mut config = c.base_config.clone();
                 config.task_id = execution_context.plan.session_id.clone();
-                let executor: Arc<dyn genesis_tools::SandboxExecutor> = Arc::new(SandboxExecutorImpl {
-                    manager: c.manager.clone(),
-                    backend: c.backend.clone(),
-                    config,
-                });
+                let executor: Arc<dyn genesis_tools::SandboxExecutor> =
+                    Arc::new(SandboxExecutorImpl {
+                        manager: c.manager.clone(),
+                        backend: c.backend.clone(),
+                        config,
+                    });
                 tool_runtime.set_sandbox_manager(executor);
             }
         }
@@ -475,15 +492,16 @@ impl<'a> SessionExecutionService<'a> {
 
         let platform_str = delivery_platform_str(&execution_context.plan.platform);
         let tool_defs = tool_runtime.definitions();
-        let mut prompt_builder = SystemPromptBuilder::new(
-            &execution_context.plan.profile,
-            &tool_defs,
-        ).delivery_platform(platform_str);
+        let mut prompt_builder =
+            SystemPromptBuilder::new(&execution_context.plan.profile, &tool_defs)
+                .delivery_platform(platform_str);
         if let Some(id) = self.system_prompt_override.as_deref() {
             prompt_builder = prompt_builder.identity(id);
         }
-        let effective_personality = self.personality_override.as_deref()
-            .or(self.loaded.config.personality.as_deref());
+        let effective_personality =
+            self.personality_override
+                .as_deref()
+                .or(self.loaded.config.personality.as_deref());
         if let Some(p) = effective_personality {
             prompt_builder = prompt_builder.personality(p);
         }
@@ -521,7 +539,8 @@ impl<'a> SessionExecutionService<'a> {
         );
 
         let hook_runner = crate::hooks::HookRunner::default();
-        let hooks: Arc<dyn crate::agent_loop::AgentHooks> = crate::audit::AuditHooks::shared(db_path);
+        let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
+            crate::audit::AuditHooks::shared(db_path);
 
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
@@ -538,7 +557,12 @@ impl<'a> SessionExecutionService<'a> {
                 tool_call_parser: self.loaded.config.provider.tool_call_parser.clone(),
                 reasoning_effort: self.loaded.config.runtime.reasoning_effort,
                 cache: self.loaded.config.runtime.cache.clone(),
-                guardrails: self.loaded.config.runtime.guardrails.as_ref()
+                guardrails: self
+                    .loaded
+                    .config
+                    .runtime
+                    .guardrails
+                    .as_ref()
                     .map(crate::guardrails::GuardrailConfig::from),
                 thinking: self.loaded.config.runtime.thinking_budget.map(|budget| {
                     genesis_provider::ThinkingConfig {
@@ -599,7 +623,14 @@ impl<'a> SessionExecutionService<'a> {
         }));
 
         // Set up response cache if configured
-        if self.loaded.config.runtime.cache.as_ref().is_some_and(|c| c.enabled) {
+        if self
+            .loaded
+            .config
+            .runtime
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.enabled)
+        {
             let cache = genesis_storage::ResponseCacheStore::new(db_path);
             agent.set_response_cache(cache);
         }
@@ -676,7 +707,10 @@ impl<'a> SessionExecutionService<'a> {
         let created_session =
             self.ensure_session(input.session_id, input.session_platform, input.title)?;
         let history = self.load_history(input.session_id)?;
-        debug!(history_messages = history.len(), "starting streaming turn execution");
+        debug!(
+            history_messages = history.len(),
+            "starting streaming turn execution"
+        );
         let executed = runner(history, on_chunk).await?;
         let store = self.session_store();
         persist_new_messages(&store, input.session_id, &executed.emitted_messages)?;
@@ -733,10 +767,7 @@ impl<'a> SessionExecutionService<'a> {
         let span = info_span!("workflow.run", workflow = %workflow.name, session_id = session_id);
         let _guard = span.enter();
 
-        info!(
-            steps = workflow.steps.len(),
-            "starting workflow execution"
-        );
+        info!(steps = workflow.steps.len(), "starting workflow execution");
 
         let mut step_outputs: HashMap<String, String> = HashMap::new();
         let mut step_results: Vec<StepResult> = Vec::new();
@@ -767,19 +798,18 @@ impl<'a> SessionExecutionService<'a> {
 
             let outcome = self.run_turn(turn_input).await?;
 
-            let step_output = outcome.result.response.clone();
+            let step_output = outcome.result.response; // move, not clone
             total_input_tokens += outcome.result.total_input_tokens;
             total_output_tokens += outcome.result.total_output_tokens;
 
             step_outputs.insert(step.name.clone(), step_output.clone());
+            final_output = step_output.clone();
             step_results.push(StepResult {
                 step_name: step.name.clone(),
-                output: step_output.clone(),
+                output: step_output, // move last use
                 input_tokens: outcome.result.total_input_tokens,
                 output_tokens: outcome.result.total_output_tokens,
             });
-
-            final_output = step_output;
 
             info!(
                 step = i + 1,
@@ -825,7 +855,7 @@ impl<'a> SessionExecutionService<'a> {
         &self,
         suite: &crate::eval::EvalSuite,
     ) -> Result<crate::eval::EvalReport, SessionExecutionError> {
-        use crate::eval::{evaluate_response, build_report, EvalResult};
+        use crate::eval::{build_report, evaluate_response, EvalResult};
 
         let started_at = chrono::Utc::now().to_rfc3339();
         let start_instant = std::time::Instant::now();
@@ -833,8 +863,7 @@ impl<'a> SessionExecutionService<'a> {
             Some((b, m)) => format!("{b}/{m}"),
             None => format!(
                 "{}/{}",
-                self.loaded.config.provider.backend,
-                self.loaded.config.provider.model
+                self.loaded.config.provider.backend, self.loaded.config.provider.model
             ),
         };
 
@@ -1093,7 +1122,11 @@ pub fn persist_new_messages(
         )?;
     }
 
-    debug!(session_id, persisted_messages = messages.len(), "persisted new messages");
+    debug!(
+        session_id,
+        persisted_messages = messages.len(),
+        "persisted new messages"
+    );
 
     Ok(())
 }
@@ -1134,24 +1167,10 @@ const SKILL_NUDGE_TOOL_THRESHOLD: usize = 5;
 /// Minimum turns used before injecting a skill creation nudge.
 const SKILL_NUDGE_TURN_THRESHOLD: usize = 3;
 
-/// Nudge message injected after complex turns to encourage autonomous skill
-/// creation. Stored as a system message in the session so the agent sees it
-/// at the start of the next turn.
-const SKILL_CREATION_NUDGE: &str = "\
-[Skill creation opportunity] The task you just completed was multi-step and \
-complex. Consider whether the approach you used could be distilled into a \
-reusable skill. If so, call `skill_create` with a descriptive name, clear \
-instructions for how to handle this type of task, and relevant tags. Good \
-skills capture durable patterns — not one-off details.";
-
 /// After a complex turn (many tool calls, multiple turns), inject a system
 /// message nudging the agent to create a skill from the pattern. The nudge
 /// is persisted so it appears when the next turn loads history.
-fn maybe_inject_skill_nudge(
-    store: &SessionStore,
-    session_id: &str,
-    result: &AgentResult,
-) {
+fn maybe_inject_skill_nudge(store: &SessionStore, session_id: &str, result: &AgentResult) {
     if result.tool_calls_made >= SKILL_NUDGE_TOOL_THRESHOLD
         && result.turns_used >= SKILL_NUDGE_TURN_THRESHOLD
         && result.finished_naturally
@@ -1180,7 +1199,13 @@ fn maybe_inject_skill_nudge(
 fn generate_session_title(prompt: &str) -> String {
     const MAX_LEN: usize = 60;
 
-    let normalized: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = prompt.split_whitespace().fold(String::new(), |mut acc, w| {
+        if !acc.is_empty() {
+            acc.push(' ');
+        }
+        acc.push_str(w);
+        acc
+    });
 
     let truncated: String = normalized.chars().take(MAX_LEN).collect();
 
@@ -1211,9 +1236,7 @@ pub fn delivery_platform_from_str(raw: &str) -> DeliveryPlatform {
         "telegram" => DeliveryPlatform::Telegram,
         "discord" => DeliveryPlatform::Discord,
         "slack" => DeliveryPlatform::Slack,
-        "homeassistant" | "home_assistant" | "home-assistant" => {
-            DeliveryPlatform::HomeAssistant
-        }
+        "homeassistant" | "home_assistant" | "home-assistant" => DeliveryPlatform::HomeAssistant,
         "whatsapp" => DeliveryPlatform::WhatsApp,
         "signal" => DeliveryPlatform::Signal,
         "api" => DeliveryPlatform::Api,
@@ -1238,7 +1261,7 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             let sb = match SingularitySandbox::new() {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("singularity backend unavailable: {e}");
+                    warn!(error = %e, backend = "singularity", "sandbox backend unavailable");
                     return None;
                 }
             };
@@ -1265,11 +1288,16 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             app,
             working_dir,
         } => {
-            let data_dir = loaded.config.storage.data_dir.to_string_lossy().into_owned();
+            let data_dir = loaded
+                .config
+                .storage
+                .data_dir
+                .to_string_lossy()
+                .into_owned();
             let sb = match ModalSandbox::new(&data_dir) {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("modal backend unavailable: {e}");
+                    warn!(error = %e, backend = "modal", "sandbox backend unavailable");
                     return None;
                 }
             };
@@ -1302,7 +1330,7 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             let sb = match DaytonaSandbox::new() {
                 Ok(sb) => sb,
                 Err(e) => {
-                    warn!("daytona backend unavailable: {e}");
+                    warn!(error = %e, backend = "daytona", "sandbox backend unavailable");
                     return None;
                 }
             };
@@ -1425,11 +1453,11 @@ mod tests {
     };
     use crate::agent_loop::AgentResult;
     use crate::tests::test_loaded_config;
-    use genesis_provider::MessageContent;
     use genesis_config::{
         AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
     };
     use genesis_provider::ChatMessage;
+    use genesis_provider::MessageContent;
     use genesis_storage::{bootstrap, SessionStore, StoredMessage};
     use genesis_types::DeliveryPlatform;
     use std::path::PathBuf;
@@ -1493,26 +1521,29 @@ mod tests {
             provider_metadata: None,
         }];
 
-        persist_new_messages(&store, "session-1", &messages)
-            .expect("messages should persist");
+        persist_new_messages(&store, "session-1", &messages).expect("messages should persist");
 
         let stored = store
             .load_messages("session-1")
             .expect("messages should load");
         assert_eq!(stored.len(), 1);
-        assert!(
-            stored[0]
-                .tool_calls_json
-                .as_deref()
-                .expect("tool calls json should exist")
-                .contains("\"echo\"")
-        );
+        assert!(stored[0]
+            .tool_calls_json
+            .as_deref()
+            .expect("tool calls json should exist")
+            .contains("\"echo\""));
     }
 
     #[test]
     fn delivery_platform_from_str_maps_known_destinations() {
-        assert_eq!(delivery_platform_from_str("telegram"), DeliveryPlatform::Telegram);
-        assert_eq!(delivery_platform_from_str("discord"), DeliveryPlatform::Discord);
+        assert_eq!(
+            delivery_platform_from_str("telegram"),
+            DeliveryPlatform::Telegram
+        );
+        assert_eq!(
+            delivery_platform_from_str("discord"),
+            DeliveryPlatform::Discord
+        );
         assert_eq!(
             delivery_platform_from_str("home-assistant"),
             DeliveryPlatform::HomeAssistant
@@ -1650,10 +1681,7 @@ mod tests {
 
     #[test]
     fn generate_title_normalizes_whitespace() {
-        assert_eq!(
-            generate_session_title("  hello   world  "),
-            "hello world"
-        );
+        assert_eq!(generate_session_title("  hello   world  "), "hello world");
     }
 
     #[test]
@@ -1685,7 +1713,11 @@ mod tests {
         let messages = store.load_messages("s1").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "system");
-        assert!(messages[0].content.as_deref().unwrap().contains("skill_create"));
+        assert!(messages[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("skill_create"));
     }
 
     #[test]
@@ -1783,6 +1815,7 @@ mod tests {
                 personality: Some("default".to_owned()),
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
+                tui: genesis_config::TuiConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1842,7 +1875,10 @@ mod tests {
             working_dir: None,
         };
         let backend = terminal_config_to_backend(&config);
-        assert!(matches!(backend, genesis_tools::TerminalBackend::Modal { .. }));
+        assert!(matches!(
+            backend,
+            genesis_tools::TerminalBackend::Modal { .. }
+        ));
     }
 
     #[test]
@@ -1860,6 +1896,9 @@ mod tests {
             working_dir: None,
         };
         let backend = terminal_config_to_backend(&config);
-        assert!(matches!(backend, genesis_tools::TerminalBackend::Daytona { .. }));
+        assert!(matches!(
+            backend,
+            genesis_tools::TerminalBackend::Daytona { .. }
+        ));
     }
 }

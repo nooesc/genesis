@@ -35,10 +35,12 @@ fn tag_by_tools(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     }
 
     // File operations
-    if tools
-        .iter()
-        .any(|t| matches!(*t, "read_file" | "write_file" | "patch" | "list_dir" | "list_tree"))
-    {
+    if tools.iter().any(|t| {
+        matches!(
+            *t,
+            "read_file" | "write_file" | "patch" | "list_dir" | "list_tree"
+        )
+    }) {
         tags.insert("file-ops".to_owned());
     }
 
@@ -48,10 +50,7 @@ fn tag_by_tools(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     }
 
     // Git operations
-    if tools
-        .iter()
-        .any(|t| t.starts_with("git_"))
-    {
+    if tools.iter().any(|t| t.starts_with("git_")) {
         tags.insert("git".to_owned());
     }
 
@@ -80,10 +79,12 @@ fn tag_by_tools(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     }
 
     // Creative/multimodal
-    if tools
-        .iter()
-        .any(|t| matches!(*t, "image_generation" | "text_to_speech" | "vision" | "transcribe"))
-    {
+    if tools.iter().any(|t| {
+        matches!(
+            *t,
+            "image_generation" | "text_to_speech" | "vision" | "transcribe"
+        )
+    }) {
         tags.insert("multimodal".to_owned());
     }
 
@@ -96,26 +97,22 @@ fn tag_by_tools(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     }
 
     // Home automation
-    if tools
-        .iter()
-        .any(|t| t.starts_with("ha_"))
-    {
+    if tools.iter().any(|t| t.starts_with("ha_")) {
         tags.insert("home-automation".to_owned());
     }
 
     // Agent coordination
-    if tools
-        .iter()
-        .any(|t| matches!(*t, "spawn_subagent" | "mixture_of_agents" | "reason_with_model"))
-    {
+    if tools.iter().any(|t| {
+        matches!(
+            *t,
+            "spawn_subagent" | "mixture_of_agents" | "reason_with_model"
+        )
+    }) {
         tags.insert("multi-agent".to_owned());
     }
 
     // Skills management
-    if tools
-        .iter()
-        .any(|t| t.starts_with("skill_"))
-    {
+    if tools.iter().any(|t| t.starts_with("skill_")) {
         tags.insert("skills".to_owned());
     }
 
@@ -191,14 +188,20 @@ fn tag_by_content(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     let lower = all_content.to_lowercase();
 
     // Coding indicators
-    if lower.contains("function") || lower.contains("class ") || lower.contains("def ")
-        || lower.contains("impl ") || lower.contains("struct ") || lower.contains("fn ")
+    if lower.contains("function")
+        || lower.contains("class ")
+        || lower.contains("def ")
+        || lower.contains("impl ")
+        || lower.contains("struct ")
+        || lower.contains("fn ")
     {
         tags.insert("coding".to_owned());
     }
 
     // Bug fix indicators
-    if lower.contains("fix") || lower.contains("bug") || lower.contains("error")
+    if lower.contains("fix")
+        || lower.contains("bug")
+        || lower.contains("error")
         || lower.contains("issue")
     {
         tags.insert("debugging".to_owned());
@@ -210,7 +213,9 @@ fn tag_by_content(trajectory: &Trajectory, tags: &mut HashSet<String>) {
     }
 
     // Refactoring indicators
-    if lower.contains("refactor") || lower.contains("rename") || lower.contains("move")
+    if lower.contains("refactor")
+        || lower.contains("rename")
+        || lower.contains("move")
         || lower.contains("extract")
     {
         tags.insert("refactoring".to_owned());
@@ -380,7 +385,10 @@ mod tests {
     #[test]
     fn tags_debugging_content() {
         let mut t = base_trajectory();
-        t.steps[0] = make_step(ActionType::UserMessage, "Fix this bug in the login function");
+        t.steps[0] = make_step(
+            ActionType::UserMessage,
+            "Fix this bug in the login function",
+        );
         let tags = auto_tag(&t);
         assert!(tags.contains(&"debugging".to_owned()));
     }

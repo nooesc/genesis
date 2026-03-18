@@ -44,11 +44,7 @@ impl HookRunner {
         Self { hooks }
     }
 
-    pub fn run_hooks(
-        &self,
-        event: HookEvent,
-        context: &serde_json::Value,
-    ) -> Vec<HookResult> {
+    pub fn run_hooks(&self, event: HookEvent, context: &serde_json::Value) -> Vec<HookResult> {
         self.hooks
             .iter()
             .filter(|hook| hook.enabled && hook.event == event)

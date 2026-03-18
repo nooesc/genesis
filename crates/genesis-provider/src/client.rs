@@ -41,9 +41,13 @@ pub struct ChatClient {
 
 impl ChatClient {
     /// Create a new client from a resolved provider.
+    ///
+    /// The backend string is normalized to lowercase so all downstream
+    /// comparisons can use simple `==`.
     pub fn new(provider: &ResolvedProvider) -> Result<Self, ProviderError> {
-        let is_anthropic = provider.backend == "anthropic";
-        let is_gemini = matches!(provider.backend.as_str(), "gemini" | "google");
+        let backend = provider.backend.to_ascii_lowercase();
+        let is_anthropic = backend == "anthropic";
+        let is_gemini = matches!(backend.as_str(), "gemini" | "google");
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -60,10 +64,7 @@ impl ChatClient {
                     })?,
                 );
             }
-            headers.insert(
-                "anthropic-version",
-                HeaderValue::from_static("2023-06-01"),
-            );
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             // token-efficient-tools applies to all requests;
             // fine-grained-tool-streaming only affects streaming calls
             // but is harmless for non-streaming (Anthropic ignores it).
@@ -115,7 +116,7 @@ impl ChatClient {
             http,
             endpoint,
             model: provider.model.clone(),
-            backend: provider.backend.clone(),
+            backend,
             api_key,
         })
     }
@@ -165,12 +166,12 @@ impl ChatClient {
                     }
 
                     if !is_retryable_status(status.as_u16()) || attempt == MAX_RETRIES {
-                        let resp_body = read_text_with_limit(
-                            response,
-                            MAX_NON_STREAMING_RESPONSE_BYTES,
-                        )
-                        .await
-                        .unwrap_or_else(|error| format!("unreadable response body: {error}"));
+                        let resp_body =
+                            read_text_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES)
+                                .await
+                                .unwrap_or_else(|error| {
+                                    format!("unreadable response body: {error}")
+                                });
                         warn!(
                             endpoint = self.endpoint.as_str(),
                             model,
@@ -261,26 +262,24 @@ impl ChatClient {
         }
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await?;
 
-        let completion: ChatCompletionResponse = match read_json_with_limit(
-            response,
-            MAX_NON_STREAMING_RESPONSE_BYTES,
-        )
-        .await
-        {
-            Ok(completion) => completion,
-            Err(error) => {
-                error!(
-                    endpoint = self.endpoint.as_str(),
-                    model = request.model.as_str(),
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "chat completion response decode failed"
-                );
-                return Err(error);
-            }
-        };
+        let completion: ChatCompletionResponse =
+            match read_json_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES).await {
+                Ok(completion) => completion,
+                Err(error) => {
+                    error!(
+                        endpoint = self.endpoint.as_str(),
+                        model = request.model.as_str(),
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        error = %error,
+                        "chat completion response decode failed"
+                    );
+                    return Err(error);
+                }
+            };
 
         if completion.choices.is_empty() {
             warn!(
@@ -313,26 +312,24 @@ impl ChatClient {
 
         let anthropic_req = anthropic_types::to_anthropic_request(&request);
         let body = serde_json::to_value(&anthropic_req)?;
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await?;
 
-        let anthropic_resp: AnthropicResponse = match read_json_with_limit(
-            response,
-            MAX_NON_STREAMING_RESPONSE_BYTES,
-        )
-        .await
-        {
-            Ok(resp) => resp,
-            Err(error) => {
-                error!(
-                    endpoint = self.endpoint.as_str(),
-                    model = request.model.as_str(),
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "anthropic response decode failed"
-                );
-                return Err(error);
-            }
-        };
+        let anthropic_resp: AnthropicResponse =
+            match read_json_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES).await {
+                Ok(resp) => resp,
+                Err(error) => {
+                    error!(
+                        endpoint = self.endpoint.as_str(),
+                        model = request.model.as_str(),
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        error = %error,
+                        "anthropic response decode failed"
+                    );
+                    return Err(error);
+                }
+            };
 
         let completion = anthropic_types::from_anthropic_response(anthropic_resp);
 
@@ -372,24 +369,20 @@ impl ChatClient {
         let body = serde_json::to_value(&gemini_req)?;
         let response = self.send_with_retry(&url, &body, &request.model).await?;
 
-        let gemini_resp: gemini_types::GeminiResponse = match read_json_with_limit(
-            response,
-            MAX_NON_STREAMING_RESPONSE_BYTES,
-        )
-        .await
-        {
-            Ok(resp) => resp,
-            Err(error) => {
-                error!(
-                    endpoint = self.endpoint.as_str(),
-                    model = request.model.as_str(),
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    error = %error,
-                    "gemini response decode failed"
-                );
-                return Err(error);
-            }
-        };
+        let gemini_resp: gemini_types::GeminiResponse =
+            match read_json_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES).await {
+                Ok(resp) => resp,
+                Err(error) => {
+                    error!(
+                        endpoint = self.endpoint.as_str(),
+                        model = request.model.as_str(),
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        error = %error,
+                        "gemini response decode failed"
+                    );
+                    return Err(error);
+                }
+            };
 
         let completion = gemini_types::from_gemini_response(gemini_resp, &request.model);
 
@@ -492,16 +485,14 @@ impl ChatClient {
         request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await?;
 
         info!(
             endpoint = self.endpoint.as_str(),
             model = request.model.as_str(),
             elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens = 0u32,
-            completion_tokens = 0u32,
-            total_tokens = 0u32,
-            token_counts_available = false,
             "streaming chat completion request accepted"
         );
 
@@ -532,10 +523,6 @@ impl ChatClient {
                                 endpoint = endpoint.as_str(),
                                 model = model.as_str(),
                                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
-                                prompt_tokens = 0u32,
-                                completion_tokens = 0u32,
-                                total_tokens = 0u32,
-                                token_counts_available = false,
                                 chunk_count,
                                 "streaming chat completion finished"
                             );
@@ -556,10 +543,6 @@ impl ChatClient {
                 endpoint = endpoint.as_str(),
                 model = model.as_str(),
                 elapsed_ms = stream_started_at.elapsed().as_millis() as u64,
-                prompt_tokens = 0u32,
-                completion_tokens = 0u32,
-                total_tokens = 0u32,
-                token_counts_available = false,
                 chunk_count,
                 "streaming chat completion stream closed"
             );
@@ -578,16 +561,14 @@ impl ChatClient {
 
         let anthropic_req = anthropic_types::to_anthropic_request(&request);
         let body = serde_json::to_value(&anthropic_req)?;
-        let response = self.send_with_retry(&self.endpoint, &body, &request.model).await?;
+        let response = self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await?;
 
         info!(
             endpoint = self.endpoint.as_str(),
             model = request.model.as_str(),
             elapsed_ms = started_at.elapsed().as_millis() as u64,
-            prompt_tokens = 0u32,
-            completion_tokens = 0u32,
-            total_tokens = 0u32,
-            token_counts_available = false,
             "anthropic streaming request accepted"
         );
 
@@ -1102,7 +1083,10 @@ mod tests {
         };
 
         let client = ChatClient::new(&provider).expect("should build client");
-        assert_eq!(client.endpoint(), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            client.endpoint(),
+            "https://api.openai.com/v1/chat/completions"
+        );
         assert_eq!(client.model(), "gpt-4");
         assert_eq!(client.backend(), "openai");
     }
@@ -1195,7 +1179,9 @@ mod tests {
     #[test]
     fn backoff_delay_caps_at_max() {
         let d10 = backoff_delay(10);
-        assert!(d10.as_millis() <= MAX_DELAY.as_millis() as u128 + MAX_DELAY.as_millis() as u128 / 4);
+        assert!(
+            d10.as_millis() <= MAX_DELAY.as_millis() as u128 + MAX_DELAY.as_millis() as u128 / 4
+        );
     }
 
     #[test]
@@ -1220,7 +1206,9 @@ mod tests {
         inject_cache_control(&mut body);
 
         let system_msg = &body["messages"][0];
-        let content = system_msg["content"].as_array().expect("content should be array");
+        let content = system_msg["content"]
+            .as_array()
+            .expect("content should be array");
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "You are Eve.");
@@ -1268,10 +1256,7 @@ mod tests {
         };
 
         let client = ChatClient::new(&provider).expect("should build anthropic client");
-        assert_eq!(
-            client.endpoint(),
-            "https://api.anthropic.com/v1/messages"
-        );
+        assert_eq!(client.endpoint(), "https://api.anthropic.com/v1/messages");
         assert_eq!(client.backend(), "anthropic");
     }
 
@@ -1350,12 +1335,15 @@ mod tests {
             ],
         );
 
-        let body = ChatClient::prepare_body(&mut request, "anthropic")
-            .expect("should prepare body");
+        let body =
+            ChatClient::prepare_body(&mut request, "anthropic").expect("should prepare body");
 
         // System message should have content blocks with cache_control
         let system_content = &body["messages"][0]["content"];
-        assert!(system_content.is_array(), "system content should be array for anthropic");
+        assert!(
+            system_content.is_array(),
+            "system content should be array for anthropic"
+        );
         assert_eq!(system_content[0]["cache_control"]["type"], "ephemeral");
     }
 
@@ -1369,8 +1357,7 @@ mod tests {
             ],
         );
 
-        let body = ChatClient::prepare_body(&mut request, "openai")
-            .expect("should prepare body");
+        let body = ChatClient::prepare_body(&mut request, "openai").expect("should prepare body");
 
         // System message content should remain a string for openai
         assert!(body["messages"][0]["content"].is_string());

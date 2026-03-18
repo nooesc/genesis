@@ -38,7 +38,10 @@ impl ToolHandler for MemoryStoreTool {
             )
             .map_err(|error| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!("failed to insert memory into `{}`: {error}", database_path.display()),
+                reason: format!(
+                    "failed to insert memory into `{}`: {error}",
+                    database_path.display()
+                ),
             })?;
 
         let memory_row_id = connection.last_insert_rowid();
@@ -82,10 +85,12 @@ impl ToolHandler for MemoryRecallTool {
             .arguments
             .get("limit")
             .map(|value| {
-                value.parse::<usize>().map_err(|error| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: format!("invalid `limit` value `{value}`: {error}"),
-                })
+                value
+                    .parse::<usize>()
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: format!("invalid `limit` value `{value}`: {error}"),
+                    })
             })
             .transpose()?
             .unwrap_or(DEFAULT_RECALL_LIMIT);
@@ -121,12 +126,12 @@ impl ToolHandler for MemoryRecallTool {
                 reason: format!("failed to search memories: {error}"),
             })?;
 
-        let memories = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to collect memory search results: {error}"),
-            })?;
+        let memories =
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to collect memory search results: {error}"),
+                })?;
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
@@ -195,12 +200,8 @@ mod tests {
     fn ctx(data_dir: &str) -> ToolContext {
         ToolContext {
             session_id: "session-42".to_owned(),
-            profile: "operator".to_owned(),
             data_dir: data_dir.to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx()
         }
     }
 

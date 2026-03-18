@@ -9,10 +9,7 @@ const TIMEOUT_SECS: u64 = 120;
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .build()
-            .expect("failed to build HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| b)
     })
 }
 
@@ -32,13 +29,13 @@ impl ToolHandler for ImageGenerationTool {
                 argument: "prompt",
             })?;
 
-        let output_path = call
-            .arguments
-            .get("output_path")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "output_path",
-            })?;
+        let output_path =
+            call.arguments
+                .get("output_path")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "output_path",
+                })?;
 
         let model = call
             .arguments
@@ -69,10 +66,7 @@ impl ToolHandler for ImageGenerationTool {
         if !valid_sizes.contains(&size) {
             return Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "invalid size '{size}'. Valid: {}",
-                    valid_sizes.join(", ")
-                ),
+                reason: format!("invalid size '{size}'. Valid: {}", valid_sizes.join(", ")),
             });
         }
 
@@ -81,7 +75,7 @@ impl ToolHandler for ImageGenerationTool {
             .get("api_base")
             .cloned()
             .or_else(|| std::env::var("OPENAI_API_BASE").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+            .unwrap_or_else(|| genesis_provider::OPENAI_BASE_URL.to_owned());
 
         let api_key = call
             .arguments
@@ -149,13 +143,12 @@ impl ToolHandler for ImageGenerationTool {
 
         // Decode and save to file.
         use base64::Engine;
-        let image_bytes =
-            base64::engine::general_purpose::STANDARD
-                .decode(b64_data)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: format!("failed to decode image data: {e}"),
-                })?;
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64_data)
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to decode image data: {e}"),
+            })?;
 
         std::fs::write(output_path, &image_bytes).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
@@ -192,15 +185,7 @@ mod tests {
     use crate::ToolContext;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     fn make_call(args: Vec<(&str, &str)>) -> ToolCall {
@@ -246,10 +231,7 @@ mod tests {
     fn error_on_missing_api_key() {
         std::env::remove_var("OPENAI_API_KEY");
         let tool = ImageGenerationTool;
-        let call = make_call(vec![
-            ("prompt", "a cat"),
-            ("output_path", "/tmp/test.png"),
-        ]);
+        let call = make_call(vec![("prompt", "a cat"), ("output_path", "/tmp/test.png")]);
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(err.to_string().contains("API key"));
     }

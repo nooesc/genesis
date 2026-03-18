@@ -13,13 +13,11 @@ use std::time::Duration;
 /// minimal builder with only the timeout is tried.
 pub fn build_blocking_client(
     timeout: Duration,
-    configure: impl FnOnce(
-        reqwest::blocking::ClientBuilder,
-    ) -> reqwest::blocking::ClientBuilder,
+    configure: impl FnOnce(reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder,
 ) -> reqwest::blocking::Client {
     let builder = reqwest::blocking::Client::builder().timeout(timeout);
     configure(builder).build().unwrap_or_else(|e| {
-        eprintln!("warning: HTTP client build failed ({e}), using minimal fallback");
+        tracing::warn!(error = %e, "failed to build configured HTTP client, falling back to default");
         reqwest::blocking::Client::builder()
             .timeout(timeout)
             .build()

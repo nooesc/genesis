@@ -140,12 +140,17 @@ struct WhisperResponse {
     text: String,
 }
 
-// --- Voice/Audio transcription helpers ---
+// --- Telegram file download helper ---
 
-/// Download a file from Telegram by file_id, then transcribe via Whisper API.
-/// Returns the transcribed text, or an error description.
-async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_id: &str) -> Result<String, String> {
-    // Step 1: Get the file path from Telegram.
+/// Call the Telegram `getFile` API and download the file bytes.
+///
+/// This is shared between voice/audio transcription and sticker image analysis
+/// to avoid duplicating the two-step getFile + download flow.
+async fn telegram_fetch_file(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<(Vec<u8>, String), String> {
     let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
         .post(&get_file_url)
@@ -168,33 +173,43 @@ async fn transcribe_telegram_audio(client: &reqwest::Client, token: &str, file_i
         .and_then(|r| r.file_path)
         .ok_or_else(|| "no file_path in getFile response".to_owned())?;
 
-    // Step 2: Download the actual audio file.
     let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-    let audio_bytes = client
+    let file_bytes = client
         .get(&download_url)
         .send()
         .await
         .map_err(|e| format!("file download failed: {e}"))?
         .bytes()
         .await
-        .map_err(|e| format!("failed to read audio bytes: {e}"))?;
+        .map_err(|e| format!("failed to read file bytes: {e}"))?;
 
-    if audio_bytes.is_empty() {
-        return Err("downloaded audio file is empty".to_owned());
+    if file_bytes.is_empty() {
+        return Err("downloaded file is empty".to_owned());
     }
 
-    // Step 3: Transcribe via Whisper API.
+    Ok((file_bytes.to_vec(), file_path))
+}
+
+// --- Voice/Audio transcription helpers ---
+
+/// Download a file from Telegram by file_id, then transcribe via Whisper API.
+/// Returns the transcribed text, or an error description.
+async fn transcribe_telegram_audio(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<String, String> {
+    let (audio_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
+
+    // Transcribe via Whisper API.
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY not set, cannot transcribe".to_owned())?;
 
-    let api_base = std::env::var("OPENAI_API_BASE")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+    let api_base =
+        std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
 
     // Determine file extension from file_path.
-    let ext = file_path
-        .rsplit('.')
-        .next()
-        .unwrap_or("ogg");
+    let ext = file_path.rsplit('.').next().unwrap_or("ogg");
     let mime = match ext {
         "ogg" | "oga" => "audio/ogg",
         "mp3" => "audio/mpeg",
@@ -305,9 +320,7 @@ async fn resolve_sticker_prompt(
 
 /// Format a sticker context string for the agent prompt.
 fn format_sticker_context(emoji: &str, set_name: &str, description: &str) -> String {
-    format!(
-        "[The user sent a sticker {emoji} from \"{set_name}\". It shows: \"{description}\"]"
-    )
+    format!("[The user sent a sticker {emoji} from \"{set_name}\". It shows: \"{description}\"]")
 }
 
 /// Download a sticker image from Telegram and analyze it with a vision LLM.
@@ -317,43 +330,7 @@ async fn analyze_sticker_image(
     file_id: &str,
     config: &genesis_config::GenesisConfig,
 ) -> Result<String, String> {
-    // Step 1: Get the file path from Telegram.
-    let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
-    let resp = client
-        .post(&get_file_url)
-        .json(&serde_json::json!({ "file_id": file_id }))
-        .send()
-        .await
-        .map_err(|e| format!("getFile request failed: {e}"))?;
-
-    let file_resp: GetFileResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse getFile response: {e}"))?;
-
-    if !file_resp.ok {
-        return Err("Telegram getFile returned not ok".to_owned());
-    }
-
-    let file_path = file_resp
-        .result
-        .and_then(|r| r.file_path)
-        .ok_or_else(|| "no file_path in getFile response".to_owned())?;
-
-    // Step 2: Download the sticker image.
-    let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-    let image_bytes = client
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| format!("sticker download failed: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("failed to read sticker bytes: {e}"))?;
-
-    if image_bytes.is_empty() {
-        return Err("downloaded sticker file is empty".to_owned());
-    }
+    let (image_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Determine MIME type from file extension.
     let ext = file_path.rsplit('.').next().unwrap_or("webp");
@@ -459,8 +436,15 @@ pub async fn webhook_handler(
     // Classify the incoming message into a typed input.
     enum MessageInput {
         Text(String),
-        Voice { file_id: String, duration: i64 },
-        Audio { file_id: String, duration: i64, file_name: String },
+        Voice {
+            file_id: String,
+            duration: i64,
+        },
+        Audio {
+            file_id: String,
+            duration: i64,
+            file_name: String,
+        },
         Sticker(TelegramSticker),
     }
 
@@ -487,7 +471,10 @@ pub async fn webhook_handler(
         MessageInput::Audio {
             file_id: audio.file_id.clone(),
             duration: audio.duration.unwrap_or(0),
-            file_name: audio.file_name.clone().unwrap_or_else(|| "audio".to_owned()),
+            file_name: audio
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "audio".to_owned()),
         }
     } else {
         return StatusCode::OK; // Ignore unsupported message types
@@ -540,7 +527,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send pairing reply");
                 }
             });
@@ -551,7 +540,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send capacity reply");
                 }
             });
@@ -571,7 +562,9 @@ pub async fn webhook_handler(
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             tokio::spawn(async move {
-                if let Err(e) = send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await {
+                if let Err(e) =
+                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
+                {
                     error!(error = %e, "failed to send command reply");
                 }
             });
@@ -652,20 +645,7 @@ pub async fn webhook_handler(
                 })
                 .await;
 
-            let reply_text = match result {
-                Ok(outcome) => {
-                    info!(
-                        turns_used = outcome.result.turns_used,
-                        tool_calls_made = outcome.result.tool_calls_made,
-                        "telegram turn completed"
-                    );
-                    outcome.result.response
-                }
-                Err(e) => {
-                    error!(error = %e, "telegram turn failed");
-                    format!("Sorry, I encountered an error: {e}")
-                }
-            };
+            let reply_text = super::extract_reply(result, "telegram");
 
             if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply_text, Some(message_id)).await {
                 error!(error = %e, "failed to send telegram reply");
@@ -747,11 +727,22 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        // Try to find a newline within the limit
-        let split_at = remaining[..max_len]
+        // Walk back to a char boundary so we never slice inside a multi-byte
+        // character (e.g. emoji). `floor_char_boundary` returns the largest
+        // byte index <= max_len that sits on a UTF-8 char boundary.
+        let safe_end = remaining.floor_char_boundary(max_len);
+
+        // Try to find a newline within the limit, then a space
+        let mut split_at = remaining[..safe_end]
             .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .or_else(|| remaining[..safe_end].rfind(' '))
+            .unwrap_or(safe_end);
+
+        // Guard: if remaining starts with a delimiter, rfind returns 0 which
+        // would push an empty chunk. Fall back to the full safe window.
+        if split_at == 0 {
+            split_at = safe_end;
+        }
 
         chunks.push(remaining[..split_at].to_owned());
         remaining = remaining[split_at..].trim_start();
@@ -811,6 +802,32 @@ mod tests {
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 100);
+        }
+    }
+
+    #[test]
+    fn split_message_multibyte_utf8_does_not_panic() {
+        // Each emoji is 4 bytes. Build a string that forces a split in the
+        // middle of a multi-byte character when using naive byte indexing.
+        let emoji = "\u{1F600}"; // 4 bytes
+        let text = emoji.repeat(30); // 120 bytes total
+                                     // max_len=50 would land inside an emoji at byte 50 if not handled.
+        let chunks = split_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 50);
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn split_message_leading_delimiter_does_not_produce_empty_chunk() {
+        // When remaining starts with '\n' or ' ', rfind returns Some(0).
+        // The guard must prevent pushing an empty chunk.
+        let text = format!("\n{}", "a".repeat(100));
+        let chunks = split_message(&text, 50);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "empty chunk produced");
         }
     }
 
@@ -1066,7 +1083,8 @@ mod tests {
             .expect("cache set");
 
         let cached = cache.get("unique-123").unwrap().unwrap();
-        let context = format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
+        let context =
+            format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
         assert_eq!(
             context,
             "[The user sent a sticker 🐸 from \"FrogPack\". It shows: \"A happy frog jumping\"]"

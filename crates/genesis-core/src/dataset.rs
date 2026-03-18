@@ -159,8 +159,7 @@ pub fn load_manifest(dir: &Path) -> Result<DatasetManifest, DatasetError> {
     let path = dir.join("dataset.json");
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| DatasetError::Io(format!("failed to read {}: {e}", path.display())))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| DatasetError::Parse(format!("invalid manifest: {e}")))
+    serde_json::from_str(&raw).map_err(|e| DatasetError::Parse(format!("invalid manifest: {e}")))
 }
 
 fn collect_json_files(
@@ -188,24 +187,15 @@ fn collect_json_files(
     Ok(files)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DatasetError {
+    #[error("no trajectory files in {0}")]
     EmptyDirectory(String),
+    #[error("{0}")]
     Io(String),
+    #[error("{0}")]
     Parse(String),
 }
-
-impl std::fmt::Display for DatasetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyDirectory(d) => write!(f, "no trajectory files in {d}"),
-            Self::Io(msg) => write!(f, "{msg}"),
-            Self::Parse(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for DatasetError {}
 
 #[cfg(test)]
 mod tests {
@@ -248,9 +238,8 @@ mod tests {
         write_test_trajectory(dir.path(), "s2", "gpt-4", 3);
         write_test_trajectory(dir.path(), "s3", "claude", 7);
 
-        let manifest =
-            build_manifest("test-dataset", "A test dataset", dir.path(), false)
-                .expect("should build manifest");
+        let manifest = build_manifest("test-dataset", "A test dataset", dir.path(), false)
+            .expect("should build manifest");
 
         assert_eq!(manifest.name, "test-dataset");
         assert_eq!(manifest.file_count, 3);
@@ -270,14 +259,9 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         write_test_trajectory(dir.path(), "s1", "gpt-4", 3);
         // Write a dataset.json file that should be ignored
-        std::fs::write(
-            dir.path().join("dataset.json"),
-            r#"{"name":"old"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("dataset.json"), r#"{"name":"old"}"#).unwrap();
 
-        let manifest =
-            build_manifest("new", "fresh", dir.path(), false).expect("should build");
+        let manifest = build_manifest("new", "fresh", dir.path(), false).expect("should build");
         assert_eq!(manifest.file_count, 1);
     }
 
@@ -319,8 +303,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         write_test_trajectory(dir.path(), "s1", "m", 2);
 
-        let manifest =
-            build_manifest("outcomes", "test", dir.path(), false).expect("should build");
+        let manifest = build_manifest("outcomes", "test", dir.path(), false).expect("should build");
         assert_eq!(manifest.statistics.outcome_counts["success"], 1);
     }
 }

@@ -269,11 +269,7 @@ fn score_efficiency(trajectory: &Trajectory, issues: &mut Vec<String>) -> f64 {
         ));
     }
 
-    let stuck_penalty = if consecutive_same_tool >= 3 {
-        0.3
-    } else {
-        0.0
-    };
+    let stuck_penalty = if consecutive_same_tool >= 3 { 0.3 } else { 0.0 };
 
     (1.0 - error_rate - stuck_penalty).max(0.0)
 }
@@ -410,11 +406,17 @@ mod tests {
                 make_step(ActionType::UserMessage, "List the files in /tmp"),
                 make_tool_call("shell_exec", "ls /tmp"),
                 make_tool_result("shell_exec", "file1.txt\nfile2.txt"),
-                make_step(ActionType::AssistantMessage, "Found 2 files: file1.txt and file2.txt"),
+                make_step(
+                    ActionType::AssistantMessage,
+                    "Found 2 files: file1.txt and file2.txt",
+                ),
                 make_step(ActionType::UserMessage, "Read file1.txt"),
                 make_tool_call("read_file", "read_file /tmp/file1.txt"),
                 make_tool_result("read_file", "Hello world"),
-                make_step(ActionType::AssistantMessage, "The file contains: Hello world"),
+                make_step(
+                    ActionType::AssistantMessage,
+                    "The file contains: Hello world",
+                ),
             ],
             outcome: Some(TrajectoryOutcome::Success),
             tags: vec!["demo".to_owned()],
@@ -447,16 +449,28 @@ mod tests {
     #[test]
     fn good_trajectory_scores_high() {
         let s = score(&good_trajectory());
-        assert!(s.overall > 0.7, "good trajectory should score > 0.7, got {}", s.overall);
+        assert!(
+            s.overall > 0.7,
+            "good trajectory should score > 0.7, got {}",
+            s.overall
+        );
         assert_eq!(s.dimensions.outcome, 1.0);
         assert!(s.dimensions.completeness > 0.9);
-        assert!(s.issues.is_empty(), "good trajectory should have no issues: {:?}", s.issues);
+        assert!(
+            s.issues.is_empty(),
+            "good trajectory should have no issues: {:?}",
+            s.issues
+        );
     }
 
     #[test]
     fn bad_trajectory_scores_low() {
         let s = score(&bad_trajectory());
-        assert!(s.overall < 0.4, "bad trajectory should score < 0.4, got {}", s.overall);
+        assert!(
+            s.overall < 0.4,
+            "bad trajectory should score < 0.4, got {}",
+            s.overall
+        );
         assert_eq!(s.dimensions.outcome, 0.0);
         assert!(!s.issues.is_empty());
     }
@@ -474,7 +488,11 @@ mod tests {
             tags: vec![],
         };
         let s = score(&t);
-        assert!(s.overall < 0.3, "empty trajectory should score very low, got {}", s.overall);
+        assert!(
+            s.overall < 0.3,
+            "empty trajectory should score very low, got {}",
+            s.overall
+        );
     }
 
     #[test]
@@ -504,7 +522,11 @@ mod tests {
     fn filter_removes_low_quality() {
         let trajectories = vec![good_trajectory(), bad_trajectory()];
         let good_indices = filter_by_quality(&trajectories, 0.5);
-        assert_eq!(good_indices, vec![0], "should keep only the good trajectory");
+        assert_eq!(
+            good_indices,
+            vec![0],
+            "should keep only the good trajectory"
+        );
     }
 
     #[test]
@@ -512,7 +534,11 @@ mod tests {
         let mut t = good_trajectory();
         t.outcome = Some(TrajectoryOutcome::Abandoned);
         let s = score(&t);
-        assert!(s.overall > 0.3 && s.overall < 0.8, "abandoned should score medium: {}", s.overall);
+        assert!(
+            s.overall > 0.3 && s.overall < 0.8,
+            "abandoned should score medium: {}",
+            s.overall
+        );
         assert_eq!(s.dimensions.outcome, 0.2);
     }
 
@@ -542,7 +568,10 @@ mod tests {
         };
         let outcome_score = score_with_weights(&t, &outcome_only);
 
-        assert_eq!(outcome_score.overall, 1.0, "outcome-only should be 1.0 for success");
+        assert_eq!(
+            outcome_score.overall, 1.0,
+            "outcome-only should be 1.0 for success"
+        );
         // Default includes other dimensions, so won't be exactly 1.0
         assert!(default_score.overall < 1.0 || default_score.overall == 1.0);
     }

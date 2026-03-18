@@ -11,11 +11,9 @@ const TIMEOUT_SECS: u64 = 15;
 fn search_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(TIMEOUT_SECS))
-            .user_agent("genesis-agent/0.1")
-            .build()
-            .expect("failed to build HTTP client")
+        crate::http::build_blocking_client(Duration::from_secs(TIMEOUT_SECS), |b| {
+            b.user_agent("genesis-agent/0.1")
+        })
     })
 }
 
@@ -127,7 +125,10 @@ fn search_ddg(query: &str, count: usize) -> Result<String, String> {
         if !abstract_text.is_empty() {
             let source = body["AbstractSource"].as_str().unwrap_or("");
             let url = body["AbstractURL"].as_str().unwrap_or("");
-            results.push(format!("1. {} ({})\n   {}\n   {}", source, url, url, abstract_text));
+            results.push(format!(
+                "1. {} ({})\n   {}\n   {}",
+                source, url, url, abstract_text
+            ));
         }
     }
 
@@ -159,15 +160,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            session_id: "test".to_owned(),
-            profile: "test".to_owned(),
-            data_dir: "/tmp".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-        }
+        crate::test_utils::test_ctx()
     }
 
     #[test]

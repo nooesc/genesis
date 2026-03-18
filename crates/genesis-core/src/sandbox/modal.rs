@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use super::{
     BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance,
 };
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 const MODAL_SIDECAR_SCRIPT: &str = include_str!("../../../../scripts/modal_sandbox.py");
 
@@ -66,8 +66,8 @@ impl ModalSandbox {
 
         // Warn if Modal auth is not configured (don't hard-fail — the user may
         // configure auth later or rely on env vars set at runtime).
-        let has_env_auth = std::env::var("MODAL_TOKEN_ID").is_ok()
-            && std::env::var("MODAL_TOKEN_SECRET").is_ok();
+        let has_env_auth =
+            std::env::var("MODAL_TOKEN_ID").is_ok() && std::env::var("MODAL_TOKEN_SECRET").is_ok();
         let has_toml_auth = dirs::home_dir()
             .map(|h| h.join(".modal.toml").exists())
             .unwrap_or(false);
@@ -95,12 +95,12 @@ impl ModalSandbox {
         };
 
         if needs_write {
-            tokio::fs::create_dir_all(&self.data_dir).await.map_err(|e| {
-                SandboxError::Other(format!("failed to create data dir: {e}"))
-            })?;
-            tokio::fs::write(&script_path, MODAL_SIDECAR_SCRIPT).await.map_err(|e| {
-                SandboxError::Other(format!("failed to write sidecar script: {e}"))
-            })?;
+            tokio::fs::create_dir_all(&self.data_dir)
+                .await
+                .map_err(|e| SandboxError::Other(format!("failed to create data dir: {e}")))?;
+            tokio::fs::write(&script_path, MODAL_SIDECAR_SCRIPT)
+                .await
+                .map_err(|e| SandboxError::Other(format!("failed to write sidecar script: {e}")))?;
         }
 
         Ok(script_path)
@@ -142,9 +142,7 @@ impl ModalSandbox {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Try to parse structured error first.
-            let reason = if let Ok(err) =
-                serde_json::from_str::<ErrorResponse>(stderr.trim())
-            {
+            let reason = if let Ok(err) = serde_json::from_str::<ErrorResponse>(stderr.trim()) {
                 err.error
             } else {
                 stderr.trim().to_owned()
@@ -208,9 +206,7 @@ impl SandboxBackend for ModalSandbox {
         working_dir: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<ExecResult, SandboxError> {
-        let timeout_secs = timeout
-            .map(|d| d.as_secs())
-            .unwrap_or(120);
+        let timeout_secs = timeout.map(|d| d.as_secs()).unwrap_or(120);
 
         let args = serde_json::json!({
             "sandbox_id": instance.id,

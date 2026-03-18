@@ -49,24 +49,15 @@ fn ensure_trajectories_dir(context: &ToolContext, tool_name: &str) -> Result<(),
     Ok(())
 }
 
-fn load_trajectory(
-    context: &ToolContext,
-    tool_name: &str,
-) -> Result<TrajectoryData, ToolError> {
+fn load_trajectory(context: &ToolContext, tool_name: &str) -> Result<TrajectoryData, ToolError> {
     let path = trajectory_path(context);
     let raw = fs::read_to_string(&path).map_err(|e| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
-        reason: format!(
-            "failed to read trajectory file `{}`: {e}",
-            path.display()
-        ),
+        reason: format!("failed to read trajectory file `{}`: {e}", path.display()),
     })?;
     serde_json::from_str(&raw).map_err(|e| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
-        reason: format!(
-            "failed to parse trajectory file `{}`: {e}",
-            path.display()
-        ),
+        reason: format!("failed to parse trajectory file `{}`: {e}", path.display()),
     })
 }
 
@@ -77,18 +68,14 @@ fn save_trajectory(
 ) -> Result<(), ToolError> {
     ensure_trajectories_dir(context, tool_name)?;
     let path = trajectory_path(context);
-    let json = serde_json::to_string_pretty(trajectory).map_err(|e| {
-        ToolError::ExecutionFailed {
+    let json =
+        serde_json::to_string_pretty(trajectory).map_err(|e| ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: format!("failed to serialize trajectory: {e}"),
-        }
-    })?;
+        })?;
     fs::write(&path, json).map_err(|e| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
-        reason: format!(
-            "failed to write trajectory file `{}`: {e}",
-            path.display()
-        ),
+        reason: format!("failed to write trajectory file `{}`: {e}", path.display()),
     })
 }
 
@@ -134,14 +121,12 @@ impl TrajectoryTool {
         let content = match format {
             "sharegpt" => export_sharegpt(&trajectory, &call.name)?,
             "chatml" => export_chatml(&trajectory),
-            "json" => {
-                serde_json::to_string_pretty(&trajectory).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool: call.name.clone(),
-                        reason: format!("failed to serialize trajectory: {e}"),
-                    }
-                })?
-            }
+            "json" => serde_json::to_string_pretty(&trajectory).map_err(|e| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to serialize trajectory: {e}"),
+                }
+            })?,
             other => {
                 return Err(ToolError::ExecutionFailed {
                     tool: call.name.clone(),
@@ -210,11 +195,7 @@ impl TrajectoryTool {
         }
     }
 
-    fn handle_tag(
-        &self,
-        call: &ToolCall,
-        context: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
+    fn handle_tag(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let tag = call
             .arguments
             .get("tag")
@@ -250,13 +231,13 @@ impl TrajectoryTool {
         call: &ToolCall,
         context: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let outcome_str = call
-            .arguments
-            .get("outcome")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "outcome",
-            })?;
+        let outcome_str =
+            call.arguments
+                .get("outcome")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "outcome",
+                })?;
 
         let outcome_value = match outcome_str.as_str() {
             "success" => serde_json::json!({"type": "success"}),
@@ -395,12 +376,8 @@ mod tests {
     fn ctx(data_dir: &str) -> ToolContext {
         ToolContext {
             session_id: "session-42".to_owned(),
-            profile: "operator".to_owned(),
             data_dir: data_dir.to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
+            ..crate::test_utils::test_ctx()
         }
     }
 
@@ -623,16 +600,18 @@ mod tests {
         assert!(output
             .content
             .contains("<|im_start|>system\nFollow the operator playbook.<|im_end|>\n"));
-        assert!(output.content.contains("<|im_start|>user\nhello<|im_end|>\n"));
+        assert!(output
+            .content
+            .contains("<|im_start|>user\nhello<|im_end|>\n"));
         assert!(output
             .content
             .contains("<|im_start|>assistant\nhi there<|im_end|>\n"));
-        assert!(output.content.contains(
-            "<|im_start|>assistant\nread_file: {\"path\":\"/tmp/f.txt\"}<|im_end|>\n"
-        ));
-        assert!(output.content.contains(
-            "<|im_start|>tool\nread_file: file contents here<|im_end|>\n"
-        ));
+        assert!(output
+            .content
+            .contains("<|im_start|>assistant\nread_file: {\"path\":\"/tmp/f.txt\"}<|im_end|>\n"));
+        assert!(output
+            .content
+            .contains("<|im_start|>tool\nread_file: file contents here<|im_end|>\n"));
     }
 
     #[test]
@@ -718,10 +697,7 @@ mod tests {
         let data: serde_json::Value = serde_json::from_str(&raw).expect("should parse");
         let tags = data["tags"].as_array().unwrap();
         // Should still only have one "demo".
-        let demo_count = tags
-            .iter()
-            .filter(|v| v.as_str() == Some("demo"))
-            .count();
+        let demo_count = tags.iter().filter(|v| v.as_str() == Some("demo")).count();
         assert_eq!(demo_count, 1);
     }
 
@@ -889,9 +865,7 @@ mod tests {
             .run(
                 &ToolCall {
                     name: "trajectory".to_owned(),
-                    arguments: BTreeMap::from([
-                        ("action".to_owned(), "set_outcome".to_owned()),
-                    ]),
+                    arguments: BTreeMap::from([("action".to_owned(), "set_outcome".to_owned())]),
                 },
                 &context,
             )

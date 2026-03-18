@@ -41,25 +41,10 @@ pub struct SyncStats {
 }
 
 /// Errors that can occur during skill sync.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    Io(io::Error),
-}
-
-impl std::fmt::Display for SyncError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "skill sync IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SyncError {}
-
-impl From<io::Error> for SyncError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
+    #[error("skill sync IO error: {0}")]
+    Io(#[from] io::Error),
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +129,10 @@ impl BundledManifest {
 
     /// Check whether a skill is marked as user-deleted.
     pub fn is_deleted(&self, name: &str) -> bool {
-        self.entries.get(name).map(|v| v == DELETED_MARKER).unwrap_or(false)
+        self.entries
+            .get(name)
+            .map(|v| v == DELETED_MARKER)
+            .unwrap_or(false)
     }
 
     /// Iterator over all entry names.
@@ -182,8 +170,7 @@ fn collect_files(root: &Path, current: &Path) -> Result<Vec<(String, PathBuf)>, 
     if !current.is_dir() {
         return Ok(result);
     }
-    let mut entries: Vec<_> = fs::read_dir(current)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
@@ -335,16 +322,12 @@ fn list_skill_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>, SyncError> {
     if !dir.exists() {
         return Ok(result);
     }
-    let mut entries: Vec<_> = fs::read_dir(dir)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
         if path.is_dir() && path.join("SKILL.md").exists() {
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
             result.push((name, path));
         }
     }
@@ -354,8 +337,7 @@ fn list_skill_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>, SyncError> {
 /// Copy a directory tree recursively.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), SyncError> {
     fs::create_dir_all(dst)?;
-    let mut entries: Vec<_> = fs::read_dir(src)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs::read_dir(src)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let src_path = entry.path();
@@ -427,7 +409,11 @@ mod tests {
     fn manifest_load_with_comments_and_blanks() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".bundled_manifest");
-        fs::write(&path, "# comment\n\nalpha:abc123\n\n# another comment\nbeta:def456\n").unwrap();
+        fs::write(
+            &path,
+            "# comment\n\nalpha:abc123\n\n# another comment\nbeta:def456\n",
+        )
+        .unwrap();
 
         let m = BundledManifest::load(&path).unwrap();
         assert_eq!(m.get("alpha"), Some("abc123"));
@@ -476,8 +462,14 @@ mod tests {
         m.save().unwrap();
 
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("alpha\taaa111"), "manifest should use tab separator");
-        assert!(!raw.contains("alpha:aaa111"), "manifest should not use colon separator");
+        assert!(
+            raw.contains("alpha\taaa111"),
+            "manifest should use tab separator"
+        );
+        assert!(
+            !raw.contains("alpha:aaa111"),
+            "manifest should not use colon separator"
+        );
     }
 
     #[test]
@@ -510,7 +502,12 @@ mod tests {
     #[test]
     fn dir_hash_deterministic() {
         let dir = tempdir().unwrap();
-        write_skill(dir.path(), "test-skill", "Do the thing", &[("notes.txt", "hello")]);
+        write_skill(
+            dir.path(),
+            "test-skill",
+            "Do the thing",
+            &[("notes.txt", "hello")],
+        );
 
         let skill_dir = dir.path().join("test-skill");
         let h1 = dir_hash(&skill_dir).unwrap();
@@ -754,7 +751,8 @@ mod tests {
         assert!(user.path().join("complex/templates/greeting.txt").exists());
         assert!(user.path().join("complex/config.yaml").exists());
 
-        let template = fs::read_to_string(user.path().join("complex/templates/greeting.txt")).unwrap();
+        let template =
+            fs::read_to_string(user.path().join("complex/templates/greeting.txt")).unwrap();
         assert_eq!(template, "Hello {{name}}!");
     }
 
@@ -872,7 +870,10 @@ mod tests {
             bundled.path(),
             "rich-skill",
             "Skill with extras",
-            &[("helper.py", "print('hello')"), ("data.json", "{\"key\": 1}")],
+            &[
+                ("helper.py", "print('hello')"),
+                ("data.json", "{\"key\": 1}"),
+            ],
         );
 
         let stats = sync_bundled_skills(bundled.path(), user.path()).unwrap();

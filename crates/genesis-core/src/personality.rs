@@ -122,8 +122,7 @@ mod tests {
 
     #[test]
     fn get_personality_matches_exact_name() {
-        let personality = get_personality("detective")
-            .expect("detective personality should exist");
+        let personality = get_personality("detective").expect("detective personality should exist");
         assert_eq!(personality.name, "detective");
         assert!(
             personality.system_prompt_prefix.contains("detective"),

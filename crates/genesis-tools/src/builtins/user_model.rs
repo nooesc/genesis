@@ -9,21 +9,21 @@ pub struct UserObserveTool;
 
 impl ToolHandler for UserObserveTool {
     fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let trait_key = call
-            .arguments
-            .get("trait_key")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "trait_key",
-            })?;
+        let trait_key =
+            call.arguments
+                .get("trait_key")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "trait_key",
+                })?;
 
-        let category = call
-            .arguments
-            .get("category")
-            .ok_or_else(|| ToolError::MissingArgument {
-                tool: call.name.clone(),
-                argument: "category",
-            })?;
+        let category =
+            call.arguments
+                .get("category")
+                .ok_or_else(|| ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "category",
+                })?;
 
         let value = call
             .arguments
@@ -34,7 +34,10 @@ impl ToolHandler for UserObserveTool {
             })?;
 
         let db_path = context.db_path();
-        let _ = bootstrap(&db_path);
+        bootstrap(&db_path).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("database initialization failed: {e}"),
+        })?;
         let store = UserModelStore::new(&db_path);
 
         let trait_record = store
@@ -56,7 +59,10 @@ impl ToolHandler for UserObserveTool {
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
                 ("trait_key".to_owned(), trait_record.trait_key),
-                ("confidence".to_owned(), format!("{:.2}", trait_record.confidence)),
+                (
+                    "confidence".to_owned(),
+                    format!("{:.2}", trait_record.confidence),
+                ),
             ]),
         })
     }
@@ -179,30 +185,38 @@ mod tests {
         let ctx = ctx_with_dir(&dir.path().display().to_string());
 
         // Add two categories
-        UserObserveTool.run(&ToolCall {
-            name: "user_observe".to_owned(),
-            arguments: BTreeMap::from([
-                ("trait_key".to_owned(), "likes_dark".to_owned()),
-                ("category".to_owned(), "preference".to_owned()),
-                ("value".to_owned(), "Dark mode".to_owned()),
-            ]),
-        }, &ctx).unwrap();
+        UserObserveTool
+            .run(
+                &ToolCall {
+                    name: "user_observe".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("trait_key".to_owned(), "likes_dark".to_owned()),
+                        ("category".to_owned(), "preference".to_owned()),
+                        ("value".to_owned(), "Dark mode".to_owned()),
+                    ]),
+                },
+                &ctx,
+            )
+            .unwrap();
 
-        UserObserveTool.run(&ToolCall {
-            name: "user_observe".to_owned(),
-            arguments: BTreeMap::from([
-                ("trait_key".to_owned(), "tone_formal".to_owned()),
-                ("category".to_owned(), "communication_style".to_owned()),
-                ("value".to_owned(), "Formal".to_owned()),
-            ]),
-        }, &ctx).unwrap();
+        UserObserveTool
+            .run(
+                &ToolCall {
+                    name: "user_observe".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("trait_key".to_owned(), "tone_formal".to_owned()),
+                        ("category".to_owned(), "communication_style".to_owned()),
+                        ("value".to_owned(), "Formal".to_owned()),
+                    ]),
+                },
+                &ctx,
+            )
+            .unwrap();
 
         // Filter by category
         let call = ToolCall {
             name: "user_model".to_owned(),
-            arguments: BTreeMap::from([
-                ("category".to_owned(), "preference".to_owned()),
-            ]),
+            arguments: BTreeMap::from([("category".to_owned(), "preference".to_owned())]),
         };
         let output = UserModelTool.run(&call, &ctx).expect("recall");
         assert!(output.content.contains("likes_dark"));

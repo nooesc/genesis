@@ -18,8 +18,7 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, error, info, warn};
 
 use crate::protocol::{
-    Implementation, InitializeResult, JsonRpcError,
-    ServerCapabilities, ToolsCapability,
+    Implementation, InitializeResult, JsonRpcError, ServerCapabilities, ToolsCapability,
 };
 use crate::read_limited_stdin_line;
 
@@ -86,11 +85,7 @@ pub trait McpToolBackend: Send + Sync {
 
     /// Execute a tool call by name with JSON arguments.
     /// Returns the text content of the tool output, or an error message.
-    fn call_tool(
-        &self,
-        name: &str,
-        arguments: Value,
-    ) -> Result<String, String>;
+    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String>;
 }
 
 /// Tool definition as exposed by the MCP server.
@@ -219,10 +214,7 @@ fn handle_request(
     }
 }
 
-fn handle_initialize(
-    config: &McpServeConfig,
-    request: &IncomingRequest,
-) -> OutgoingResponse {
+fn handle_initialize(config: &McpServeConfig, request: &IncomingRequest) -> OutgoingResponse {
     let result = InitializeResult {
         protocol_version: "2024-11-05".to_owned(),
         capabilities: ServerCapabilities {
@@ -244,29 +236,16 @@ fn handle_initialize(
     }
 }
 
-fn handle_tools_list(
-    backend: &dyn McpToolBackend,
-    request: &IncomingRequest,
-) -> OutgoingResponse {
+fn handle_tools_list(backend: &dyn McpToolBackend, request: &IncomingRequest) -> OutgoingResponse {
     let tools = backend.list_tools();
-    OutgoingResponse::success(
-        request.id,
-        serde_json::json!({ "tools": tools }),
-    )
+    OutgoingResponse::success(request.id, serde_json::json!({ "tools": tools }))
 }
 
-fn handle_tools_call(
-    backend: &dyn McpToolBackend,
-    request: &IncomingRequest,
-) -> OutgoingResponse {
+fn handle_tools_call(backend: &dyn McpToolBackend, request: &IncomingRequest) -> OutgoingResponse {
     let params = match &request.params {
         Some(p) => p,
         None => {
-            return OutgoingResponse::error(
-                request.id,
-                -32602,
-                "Missing params for tools/call",
-            );
+            return OutgoingResponse::error(request.id, -32602, "Missing params for tools/call");
         }
     };
 
@@ -297,9 +276,7 @@ fn handle_tools_call(
             });
             OutgoingResponse::success(request.id, result)
         }
-        Err(error_msg) => {
-            OutgoingResponse::error(request.id, -32603, error_msg)
-        }
+        Err(error_msg) => OutgoingResponse::error(request.id, -32603, error_msg),
     }
 }
 
@@ -345,11 +322,7 @@ mod tests {
             self.tools.clone()
         }
 
-        fn call_tool(
-            &self,
-            name: &str,
-            arguments: Value,
-        ) -> Result<String, String> {
+        fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
             match name {
                 "echo" => {
                     let text = arguments
@@ -400,11 +373,15 @@ mod tests {
     fn initialize_returns_capabilities() {
         let config = McpServeConfig::default();
         let backend = mock_backend();
-        let req = make_request(1, "initialize", Some(serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "1.0"}
-        })));
+        let req = make_request(
+            1,
+            "initialize",
+            Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"}
+            })),
+        );
 
         let resp = handle_request(&config, &backend, &req);
         let result = resp.result.unwrap();
@@ -431,10 +408,14 @@ mod tests {
     fn tools_call_success() {
         let config = McpServeConfig::default();
         let backend = mock_backend();
-        let req = make_request(3, "tools/call", Some(serde_json::json!({
-            "name": "echo",
-            "arguments": {"text": "hello world"}
-        })));
+        let req = make_request(
+            3,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "echo",
+                "arguments": {"text": "hello world"}
+            })),
+        );
 
         let resp = handle_request(&config, &backend, &req);
         let result = resp.result.unwrap();
@@ -448,10 +429,14 @@ mod tests {
     fn tools_call_error() {
         let config = McpServeConfig::default();
         let backend = mock_backend();
-        let req = make_request(4, "tools/call", Some(serde_json::json!({
-            "name": "fail",
-            "arguments": {}
-        })));
+        let req = make_request(
+            4,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "fail",
+                "arguments": {}
+            })),
+        );
 
         let resp = handle_request(&config, &backend, &req);
         assert!(resp.error.is_some());
@@ -464,9 +449,13 @@ mod tests {
     fn tools_call_missing_name() {
         let config = McpServeConfig::default();
         let backend = mock_backend();
-        let req = make_request(5, "tools/call", Some(serde_json::json!({
-            "arguments": {"foo": "bar"}
-        })));
+        let req = make_request(
+            5,
+            "tools/call",
+            Some(serde_json::json!({
+                "arguments": {"foo": "bar"}
+            })),
+        );
 
         let resp = handle_request(&config, &backend, &req);
         assert!(resp.error.is_some());

@@ -154,28 +154,19 @@ pub fn search_entries(entries: &[SkillEntry], query: &str) -> Vec<SkillEntry> {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SkillParseError {
+    #[error("SKILL.md must start with --- frontmatter")]
     MissingFrontmatter,
+    #[error("SKILL.md frontmatter missing closing ---")]
     UnclosedFrontmatter,
-    InvalidYaml(serde_yaml::Error),
+    #[error("invalid YAML frontmatter: {0}")]
+    InvalidYaml(#[source] serde_yaml::Error),
+    #[error("SKILL.md frontmatter missing 'name' field")]
     MissingName,
-    Io(std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[source] std::io::Error),
 }
-
-impl std::fmt::Display for SkillParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingFrontmatter => write!(f, "SKILL.md must start with --- frontmatter"),
-            Self::UnclosedFrontmatter => write!(f, "SKILL.md frontmatter missing closing ---"),
-            Self::InvalidYaml(e) => write!(f, "invalid YAML frontmatter: {e}"),
-            Self::MissingName => write!(f, "SKILL.md frontmatter missing 'name' field"),
-            Self::Io(e) => write!(f, "IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SkillParseError {}
 
 #[cfg(test)]
 mod tests {
@@ -224,10 +215,7 @@ Review the provided code for:
         assert_eq!(skill.frontmatter.version, "1.0");
         assert_eq!(skill.frontmatter.author, "Genesis Team");
         assert_eq!(skill.frontmatter.license, "MIT");
-        assert_eq!(
-            skill.frontmatter.tags,
-            vec!["development", "quality"]
-        );
+        assert_eq!(skill.frontmatter.tags, vec!["development", "quality"]);
         assert_eq!(
             skill.frontmatter.allowed_tools,
             vec!["read_file", "shell_exec"]
@@ -278,8 +266,7 @@ Review the provided code for:
 
     #[test]
     fn parse_extra_fields_preserved() {
-        let content =
-            "---\nname: custom\ncustom_field: hello\npriority: 5\n---\nInstructions.";
+        let content = "---\nname: custom\ncustom_field: hello\npriority: 5\n---\nInstructions.";
         let skill = parse_skill_md(content).expect("should parse");
         assert_eq!(skill.frontmatter.name, "custom");
         assert!(skill.frontmatter.extra.contains_key("custom_field"));
@@ -375,16 +362,14 @@ Review the provided code for:
 
     #[test]
     fn search_entries_by_tag() {
-        let entries = vec![
-            SkillEntry {
-                name: "deploy".to_owned(),
-                description: "Deploy app".to_owned(),
-                version: "1.0".to_owned(),
-                tags: vec!["operations".to_owned()],
-                user_invocable: true,
-                path: PathBuf::from("a/SKILL.md"),
-            },
-        ];
+        let entries = vec![SkillEntry {
+            name: "deploy".to_owned(),
+            description: "Deploy app".to_owned(),
+            version: "1.0".to_owned(),
+            tags: vec!["operations".to_owned()],
+            user_invocable: true,
+            path: PathBuf::from("a/SKILL.md"),
+        }];
 
         let results = search_entries(&entries, "operations");
         assert_eq!(results.len(), 1);
@@ -423,8 +408,7 @@ Review the provided code for:
     #[test]
     fn parse_allowed_tools_as_space_delimited() {
         // The spec also allows space-delimited tool lists
-        let content =
-            "---\nname: test\nallowed_tools:\n  - read_file\n  - write_file\n---\nDo it.";
+        let content = "---\nname: test\nallowed_tools:\n  - read_file\n  - write_file\n---\nDo it.";
         let skill = parse_skill_md(content).expect("should parse");
         assert_eq!(
             skill.frontmatter.allowed_tools,
