@@ -592,11 +592,14 @@ impl<'a> SessionExecutionService<'a> {
 
         // Set up tool provider routing if configured
         if let Some(tp) = &self.loaded.config.tool_provider {
-            let tool_client = client_from_config(
+            let tp_cb = tp.circuit_breaker.as_ref();
+            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
                 &tp.backend,
                 &tp.model,
                 tp.base_url.as_deref(),
                 tp.api_key_env.as_deref(),
+                tp_cb.map(|c| c.failure_threshold),
+                tp_cb.map(|c| c.cooldown_secs),
             )
             .await?;
             agent.set_tool_client(tool_client);

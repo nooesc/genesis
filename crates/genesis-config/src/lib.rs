@@ -939,7 +939,10 @@ pub fn load_from_map(
                 .or_else(|| provider.api_key_env.clone()),
             extra_body: fp.extra_body.clone(),
             tool_call_parser: fp.tool_call_parser.clone(),
-            circuit_breaker: fp.circuit_breaker.clone(),
+            circuit_breaker: fp
+                .circuit_breaker
+                .clone()
+                .or_else(|| provider.circuit_breaker.clone()),
         })
         .collect::<Vec<_>>();
 

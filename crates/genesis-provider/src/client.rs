@@ -125,20 +125,6 @@ impl ChatClient {
         })
     }
 
-    /// Create a new client with custom circuit breaker thresholds.
-    pub fn with_circuit_breaker(
-        provider: &ResolvedProvider,
-        failure_threshold: u32,
-        cooldown_secs: u64,
-    ) -> Result<Self, ProviderError> {
-        let mut client = Self::new(provider)?;
-        client.circuit = std::sync::Arc::new(crate::circuit_breaker::CircuitBreaker::new(
-            failure_threshold,
-            std::time::Duration::from_secs(cooldown_secs),
-        ));
-        Ok(client)
-    }
-
     /// Prepare a request body from a `ChatCompletionRequest`, merging
     /// `extra_body` fields into the top-level JSON object and applying
     /// backend-specific optimizations like prompt caching.

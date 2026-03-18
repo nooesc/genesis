@@ -357,15 +357,14 @@ pub(crate) struct HealthResponse {
     pub active_schedules: usize,
     pub total_sessions: usize,
     pub total_tools: usize,
-    /// Per-provider circuit breaker status. Present when fallback providers are
-    /// configured. Each entry shows the provider model, backend, and circuit state.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub providers: Vec<ProviderCircuitStatus>,
+    /// Configured providers with their circuit breaker settings.
+    /// Always includes the primary provider; fallback providers follow in order.
+    pub providers: Vec<ProviderInfo>,
 }
 
-/// Provider info for health endpoint.
+/// Provider configuration info for the health endpoint.
 #[derive(Debug, Serialize)]
-pub(crate) struct ProviderCircuitStatus {
+pub(crate) struct ProviderInfo {
     pub backend: String,
     pub model: String,
     pub role: String,
@@ -841,7 +840,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
     // Build provider status list for health reporting.
     let mut providers = Vec::new();
     let primary = &state.loaded.config.provider;
-    providers.push(ProviderCircuitStatus {
+    providers.push(ProviderInfo {
         backend: primary.backend.clone(),
         model: primary.model.clone(),
         role: "primary".to_owned(),
@@ -851,7 +850,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         }),
     });
     for fp in &state.loaded.config.fallback_providers {
-        providers.push(ProviderCircuitStatus {
+        providers.push(ProviderInfo {
             backend: fp.backend.clone(),
             model: fp.model.clone(),
             role: "fallback".to_owned(),
