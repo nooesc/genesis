@@ -86,12 +86,15 @@ impl HelpOverlay {
 
         let bindings: &[(&str, &str)] = &[
             ("Enter", "Submit message"),
+            ("Ctrl+J", "Insert newline (multi-line input)"),
             ("Ctrl+C", "Interrupt running turn"),
             ("Ctrl+D", "Exit Eve"),
-            ("Ctrl+T", "Toggle transcript overlay"),
-            ("Up/Down", "Navigate input history"),
-            ("Home/End", "Move cursor to start/end of line"),
+            ("Ctrl+P", "Open command palette"),
             ("Ctrl+K", "Delete from cursor to end of line"),
+            ("Ctrl+T", "Toggle transcript overlay"),
+            ("@", "File path completion"),
+            ("Up/Down", "Navigate input history / lines"),
+            ("Home/End", "Move cursor to start/end of line"),
             ("Ctrl+U", "Delete from cursor to start of line"),
             ("Esc", "Close overlay / dismiss popup"),
         ];
