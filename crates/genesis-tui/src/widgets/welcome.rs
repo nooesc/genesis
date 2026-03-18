@@ -18,6 +18,7 @@ use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
 use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
+use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 /// Minimum width for the wide side-by-side layout.
 const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
@@ -89,6 +90,12 @@ pub struct WelcomeAreas {
     pub full: Rect,
 }
 
+/// Minimum width for showing the braille canvas panel in wide mode.
+const WIDE_BRAILLE_MIN_WIDTH: u16 = 120;
+
+/// Width of the braille canvas panel in cells.
+const BRAILLE_PANEL_WIDTH: u16 = 20;
+
 /// Welcome screen widget showing portrait art with session info.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
@@ -100,6 +107,8 @@ pub struct WelcomeWidget {
     boot_triggered: bool,
     /// Areas computed during the last render for effect targeting.
     last_areas: WelcomeAreas,
+    /// Braille canvas pattern for the welcome screen animation.
+    pub braille_pattern: Pattern,
 }
 
 impl WelcomeWidget {
@@ -114,6 +123,7 @@ impl WelcomeWidget {
             compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
+            braille_pattern: Pattern::default_particles(18),
         }
     }
 
@@ -216,7 +226,7 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Portrait + info side by side ───────────────────────────
+        // ── Portrait + braille canvas + info side by side ──────────
         // Clone art lines up front to release the borrow on `self`.
         let art: Vec<Line<'static>> = self.current_full_art().to_vec();
         let art_width = art
@@ -226,10 +236,18 @@ impl WelcomeWidget {
             .unwrap_or(0) as u16;
         let art_height = art.len() as u16;
 
-        let art_col_width =
-            art_width.min(inner.width.saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP));
-        let info_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
-        let info_col_width = inner.width.saturating_sub(art_col_width + WIDE_LAYOUT_GAP);
+        // Decide if there's room for the braille canvas panel.
+        let show_braille = area.width >= WIDE_BRAILLE_MIN_WIDTH;
+        let braille_cols = if show_braille { BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP } else { 0 };
+
+        let art_col_width = art_width.min(
+            inner.width.saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
+        );
+        let braille_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
+        let info_col_x = braille_col_x + braille_cols;
+        let info_col_width = inner.width.saturating_sub(
+            art_col_width + WIDE_LAYOUT_GAP + braille_cols,
+        );
 
         // Boot status lines
         let boot_status = BootStatusWidget::new(self.boot_status_info());
@@ -268,6 +286,19 @@ impl WelcomeWidget {
             };
             self.last_areas.status = status_area;
             boot_status.render(status_area, buf);
+        }
+
+        // Braille canvas panel (between portrait and info, only in extra-wide mode)
+        if show_braille && remaining_height >= 3 {
+            let braille_height = remaining_height.min(art_render_height).max(3);
+            let braille_y = below_title_y + remaining_height.saturating_sub(braille_height) / 2;
+            let braille_area = Rect {
+                x: braille_col_x,
+                y: braille_y,
+                width: BRAILLE_PANEL_WIDTH,
+                height: braille_height,
+            };
+            BrailleCanvas::new(&self.braille_pattern).render(braille_area, buf);
         }
 
         // Info panel (right column, vertically centered)

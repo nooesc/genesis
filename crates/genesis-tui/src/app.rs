@@ -9,6 +9,7 @@ use crate::widgets::help_overlay::{HelpAction, HelpOverlay};
 use crate::widgets::input_widget::InputAction;
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
+use crate::widgets::braille_canvas::Pattern;
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -75,6 +76,8 @@ pub struct App {
     pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
     /// Post-render visual effects (tachyonfx).
     pub effects: crate::effects::GenesisEffects,
+    /// Lissajous pattern shown below messages when idle.
+    pub idle_pattern: Pattern,
 }
 
 impl App {
@@ -500,6 +503,12 @@ mod tests {
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
             effects: crate::effects::GenesisEffects::new(false, false),
+            idle_pattern: Pattern::Lissajous {
+                t: 0.0,
+                a: 3.0,
+                b: 2.0,
+                delta: std::f64::consts::FRAC_PI_2,
+            },
         };
         (app, submission_rx, app_rx)
     }

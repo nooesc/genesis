@@ -224,6 +224,12 @@ pub async fn run_tui(
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
         effects: crate::effects::GenesisEffects::new(animations_enabled, no_color),
+        idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
+            t: 0.0,
+            a: 3.0,
+            b: 2.0,
+            delta: std::f64::consts::FRAC_PI_2,
+        },
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -346,8 +352,17 @@ pub async fn run_tui(
                     break;
                 }
 
-                // Advance status bar animation (sprite / spinner).
+                // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
+
+                // Tick braille patterns for welcome screen and idle canvas.
+                let pattern_dt = std::time::Duration::from_millis(80);
+                if matches!(app.screen, AppScreen::Welcome) {
+                    app.welcome.braille_pattern.tick(pattern_dt);
+                }
+                if !app.turn_running {
+                    app.idle_pattern.tick(pattern_dt);
+                }
 
                 // Update elapsed time for the current turn.
                 if app.turn_running {
@@ -374,9 +389,12 @@ pub async fn run_tui(
                 render_frame(&mut term, &mut app);
 
                 // Schedule periodic redraws while animations are active.
-                // Idle effects (border glow, breathing) also need ticking.
+                // Idle effects (border glow, breathing) and braille patterns also need ticking.
+                let braille_animating = matches!(app.screen, AppScreen::Welcome)
+                    || (!app.turn_running && matches!(app.screen, AppScreen::Chat));
                 let needs_redraw = app.status_bar.is_animating()
                     || app.effects.is_running()
+                    || braille_animating
                     || (app.effects.enabled()
                         && matches!(app.screen, AppScreen::Chat)
                         && matches!(app.status_bar.state, crate::events::StatusState::Idle));
@@ -506,6 +524,31 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
 
                 if message_area_height > 0 {
                     app.chat.render_messages(message_area, buf);
+
+                    // Idle braille canvas: show a small Lissajous animation
+                    // below the last message when the agent is idle and there
+                    // is remaining vertical space (at least 5 rows).
+                    const IDLE_CANVAS_HEIGHT: u16 = 5;
+                    const IDLE_CANVAS_WIDTH: u16 = 15;
+                    if !app.turn_running {
+                        let content_h = app.chat.visible_content_height(area.width);
+                        let remaining = message_area_height.saturating_sub(content_h);
+                        if remaining >= IDLE_CANVAS_HEIGHT {
+                            // Center the canvas horizontally in the message area.
+                            let canvas_x = message_area.x
+                                + message_area.width.saturating_sub(IDLE_CANVAS_WIDTH) / 2;
+                            let canvas_y = message_area.y + content_h
+                                + (remaining.saturating_sub(IDLE_CANVAS_HEIGHT)) / 2;
+                            let idle_area = Rect {
+                                x: canvas_x,
+                                y: canvas_y,
+                                width: IDLE_CANVAS_WIDTH.min(message_area.width),
+                                height: IDLE_CANVAS_HEIGHT,
+                            };
+                            crate::widgets::braille_canvas::BrailleCanvas::new(&app.idle_pattern)
+                                .render(idle_area, buf);
+                        }
+                    }
                 }
 
                 if separator_rows > 0 {

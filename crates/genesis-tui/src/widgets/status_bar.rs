@@ -24,6 +24,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::events::StatusState;
+use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 // ── Palette ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,9 @@ const SPARKLINE_WIDTH: usize = 12;
 /// Idle tick interval for effects (~100ms).
 const IDLE_EFFECTS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Width of the inline braille heartbeat in cells.
+const HEARTBEAT_WIDTH: usize = 10;
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single-row status bar rendered at the bottom of the TUI viewport.
@@ -101,6 +105,8 @@ pub struct StatusBarWidget {
     token_history: VecDeque<u64>,
     /// Whether effects are enabled (used for animation interval).
     effects_enabled: bool,
+    /// Inline braille heartbeat pattern.
+    heartbeat: Pattern,
 }
 
 impl StatusBarWidget {
@@ -122,6 +128,7 @@ impl StatusBarWidget {
             turn_elapsed: None,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_CAP),
             effects_enabled: false,
+            heartbeat: Pattern::Flatline,
         }
     }
 
@@ -137,10 +144,22 @@ impl StatusBarWidget {
 
     /// Update the current agent state, storing the previous for transition effects.
     pub fn set_state(&mut self, state: StatusState) {
+        let was_idle = matches!(self.state, StatusState::Idle);
+        let is_idle = matches!(state, StatusState::Idle);
         let old = std::mem::replace(&mut self.state, state);
         self.prev_state = Some(old);
         self.sprite_frame = 0;
         self.last_tick = Instant::now();
+
+        // Switch heartbeat pattern on state transitions.
+        if was_idle && !is_idle {
+            self.heartbeat = Pattern::Waveform {
+                phase: 0.0,
+                frequency: 2.0,
+            };
+        } else if !was_idle && is_idle {
+            self.heartbeat = Pattern::Flatline;
+        }
     }
 
     /// Returns the most recent state transition as `(from, to)`.
@@ -206,12 +225,16 @@ impl StatusBarWidget {
 
     /// Advance the animation frame if enough time has elapsed.
     pub fn tick(&mut self) {
+        // Tick the heartbeat pattern regardless of state.
+        let dt = self.last_tick.elapsed();
+        self.heartbeat.tick(dt);
+
         if matches!(self.state, StatusState::Idle) {
             return;
         }
 
         let interval = self.animation_interval();
-        if self.last_tick.elapsed() >= interval {
+        if dt >= interval {
             self.sprite_frame = self.sprite_frame.wrapping_add(1);
             self.last_tick = Instant::now();
         }
@@ -247,10 +270,19 @@ impl StatusBarWidget {
         let center_w = spans_width(&center);
         let right_w = spans_width(&right);
 
+        // Heartbeat width: show if there's enough room (needs ~12 cells + padding).
+        let heartbeat_w = if total > left_w + center_w + right_w + HEARTBEAT_WIDTH + 6 {
+            HEARTBEAT_WIDTH + 1 // 1 cell gap
+        } else {
+            0
+        };
+
         // Sparkline width: only show if we have data and enough room.
         let sparkline_w = if !self.token_history.is_empty() {
             // 2 cells padding + sparkline cells
-            (SPARKLINE_WIDTH + 2).min(total.saturating_sub(left_w + center_w + right_w + 6))
+            (SPARKLINE_WIDTH + 2).min(
+                total.saturating_sub(left_w + center_w + right_w + heartbeat_w + 6),
+            )
         } else {
             0
         };
@@ -283,16 +315,17 @@ impl StatusBarWidget {
             // Draw center.
             write_spans(&center, area.x + center_start as u16, row, area.x + area.width, buf);
 
-            // Draw fill between center and sparkline/right.
+            // Draw fill between center and heartbeat/sparkline/right.
             let center_end = area.x + center_start as u16 + center_w as u16 + 1;
-            let sparkline_start = if sparkline_w > 0 {
-                area.x + right_start as u16 - sparkline_w as u16
+            let decorations_total = sparkline_w + heartbeat_w;
+            let decorations_start = if decorations_total > 0 {
+                area.x + right_start as u16 - decorations_total as u16
             } else {
                 area.x + right_start as u16
             };
-            if center_end < sparkline_start {
+            if center_end < decorations_start {
                 let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in center_end..sparkline_start {
+                for x in center_end..decorations_start {
                     if let Some(cell) = buf.cell_mut((x, row)) {
                         cell.set_symbol("─");
                         cell.set_style(fill_style);
@@ -300,22 +333,35 @@ impl StatusBarWidget {
                 }
             }
         } else {
-            // No center — fill between left and sparkline/right.
+            // No center — fill between left and heartbeat/sparkline/right.
             let fill_start = area.x + 1 + left_w as u16 + 1;
-            let sparkline_start = if sparkline_w > 0 {
-                area.x + right_start as u16 - sparkline_w as u16
+            let decorations_total = sparkline_w + heartbeat_w;
+            let decorations_start = if decorations_total > 0 {
+                area.x + right_start as u16 - decorations_total as u16
             } else {
                 area.x + right_start as u16
             };
-            if fill_start < sparkline_start {
+            if fill_start < decorations_start {
                 let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in fill_start..sparkline_start {
+                for x in fill_start..decorations_start {
                     if let Some(cell) = buf.cell_mut((x, row)) {
                         cell.set_symbol("─");
                         cell.set_style(fill_style);
                     }
                 }
             }
+        }
+
+        // Draw heartbeat (braille canvas, 1-row inline).
+        if heartbeat_w > 0 {
+            let hb_x = area.x + right_start as u16 - (sparkline_w + heartbeat_w) as u16;
+            let hb_area = Rect {
+                x: hb_x,
+                y: row,
+                width: HEARTBEAT_WIDTH as u16,
+                height: 1,
+            };
+            BrailleCanvas::new(&self.heartbeat).render(hb_area, buf);
         }
 
         // Draw sparkline (if we have data).
@@ -597,6 +643,7 @@ mod tests {
             turn_elapsed: None,
             token_history: VecDeque::new(),
             effects_enabled: false,
+            heartbeat: Pattern::Flatline,
         }
     }
 
@@ -744,5 +791,35 @@ mod tests {
         // Non-idle states unaffected.
         w.set_state(StatusState::Thinking);
         assert_eq!(w.animation_interval(), DANCE_INTERVAL);
+    }
+
+    #[test]
+    fn heartbeat_changes_on_state_transition() {
+        let mut w = make_widget();
+        // Starts as Flatline.
+        assert!(matches!(w.heartbeat, Pattern::Flatline));
+
+        // Transition to active: becomes Waveform.
+        w.set_state(StatusState::Thinking);
+        assert!(
+            matches!(w.heartbeat, Pattern::Waveform { .. }),
+            "heartbeat should be Waveform when active"
+        );
+
+        // Transition between active states: stays Waveform.
+        w.set_state(StatusState::ToolRunning {
+            tool_name: "shell".to_string(),
+        });
+        assert!(
+            matches!(w.heartbeat, Pattern::Waveform { .. }),
+            "heartbeat should stay Waveform between active states"
+        );
+
+        // Transition back to idle: becomes Flatline.
+        w.set_state(StatusState::Idle);
+        assert!(
+            matches!(w.heartbeat, Pattern::Flatline),
+            "heartbeat should be Flatline when idle"
+        );
     }
 }
