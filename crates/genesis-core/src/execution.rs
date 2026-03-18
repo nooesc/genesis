@@ -1827,6 +1827,7 @@ mod tests {
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
+                telemetry: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
