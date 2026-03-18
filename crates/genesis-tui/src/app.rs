@@ -361,6 +361,8 @@ mod tests {
                 tool_count_mcp: 0,
                 skill_count: 0,
             },
+            &[],
+            &[],
         );
         let app = App {
             submission_tx,
