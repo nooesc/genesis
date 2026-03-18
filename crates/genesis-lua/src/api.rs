@@ -1,11 +1,17 @@
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, Table, UserData, UserDataFields};
+use mlua::{Lua, UserData, UserDataFields};
 
 use crate::{LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GenesisApi;
+#[derive(Debug, Clone)]
+pub struct GenesisApi {
+    version: String,
+    plugin_dir: String,
+    session: LuaSessionContext,
+    config_values: Arc<std::collections::BTreeMap<String, String>>,
+    logs: Arc<Mutex<Vec<String>>>,
+}
 
 #[derive(Debug, Clone)]
 struct SessionView {
@@ -37,46 +43,57 @@ impl UserData for ConfigView {
     }
 }
 
+impl UserData for GenesisApi {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("version", |_, this| Ok(this.version.clone()));
+        fields.add_field_method_get("plugin_dir", |_, this| Ok(this.plugin_dir.clone()));
+        fields.add_field_method_get("session", |lua, this| {
+            lua.create_userdata(SessionView {
+                ctx: this.session.clone(),
+            })
+        });
+        fields.add_field_method_get("config", |lua, this| {
+            lua.create_userdata(ConfigView {
+                values: Arc::clone(&this.config_values),
+            })
+        });
+        fields.add_field_method_get("log", |lua, this| {
+            make_logger(lua, Arc::clone(&this.logs), None)
+        });
+        fields.add_field_method_get("log_warn", |lua, this| {
+            make_logger(lua, Arc::clone(&this.logs), Some("[warn] "))
+        });
+        fields.add_field_method_get("log_error", |lua, this| {
+            make_logger(lua, Arc::clone(&this.logs), Some("[error] "))
+        });
+    }
+}
+
 pub(crate) fn install_genesis_api(
     lua: &Lua,
     config: &LuaRuntimeConfig,
     logs: Arc<Mutex<Vec<String>>>,
-) -> Result<Table, LuaRuntimeError> {
-    let genesis = lua.create_table()?;
-    genesis.set("version", env!("CARGO_PKG_VERSION"))?;
-    genesis.set("plugin_dir", config.plugin_dir.to_string_lossy().into_owned())?;
-
-    let session = lua.create_userdata(SessionView {
-        ctx: config.session.clone(),
-    })?;
-    genesis.set("session", session)?;
-
-    let config_view = lua.create_userdata(ConfigView {
-        values: Arc::new(config.config_values.clone()),
-    })?;
-    genesis.set("config", config_view)?;
-
-    genesis.set("log", make_logger(lua, Arc::clone(&logs), None)?)?;
-    genesis.set(
-        "log_warn",
-        make_logger(lua, Arc::clone(&logs), Some("[warn] "))?,
-    )?;
-    genesis.set("log_error", make_logger(lua, logs, Some("[error] "))?)?;
-
-    Ok(genesis)
+) -> Result<mlua::AnyUserData, LuaRuntimeError> {
+    Ok(lua.create_userdata(GenesisApi {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        plugin_dir: config.plugin_dir.to_string_lossy().into_owned(),
+        session: config.session.clone(),
+        config_values: Arc::new(config.config_values.clone()),
+        logs,
+    })?)
 }
 
 fn make_logger(
     lua: &Lua,
     logs: Arc<Mutex<Vec<String>>>,
     prefix: Option<&'static str>,
-) -> Result<mlua::Function, LuaRuntimeError> {
-    Ok(lua.create_function(move |_, message: String| {
+) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |_, message: String| {
         let mut stored = logs.lock().expect("log sink mutex should not be poisoned");
         stored.push(match prefix {
             Some(prefix) => format!("{prefix}{message}"),
             None => message,
         });
         Ok(())
-    })?)
+    })
 }

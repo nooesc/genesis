@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt};
+use mlua::{Lua, LuaSerdeExt, Table};
 use thiserror::Error;
 
 use crate::{api::install_genesis_api, discovery::discover_plugins_best_effort};
@@ -159,7 +159,14 @@ impl LuaRuntime {
                     continue;
                 }
             };
-            if let Err(err) = self.lua.load(&source).set_name(&plugin.name).exec() {
+            let plugin_env = self.plugin_environment()?;
+            if let Err(err) = self
+                .lua
+                .load(&source)
+                .set_name(&plugin.name)
+                .set_environment(plugin_env)
+                .exec()
+            {
                 self.plugin_errors
                     .push(format!("plugin `{}` failed to load: {err}", plugin.name));
                 continue;
@@ -187,5 +194,16 @@ impl LuaRuntime {
 
     pub fn plugin_errors(&self) -> &[String] {
         &self.plugin_errors
+    }
+
+    fn plugin_environment(&self) -> Result<Table, LuaRuntimeError> {
+        let globals = self.lua.globals();
+        let env = self.lua.create_table()?;
+        let metatable = self.lua.create_table()?;
+        metatable.set("__index", globals)?;
+        env.set_metatable(Some(metatable))?;
+        env.set("_G", env.clone())?;
+        env.set("_ENV", env.clone())?;
+        Ok(env)
     }
 }

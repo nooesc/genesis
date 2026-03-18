@@ -209,6 +209,57 @@ version = "0.1.0"
         );
     }
 
+    #[test]
+    fn runtime_isolates_plugin_globals_between_siblings() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("first.lua"), "shared_value = 'leaked'").expect("plugin should write");
+        fs::write(
+            dir.path().join("second.lua"),
+            "assert(shared_value == nil, 'global leaked across plugins')\ngenesis.log('second loaded')",
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(runtime.plugin_names(), vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
+        assert!(
+            runtime.plugin_errors().is_empty(),
+            "no plugin should fail when globals are isolated: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
+    fn runtime_protects_genesis_root_from_plugin_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("mutator.lua"),
+            "genesis.log = function(_) end",
+        )
+        .expect("plugin should write");
+        fs::write(
+            dir.path().join("observer.lua"),
+            "genesis.log('observer loaded')",
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(runtime.plugin_names(), vec!["observer".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["observer loaded".to_owned()]);
+        assert_eq!(runtime.plugin_errors().len(), 1);
+        assert!(
+            runtime.plugin_errors()[0].contains("read-only")
+                || runtime.plugin_errors()[0].contains("protected")
+                || runtime.plugin_errors()[0].contains("newindex")
+                || runtime.plugin_errors()[0].contains("GenesisApi")
+                || runtime.plugin_errors()[0].contains("userdata"),
+            "mutation error should be recorded: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
     fn test_runtime(
         plugin_dir: &std::path::Path,
         config_values: BTreeMap<String, String>,
