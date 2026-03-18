@@ -106,7 +106,7 @@ export function SystemBar() {
       {/* Right: Clock */}
       <div className="flex items-center gap-3">
         <span className="font-mono text-[10px] text-muted-foreground/40">
-          {isError ? 'OFFLINE' : 'ONLINE'}
+          {isError ? 'OFFLINE' : health ? 'ONLINE' : '...'}
         </span>
         <SystemClock />
       </div>

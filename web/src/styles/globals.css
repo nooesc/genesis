@@ -175,7 +175,6 @@
 /* System bar */
 .system-bar {
   user-select: none;
-  -webkit-app-region: drag;
 }
 
 /* Dock navigation */
@@ -188,7 +187,7 @@
               color 150ms ease;
 }
 
-/* Command palette backdrop */
+/* Command palette backdrop — uses Shadcn's data-slot convention (stable within major version) */
 [data-slot="dialog-overlay"] {
   backdrop-filter: blur(8px) saturate(120%);
   background: rgba(0, 0, 0, 0.6);

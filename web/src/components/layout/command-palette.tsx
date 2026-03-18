@@ -1,9 +1,6 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import {
-  LayoutDashboard, MessagesSquare, Brain, Database,
-  Clock, Wrench, BarChart3, FileText, Settings,
-} from 'lucide-react'
+import { navRoutes } from '@/lib/nav'
 import {
   CommandDialog,
   Command,
@@ -14,18 +11,6 @@ import {
   CommandItem,
 } from '@/components/ui/command'
 
-const routes = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, keywords: 'home overview kpi' },
-  { to: '/sessions', label: 'Sessions', icon: MessagesSquare, keywords: 'chat conversations messages' },
-  { to: '/skills', label: 'Skills', icon: Brain, keywords: 'abilities prompts templates' },
-  { to: '/memories', label: 'Memories', icon: Database, keywords: 'knowledge storage recall' },
-  { to: '/schedules', label: 'Schedules', icon: Clock, keywords: 'cron timer jobs automation' },
-  { to: '/tools', label: 'Tools', icon: Wrench, keywords: 'functions registry mcp' },
-  { to: '/analytics', label: 'Analytics', icon: BarChart3, keywords: 'stats usage tokens charts' },
-  { to: '/audit', label: 'Audit Log', icon: FileText, keywords: 'history actions log events' },
-  { to: '/settings', label: 'Settings', icon: Settings, keywords: 'config preferences' },
-] as const
-
 interface CommandPaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -34,17 +19,21 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
 
+  const toggleOpen = useCallback(() => {
+    onOpenChange(!open)
+  }, [open, onOpenChange])
+
   // Cmd+K / Ctrl+K shortcut
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
-        onOpenChange(!open)
+        toggleOpen()
       }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [open, onOpenChange])
+  }, [toggleOpen])
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
@@ -55,7 +44,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             No results found.
           </CommandEmpty>
           <CommandGroup heading="Navigation">
-            {routes.map(({ to, label, icon: Icon, keywords }) => (
+            {navRoutes.map(({ to, label, icon: Icon, keywords }) => (
               <CommandItem
                 key={to}
                 value={`${label} ${keywords}`}

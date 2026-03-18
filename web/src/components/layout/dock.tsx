@@ -1,21 +1,7 @@
 import { Link, useRouterState } from '@tanstack/react-router'
-import {
-  LayoutDashboard, MessagesSquare, Brain, Database,
-  Clock, Wrench, BarChart3, FileText, Settings, Command,
-} from 'lucide-react'
+import { Command } from 'lucide-react'
 import { useState } from 'react'
-
-const navItems = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/sessions', label: 'Sessions', icon: MessagesSquare },
-  { to: '/skills', label: 'Skills', icon: Brain },
-  { to: '/memories', label: 'Memories', icon: Database },
-  { to: '/schedules', label: 'Schedules', icon: Clock },
-  { to: '/tools', label: 'Tools', icon: Wrench },
-  { to: '/analytics', label: 'Analytics', icon: BarChart3 },
-  { to: '/audit', label: 'Audit Log', icon: FileText },
-  { to: '/settings', label: 'Settings', icon: Settings },
-] as const
+import { navRoutes } from '@/lib/nav'
 
 interface DockProps {
   onCommandPalette: () => void
@@ -27,23 +13,28 @@ export function Dock({ onCommandPalette }: DockProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
 
   return (
-    <nav className="dock relative flex h-[52px] items-center justify-center border-t border-border/40 bg-[#0c0c0c]/95 backdrop-blur-sm">
-      <div className="flex items-center gap-1">
-        {navItems.map(({ to, label, icon: Icon }, index) => {
+    <nav
+      className="dock relative flex h-[52px] items-center justify-center border-t border-border/40 bg-[#0c0c0c]/95 backdrop-blur-sm"
+      aria-label="Main navigation"
+    >
+      <div className="flex items-center gap-1 overflow-x-auto px-2 no-scrollbar">
+        {navRoutes.map(({ to, label, icon: Icon }, index) => {
           const isActive = to === '/' ? currentPath === '/' : currentPath.startsWith(to)
           const isHovered = hoveredIndex === index
 
           return (
-            <div key={to} className="relative">
+            <div key={to} className="relative shrink-0">
               {/* Tooltip */}
               {isHovered && (
-                <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-card px-2 py-0.5 font-mono text-[10px] text-foreground/80 shadow-lg ring-1 ring-border/50 pointer-events-none">
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-card px-2 py-0.5 font-mono text-[10px] text-foreground/80 shadow-lg ring-1 ring-border/50 pointer-events-none" role="tooltip">
                   {label}
                 </div>
               )}
 
               <Link
                 to={to}
+                aria-label={label}
+                aria-current={isActive ? 'page' : undefined}
                 className={`dock-item relative flex h-9 w-9 items-center justify-center rounded-lg transition-all duration-200 ${
                   isActive
                     ? 'text-primary'
@@ -67,16 +58,17 @@ export function Dock({ onCommandPalette }: DockProps) {
         })}
 
         {/* Separator */}
-        <div className="mx-1.5 h-5 w-px bg-border/30" />
+        <div className="mx-1.5 h-5 w-px shrink-0 bg-border/30" />
 
         {/* Command palette trigger */}
         <button
           onClick={onCommandPalette}
-          className="dock-item flex h-9 items-center gap-1 rounded-lg px-2 text-muted-foreground/40 transition-all duration-200 hover:text-foreground/60"
+          className="dock-item flex h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-muted-foreground/40 transition-all duration-200 hover:text-foreground/60"
+          aria-label="Open command palette"
           title="Command Palette (⌘K)"
         >
           <Command className="h-3.5 w-3.5" />
-          <span className="font-mono text-[9px] tracking-wider">⌘K</span>
+          <span className="hidden font-mono text-[9px] tracking-wider sm:inline">⌘K</span>
         </button>
       </div>
     </nav>
