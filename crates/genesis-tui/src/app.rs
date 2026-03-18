@@ -7,6 +7,7 @@ use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
 use crate::widgets::help_overlay::{HelpAction, HelpOverlay};
 use crate::widgets::input_widget::InputAction;
+use crate::widgets::model_picker::{ModelPicker, ModelPickerAction};
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
 use crate::widgets::welcome::WelcomeWidget;
@@ -28,6 +29,8 @@ pub enum ActiveOverlay {
     Transcript(TranscriptOverlay),
     /// Keybinding and command reference.
     Help(HelpOverlay),
+    /// Interactive model picker.
+    Models(ModelPicker),
 }
 
 /// Central application state for the TUI event loop.
@@ -230,10 +233,31 @@ impl App {
                     self.overlay = Some(ActiveOverlay::Help(HelpOverlay::new()));
                     self.frame_requester.schedule_frame();
                 }
+                "/models" => {
+                    self.command_popup.hide();
+                    // Open model picker in loading state — models fetched async.
+                    self.overlay = Some(ActiveOverlay::Models(ModelPicker::new_loading()));
+                    self.frame_requester.schedule_frame();
+                    // Trigger async model fetch via AppEvent.
+                    let _ = self.app_tx.send(AppEvent::FetchModels);
+                }
                 _ => {}
             },
             AppEvent::ModelChanged(model) => {
                 self.status_bar.set_model(model);
+                self.frame_requester.schedule_frame();
+            }
+            AppEvent::FetchModels => {
+                // Handled in lib.rs event loop — spawn async fetch.
+            }
+            AppEvent::ModelsFetched(result) => {
+                // Deliver fetched models to the picker overlay.
+                if let Some(ActiveOverlay::Models(ref mut picker)) = self.overlay {
+                    match result {
+                        Ok(models) => picker.set_models(models),
+                        Err(err) => picker.set_error(err),
+                    }
+                }
                 self.frame_requester.schedule_frame();
             }
         }
@@ -279,16 +303,27 @@ impl App {
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
-            let should_close = match overlay {
+            let (should_close, model_selected) = match overlay {
                 ActiveOverlay::Transcript(t) => {
-                    matches!(t.handle_key(key, visible_rows), TranscriptAction::Close)
+                    (matches!(t.handle_key(key, visible_rows), TranscriptAction::Close), None)
                 }
                 ActiveOverlay::Help(h) => {
-                    matches!(h.handle_key(key, visible_rows), HelpAction::Close)
+                    (matches!(h.handle_key(key, visible_rows), HelpAction::Close), None)
+                }
+                ActiveOverlay::Models(m) => {
+                    match m.handle_key(key) {
+                        ModelPickerAction::Close => (true, None),
+                        ModelPickerAction::Select(id) => (true, Some(id)),
+                        ModelPickerAction::None => (false, None),
+                    }
                 }
             };
             if should_close {
                 self.overlay = None;
+            }
+            if let Some(model_id) = model_selected {
+                // Switch model — notify via AppEvent.
+                let _ = self.app_tx.send(AppEvent::ModelChanged(model_id));
             }
             self.frame_requester.schedule_frame();
             return;

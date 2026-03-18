@@ -72,6 +72,10 @@ pub enum AppEvent {
     SlashCommand(String),
     /// Model was changed via /model.
     ModelChanged(String),
+    /// Trigger async model list fetch for the model picker.
+    FetchModels,
+    /// Model list fetched — deliver to the picker overlay.
+    ModelsFetched(Result<Vec<genesis_provider::openrouter_models::OpenRouterModel>, String>),
 }
 
 /// Status bar states.

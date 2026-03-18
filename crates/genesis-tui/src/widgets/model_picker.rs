@@ -1,0 +1,400 @@
+//! Model picker overlay — interactive model browser for OpenRouter.
+//!
+//! Shows a searchable, scrollable list of available models with pricing,
+//! context length, and capability badges. Launched via `/models`.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Paragraph, Widget as _},
+};
+
+use crate::history::rgb;
+use genesis_provider::openrouter_models::OpenRouterModel;
+
+const ACCENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
+const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
+const DIM: Color = rgb(genesis_ui::colors::UI_DIM);
+const SUCCESS: Color = rgb(genesis_ui::colors::UI_SUCCESS);
+const BORDER: Color = Color::Rgb(88, 88, 88);
+const SELECTED_BG: Color = Color::Rgb(45, 42, 55);
+
+/// Result of handling a key in the model picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelPickerAction {
+    None,
+    /// User selected a model — ID to switch to.
+    Select(String),
+    /// User dismissed the picker.
+    Close,
+}
+
+/// Interactive model picker overlay.
+pub struct ModelPicker {
+    /// All available models.
+    all_models: Vec<OpenRouterModel>,
+    /// Indices into `all_models` that match the current search.
+    filtered: Vec<usize>,
+    /// Current search query.
+    query: String,
+    /// Index into `filtered` that is highlighted.
+    selected: usize,
+    /// Scroll offset for the list.
+    scroll: usize,
+    /// Whether the picker is loading models.
+    loading: bool,
+    /// Error message if fetch failed.
+    error: Option<String>,
+}
+
+impl ModelPicker {
+    /// Create a new picker in loading state.
+    pub fn new_loading() -> Self {
+        Self {
+            all_models: Vec::new(),
+            filtered: Vec::new(),
+            query: String::new(),
+            selected: 0,
+            scroll: 0,
+            loading: true,
+            error: None,
+        }
+    }
+
+    /// Set the model list (called when fetch completes).
+    pub fn set_models(&mut self, models: Vec<OpenRouterModel>) {
+        self.all_models = models;
+        self.loading = false;
+        self.refilter();
+    }
+
+    /// Set an error message (called when fetch fails).
+    pub fn set_error(&mut self, error: String) {
+        self.error = Some(error);
+        self.loading = false;
+    }
+
+    /// Handle a key event.
+    pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        match (key.code, key.modifiers) {
+            // Close
+            (KeyCode::Esc, _) => ModelPickerAction::Close,
+
+            // Select
+            (KeyCode::Enter, _) => {
+                if let Some(&idx) = self.filtered.get(self.selected) {
+                    let model_id = self.all_models[idx].id.clone();
+                    ModelPickerAction::Select(model_id)
+                } else {
+                    ModelPickerAction::None
+                }
+            }
+
+            // Navigate
+            (KeyCode::Up, _) => {
+                if self.selected > 0 {
+                    self.selected -= 1;
+                    if self.selected < self.scroll {
+                        self.scroll = self.selected;
+                    }
+                }
+                ModelPickerAction::None
+            }
+            (KeyCode::Down, _) => {
+                if !self.filtered.is_empty() && self.selected + 1 < self.filtered.len() {
+                    self.selected += 1;
+                }
+                ModelPickerAction::None
+            }
+
+            // Search input
+            (KeyCode::Char(c), mods)
+                if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT =>
+            {
+                self.query.push(c);
+                self.refilter();
+                ModelPickerAction::None
+            }
+            (KeyCode::Backspace, _) => {
+                self.query.pop();
+                self.refilter();
+                ModelPickerAction::None
+            }
+
+            _ => ModelPickerAction::None,
+        }
+    }
+
+    fn refilter(&mut self) {
+        let q = self.query.to_lowercase();
+        self.filtered = self
+            .all_models
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                if q.is_empty() {
+                    return true;
+                }
+                m.id.to_lowercase().contains(&q)
+                    || m.name.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.scroll = self.scroll.min(self.selected);
+    }
+
+    /// Render the picker overlay.
+    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        if area.width < 30 || area.height < 8 {
+            return;
+        }
+
+        // Full-screen overlay.
+        let bg_style = Style::default().bg(Color::Rgb(20, 20, 25));
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol(" ");
+                    cell.set_style(bg_style);
+                }
+            }
+        }
+
+        // Header.
+        let header = Line::from(vec![
+            Span::styled(" ◆ ", Style::default().fg(ACCENT)),
+            Span::styled("Model Picker", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  — ", Style::default().fg(DIM)),
+            Span::styled(
+                format!("{} models", self.filtered.len()),
+                Style::default().fg(DIM),
+            ),
+            Span::styled("  Esc to close", Style::default().fg(DIM)),
+        ]);
+        let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+        Paragraph::new(header).render(header_area, buf);
+
+        // Search bar.
+        let search_y = area.y + 1;
+        let search = Line::from(vec![
+            Span::styled(" 🔍 ", Style::default().fg(DIM)),
+            Span::styled(
+                if self.query.is_empty() { "Type to search..." } else { &self.query },
+                Style::default().fg(if self.query.is_empty() { DIM } else { TEXT }),
+            ),
+            Span::styled("▎", Style::default().fg(ACCENT)),
+        ]);
+        let search_area = Rect { x: area.x, y: search_y, width: area.width, height: 1 };
+        Paragraph::new(search).render(search_area, buf);
+
+        // Separator.
+        let sep_y = area.y + 2;
+        let sep_style = Style::default().fg(BORDER);
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, sep_y)) {
+                cell.set_symbol("─");
+                cell.set_style(sep_style);
+            }
+        }
+
+        // Loading / error state.
+        if self.loading {
+            let msg = Line::from(Span::styled(
+                "  Loading models from OpenRouter...",
+                Style::default().fg(DIM),
+            ));
+            let msg_area = Rect { x: area.x, y: area.y + 4, width: area.width, height: 1 };
+            Paragraph::new(msg).render(msg_area, buf);
+            return;
+        }
+        if let Some(ref err) = self.error {
+            let msg = Line::from(Span::styled(
+                format!("  Error: {err}"),
+                Style::default().fg(Color::Red),
+            ));
+            let msg_area = Rect { x: area.x, y: area.y + 4, width: area.width, height: 1 };
+            Paragraph::new(msg).render(msg_area, buf);
+            return;
+        }
+
+        // Model list.
+        let list_y = area.y + 3;
+        let list_height = area.height.saturating_sub(4); // leave room for footer
+        let visible = list_height as usize;
+
+        // Ensure scroll keeps selected visible.
+        let scroll = if self.selected >= self.scroll + visible {
+            self.selected - visible + 1
+        } else if self.selected < self.scroll {
+            self.selected
+        } else {
+            self.scroll
+        };
+
+        for row in 0..visible {
+            let item_idx = scroll + row;
+            if item_idx >= self.filtered.len() {
+                break;
+            }
+            let model_idx = self.filtered[item_idx];
+            let model = &self.all_models[model_idx];
+            let is_selected = item_idx == self.selected;
+
+            let row_y = list_y + row as u16;
+            let row_style = if is_selected {
+                Style::default().bg(SELECTED_BG)
+            } else {
+                Style::default()
+            };
+
+            // Fill row background for selected.
+            if is_selected {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell_mut((x, row_y)) {
+                        cell.set_style(row_style);
+                    }
+                }
+            }
+
+            // Build model line.
+            let mut spans: Vec<Span<'static>> = Vec::new();
+
+            // Indicator.
+            spans.push(Span::styled(
+                if is_selected { " ▸ " } else { "   " },
+                Style::default().fg(ACCENT),
+            ));
+
+            // Model ID.
+            let id_style = if is_selected {
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD).bg(SELECTED_BG)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            // Truncate ID to fit.
+            let max_id_len = (area.width as usize).saturating_sub(45).min(40);
+            let id_display = if model.id.len() > max_id_len {
+                format!("{}…", &model.id[..model.id.floor_char_boundary(max_id_len)])
+            } else {
+                format!("{:<width$}", model.id, width = max_id_len)
+            };
+            spans.push(Span::styled(id_display, id_style));
+
+            // Price.
+            let price = model.price_display();
+            spans.push(Span::styled(
+                format!("  {:<12}", price),
+                Style::default().fg(DIM).bg(if is_selected { SELECTED_BG } else { Color::Reset }),
+            ));
+
+            // Context.
+            spans.push(Span::styled(
+                format!("{:>5}", model.context_display()),
+                Style::default().fg(DIM).bg(if is_selected { SELECTED_BG } else { Color::Reset }),
+            ));
+
+            // Capability badges.
+            let badge_bg = if is_selected { SELECTED_BG } else { Color::Reset };
+            if model.supports_tools() {
+                spans.push(Span::styled(" T", Style::default().fg(SUCCESS).bg(badge_bg)));
+            }
+            if model.supports_vision() {
+                spans.push(Span::styled(" V", Style::default().fg(Color::Cyan).bg(badge_bg)));
+            }
+            if model.supports_reasoning() {
+                spans.push(Span::styled(" R", Style::default().fg(Color::Yellow).bg(badge_bg)));
+            }
+
+            let line = Line::from(spans);
+            let line_area = Rect { x: area.x, y: row_y, width: area.width, height: 1 };
+            Paragraph::new(line).render(line_area, buf);
+        }
+
+        // Footer.
+        let footer_y = area.y + area.height - 1;
+        let footer = Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" select  ", Style::default().fg(DIM)),
+            Span::styled("↑↓", Style::default().fg(ACCENT)),
+            Span::styled(" navigate  ", Style::default().fg(DIM)),
+            Span::styled("T", Style::default().fg(SUCCESS)),
+            Span::styled("ools ", Style::default().fg(DIM)),
+            Span::styled("V", Style::default().fg(Color::Cyan)),
+            Span::styled("ision ", Style::default().fg(DIM)),
+            Span::styled("R", Style::default().fg(Color::Yellow)),
+            Span::styled("easoning", Style::default().fg(DIM)),
+        ]);
+        let footer_area = Rect { x: area.x, y: footer_y, width: area.width, height: 1 };
+        Paragraph::new(footer).render(footer_area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genesis_provider::openrouter_models::{ModelArchitecture, ModelPricing};
+
+    fn make_models() -> Vec<OpenRouterModel> {
+        vec![
+            OpenRouterModel {
+                id: "openai/gpt-4.1".to_owned(),
+                name: "GPT-4.1".to_owned(),
+                created: 1000,
+                context_length: 1_048_576,
+                pricing: ModelPricing { prompt: "0.000002".to_owned(), completion: "0.00001".to_owned() },
+                architecture: ModelArchitecture::default(),
+                supported_parameters: vec!["tools".to_owned()],
+            },
+            OpenRouterModel {
+                id: "anthropic/claude-sonnet-4-6".to_owned(),
+                name: "Claude Sonnet 4.6".to_owned(),
+                created: 2000,
+                context_length: 200_000,
+                pricing: ModelPricing { prompt: "0.000003".to_owned(), completion: "0.000015".to_owned() },
+                architecture: ModelArchitecture { input_modalities: vec!["text".to_owned(), "image".to_owned()], output_modalities: vec!["text".to_owned()] },
+                supported_parameters: vec!["tools".to_owned(), "reasoning".to_owned()],
+            },
+        ]
+    }
+
+    #[test]
+    fn search_filters_models() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        assert_eq!(picker.filtered.len(), 2);
+
+        picker.query = "claude".to_owned();
+        picker.refilter();
+        assert_eq!(picker.filtered.len(), 1);
+        assert_eq!(picker.all_models[picker.filtered[0]].id, "anthropic/claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn esc_closes() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(action, ModelPickerAction::Close);
+    }
+
+    #[test]
+    fn enter_selects_model() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, ModelPickerAction::Select("openai/gpt-4.1".to_owned()));
+    }
+
+    #[test]
+    fn navigate_and_select() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, ModelPickerAction::Select("anthropic/claude-sonnet-4-6".to_owned()));
+    }
+}

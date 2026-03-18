@@ -326,6 +326,18 @@ pub async fn run_tui(
                         // by the transcript overlay and does not write to
                         // terminal scrollback.
                     }
+                    if matches!(&event, AppEvent::FetchModels) {
+                        // Spawn async model fetch.
+                        let tx = app.app_tx.clone();
+                        let cache_dir = config.storage.data_dir.join("cache");
+                        tokio::spawn(async move {
+                            let result =
+                                genesis_provider::openrouter_models::fetch_models(None, &cache_dir)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                            let _ = tx.send(AppEvent::ModelsFetched(result));
+                        });
+                    }
                     app.handle_app_event(event);
                 }
             }
@@ -390,6 +402,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         match overlay {
             app::ActiveOverlay::Transcript(t) => t.render(area, buf),
             app::ActiveOverlay::Help(h) => h.render(area, buf),
+            app::ActiveOverlay::Models(m) => m.render(area, buf),
         }
         let _ = term.draw_diff();
         term.swap_buffers();
