@@ -356,6 +356,8 @@ pub async fn run_tui(
                 if app.clear_after_welcome {
                     let _ = term.clear_all();
                     app.clear_after_welcome = false;
+                    let area = term.viewport_area();
+                    app.effects.start_chat_coalesce(area);
                 }
 
                 render_frame(&mut term, &mut app);

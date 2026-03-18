@@ -130,6 +130,31 @@ impl GenesisEffects {
         &self.manager
     }
 
+    /// Start the Welcome → Chat transition: dissolve the welcome screen out.
+    ///
+    /// Cancels any running boot effects first so they don't compete with the
+    /// dissolve. No-op when effects are disabled.
+    pub fn start_welcome_to_chat_transition(&mut self, area: Rect) {
+        if !self.enabled {
+            return;
+        }
+        self.cancel_all();
+        self.manager
+            .add_unique_effect(EffectId::TransitionOut, transitions::welcome_dissolve_out(area));
+    }
+
+    /// Start the chat screen coalesce-in effect after the terminal has been
+    /// cleared.
+    ///
+    /// No-op when effects are disabled.
+    pub fn start_chat_coalesce(&mut self, area: Rect) {
+        if !self.enabled {
+            return;
+        }
+        self.manager
+            .add_unique_effect(EffectId::TransitionIn, transitions::chat_coalesce_in(area));
+    }
+
     /// Launch the boot sequence animation across the four target areas.
     ///
     /// No-op when effects are disabled.  Safe to call multiple times — each
@@ -229,6 +254,54 @@ mod tests {
         let status = Rect::new(5, 20, 40, 4);
 
         effects.start_boot_sequence(title, portrait, status, area);
+        assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn start_welcome_to_chat_transition_cancels_boot_and_starts_dissolve() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 120, 24);
+        let title = Rect::new(5, 1, 40, 4);
+        let portrait = Rect::new(5, 6, 30, 14);
+        let status = Rect::new(5, 20, 40, 4);
+
+        // Start the boot sequence first.
+        effects.start_boot_sequence(title, portrait, status, area);
+        assert!(effects.is_running(), "boot effects should be running");
+
+        // Transition should cancel boot and register the dissolve-out effect.
+        effects.start_welcome_to_chat_transition(area);
+
+        // After cancellation + dissolve registration, at least the dissolve is live.
+        // Process one frame to clear the zero-duration boot sentinels.
+        let mut buf = Buffer::empty(area);
+        effects.process(std::time::Duration::from_millis(1), &mut buf, area);
+
+        // TransitionOut (dissolve 300 ms) is still running.
+        assert!(effects.is_running(), "dissolve-out should be running after transition starts");
+    }
+
+    #[test]
+    fn start_welcome_to_chat_transition_noop_when_disabled() {
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 120, 24);
+        effects.start_welcome_to_chat_transition(area);
+        assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn start_chat_coalesce_starts_effect() {
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 120, 24);
+        effects.start_chat_coalesce(area);
+        assert!(effects.is_running(), "coalesce-in should be running");
+    }
+
+    #[test]
+    fn start_chat_coalesce_noop_when_disabled() {
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 120, 24);
+        effects.start_chat_coalesce(area);
         assert!(!effects.is_running());
     }
 }

@@ -245,6 +245,7 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         // On the welcome screen, any key dismisses it and transitions to chat.
         if matches!(self.screen, AppScreen::Welcome) {
+            self.effects.cancel_all();
             self.screen = AppScreen::Chat;
             self.clear_after_welcome = true;
             self.frame_requester.schedule_frame();
