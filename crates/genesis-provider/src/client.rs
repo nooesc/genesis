@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use futures_util::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
-use tracing::{error, info, warn};
+use tracing::{error, info, info_span, warn};
 
 use crate::api_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatUsage,
@@ -256,11 +256,27 @@ impl ChatClient {
             });
         }
 
+        let span = info_span!(
+            "gen_ai.chat",
+            "gen_ai.operation.name" = "chat",
+            "gen_ai.provider.name" = self.backend.as_str(),
+            "gen_ai.request.model" = if request.model.is_empty() { self.model.as_str() } else { request.model.as_str() },
+            "gen_ai.usage.input_tokens" = tracing::field::Empty,
+            "gen_ai.usage.output_tokens" = tracing::field::Empty,
+        );
+        let _guard = span.enter();
+
         let result = self.complete_inner(request).await;
 
         // Record success or failure in the circuit breaker.
         match &result {
-            Ok(_) => self.circuit.record_success(),
+            Ok(completion) => {
+                self.circuit.record_success();
+                if let Some(ref usage) = completion.usage {
+                    span.record("gen_ai.usage.input_tokens", usage.prompt_tokens as i64);
+                    span.record("gen_ai.usage.output_tokens", usage.completion_tokens as i64);
+                }
+            }
             Err(_) => self.circuit.record_failure(),
         }
 
@@ -502,6 +518,14 @@ impl ChatClient {
         // may occur mid-stream. We record success at connection time and
         // rely on the non-streaming path for failure tracking.
         self.circuit.record_success();
+
+        let span = info_span!(
+            "gen_ai.chat",
+            "gen_ai.operation.name" = "chat",
+            "gen_ai.provider.name" = self.backend.as_str(),
+            "gen_ai.request.model" = if request.model.is_empty() { self.model.as_str() } else { request.model.as_str() },
+        );
+        let _guard = span.enter();
 
         let started_at = Instant::now();
         if request.model.is_empty() {

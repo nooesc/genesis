@@ -290,9 +290,11 @@ impl<'a> SessionExecutionService<'a> {
         mut input: SessionTurnInput<'_>,
     ) -> Result<SessionTurnOutcome, SessionExecutionError> {
         let span = info_span!(
-            "session.run_turn",
-            session_id = input.session_id,
-            session_platform = input.session_platform
+            "gen_ai.invoke_agent",
+            "gen_ai.operation.name" = "invoke_agent",
+            "gen_ai.agent.name" = "eve",
+            "gen_ai.conversation.id" = input.session_id,
+            "session_platform" = input.session_platform,
         );
         let started_at = Instant::now();
         let session_id = input.session_id.to_owned();
@@ -330,9 +332,11 @@ impl<'a> SessionExecutionService<'a> {
         F: FnMut(crate::agent_loop::StreamEvent<'_>),
     {
         let span = info_span!(
-            "session.run_turn_streaming",
-            session_id = input.session_id,
-            session_platform = input.session_platform
+            "gen_ai.invoke_agent",
+            "gen_ai.operation.name" = "invoke_agent",
+            "gen_ai.agent.name" = "eve",
+            "gen_ai.conversation.id" = input.session_id,
+            "session_platform" = input.session_platform,
         );
         let started_at = Instant::now();
         let session_id = input.session_id.to_owned();
@@ -1816,6 +1820,7 @@ mod tests {
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
+                telemetry: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

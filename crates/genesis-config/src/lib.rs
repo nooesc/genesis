@@ -54,6 +54,9 @@ pub struct GenesisConfig {
     /// TUI (terminal user interface) settings.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// OpenTelemetry telemetry export configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 /// Display and UI settings for the CLI.
@@ -306,6 +309,38 @@ impl Default for CacheConfig {
             enabled: default_true(),
             ttl_seconds: default_cache_ttl(),
             max_context_messages: default_cache_context_messages(),
+        }
+    }
+}
+
+/// OpenTelemetry export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    /// Whether OTel export is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// OTLP endpoint (HTTP/protobuf). Default: "http://localhost:4317".
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    /// Service name reported in traces. Default: "genesis".
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_owned()
+}
+
+fn default_service_name() -> String {
+    "genesis".to_owned()
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: default_otlp_endpoint(),
+            service_name: default_service_name(),
         }
     }
 }
@@ -607,6 +642,8 @@ struct FileConfig {
     display: Option<DisplayConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tui: Option<TuiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    telemetry: Option<TelemetryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -753,6 +790,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         embedding: None,
         display: DisplayConfig::default(),
         tui: TuiConfig::default(),
+        telemetry: None,
     })
 }
 
@@ -922,6 +960,7 @@ pub fn load_from_map(
             embedding: file_config.embedding,
             display: file_config.display.unwrap_or_default(),
             tui: file_config.tui.unwrap_or_default(),
+            telemetry: file_config.telemetry,
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -1253,7 +1292,7 @@ fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), Config
 
 #[cfg(test)]
 mod tests {
-    use super::{load, load_from_map};
+    use super::{load, load_from_map, TelemetryConfig};
     use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
@@ -1830,5 +1869,29 @@ tool_mode = "verbose"
             let deserialized: AltScreenMode = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, variant);
         }
+    }
+
+    #[test]
+    fn telemetry_config_defaults() {
+        let cfg = TelemetryConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.otlp_endpoint, "http://localhost:4317");
+        assert_eq!(cfg.service_name, "genesis");
+    }
+
+    #[test]
+    fn telemetry_config_from_yaml() {
+        let yaml = r#"
+telemetry:
+  enabled: true
+  otlp_endpoint: "http://tempo:4318"
+  service_name: "eve-prod"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tel: TelemetryConfig =
+            serde_yaml::from_value(val["telemetry"].clone()).unwrap();
+        assert!(tel.enabled);
+        assert_eq!(tel.otlp_endpoint, "http://tempo:4318");
+        assert_eq!(tel.service_name, "eve-prod");
     }
 }

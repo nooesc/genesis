@@ -2336,9 +2336,10 @@ async fn execute_single_tool(
     tc: &ToolCallEntry,
 ) -> Result<(String, bool), AgentError> {
     let span = info_span!(
-        "agent.tool_call",
-        tool_name = tc.function.name.as_str(),
-        tool_call_id = tc.id.as_str()
+        "gen_ai.execute_tool",
+        "gen_ai.operation.name" = "execute_tool",
+        "gen_ai.tool.name" = tc.function.name.as_str(),
+        "gen_ai.tool.call.id" = tc.id.as_str(),
     );
     let started_at = Instant::now();
     let tool_name = &tc.function.name;

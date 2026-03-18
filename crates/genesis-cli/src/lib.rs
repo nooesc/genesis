@@ -15,8 +15,6 @@ use genesis_core::agent_loop::AgentError;
 use genesis_core::replay::load_and_report;
 use genesis_core::execution::SessionExecutionError;
 use genesis_core::run_doctor;
-use genesis_core::scheduler::{check_due_schedules, CronTime};
-use genesis_gateway::{build_router, AppState};
 use genesis_provider::ProviderError;
 use genesis_storage::{
     bootstrap, MemoryStore, ScheduleStore, SessionStore,
