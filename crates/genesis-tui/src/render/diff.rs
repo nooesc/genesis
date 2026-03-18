@@ -27,13 +27,18 @@ const FILE_HEADER_FG: Color = Color::Rgb(208, 208, 208);
 
 /// Returns `true` if the text looks like a unified diff.
 pub fn is_unified_diff(text: &str) -> bool {
-    // A unified diff starts with "diff " or "---" followed by "+++" on the
-    // next line, or contains @@ hunk headers.
     let text = text.trim_start();
-    text.starts_with("diff ")
-        || text.starts_with("--- ")
-        || text.contains("\n@@ ")
-        || text.starts_with("@@ ")
+    // "diff --git" or "diff -u" header is unambiguous.
+    if text.starts_with("diff ") {
+        return true;
+    }
+    // "--- " is only a diff when followed by "+++ " (avoids false positives
+    // on YAML separators, markdown, or error messages starting with "---").
+    if text.starts_with("--- ") && text.contains("\n+++ ") {
+        return true;
+    }
+    // @@ hunk headers are distinctive enough on their own.
+    text.contains("\n@@ ") || text.starts_with("@@ ")
 }
 
 /// Parse a unified diff string into styled Lines.
@@ -190,6 +195,9 @@ index abc1234..def5678 100644
         assert!(!is_unified_diff("hello world"));
         assert!(!is_unified_diff("wrote 42 bytes to foo.txt"));
         assert!(!is_unified_diff("fn main() { }"));
+        // YAML separator / markdown / error messages starting with "---"
+        assert!(!is_unified_diff("--- Error: not found"));
+        assert!(!is_unified_diff("---\ntitle: something\n---"));
     }
 
     #[test]

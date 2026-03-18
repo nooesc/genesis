@@ -468,7 +468,7 @@ fn format_patch_diff(path: &str, old_text: &str, new_text: &str) -> String {
     out.push_str(&format!("--- a/{path}\n"));
     out.push_str(&format!("+++ b/{path}\n"));
     out.push_str(&format!(
-        "@@ -{},{}  +{},{} @@\n",
+        "@@ -{},{} +{},{} @@\n",
         1,
         old_lines.len(),
         1,
