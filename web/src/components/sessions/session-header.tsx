@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { GitForkIcon, Trash2Icon, Copy } from 'lucide-react'
+import { GitForkIcon, Trash2Icon, Copy, DownloadIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -59,9 +59,12 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
   }
 
   function handleCopyId() {
-    void navigator.clipboard.writeText(session.id)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+    navigator.clipboard.writeText(session.id).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {
+      // clipboard unavailable (non-HTTPS or denied)
+    })
   }
 
   return (
@@ -98,6 +101,12 @@ export function SessionHeader({ session, messageCount }: SessionHeaderProps) {
           <Button variant="outline" size="sm" onClick={handleFork} disabled={forkMutation.isPending} className="h-7 px-2 font-mono text-[10px]">
             <GitForkIcon className="mr-1 h-3 w-3" />
             Fork
+          </Button>
+          <Button variant="outline" size="sm" asChild className="h-7 px-2 font-mono text-[10px]">
+            <a href={`/api/sessions/${session.id}/export`} download>
+              <DownloadIcon className="mr-1 h-3 w-3" />
+              Export
+            </a>
           </Button>
           <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
             <DialogTrigger asChild>

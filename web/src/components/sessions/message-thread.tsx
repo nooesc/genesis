@@ -61,9 +61,6 @@ export function MessageThread({ messages }: MessageThreadProps) {
 
   return (
     <div className="relative">
-      {/* Timeline track */}
-      <div className="absolute left-[11px] top-0 bottom-0 w-px bg-border/30" />
-
       <div className="flex flex-col">
         {messages.map((msg, idx) => {
           const config = ROLE_CONFIG[msg.role]
@@ -120,8 +117,8 @@ export function MessageThread({ messages }: MessageThreadProps) {
                     </p>
                   ) : (
                     <>
-                      {/* Message content */}
-                      {msg.content && (
+                      {/* Message content (skip for tool — shown via ToolCallBlock) */}
+                      {msg.content && msg.role !== 'tool' && (
                         <div className="rounded-md bg-card/50 px-3 py-2 ring-1 ring-border/20">
                           <p className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-foreground/80">
                             {msg.content}
