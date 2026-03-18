@@ -966,9 +966,9 @@ pub fn load_from_map(
         },
         paths: AppPaths {
             config_path: paths.config_path,
+            plugin_dir: data_dir.join("plugins"),
             data_dir,
             database_path,
-            plugin_dir: paths.plugin_dir,
         },
     })
 }
@@ -1767,6 +1767,32 @@ plugins:
         assert_eq!(loaded.config.plugins.hook_timeout_ms, 1_500);
         assert_eq!(loaded.config.plugins.tool_timeout_ms, 9_000);
         assert_eq!(loaded.config.plugins.auto_disable_after, 5);
+    }
+
+    #[test]
+    fn plugin_dir_tracks_overridden_data_dir() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openai
+  model: gpt-4.1-mini
+"#,
+        )
+        .expect("config file should be written");
+
+        let overridden_data_dir = dir.path().join("custom-data");
+        let env = BTreeMap::from([(
+            "GENESIS_DATA_DIR".to_owned(),
+            overridden_data_dir.to_string_lossy().into_owned(),
+        )]);
+
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
+
+        assert_eq!(loaded.paths.data_dir, overridden_data_dir);
+        assert_eq!(loaded.paths.plugin_dir, overridden_data_dir.join("plugins"));
     }
 
     #[test]
