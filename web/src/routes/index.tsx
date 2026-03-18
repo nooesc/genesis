@@ -35,12 +35,14 @@ function DashboardPage() {
   const { data: insights, isLoading: insightsLoading } = useInsights(7)
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 10 })
 
+  // tokens_per_day is [date, input, output][] — sum input + output
   const totalTokens7d = insights
-    ? Object.values(insights.tokens_per_day).reduce((sum, v) => sum + v, 0)
+    ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0)
     : 0
 
+  // platform_breakdown is already [platform, count][]
   const platformEntries: [string, number][] = insights
-    ? Object.entries(insights.platform_breakdown)
+    ? insights.platform_breakdown
     : []
 
   const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
@@ -92,7 +94,7 @@ function DashboardPage() {
             {insightsLoading ? (
               <Skeleton className="h-[200px] w-full rounded" />
             ) : (
-              <TokenChart tokensPerDay={insights?.tokens_per_day ?? {}} />
+              <TokenChart tokensPerDay={insights?.tokens_per_day ?? []} />
             )}
           </CardContent>
         </Card>
