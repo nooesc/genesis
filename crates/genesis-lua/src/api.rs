@@ -1,15 +1,15 @@
 use std::sync::{Arc, Mutex};
 
-use mlua::{Function, Lua, Table, UserData, UserDataFields};
+use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
     hooks::{HookEvent, HookRegistry},
     manifest::PluginPermissions,
-    tools::LuaToolRegistry,
+    tools::{LuaHostToolExecutor, LuaToolRegistry},
     LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenesisApi {
     version: String,
     plugin_dir: String,
@@ -18,6 +18,8 @@ pub struct GenesisApi {
     logs: Arc<Mutex<Vec<String>>>,
     hooks: Arc<Mutex<HookRegistry>>,
     tools: Arc<Mutex<LuaToolRegistry>>,
+    host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
+    active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
 }
 
@@ -60,13 +62,23 @@ impl PluginContext {
             .lock()
             .expect("plugin load state mutex should not be poisoned")
     }
+
+    pub(crate) fn for_execution(name: String, permissions: PluginPermissions) -> Self {
+        let context = Self::new(name, permissions);
+        context.close_tool_registration();
+        context
+    }
 }
 
 impl UserData for SessionView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, this| Ok(this.ctx.lock().unwrap().id.clone()));
-        fields.add_field_method_get("model", |_, this| Ok(this.ctx.lock().unwrap().model.clone()));
-        fields.add_field_method_get("turn_count", |_, this| Ok(this.ctx.lock().unwrap().turn_count));
+        fields.add_field_method_get("model", |_, this| {
+            Ok(this.ctx.lock().unwrap().model.clone())
+        });
+        fields.add_field_method_get("turn_count", |_, this| {
+            Ok(this.ctx.lock().unwrap().turn_count)
+        });
         fields.add_field_method_get("total_tokens", |_, this| {
             Ok(this.ctx.lock().unwrap().total_tokens)
         });
@@ -111,8 +123,16 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("log_error", |lua, this| {
             make_logger(lua, Arc::clone(&this.logs), Some("[error] "))
         });
+        fields.add_field_method_get("tools", |lua, this| {
+            make_tool_bridge(
+                lua,
+                Arc::clone(&this.host_tools),
+                Arc::clone(&this.active_plugin),
+            )
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
+            let plugin_context = this.plugin_context.clone();
             lua.create_function(move |_, (event_name, callback): (String, Function)| {
                 let event = HookEvent::from_name(&event_name).ok_or_else(|| {
                     mlua::Error::external(LuaRuntimeError::UnsupportedHookEvent {
@@ -122,7 +142,7 @@ impl UserData for GenesisApi {
                 hooks
                     .lock()
                     .expect("hook registry mutex should not be poisoned")
-                    .register(event, callback);
+                    .register(event, callback, plugin_context.clone());
                 Ok(())
             })
         });
@@ -156,6 +176,8 @@ pub(crate) fn install_genesis_api(
     session: Arc<Mutex<LuaSessionContext>>,
     hooks: Arc<Mutex<HookRegistry>>,
     tools: Arc<Mutex<LuaToolRegistry>>,
+    host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
+    active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
@@ -166,6 +188,8 @@ pub(crate) fn install_genesis_api(
         logs,
         hooks,
         tools,
+        host_tools,
+        active_plugin,
         plugin_context,
     })?)
 }
@@ -183,4 +207,84 @@ fn make_logger(
         });
         Ok(())
     })
+}
+
+fn make_tool_bridge(
+    lua: &Lua,
+    host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
+    active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+) -> mlua::Result<Table> {
+    let tools = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    let index = lua.create_function(move |lua, (_table, tool_name): (Table, String)| {
+        let host_tools = Arc::clone(&host_tools);
+        let active_plugin = Arc::clone(&active_plugin);
+        lua.create_function(move |lua, args: Option<Table>| {
+            let plugin_context = active_plugin
+                .lock()
+                .expect("active plugin mutex should not be poisoned")
+                .last()
+                .cloned()
+                .ok_or_else(|| mlua::Error::external(LuaRuntimeError::HostToolContextUnavailable))?;
+            if !plugin_context.permissions.trusted
+                && !plugin_context
+                    .permissions
+                    .tools
+                    .iter()
+                    .any(|allowed| allowed == &tool_name)
+            {
+                return Err(mlua::Error::external(
+                    LuaRuntimeError::HostToolPermissionDenied {
+                        plugin_name: plugin_context.name.clone(),
+                        tool_name: tool_name.clone(),
+                    },
+                ));
+            }
+
+            let executor = host_tools
+                .lock()
+                .expect("host tools mutex should not be poisoned")
+                .clone()
+                .ok_or_else(|| mlua::Error::external(LuaRuntimeError::HostToolBridgeUnavailable))?;
+            let arguments = table_to_string_arguments(lua, args)?;
+            let output = executor.execute(&tool_name, arguments).map_err(|reason| {
+                mlua::Error::external(LuaRuntimeError::HostToolExecutionFailed {
+                    tool_name: tool_name.clone(),
+                    reason,
+                })
+            })?;
+            Ok(output)
+        })
+    })?;
+    metatable.set("__index", index)?;
+    tools.set_metatable(Some(metatable))?;
+    Ok(tools)
+}
+
+fn table_to_string_arguments(
+    lua: &Lua,
+    args: Option<Table>,
+) -> mlua::Result<std::collections::BTreeMap<String, String>> {
+    let Some(args) = args else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+
+    let mut flattened = std::collections::BTreeMap::new();
+    for pair in args.pairs::<String, Value>() {
+        let (key, value) = pair?;
+        let value = match value {
+            Value::Nil => continue,
+            Value::String(text) => text.to_str()?.to_owned(),
+            Value::Boolean(flag) => flag.to_string(),
+            Value::Integer(number) => number.to_string(),
+            Value::Number(number) => number.to_string(),
+            other => {
+                let json = lua.from_value::<serde_json::Value>(other)?;
+                json.to_string()
+            }
+        };
+        flattened.insert(key, value);
+    }
+
+    Ok(flattened)
 }

@@ -3,7 +3,15 @@ use std::collections::BTreeMap;
 use genesis_types::ToolDefinition;
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 
-use crate::{PluginPermissions, LuaRuntimeError};
+use crate::{LuaRuntimeError, PluginPermissions};
+
+pub trait LuaHostToolExecutor: Send + Sync {
+    fn execute(
+        &self,
+        tool_name: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> Result<String, String>;
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LuaToolOutput {
@@ -109,11 +117,16 @@ impl LuaToolRegistry {
     }
 }
 
-fn required_string(spec: &Table, field: &str, plugin_name: &str) -> Result<String, LuaRuntimeError> {
-    spec.get::<String>(field).map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
-        plugin_name: plugin_name.to_owned(),
-        reason: format!("missing or invalid `{field}`: {source}"),
-    })
+fn required_string(
+    spec: &Table,
+    field: &str,
+    plugin_name: &str,
+) -> Result<String, LuaRuntimeError> {
+    spec.get::<String>(field)
+        .map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
+            plugin_name: plugin_name.to_owned(),
+            reason: format!("missing or invalid `{field}`: {source}"),
+        })
 }
 
 fn required_function(
@@ -133,12 +146,12 @@ fn optional_parameter_schema(
     spec: &Table,
     plugin_name: &str,
 ) -> Result<Option<serde_json::Value>, LuaRuntimeError> {
-    let value = spec
-        .get::<Option<Value>>("parameters")
-        .map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
+    let value = spec.get::<Option<Value>>("parameters").map_err(|source| {
+        LuaRuntimeError::InvalidLuaToolDefinition {
             plugin_name: plugin_name.to_owned(),
             reason: format!("invalid `parameters`: {source}"),
-        })?;
+        }
+    })?;
 
     let Some(value) = value else {
         return Ok(None);
@@ -163,7 +176,8 @@ fn optional_parameter_schema(
                 plugin_name: plugin_name.to_owned(),
                 reason: format!("invalid parameter definition: {source}"),
             })?;
-        let mut schema = match lua.from_value::<serde_json::Value>(Value::Table(definition.clone())) {
+        let mut schema = match lua.from_value::<serde_json::Value>(Value::Table(definition.clone()))
+        {
             Ok(serde_json::Value::Object(object)) => object,
             Ok(_) => {
                 return Err(LuaRuntimeError::InvalidLuaToolDefinition {
@@ -179,7 +193,10 @@ fn optional_parameter_schema(
             }
         };
 
-        if matches!(schema.remove("required"), Some(serde_json::Value::Bool(true))) {
+        if matches!(
+            schema.remove("required"),
+            Some(serde_json::Value::Bool(true))
+        ) {
             required.push(serde_json::Value::String(name.clone()));
         }
 
@@ -187,8 +204,14 @@ fn optional_parameter_schema(
     }
 
     let mut root = serde_json::Map::new();
-    root.insert("type".to_owned(), serde_json::Value::String("object".to_owned()));
-    root.insert("properties".to_owned(), serde_json::Value::Object(properties));
+    root.insert(
+        "type".to_owned(),
+        serde_json::Value::String("object".to_owned()),
+    );
+    root.insert(
+        "properties".to_owned(),
+        serde_json::Value::Object(properties),
+    );
     if !required.is_empty() {
         root.insert("required".to_owned(), serde_json::Value::Array(required));
     }
@@ -200,10 +223,9 @@ fn to_output(lua: &Lua, tool_name: &str, value: Value) -> Result<LuaToolOutput, 
     match value {
         Value::Nil => Ok(LuaToolOutput::Text(String::new())),
         Value::String(text) => Ok(LuaToolOutput::Text(text.to_str()?.to_owned())),
-        Value::Boolean(_)
-        | Value::Integer(_)
-        | Value::Number(_)
-        | Value::Table(_) => Ok(LuaToolOutput::Json(lua.from_value(value)?)),
+        Value::Boolean(_) | Value::Integer(_) | Value::Number(_) | Value::Table(_) => {
+            Ok(LuaToolOutput::Json(lua.from_value(value)?))
+        }
         other => Err(LuaRuntimeError::InvalidLuaToolResult {
             tool_name: tool_name.to_owned(),
             value_type: other.type_name().to_owned(),

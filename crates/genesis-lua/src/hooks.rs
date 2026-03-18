@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use mlua::{Function, MultiValue, Value};
 use serde::{Deserialize, Serialize};
 
+use crate::api::PluginContext;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -59,15 +61,29 @@ impl<T> PostHookOutcome<T> {
 
 #[derive(Debug, Default)]
 pub struct HookRegistry {
-    callbacks: BTreeMap<HookEvent, Vec<Function>>,
+    callbacks: BTreeMap<HookEvent, Vec<HookCallback>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HookCallback {
+    pub(crate) function: Function,
+    pub(crate) plugin_context: Option<PluginContext>,
 }
 
 impl HookRegistry {
-    pub fn register(&mut self, event: HookEvent, callback: Function) {
-        self.callbacks.entry(event).or_default().push(callback);
+    pub(crate) fn register(
+        &mut self,
+        event: HookEvent,
+        callback: Function,
+        plugin_context: Option<PluginContext>,
+    ) {
+        self.callbacks.entry(event).or_default().push(HookCallback {
+            function: callback,
+            plugin_context,
+        });
     }
 
-    pub fn callbacks(&self, event: HookEvent) -> Vec<Function> {
+    pub(crate) fn callbacks(&self, event: HookEvent) -> Vec<HookCallback> {
         self.callbacks.get(&event).cloned().unwrap_or_default()
     }
 }
@@ -81,10 +97,10 @@ pub(crate) fn parse_pre_hook_result(
         None | Some(Value::Nil) | Some(Value::Boolean(true)) => Ok(PreHookOutcome::Allow(original)),
         Some(Value::Boolean(false)) => {
             let reason = match iter.next() {
-        Some(Value::String(s)) => Some(s.to_str()?.to_owned()),
-        Some(Value::Nil) | None => None,
-        Some(other) => Some(other.to_string()?),
-    };
+                Some(Value::String(s)) => Some(s.to_str()?.to_owned()),
+                Some(Value::Nil) | None => None,
+                Some(other) => Some(other.to_string()?),
+            };
             Ok(PreHookOutcome::Veto { reason })
         }
         Some(Value::String(s)) => Ok(PreHookOutcome::Allow(s.to_str()?.to_owned())),

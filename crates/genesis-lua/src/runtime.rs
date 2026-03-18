@@ -10,8 +10,11 @@ use thiserror::Error;
 use crate::{
     api::{install_genesis_api, PluginContext},
     discovery::discover_plugins_best_effort,
-    hooks::{parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome, PreHookOutcome},
-    tools::{LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
+    hooks::{
+        parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
+        PreHookOutcome,
+    },
+    tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,6 +42,8 @@ pub struct LuaRuntime {
     session_state: Arc<Mutex<LuaSessionContext>>,
     hook_registry: Arc<Mutex<HookRegistry>>,
     tool_registry: Arc<Mutex<LuaToolRegistry>>,
+    host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
+    active_plugin: Arc<Mutex<Vec<PluginContext>>>,
 }
 
 impl std::fmt::Debug for LuaRuntime {
@@ -107,6 +112,14 @@ pub enum LuaRuntimeError {
         tool_name: String,
         value_type: String,
     },
+    #[error("host tool bridge is not configured")]
+    HostToolBridgeUnavailable,
+    #[error("host tool bridge is unavailable outside plugin callbacks")]
+    HostToolContextUnavailable,
+    #[error("plugin `{plugin_name}` is not permitted to call host tool `{tool_name}`")]
+    HostToolPermissionDenied { plugin_name: String, tool_name: String },
+    #[error("host tool `{tool_name}` failed: {reason}")]
+    HostToolExecutionFailed { tool_name: String, reason: String },
     #[error("lua execution failed: {source}")]
     Lua {
         #[from]
@@ -140,6 +153,8 @@ impl LuaRuntime {
         let session_state = Arc::new(Mutex::new(config.session.clone()));
         let hook_registry = Arc::new(Mutex::new(HookRegistry::default()));
         let tool_registry = Arc::new(Mutex::new(LuaToolRegistry::default()));
+        let host_tool_executor = Arc::new(Mutex::new(None));
+        let active_plugin = Arc::new(Mutex::new(Vec::new()));
         let genesis = install_genesis_api(
             &lua,
             &config,
@@ -147,6 +162,8 @@ impl LuaRuntime {
             Arc::clone(&session_state),
             Arc::clone(&hook_registry),
             Arc::clone(&tool_registry),
+            Arc::clone(&host_tool_executor),
+            Arc::clone(&active_plugin),
             None,
         )?;
         lua.globals().set("genesis", genesis)?;
@@ -159,6 +176,8 @@ impl LuaRuntime {
             session_state,
             hook_registry,
             tool_registry,
+            host_tool_executor,
+            active_plugin,
         };
         runtime.load_plugins(&config)?;
         Ok(runtime)
@@ -251,10 +270,33 @@ impl LuaRuntime {
         name: &str,
         arguments: BTreeMap<String, String>,
     ) -> Result<LuaToolOutput, LuaRuntimeError> {
+        let plugin_context = {
+            let registry = self
+                .tool_registry
+                .lock()
+                .expect("tool registry mutex should not be poisoned");
+            let tool = registry
+                .registered_tools()
+                .into_iter()
+                .find(|tool| tool.definition.name == name)
+                .ok_or_else(|| LuaRuntimeError::UnknownLuaTool {
+                    name: name.to_owned(),
+                })?;
+            PluginContext::for_execution(tool.plugin_name, tool.permissions)
+        };
+        let _guard =
+            ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
         self.tool_registry
             .lock()
             .expect("tool registry mutex should not be poisoned")
             .invoke(&self.lua, name, arguments)
+    }
+
+    pub fn set_host_tool_executor(&self, executor: Arc<dyn LuaHostToolExecutor>) {
+        *self
+            .host_tool_executor
+            .lock()
+            .expect("host tool executor mutex should not be poisoned") = Some(executor);
     }
 
     pub fn register_hook(
@@ -262,14 +304,15 @@ impl LuaRuntime {
         event_name: &str,
         callback: mlua::Function,
     ) -> Result<(), LuaRuntimeError> {
-        let event = HookEvent::from_name(event_name)
-            .ok_or_else(|| LuaRuntimeError::UnsupportedHookEvent {
+        let event = HookEvent::from_name(event_name).ok_or_else(|| {
+            LuaRuntimeError::UnsupportedHookEvent {
                 event: event_name.to_owned(),
-            })?;
+            }
+        })?;
         self.hook_registry
             .lock()
             .expect("hook registry mutex should not be poisoned")
-            .register(event, callback);
+            .register(event, callback, None);
         Ok(())
     }
 
@@ -282,7 +325,10 @@ impl LuaRuntime {
         state.total_tokens = state.total_tokens.saturating_add(tokens);
     }
 
-    pub fn run_pre_turn(&self, user_message: &str) -> Result<PreHookOutcome<String>, LuaRuntimeError> {
+    pub fn run_pre_turn(
+        &self,
+        user_message: &str,
+    ) -> Result<PreHookOutcome<String>, LuaRuntimeError> {
         let context = self.lua.create_table()?;
         context.set("user_message", user_message)?;
         self.run_pre_hook(HookEvent::PreTurn, context, user_message.to_owned())
@@ -310,7 +356,10 @@ impl LuaRuntime {
         self.run_post_hook(HookEvent::PostToolCall, context, output.to_owned())
     }
 
-    pub fn run_post_turn(&self, response: &str) -> Result<PostHookOutcome<String>, LuaRuntimeError> {
+    pub fn run_post_turn(
+        &self,
+        response: &str,
+    ) -> Result<PostHookOutcome<String>, LuaRuntimeError> {
         let context = self.lua.create_table()?;
         context.set("response", response)?;
         self.run_post_hook(HookEvent::PostTurn, context, response.to_owned())
@@ -336,10 +385,8 @@ impl LuaRuntime {
         let globals = self.lua.globals();
         let mut cloned_tables = HashMap::new();
         let env = self.clone_table(&globals, &mut cloned_tables)?;
-        let plugin_context = PluginContext::new(
-            plugin.name.clone(),
-            plugin.manifest.permissions.clone(),
-        );
+        let plugin_context =
+            PluginContext::new(plugin.name.clone(), plugin.manifest.permissions.clone());
         let plugin_genesis = install_genesis_api(
             &self.lua,
             config,
@@ -347,6 +394,8 @@ impl LuaRuntime {
             Arc::clone(&self.session_state),
             Arc::clone(&self.hook_registry),
             Arc::clone(&self.tool_registry),
+            Arc::clone(&self.host_tool_executor),
+            Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
         )?;
         env.set("genesis", plugin_genesis)?;
@@ -406,11 +455,18 @@ impl LuaRuntime {
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
-            let value: Result<mlua::MultiValue, mlua::Error> = callback.call(context.clone());
+            let _guard = ActivePluginGuard::push(
+                Arc::clone(&self.active_plugin),
+                callback.plugin_context.clone(),
+            );
+            let value: Result<mlua::MultiValue, mlua::Error> =
+                callback.function.call(context.clone());
             match value {
                 Ok(values) => match parse_pre_hook_result(values, current.clone()) {
                     Ok(PreHookOutcome::Allow(next)) => current = next,
-                    Ok(PreHookOutcome::Veto { reason }) => return Ok(PreHookOutcome::Veto { reason }),
+                    Ok(PreHookOutcome::Veto { reason }) => {
+                        return Ok(PreHookOutcome::Veto { reason })
+                    }
                     Err(err) => {
                         self.push_hook_error(event, err.to_string());
                     }
@@ -435,7 +491,12 @@ impl LuaRuntime {
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
-            let value: Result<mlua::MultiValue, mlua::Error> = callback.call(context.clone());
+            let _guard = ActivePluginGuard::push(
+                Arc::clone(&self.active_plugin),
+                callback.plugin_context.clone(),
+            );
+            let value: Result<mlua::MultiValue, mlua::Error> =
+                callback.function.call(context.clone());
             match value {
                 Ok(values) => match parse_post_hook_result(values, current.clone()) {
                     Ok(PostHookOutcome::Keep(next)) => current = next,
@@ -448,18 +509,19 @@ impl LuaRuntime {
         Ok(PostHookOutcome::Rewrite(current))
     }
 
-    fn run_observe_hook(
-        &self,
-        event: HookEvent,
-        context: Table,
-    ) -> Result<(), LuaRuntimeError> {
+    fn run_observe_hook(&self, event: HookEvent, context: Table) -> Result<(), LuaRuntimeError> {
         let callbacks = self
             .hook_registry
             .lock()
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
-            let value: Result<mlua::MultiValue, mlua::Error> = callback.call(context.clone());
+            let _guard = ActivePluginGuard::push(
+                Arc::clone(&self.active_plugin),
+                callback.plugin_context.clone(),
+            );
+            let value: Result<mlua::MultiValue, mlua::Error> =
+                callback.function.call(context.clone());
             if let Err(err) = value {
                 self.push_hook_error(event, err.to_string());
             }
@@ -473,5 +535,36 @@ impl LuaRuntime {
             .lock()
             .expect("log sink mutex should not be poisoned");
         logs.push(format!("[hook::{event:?}] {message}"));
+    }
+}
+
+struct ActivePluginGuard {
+    stack: Arc<Mutex<Vec<PluginContext>>>,
+    pushed: bool,
+}
+
+impl ActivePluginGuard {
+    fn push(stack: Arc<Mutex<Vec<PluginContext>>>, plugin_context: Option<PluginContext>) -> Self {
+        let pushed = if let Some(plugin_context) = plugin_context {
+            stack
+                .lock()
+                .expect("active plugin mutex should not be poisoned")
+                .push(plugin_context);
+            true
+        } else {
+            false
+        };
+        Self { stack, pushed }
+    }
+}
+
+impl Drop for ActivePluginGuard {
+    fn drop(&mut self) {
+        if self.pushed {
+            self.stack
+                .lock()
+                .expect("active plugin mutex should not be poisoned")
+                .pop();
+        }
     }
 }

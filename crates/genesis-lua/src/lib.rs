@@ -11,16 +11,43 @@ pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissi
 pub use runtime::{
     LuaRuntime, LuaRuntimeBuilder, LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
-pub use tools::{LuaRegisteredTool, LuaToolOutput, LuaToolRegistry};
+pub use tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry};
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::sync::{Arc, Mutex};
 
     use serde_json::json;
 
     use crate::{LuaRuntimeConfig, LuaSessionContext};
+
+    #[derive(Default)]
+    struct TestHostToolExecutor {
+        calls: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
+    }
+
+    impl crate::tools::LuaHostToolExecutor for TestHostToolExecutor {
+        fn execute(
+            &self,
+            tool_name: &str,
+            arguments: BTreeMap<String, String>,
+        ) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("host tool calls mutex should not be poisoned")
+                .push((tool_name.to_owned(), arguments.clone()));
+            Ok(match tool_name {
+                "read_file" => format!(
+                    "read:{}",
+                    arguments.get("path").cloned().unwrap_or_default()
+                ),
+                "echo" => arguments.get("message").cloned().unwrap_or_default(),
+                other => format!("host:{other}"),
+            })
+        }
+    }
 
     #[test]
     fn runtime_builder_is_constructible() {
@@ -31,7 +58,8 @@ mod tests {
     #[test]
     fn runtime_builds_from_plugin_directory() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(dir.path().join("logger.lua"), "genesis.log('loaded')").expect("plugin should write");
+        fs::write(dir.path().join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
@@ -347,7 +375,10 @@ error("boom")
             "failed plugins must not leave registered tools behind"
         );
         assert!(
-            runtime.plugin_errors().iter().any(|entry| entry.contains("boom")),
+            runtime
+                .plugin_errors()
+                .iter()
+                .any(|entry| entry.contains("boom")),
             "plugin failure should still be recorded: {:?}",
             runtime.plugin_errors()
         );
@@ -394,7 +425,10 @@ end)
             "tool registration should stay closed after plugin load"
         );
         assert!(
-            runtime.logs().iter().any(|entry| entry.contains("only available during plugin load")),
+            runtime
+                .logs()
+                .iter()
+                .any(|entry| entry.contains("only available during plugin load")),
             "late registration failure should be logged: {:?}",
             runtime.logs()
         );
@@ -428,7 +462,10 @@ genesis.register_tool({
             )
             .expect("tool should run");
 
-        assert_eq!(output, crate::tools::LuaToolOutput::Text("hello:2".to_owned()));
+        assert_eq!(
+            output,
+            crate::tools::LuaToolOutput::Text("hello:2".to_owned())
+        );
     }
 
     #[test]
@@ -469,6 +506,139 @@ genesis.register_tool({
     }
 
     #[test]
+    fn runtime_lua_tool_can_call_permitted_host_tool() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("reader");
+        fs::create_dir(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "reader"
+version = "0.1.0"
+
+[permissions]
+tools = ["read_file"]
+"#,
+        )
+        .expect("manifest should write");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_tool({
+    name = "read_path",
+    description = "Read a path through the host bridge",
+    run = function(args)
+        return genesis.tools.read_file({ path = args.path })
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let executor = Arc::new(TestHostToolExecutor::default());
+        runtime.set_host_tool_executor(executor.clone());
+
+        let output = runtime
+            .invoke_tool(
+                "read_path",
+                BTreeMap::from([("path".to_owned(), "/tmp/demo.txt".to_owned())]),
+            )
+            .expect("tool should run");
+
+        assert_eq!(
+            output,
+            crate::tools::LuaToolOutput::Text("read:/tmp/demo.txt".to_owned())
+        );
+        assert_eq!(
+            executor
+                .calls
+                .lock()
+                .expect("host tool calls mutex should not be poisoned")
+                .as_slice(),
+            &[(
+                "read_file".to_owned(),
+                BTreeMap::from([("path".to_owned(), "/tmp/demo.txt".to_owned())]),
+            )]
+        );
+    }
+
+    #[test]
+    fn runtime_blocks_unpermitted_host_tool_access() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("blocked.lua"),
+            r#"
+genesis.register_tool({
+    name = "blocked_reader",
+    description = "Should not be able to reach host tools",
+    run = function(args)
+        return genesis.tools.read_file({ path = args.path })
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        runtime.set_host_tool_executor(Arc::new(TestHostToolExecutor::default()));
+
+        let err = runtime
+            .invoke_tool(
+                "blocked_reader",
+                BTreeMap::from([("path".to_owned(), "/tmp/demo.txt".to_owned())]),
+            )
+            .expect_err("unpermitted host tool access should fail");
+
+        assert!(
+            err.to_string()
+                .contains("plugin `blocked` is not permitted to call host tool `read_file`"),
+            "unexpected permission error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_hook_can_call_permitted_host_tool() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("rewriter");
+        fs::create_dir(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "rewriter"
+version = "0.1.0"
+
+[permissions]
+tools = ["echo"]
+"#,
+        )
+        .expect("manifest should write");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return genesis.tools.echo({ message = "hook:" .. ctx.user_message })
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        runtime.set_host_tool_executor(Arc::new(TestHostToolExecutor::default()));
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("hook should run");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hook:hello".to_owned())
+        );
+    }
+
+    #[test]
     fn runtime_treats_missing_plugin_directory_as_empty() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         let missing = dir.path().join("missing-plugins");
@@ -487,7 +657,8 @@ genesis.register_tool({
         fs::write(dir.path().join("broken.lua"), "this is not valid lua(")
             .expect("broken plugin should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
         assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
@@ -517,7 +688,8 @@ name = "broken"
         )
         .expect("plugin.toml should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
         assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
@@ -550,7 +722,8 @@ version = "0.1.0"
         )
         .expect("plugin.toml should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
         assert_eq!(
             runtime.plugin_names(),
@@ -571,16 +744,21 @@ version = "0.1.0"
     #[test]
     fn runtime_isolates_plugin_globals_between_siblings() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(dir.path().join("first.lua"), "shared_value = 'leaked'").expect("plugin should write");
+        fs::write(dir.path().join("first.lua"), "shared_value = 'leaked'")
+            .expect("plugin should write");
         fs::write(
             dir.path().join("second.lua"),
             "assert(shared_value == nil, 'global leaked across plugins')\ngenesis.log('second loaded')",
         )
         .expect("plugin should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(
+            runtime.plugin_names(),
+            vec!["first".to_owned(), "second".to_owned()]
+        );
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -603,9 +781,13 @@ version = "0.1.0"
         )
         .expect("plugin should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(
+            runtime.plugin_names(),
+            vec!["first".to_owned(), "second".to_owned()]
+        );
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -628,7 +810,8 @@ version = "0.1.0"
         )
         .expect("plugin should write");
 
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+        let runtime =
+            test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
         assert_eq!(runtime.plugin_names(), vec!["observer".to_owned()]);
         assert_eq!(runtime.logs(), vec!["observer loaded".to_owned()]);

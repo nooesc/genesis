@@ -36,7 +36,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genesis_config::{load, GenesisConfig, LoadedConfig};
-use genesis_lua::{LuaRuntime, LuaToolOutput};
+use genesis_lua::{LuaHostToolExecutor, LuaRuntime, LuaToolOutput};
 use genesis_mcp::McpManager;
 use genesis_provider::resolve;
 use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
@@ -576,6 +576,10 @@ impl ToolRuntime {
             return;
         }
 
+        runtime.set_host_tool_executor(Arc::new(CoreLuaHostToolExecutor {
+            registry: self.registry.clone(),
+            context: self.context.clone(),
+        }));
         self.lua_runtime = Some(Arc::clone(&runtime));
 
         let mut existing = self
@@ -1081,6 +1085,31 @@ struct LuaToolHandler {
     tool_name: String,
 }
 
+#[derive(Clone)]
+struct CoreLuaHostToolExecutor {
+    registry: ToolRegistry,
+    context: ToolContext,
+}
+
+impl LuaHostToolExecutor for CoreLuaHostToolExecutor {
+    fn execute(
+        &self,
+        tool_name: &str,
+        arguments: std::collections::BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        self.registry
+            .execute(
+                &ToolCall {
+                    name: tool_name.to_owned(),
+                    arguments,
+                },
+                &self.context,
+            )
+            .map(|output| output.content)
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl ToolHandler for LuaToolHandler {
     fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let output = self
@@ -1502,6 +1531,79 @@ genesis.register_tool({
                 "echoed": "hello",
             })
             .to_string()
+        );
+    }
+
+    #[test]
+    fn default_tool_runtime_exposes_host_tool_bridge_to_lua_tools() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        let package_dir = plugin_dir.join("bridge");
+        std::fs::create_dir_all(&package_dir).expect("plugin dir should exist");
+        std::fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "bridge"
+version = "0.1.0"
+
+[permissions]
+tools = ["session_info"]
+"#,
+        )
+        .expect("manifest should write");
+        std::fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_tool({
+    name = "bridge_info",
+    description = "Read host session info through the bridge",
+    run = function(_)
+        return genesis.tools.session_info({})
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    config_values: BTreeMap::new(),
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let output = runtime
+            .execute(&ToolCall {
+                name: "bridge_info".to_owned(),
+                arguments: BTreeMap::new(),
+            })
+            .expect("lua tool should execute");
+
+        assert!(
+            output.content.contains("session=session-42"),
+            "lua bridge should surface builtin output: {}",
+            output.content
         );
     }
 
