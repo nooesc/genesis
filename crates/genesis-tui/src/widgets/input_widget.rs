@@ -1,20 +1,23 @@
-//! Text input widget with readline-style editing and command history.
+//! Multi-line text input widget with readline-style editing and command history.
 //!
-//! Renders a single-line input as `you> {text}` with a block cursor
-//! on the character under the cursor position.
+//! Renders as `you> {text}` with a block cursor. Supports multi-line editing
+//! via Shift+Enter (insert newline) and Enter (submit). The input area grows
+//! dynamically to fit the content, up to a configurable maximum.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
 };
 
 use crate::history::rgb;
 
 /// The prefix shown before user input (includes trailing space).
 const PREFIX: &str = "you> ";
+
+/// Width of the prefix in terminal columns.
+const PREFIX_WIDTH: usize = 5;
 
 /// Style for the `you> ` prefix.
 const PREFIX_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_DIM));
@@ -26,6 +29,9 @@ const TEXT_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_TEXT));
 const CURSOR_STYLE: Style = Style::new()
     .fg(rgb(genesis_ui::colors::UI_TEXT))
     .add_modifier(Modifier::REVERSED);
+
+/// Maximum number of visible rows for the input area (excluding border).
+const MAX_INPUT_ROWS: u16 = 10;
 
 /// Action returned from [`InputWidget::handle_key`].
 #[derive(Debug, PartialEq, Eq)]
@@ -40,10 +46,10 @@ pub enum InputAction {
     Exit,
 }
 
-/// Single-line text input with readline-style key bindings and
+/// Multi-line text input with readline-style key bindings and
 /// command history navigation.
 pub struct InputWidget {
-    /// Current edit buffer.
+    /// Current edit buffer (may contain `\n` for multi-line).
     buffer: String,
     /// Byte position of the cursor within `buffer`.
     cursor: usize,
@@ -97,10 +103,18 @@ impl InputWidget {
         self.saved_input = None;
     }
 
-    /// Height of this widget in terminal rows (always 1 for now).
-    #[allow(clippy::unused_self)]
+    /// Number of visual lines the content occupies (for dynamic layout).
+    ///
+    /// Returns the number of `\n`-delimited lines in the buffer (minimum 1).
+    /// The caller adds border rows on top of this.
     pub fn height(&self, _width: u16) -> u16 {
-        1
+        let line_count = self.buffer.matches('\n').count() + 1;
+        (line_count as u16).clamp(1, MAX_INPUT_ROWS)
+    }
+
+    /// Whether the buffer contains multiple lines.
+    fn is_multiline(&self) -> bool {
+        self.buffer.contains('\n')
     }
 
     // ── Event handling ────────────────────────────────────────────────────
@@ -108,13 +122,19 @@ impl InputWidget {
     /// Handle a keyboard event and return the resulting [`InputAction`].
     pub fn handle_key(&mut self, key: KeyEvent) -> InputAction {
         match (key.code, key.modifiers) {
-            // ── Submit ───────────────────────────────────────────────────
-            (KeyCode::Enter, _) => {
+            // ── Submit (Enter without Shift) ─────────────────────────────
+            (KeyCode::Enter, mods) if !mods.contains(KeyModifiers::SHIFT) => {
                 let text = std::mem::take(&mut self.buffer);
                 self.cursor = 0;
                 self.history_index = None;
                 self.saved_input = None;
                 InputAction::Submit(text)
+            }
+
+            // ── Newline (Shift+Enter) ────────────────────────────────────
+            (KeyCode::Enter, mods) if mods.contains(KeyModifiers::SHIFT) => {
+                self.insert_char('\n');
+                InputAction::None
             }
 
             // ── Interrupt / Exit ─────────────────────────────────────────
@@ -131,13 +151,17 @@ impl InputWidget {
 
             // ── Kill / clear line ────────────────────────────────────────
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                self.buffer.drain(..self.cursor);
-                self.cursor = 0;
+                // Kill from cursor to start of current line.
+                let line_start = self.current_line_start();
+                self.buffer.drain(line_start..self.cursor);
+                self.cursor = line_start;
                 InputAction::None
             }
 
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                self.buffer.truncate(self.cursor);
+                // Kill from cursor to end of current line.
+                let line_end = self.current_line_end();
+                self.buffer.drain(self.cursor..line_end);
                 InputAction::None
             }
 
@@ -153,12 +177,14 @@ impl InputWidget {
             }
 
             (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                self.cursor = 0;
+                // Move to start of current line (not whole buffer).
+                self.cursor = self.current_line_start();
                 InputAction::None
             }
 
             (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                self.cursor = self.buffer.len();
+                // Move to end of current line (not whole buffer).
+                self.cursor = self.current_line_end();
                 InputAction::None
             }
 
@@ -173,14 +199,22 @@ impl InputWidget {
                 InputAction::None
             }
 
-            // ── History navigation ────────────────────────────────────────
+            // ── Up/Down: line navigation when multi-line, history when single-line
             (KeyCode::Up, _) => {
-                self.history_prev();
+                if self.is_multiline() {
+                    self.move_cursor_up();
+                } else {
+                    self.history_prev();
+                }
                 InputAction::None
             }
 
             (KeyCode::Down, _) => {
-                self.history_next();
+                if self.is_multiline() {
+                    self.move_cursor_down();
+                } else {
+                    self.history_next();
+                }
                 InputAction::None
             }
 
@@ -198,12 +232,12 @@ impl InputWidget {
 
     /// Handle a bracketed-paste event by inserting all characters.
     ///
-    /// Newlines inside the pasted text are treated as spaces to avoid
-    /// triggering an accidental submission.
+    /// Newlines inside the pasted text are preserved for multi-line editing.
     pub fn handle_paste(&mut self, text: &str) {
         for c in text.chars() {
-            if c == '\n' || c == '\r' {
-                self.insert_char(' ');
+            if c == '\r' {
+                // Convert carriage returns to newlines.
+                self.insert_char('\n');
             } else {
                 self.insert_char(c);
             }
@@ -212,113 +246,188 @@ impl InputWidget {
 
     // ── Rendering ─────────────────────────────────────────────────────────
 
-    /// Render the input line into `buf` at `area`.
-    ///
-    /// Layout: `you> {text}` where the character at `cursor` is displayed
-    /// with inverted colours. If the cursor is at the end of the text, a
-    /// space with inverted colours acts as the block cursor.
+    /// Render the input line(s) into `buf` at `area`.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         self.render_with_state(area, buf, true);
     }
 
-    /// Render the input line into `buf` with optional cursor visibility.
-    ///
-    /// When the cursor is hidden (e.g. agent turn active), text is rendered
-    /// normally and no highlighted cursor span is shown.
+    /// Render the input into `buf` with optional cursor visibility.
     pub fn render_with_state(&self, area: Rect, buf: &mut Buffer, show_cursor: bool) {
         if area.height == 0 || area.width == 0 {
             return;
         }
 
-        let prefix_span = Span::styled(PREFIX, PREFIX_STYLE);
+        let lines: Vec<&str> = self.buffer.split('\n').collect();
+        let visible_lines = (area.height as usize).min(lines.len());
 
-        // Build text spans with cursor highlight.
-        let text_spans = self.build_text_spans(show_cursor);
+        // Determine which lines to show (scroll to keep cursor visible).
+        let cursor_line = self.cursor_line_index();
+        let scroll_offset = if cursor_line >= visible_lines {
+            cursor_line - visible_lines + 1
+        } else {
+            0
+        };
 
-        let line = Line::from(
-            std::iter::once(prefix_span)
-                .chain(text_spans)
-                .collect::<Vec<_>>(),
-        );
+        for (row_idx, line_idx) in (scroll_offset..scroll_offset + visible_lines).enumerate() {
+            let row = area.y + row_idx as u16;
+            if row >= area.y + area.height {
+                break;
+            }
 
-        // Render the line into the first row of the area.
-        let row = area.y;
-        let mut x = area.x;
+            let line_text = lines.get(line_idx).copied().unwrap_or("");
+            let is_first_line = line_idx == 0;
 
-        for span in &line.spans {
-            let style = span.style;
-            for ch in span.content.chars() {
+            // Compute byte offsets for this line within the buffer.
+            let line_byte_start = self.line_byte_offset(line_idx);
+            let line_byte_end = line_byte_start + line_text.len();
+
+            let mut x = area.x;
+
+            // Prefix on first visible line only.
+            if is_first_line {
+                for ch in PREFIX.chars() {
+                    if x >= area.x + area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, row)) {
+                        let mut s = String::with_capacity(ch.len_utf8());
+                        s.push(ch);
+                        cell.set_symbol(&s);
+                        cell.set_style(PREFIX_STYLE);
+                    }
+                    x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                }
+            } else {
+                // Indent continuation lines to align with content after prefix.
+                for _ in 0..PREFIX_WIDTH {
+                    if x >= area.x + area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, row)) {
+                        cell.set_symbol(" ");
+                        cell.set_style(TEXT_STYLE);
+                    }
+                    x += 1;
+                }
+            }
+
+            // Render the text content with cursor highlight.
+            let cursor_in_this_line = self.cursor >= line_byte_start
+                && self.cursor <= line_byte_end
+                && line_idx == cursor_line;
+
+            for (byte_offset, ch) in line_text.char_indices() {
                 if x >= area.x + area.width {
                     break;
                 }
+                let abs_byte = line_byte_start + byte_offset;
+                let is_cursor_pos = cursor_in_this_line && abs_byte == self.cursor;
+                let style = if show_cursor && is_cursor_pos {
+                    CURSOR_STYLE
+                } else {
+                    TEXT_STYLE
+                };
+
                 if let Some(cell) = buf.cell_mut((x, row)) {
                     let mut s = String::with_capacity(ch.len_utf8());
                     s.push(ch);
                     cell.set_symbol(&s);
                     cell.set_style(style);
                 }
-                let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-                x += char_width;
+                x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            }
+
+            // Block cursor at end of line.
+            if cursor_in_this_line && self.cursor == line_byte_end && x < area.x + area.width {
+                if let Some(cell) = buf.cell_mut((x, row)) {
+                    cell.set_symbol(" ");
+                    cell.set_style(if show_cursor { CURSOR_STYLE } else { TEXT_STYLE });
+                }
             }
         }
+    }
+
+    // ── Line navigation helpers ──────────────────────────────────────────
+
+    /// Returns the 0-based line index the cursor is on.
+    fn cursor_line_index(&self) -> usize {
+        self.buffer[..self.cursor].matches('\n').count()
+    }
+
+    /// Returns the byte offset of the start of line `line_idx`.
+    fn line_byte_offset(&self, line_idx: usize) -> usize {
+        if line_idx == 0 {
+            return 0;
+        }
+        let mut count = 0;
+        for (i, ch) in self.buffer.char_indices() {
+            if ch == '\n' {
+                count += 1;
+                if count == line_idx {
+                    return i + 1; // byte after the \n
+                }
+            }
+        }
+        self.buffer.len()
+    }
+
+    /// Returns the byte offset of the start of the current line.
+    fn current_line_start(&self) -> usize {
+        // Search backwards for \n from cursor.
+        if self.cursor == 0 {
+            return 0;
+        }
+        match self.buffer[..self.cursor].rfind('\n') {
+            Some(pos) => pos + 1,
+            None => 0,
+        }
+    }
+
+    /// Returns the byte offset of the end of the current line (before \n or buffer end).
+    fn current_line_end(&self) -> usize {
+        match self.buffer[self.cursor..].find('\n') {
+            Some(pos) => self.cursor + pos,
+            None => self.buffer.len(),
+        }
+    }
+
+    /// Column offset of cursor within the current line (in bytes).
+    fn cursor_column(&self) -> usize {
+        self.cursor - self.current_line_start()
+    }
+
+    /// Move cursor up one line, preserving column position.
+    fn move_cursor_up(&mut self) {
+        let current_line = self.cursor_line_index();
+        if current_line == 0 {
+            return; // Already on first line.
+        }
+        let col = self.cursor_column();
+        let prev_line_start = self.line_byte_offset(current_line - 1);
+        let prev_line_end = self.line_byte_offset(current_line) - 1; // before the \n
+        let prev_line_len = prev_line_end - prev_line_start;
+        self.cursor = prev_line_start + col.min(prev_line_len);
+    }
+
+    /// Move cursor down one line, preserving column position.
+    fn move_cursor_down(&mut self) {
+        let current_line = self.cursor_line_index();
+        let total_lines = self.buffer.matches('\n').count() + 1;
+        if current_line + 1 >= total_lines {
+            return; // Already on last line.
+        }
+        let col = self.cursor_column();
+        let next_line_start = self.line_byte_offset(current_line + 1);
+        let next_line_end = if current_line + 2 < total_lines {
+            self.line_byte_offset(current_line + 2) - 1
+        } else {
+            self.buffer.len()
+        };
+        let next_line_len = next_line_end - next_line_start;
+        self.cursor = next_line_start + col.min(next_line_len);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
-
-    /// Build the spans for the text portion.
-    fn build_text_spans(&self, show_cursor: bool) -> Vec<Span<'static>> {
-        let text = &self.buffer;
-
-        if text.is_empty() {
-            if show_cursor {
-                // Show a block cursor on a space at position 0.
-                return vec![Span::styled(" ", CURSOR_STYLE)];
-            }
-            return vec![Span::styled(" ", TEXT_STYLE)];
-        }
-
-        let mut spans: Vec<Span<'static>> = Vec::new();
-
-        // Text before the cursor.
-        if self.cursor > 0 {
-            spans.push(Span::styled(
-                text[..self.cursor].to_owned(),
-                TEXT_STYLE,
-            ));
-        }
-
-        // Character at the cursor (with reversed style).
-        if self.cursor < text.len() {
-            // Find the end of the character at cursor.
-            let char_end = text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(text.len());
-
-            if show_cursor {
-                spans.push(Span::styled(
-                    text[self.cursor..char_end].to_owned(),
-                    CURSOR_STYLE,
-                ));
-            } else {
-                spans.push(Span::styled(
-                    text[self.cursor..char_end].to_owned(),
-                    TEXT_STYLE,
-                ));
-            }
-
-            // Text after the cursor.
-            if char_end < text.len() {
-                spans.push(Span::styled(text[char_end..].to_owned(), TEXT_STYLE));
-            }
-        } else {
-            // Cursor is past the end — add a block cursor space.
-            spans.push(Span::styled(" ", if show_cursor { CURSOR_STYLE } else { TEXT_STYLE }));
-        }
-
-        spans
-    }
 
     /// Insert `c` at the current cursor byte position.
     fn insert_char(&mut self, c: char) {
@@ -331,7 +440,6 @@ impl InputWidget {
         if self.cursor == 0 {
             return;
         }
-        // Walk back one char boundary.
         let prev = self.prev_char_boundary(self.cursor);
         self.buffer.drain(prev..self.cursor);
         self.cursor = prev;
@@ -344,7 +452,6 @@ impl InputWidget {
         }
         let next = self.next_char_boundary(self.cursor);
         self.buffer.drain(self.cursor..next);
-        // cursor stays at the same position.
     }
 
     /// Move cursor left by one Unicode scalar value.
@@ -391,11 +498,10 @@ impl InputWidget {
 
         let new_index = match self.history_index {
             None => {
-                // Save current input before navigating away.
                 self.saved_input = Some(self.buffer.clone());
                 self.history.len() - 1
             }
-            Some(0) => 0, // Already at oldest — stay.
+            Some(0) => 0,
             Some(i) => i - 1,
         };
 
@@ -407,9 +513,8 @@ impl InputWidget {
     /// Navigate to the next (newer) history entry, or back to saved input.
     fn history_next(&mut self) {
         match self.history_index {
-            None => {} // Already editing new text; nothing to do.
+            None => {}
             Some(i) if i + 1 >= self.history.len() => {
-                // Reached the end of history — restore the saved buffer.
                 self.history_index = None;
                 self.buffer = self.saved_input.take().unwrap_or_default();
                 self.cursor = self.buffer.len();
@@ -445,6 +550,10 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    fn shift_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+    }
+
     #[test]
     fn new_is_empty() {
         let w = InputWidget::new();
@@ -460,7 +569,6 @@ mod tests {
         assert_eq!(w.text(), "hi");
         assert_eq!(w.cursor, 2);
 
-        // Insert in the middle.
         w.handle_key(key(KeyCode::Home));
         w.handle_key(key(KeyCode::Char('!')));
         assert_eq!(w.text(), "!hi");
@@ -476,7 +584,6 @@ mod tests {
         assert_eq!(w.text(), "a");
         assert_eq!(w.cursor, 1);
 
-        // Backspace at position 0 is a no-op.
         w.handle_key(key(KeyCode::Home));
         w.handle_key(key(KeyCode::Backspace));
         assert_eq!(w.text(), "a");
@@ -512,7 +619,6 @@ mod tests {
         let mut w = InputWidget::new();
         w.handle_key(key(KeyCode::Char('a')));
         w.handle_key(key(KeyCode::Char('b')));
-        // Move to start, then Ctrl+D should delete 'a'.
         w.handle_key(key(KeyCode::Home));
         let action = w.handle_key(ctrl('d'));
         assert_eq!(action, InputAction::None);
@@ -532,7 +638,6 @@ mod tests {
         w.handle_key(key(KeyCode::Left));
         assert_eq!(w.cursor, 0);
 
-        // Left at 0 is a no-op.
         w.handle_key(key(KeyCode::Left));
         assert_eq!(w.cursor, 0);
 
@@ -542,7 +647,6 @@ mod tests {
         w.handle_key(key(KeyCode::Right));
         assert_eq!(w.cursor, 2);
 
-        // Right at end is a no-op.
         w.handle_key(key(KeyCode::Right));
         assert_eq!(w.cursor, 2);
     }
@@ -559,7 +663,6 @@ mod tests {
         w.handle_key(key(KeyCode::End));
         assert_eq!(w.cursor, 2);
 
-        // Ctrl+A and Ctrl+E are aliases.
         w.handle_key(ctrl('a'));
         assert_eq!(w.cursor, 0);
 
@@ -573,26 +676,20 @@ mod tests {
         w.push_history("first".to_string());
         w.push_history("second".to_string());
 
-        // Type something new.
         w.handle_key(key(KeyCode::Char('x')));
 
-        // Up → second (most recent).
         w.handle_key(key(KeyCode::Up));
         assert_eq!(w.text(), "second");
 
-        // Up → first.
         w.handle_key(key(KeyCode::Up));
         assert_eq!(w.text(), "first");
 
-        // Up at oldest stays at first.
         w.handle_key(key(KeyCode::Up));
         assert_eq!(w.text(), "first");
 
-        // Down → second.
         w.handle_key(key(KeyCode::Down));
         assert_eq!(w.text(), "second");
 
-        // Down → restore saved "x".
         w.handle_key(key(KeyCode::Down));
         assert_eq!(w.text(), "x");
         assert!(w.history_index.is_none());
@@ -607,10 +704,11 @@ mod tests {
     }
 
     #[test]
-    fn paste_converts_newlines_to_spaces() {
+    fn paste_preserves_newlines() {
         let mut w = InputWidget::new();
         w.handle_paste("line1\nline2");
-        assert_eq!(w.text(), "line1 line2");
+        assert_eq!(w.text(), "line1\nline2");
+        assert!(w.is_multiline());
     }
 
     #[test]
@@ -619,7 +717,7 @@ mod tests {
         w.handle_key(key(KeyCode::Char('a')));
         w.handle_key(key(KeyCode::Char('b')));
         w.handle_key(key(KeyCode::Char('c')));
-        w.handle_key(key(KeyCode::Left)); // cursor at 2
+        w.handle_key(key(KeyCode::Left));
         w.handle_key(ctrl('u'));
         assert_eq!(w.text(), "c");
         assert_eq!(w.cursor, 0);
@@ -632,7 +730,7 @@ mod tests {
         w.handle_key(key(KeyCode::Char('b')));
         w.handle_key(key(KeyCode::Char('c')));
         w.handle_key(key(KeyCode::Home));
-        w.handle_key(key(KeyCode::Right)); // cursor at 1
+        w.handle_key(key(KeyCode::Right));
         w.handle_key(ctrl('k'));
         assert_eq!(w.text(), "a");
         assert_eq!(w.cursor, 1);
@@ -652,20 +750,19 @@ mod tests {
     #[test]
     fn utf8_cursor_movement() {
         let mut w = InputWidget::new();
-        // '€' is a 3-byte UTF-8 character.
         w.insert_char('€');
         w.insert_char('!');
         assert_eq!(w.text(), "€!");
-        assert_eq!(w.cursor, 4); // 3 bytes + 1 byte
+        assert_eq!(w.cursor, 4);
 
         w.move_cursor_left();
-        assert_eq!(w.cursor, 3); // on '!'
+        assert_eq!(w.cursor, 3);
 
         w.move_cursor_left();
-        assert_eq!(w.cursor, 0); // on '€'
+        assert_eq!(w.cursor, 0);
 
         w.move_cursor_right();
-        assert_eq!(w.cursor, 3); // back to '!'
+        assert_eq!(w.cursor, 3);
     }
 
     #[test]
@@ -681,5 +778,121 @@ mod tests {
         let mut w = InputWidget::new();
         w.push_history(String::new());
         assert!(w.history.is_empty());
+    }
+
+    // ── Multi-line tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let mut w = InputWidget::new();
+        w.handle_key(key(KeyCode::Char('a')));
+        let action = w.handle_key(shift_enter());
+        assert_eq!(action, InputAction::None);
+        w.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(w.text(), "a\nb");
+        assert!(w.is_multiline());
+    }
+
+    #[test]
+    fn enter_submits_multiline_text() {
+        let mut w = InputWidget::new();
+        w.handle_key(key(KeyCode::Char('a')));
+        w.handle_key(shift_enter());
+        w.handle_key(key(KeyCode::Char('b')));
+        let action = w.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, InputAction::Submit("a\nb".to_string()));
+    }
+
+    #[test]
+    fn height_reflects_line_count() {
+        let mut w = InputWidget::new();
+        assert_eq!(w.height(80), 1);
+
+        w.handle_key(key(KeyCode::Char('a')));
+        w.handle_key(shift_enter());
+        w.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(w.height(80), 2);
+
+        w.handle_key(shift_enter());
+        w.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(w.height(80), 3);
+    }
+
+    #[test]
+    fn up_down_navigate_lines_when_multiline() {
+        let mut w = InputWidget::new();
+        w.handle_paste("line1\nline2\nline3");
+        // Cursor is at end of "line3".
+        assert_eq!(w.cursor_line_index(), 2);
+
+        w.handle_key(key(KeyCode::Up));
+        assert_eq!(w.cursor_line_index(), 1);
+
+        w.handle_key(key(KeyCode::Up));
+        assert_eq!(w.cursor_line_index(), 0);
+
+        w.handle_key(key(KeyCode::Down));
+        assert_eq!(w.cursor_line_index(), 1);
+    }
+
+    #[test]
+    fn up_down_use_history_when_single_line() {
+        let mut w = InputWidget::new();
+        w.push_history("old".to_string());
+        w.handle_key(key(KeyCode::Char('x')));
+
+        // Single-line: Up should navigate history.
+        w.handle_key(key(KeyCode::Up));
+        assert_eq!(w.text(), "old");
+    }
+
+    #[test]
+    fn home_end_work_per_line() {
+        let mut w = InputWidget::new();
+        w.handle_paste("abc\ndef");
+        // Cursor at end of "def" (byte 7).
+        assert_eq!(w.cursor, 7);
+
+        // Home goes to start of "def" (byte 4, after \n).
+        w.handle_key(key(KeyCode::Home));
+        assert_eq!(w.cursor, 4);
+
+        // End goes to end of "def" (byte 7).
+        w.handle_key(key(KeyCode::End));
+        assert_eq!(w.cursor, 7);
+    }
+
+    #[test]
+    fn backspace_joins_lines() {
+        let mut w = InputWidget::new();
+        w.handle_paste("abc\ndef");
+        // Move to start of "def".
+        w.cursor = 4;
+        // Backspace deletes the \n, joining lines.
+        w.handle_key(key(KeyCode::Backspace));
+        assert_eq!(w.text(), "abcdef");
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_line_start_not_buffer_start() {
+        let mut w = InputWidget::new();
+        w.handle_paste("abc\ndef");
+        // Cursor at end of "def" (byte 7).
+        w.handle_key(ctrl('u'));
+        // Should kill "def" but leave "abc\n".
+        assert_eq!(w.text(), "abc\n");
+    }
+
+    #[test]
+    fn height_capped_at_max() {
+        let mut w = InputWidget::new();
+        // Create more than MAX_INPUT_ROWS lines.
+        for i in 0..15 {
+            if i > 0 {
+                w.insert_char('\n');
+            }
+            w.insert_char('a');
+        }
+        assert_eq!(w.height(80), MAX_INPUT_ROWS);
     }
 }

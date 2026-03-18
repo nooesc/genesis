@@ -377,7 +377,6 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
             if area.height < 2 {
                 app.status_bar.render(area, buf);
             } else {
-                const INPUT_PANEL_ROWS: u16 = 3;
                 const SEPARATOR_ROW: u16 = 1;
                 const STATUS_ROWS: u16 = 1;
 
@@ -390,7 +389,12 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
                 app.status_bar.render(status_area, buf);
 
                 let chat_area_height = area.height - STATUS_ROWS;
-                let input_rows = INPUT_PANEL_ROWS.min(chat_area_height);
+
+                // Dynamic input height: content lines + 2 border rows,
+                // capped at 50% of available space.
+                let content_rows = app.chat.input.height(area.width);
+                let max_input = (chat_area_height / 2).max(3);
+                let input_rows = (content_rows + 2).clamp(3, max_input.min(chat_area_height));
                 let message_area_height = if chat_area_height > input_rows {
                     chat_area_height.saturating_sub(input_rows + 1)
                 } else {
