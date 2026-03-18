@@ -69,7 +69,7 @@ function DashboardPage() {
   return (
     <div className="flex flex-col gap-4">
       {/* Row 1: System gauges + KPI metrics */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+      <div className="card-stagger grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Health gauge */}
         <Card className="lg:col-span-2">
           <CardContent className="flex items-center justify-center py-4">
