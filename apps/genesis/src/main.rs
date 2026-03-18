@@ -23,22 +23,27 @@ async fn main() {
 
     let _otel_guard = init_tracing(tui_active, telemetry_config.as_ref());
 
-    match run(cli).await {
+    let exit_code = match run(cli).await {
         Ok(output) => {
             if !output.is_empty() {
                 println!("{output}");
             }
+            0
         }
         Err(error) => {
             eprintln!("\x1b[38;2;215;95;95m{error}\x1b[0m");
-            std::process::exit(1);
+            1
         }
-    }
+    };
 
-    // Flush telemetry on exit.
+    // Flush telemetry before exit — must happen on both success and error paths.
     #[cfg(feature = "telemetry")]
     if let Some(guard) = _otel_guard {
         guard.shutdown();
+    }
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 

@@ -844,7 +844,6 @@ impl AgentLoop {
 
             self.hooks
                 .on_llm_request(&hook_session, self.active_client().model(), turns_used);
-            let llm_started_at = std::time::Instant::now();
             let (mut response, active_model) = if let Some(hit) = cached {
                 debug!(
                     cache_key = cache_key.as_deref().unwrap_or(""),
@@ -887,12 +886,20 @@ impl AgentLoop {
                 if cache_key.is_some() {
                     self.cache_misses += 1;
                 }
-                match self.complete_with_failover(request).await {
+                let llm_started_at = std::time::Instant::now();
+                let result = match self.complete_with_failover(request).await {
                     Ok(result) => result,
                     Err(err) => {
                         return Err(self.report_error(&hook_session, "llm_request", err.into()))
                     }
-                }
+                };
+                info!(
+                    model = result.1.as_str(),
+                    turn = turns_used,
+                    latency_ms = llm_started_at.elapsed().as_millis() as u64,
+                    "agent.llm_request.completed"
+                );
+                result
             };
 
             // Apply tool call parser for models that embed tool calls in text
@@ -930,19 +937,15 @@ impl AgentLoop {
                 }
             }
 
-            // Log LLM response metrics as a tracing event.
             if let Some(usage) = &response.usage {
+                // Log token usage for OTel / structured logging.
                 info!(
                     model = active_model.as_str(),
                     turn = turns_used,
                     input_tokens = usage.prompt_tokens,
                     output_tokens = usage.completion_tokens,
-                    latency_ms = llm_started_at.elapsed().as_millis() as u64,
                     "agent.llm_response"
                 );
-            }
-
-            if let Some(usage) = &response.usage {
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
                 self.last_prompt_tokens = usage.prompt_tokens;
