@@ -177,6 +177,58 @@ impl GenesisEffects {
             full_area,
         );
     }
+
+    // ── Status bar transition effects ────────────────────────────────────
+
+    /// Trigger a status bar state transition effect.
+    ///
+    /// Called after `StatusBarWidget::set_state()` with the status bar area.
+    /// Chooses the appropriate effect based on the previous and current state.
+    pub fn on_status_change(
+        &mut self,
+        from: &crate::events::StatusState,
+        to: &crate::events::StatusState,
+        status_area: Rect,
+    ) {
+        use crate::events::StatusState;
+
+        if !self.color_effects_enabled() {
+            return;
+        }
+
+        match (from, to) {
+            // Idle → any active state: fade-in the animation area.
+            (StatusState::Idle, StatusState::Thinking)
+            | (StatusState::Idle, StatusState::Streaming { .. })
+            | (StatusState::Idle, StatusState::ToolRunning { .. }) => {
+                self.manager.add_unique_effect(
+                    EffectId::StatusTransition,
+                    ambient::status_activate(status_area),
+                );
+            }
+            // Any active → Idle: fade-out.
+            (_, StatusState::Idle) => {
+                self.manager.add_unique_effect(
+                    EffectId::StatusTransition,
+                    ambient::status_deactivate(status_area),
+                );
+            }
+            // Active → ToolRunning: tool name flash.
+            (_, StatusState::ToolRunning { .. }) => {
+                self.manager.add_unique_effect(
+                    EffectId::StatusTransition,
+                    ambient::tool_flash(status_area),
+                );
+            }
+            // Other transitions (e.g., Thinking → Streaming): no extra effect.
+            _ => {}
+        }
+    }
+
+    /// Whether effects are enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +354,46 @@ mod tests {
         let mut effects = GenesisEffects::new(false, false);
         let area = Rect::new(0, 0, 120, 24);
         effects.start_chat_coalesce(area);
+        assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn on_status_change_idle_to_thinking_starts_transition() {
+        use crate::events::StatusState;
+
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 1);
+        effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
+        assert!(effects.is_running(), "transition should be running");
+    }
+
+    #[test]
+    fn on_status_change_thinking_to_idle_starts_deactivate() {
+        use crate::events::StatusState;
+
+        let mut effects = GenesisEffects::new(true, false);
+        let area = Rect::new(0, 0, 80, 1);
+        effects.on_status_change(&StatusState::Thinking, &StatusState::Idle, area);
+        assert!(effects.is_running(), "deactivate should be running");
+    }
+
+    #[test]
+    fn on_status_change_noop_when_disabled() {
+        use crate::events::StatusState;
+
+        let mut effects = GenesisEffects::new(false, false);
+        let area = Rect::new(0, 0, 80, 1);
+        effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
+        assert!(!effects.is_running());
+    }
+
+    #[test]
+    fn on_status_change_noop_when_no_color() {
+        use crate::events::StatusState;
+
+        let mut effects = GenesisEffects::new(true, true);
+        let area = Rect::new(0, 0, 80, 1);
+        effects.on_status_change(&StatusState::Idle, &StatusState::Thinking, area);
         assert!(!effects.is_running());
     }
 }

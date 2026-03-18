@@ -75,7 +75,7 @@ pub enum AppEvent {
 }
 
 /// Status bar states.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StatusState {
     Idle,
     Thinking,

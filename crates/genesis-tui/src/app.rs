@@ -198,6 +198,20 @@ impl App {
             }
             AppEvent::UpdateStatus(state) => {
                 self.status_bar.set_state(state);
+
+                // Trigger transition effects if the state actually changed.
+                if let Some((from, to)) = self.status_bar.last_state_change() {
+                    if from != to {
+                        // Compute status bar area from viewport dimensions.
+                        let status_area = ratatui::layout::Rect {
+                            x: 0,
+                            y: self.viewport_height.saturating_sub(1),
+                            width: self.viewport_width,
+                            height: 1,
+                        };
+                        self.effects.on_status_change(from, to, status_area);
+                    }
+                }
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();

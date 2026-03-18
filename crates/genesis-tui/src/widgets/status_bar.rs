@@ -70,6 +70,8 @@ pub struct StatusBarWidget {
     pub context_percent: u8,
     /// Current agent state.
     pub state: StatusState,
+    /// Previous state before the last `set_state` call.
+    prev_state: Option<StatusState>,
     /// Current animation frame index.
     pub sprite_frame: usize,
     /// When the last frame advance happened.
@@ -94,6 +96,7 @@ impl StatusBarWidget {
             model,
             context_percent: 0,
             state: StatusState::Idle,
+            prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
             right_info: None,
@@ -113,11 +116,19 @@ impl StatusBarWidget {
         }
     }
 
-    /// Update the current agent state.
+    /// Update the current agent state, storing the previous for transition effects.
     pub fn set_state(&mut self, state: StatusState) {
-        self.state = state;
+        let old = std::mem::replace(&mut self.state, state);
+        self.prev_state = Some(old);
         self.sprite_frame = 0;
         self.last_tick = Instant::now();
+    }
+
+    /// Returns the most recent state transition as `(from, to)`.
+    ///
+    /// Returns `None` if `set_state` has never been called.
+    pub fn last_state_change(&self) -> Option<(&StatusState, &StatusState)> {
+        self.prev_state.as_ref().map(|prev| (prev, &self.state))
     }
 
     /// Update the displayed model name.
@@ -456,6 +467,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             context_percent: 42,
             state: StatusState::Idle,
+            prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
             right_info: Some("main".to_string()),
@@ -548,5 +560,28 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("↑5.0k"), "in tokens: {text:?}");
         assert!(text.contains("↓1.2k"), "out tokens: {text:?}");
+    }
+
+    #[test]
+    fn last_state_change_returns_correct_transitions() {
+        let mut w = make_widget();
+        assert!(w.last_state_change().is_none(), "no transition yet");
+
+        w.set_state(StatusState::Thinking);
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::Idle));
+        assert!(matches!(to, StatusState::Thinking));
+
+        w.set_state(StatusState::ToolRunning {
+            tool_name: "shell".to_string(),
+        });
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::Thinking));
+        assert!(matches!(to, StatusState::ToolRunning { .. }));
+
+        w.set_state(StatusState::Idle);
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::ToolRunning { .. }));
+        assert!(matches!(to, StatusState::Idle));
     }
 }
