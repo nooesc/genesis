@@ -157,3 +157,39 @@
     background: var(--muted-foreground);
   }
 }
+
+/* === OS-like System UI === */
+
+/* Status indicator pulse */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 4px rgba(52, 211, 153, 0.4);
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+  }
+}
+
+/* System bar */
+.system-bar {
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* Dock navigation */
+.dock {
+  user-select: none;
+}
+
+.dock-item {
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              color 150ms ease;
+}
+
+/* Command palette backdrop */
+[data-slot="dialog-overlay"] {
+  backdrop-filter: blur(8px) saturate(120%);
+  background: rgba(0, 0, 0, 0.6);
+}
