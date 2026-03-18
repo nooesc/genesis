@@ -149,6 +149,7 @@ impl App {
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
+                self.status_bar.record_turn_tokens(input_tokens, output_tokens);
 
                 // Update context usage percentage. Use the latest turn's
                 // input_tokens (not the cumulative sum) because each LLM call
