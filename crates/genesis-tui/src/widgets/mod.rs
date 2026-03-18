@@ -1,6 +1,7 @@
 //! Ratatui widget implementations for the Genesis TUI.
 
 pub mod approval_overlay;
+pub mod boot_status;
 pub mod chat_widget;
 pub mod clarification;
 pub mod command_popup;
@@ -10,6 +11,7 @@ pub mod status_bar;
 pub mod transcript;
 pub mod welcome;
 
+pub use boot_status::{BootStatusInfo, BootStatusWidget};
 pub use chat_widget::ChatWidget;
 pub use clarification::{ClarificationAction, ClarificationWidget};
 pub use command_popup::{CommandAction, CommandPopup};
