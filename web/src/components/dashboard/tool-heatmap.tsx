@@ -1,10 +1,10 @@
 interface ToolHeatmapProps {
-  toolUsage: Record<string, number>
+  /** [tool_name, count] tuples from API */
+  toolUsage: [string, number][]
   maxItems?: number
 }
 
 function getHeatColor(intensity: number): string {
-  // intensity 0–1, maps to opacity of primary color
   if (intensity > 0.8) return 'bg-primary/80'
   if (intensity > 0.6) return 'bg-primary/60'
   if (intensity > 0.4) return 'bg-primary/40'
@@ -13,7 +13,7 @@ function getHeatColor(intensity: number): string {
 }
 
 export function ToolHeatmap({ toolUsage, maxItems = 24 }: ToolHeatmapProps) {
-  const entries = Object.entries(toolUsage)
+  const entries = [...toolUsage]
     .sort(([, a], [, b]) => b - a)
     .slice(0, maxItems)
 

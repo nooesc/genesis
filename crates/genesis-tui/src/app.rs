@@ -5,6 +5,7 @@ use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
+use crate::widgets::file_completion::{FileCompletion, FileCompletionAction};
 use crate::widgets::help_overlay::{HelpAction, HelpOverlay};
 use crate::widgets::input_widget::InputAction;
 use crate::widgets::model_picker::{ModelPicker, ModelPickerAction};
@@ -76,6 +77,8 @@ pub struct App {
     pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
     /// Queue of pending approval requests (processed one at a time).
     pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
+    /// @-file completion popup.
+    pub file_completion: FileCompletion,
 }
 
 impl App {
@@ -361,6 +364,17 @@ impl App {
             return;
         }
 
+        // Ctrl+P — open command palette (accessible anytime).
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if !self.command_popup.is_visible() {
+                self.command_popup.show();
+            } else {
+                self.command_popup.hide();
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // When the command popup is visible, route keys to it first.
         if self.command_popup.is_visible() {
             // Keep the slash command query synced with the actual input widget so
@@ -399,6 +413,59 @@ impl App {
             return;
         }
 
+        // When the @-file completion popup is visible, route keys to it.
+        if self.file_completion.is_visible() {
+            let is_text_key = matches!(key.code, KeyCode::Char(_))
+                && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT);
+            if is_text_key || matches!(key.code, KeyCode::Backspace) {
+                self.chat.input.handle_key(key);
+            }
+
+            match self.file_completion.handle_key(key) {
+                FileCompletionAction::Select(path) => {
+                    // Replace @query with the selected path, preserving
+                    // any text before and after the @-query token.
+                    let text = self.chat.input.text().to_owned();
+                    if let Some(at_pos) = text.rfind('@') {
+                        // Find end of the @-query: next space or end of text.
+                        let query_end = text[at_pos + 1..]
+                            .find(' ')
+                            .map(|p| at_pos + 1 + p)
+                            .unwrap_or(text.len());
+                        let before = &text[..at_pos];
+                        let after = &text[query_end..];
+                        self.chat.input.clear();
+                        let new_text = format!("{before}{path} {}", after.trim_start());
+                        for c in new_text.trim_end().chars() {
+                            self.chat.input.handle_key(KeyEvent::new(
+                                KeyCode::Char(c),
+                                KeyModifiers::NONE,
+                            ));
+                        }
+                        // Add trailing space.
+                        self.chat.input.handle_key(KeyEvent::new(
+                            KeyCode::Char(' '),
+                            KeyModifiers::NONE,
+                        ));
+                    }
+                }
+                FileCompletionAction::Dismiss => {}
+                FileCompletionAction::None => {}
+            }
+
+            // Update file completion query from input.
+            let input_text = self.chat.input.text().to_owned();
+            if let Some(at_pos) = input_text.rfind('@') {
+                let query = &input_text[at_pos + 1..];
+                self.file_completion.update_query(query);
+            } else {
+                self.file_completion.hide();
+            }
+
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -426,6 +493,14 @@ impl App {
                 } else if self.command_popup.is_visible() {
                     self.command_popup.hide();
                 }
+
+                // Check for @ at the end of input to trigger file completion.
+                // Only triggers when @ was just typed (last char), not when the
+                // buffer just happens to contain @ from earlier.
+                if input_text.ends_with('@') && !self.file_completion.is_visible() {
+                    self.file_completion.show();
+                }
+
                 match action {
                     InputAction::Submit(text) => self.submit_text(text),
                     InputAction::Exit => self.should_exit = true,
@@ -518,6 +593,7 @@ mod tests {
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
+            file_completion: FileCompletion::new(),
         };
         (app, submission_rx, app_rx)
     }

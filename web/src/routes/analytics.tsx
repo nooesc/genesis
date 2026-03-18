@@ -32,8 +32,8 @@ function formatDateLabel(dateStr: string): string {
   }
 }
 
-function SessionsPerDayChart({ sessionsPerDay }: { sessionsPerDay: Record<string, number> }) {
-  const data = Object.entries(sessionsPerDay)
+function SessionsPerDayChart({ sessionsPerDay }: { sessionsPerDay: [string, number][] }) {
+  const data = [...sessionsPerDay]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, sessions]) => ({
       date: formatDateLabel(date),
@@ -86,8 +86,8 @@ function SessionsPerDayChart({ sessionsPerDay }: { sessionsPerDay: Record<string
   )
 }
 
-function ToolUsageChart({ toolUsage }: { toolUsage: Record<string, number> }) {
-  const data = Object.entries(toolUsage)
+function ToolUsageChart({ toolUsage }: { toolUsage: [string, number][] }) {
+  const data = [...toolUsage]
     .sort(([, a], [, b]) => b - a)
     .slice(0, 20)
     .map(([tool, count]) => ({ tool, count }))
@@ -156,7 +156,7 @@ function AnalyticsPage() {
   const { data: usage, isLoading: usageLoading } = useUsage()
 
   const platformEntries: [string, number][] = insights
-    ? Object.entries(insights.platform_breakdown)
+    ? insights.platform_breakdown
     : []
 
   const avgTokensPerSession =
@@ -235,7 +235,7 @@ function AnalyticsPage() {
             {insightsLoading ? (
               <Skeleton className="h-[200px] w-full rounded" />
             ) : (
-              <TokenChart tokensPerDay={insights?.tokens_per_day ?? {}} />
+              <TokenChart tokensPerDay={insights?.tokens_per_day ?? []} />
             )}
           </CardContent>
         </Card>
@@ -250,7 +250,7 @@ function AnalyticsPage() {
             {insightsLoading ? (
               <Skeleton className="h-[200px] w-full rounded" />
             ) : (
-              <SessionsPerDayChart sessionsPerDay={insights?.sessions_per_day ?? {}} />
+              <SessionsPerDayChart sessionsPerDay={insights?.sessions_per_day ?? []} />
             )}
           </CardContent>
         </Card>
@@ -287,7 +287,7 @@ function AnalyticsPage() {
             {insightsLoading ? (
               <Skeleton className="h-[300px] w-full rounded" />
             ) : (
-              <ToolUsageChart toolUsage={insights?.tool_usage ?? {}} />
+              <ToolUsageChart toolUsage={insights?.tool_usage ?? []} />
             )}
           </CardContent>
         </Card>

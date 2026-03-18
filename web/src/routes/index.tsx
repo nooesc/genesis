@@ -38,22 +38,25 @@ function DashboardPage() {
   const { data: insights, isLoading: insightsLoading } = useInsights(7)
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 10 })
 
+  // tokens_per_day is [date, input, output][] — extract totals for sparkline
   const tokensPerDayValues = insights
-    ? Object.entries(insights.tokens_per_day)
+    ? [...insights.tokens_per_day]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([, v]) => v)
+        .map(([, inp, out]) => inp + out)
     : []
 
+  // sessions_per_day is [date, count][]
   const sessionsPerDayValues = insights
-    ? Object.entries(insights.sessions_per_day)
+    ? [...insights.sessions_per_day]
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([, v]) => v)
+        .map(([, count]) => count)
     : []
 
   const totalTokens7d = tokensPerDayValues.reduce((sum, v) => sum + v, 0)
 
+  // platform_breakdown is already [platform, count][]
   const platformEntries: [string, number][] = insights
-    ? Object.entries(insights.platform_breakdown)
+    ? insights.platform_breakdown
     : []
 
   const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
@@ -163,7 +166,7 @@ function DashboardPage() {
             {insightsLoading ? (
               <Skeleton className="h-[200px] w-full rounded" />
             ) : (
-              <TokenChart tokensPerDay={insights?.tokens_per_day ?? {}} />
+              <TokenChart tokensPerDay={insights?.tokens_per_day ?? []} />
             )}
           </CardContent>
         </Card>
@@ -178,7 +181,7 @@ function DashboardPage() {
             {insightsLoading ? (
               <Skeleton className="h-[200px] w-full rounded" />
             ) : (
-              <ToolHeatmap toolUsage={insights?.tool_usage ?? {}} />
+              <ToolHeatmap toolUsage={insights?.tool_usage ?? []} />
             )}
           </CardContent>
         </Card>
