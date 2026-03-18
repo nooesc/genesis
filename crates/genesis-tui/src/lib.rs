@@ -215,6 +215,7 @@ pub async fn run_tui(
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
+        file_completion: crate::widgets::file_completion::FileCompletion::new(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -576,6 +577,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
                 // Render the slash command popup above the input area.
                 if app.command_popup.is_visible() {
                     app.command_popup.render(interactive_area, buf);
+                }
+
+                // Render the @-file completion popup above the input area.
+                if app.file_completion.is_visible() {
+                    app.file_completion.render(interactive_area, buf);
                 }
 
                 // Render the clarification picker as a centered overlay.

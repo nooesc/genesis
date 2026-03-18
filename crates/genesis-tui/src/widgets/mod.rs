@@ -4,6 +4,7 @@ pub mod approval_overlay;
 pub mod chat_widget;
 pub mod clarification;
 pub mod command_popup;
+pub mod file_completion;
 pub mod help_overlay;
 pub mod input_widget;
 pub mod model_picker;
