@@ -141,9 +141,19 @@ pub async fn run_tui(
     let frame_requester = FrameRequester::new(draw_tx);
 
     let (tool_count_builtin, tool_count_mcp) = service.tool_counts().await;
-    let skill_count = SkillStore::new(&config.storage.database_path)
-        .list_all()
-        .map_or(0, |skills| skills.len());
+    let db_path = config.storage.database_path.clone();
+    let skill_count = tokio::task::spawn_blocking(move || {
+        SkillStore::new(&db_path)
+            .list_all()
+            .map_or(0, |skills| skills.len())
+    })
+    .await
+    .unwrap_or(0);
+
+    // Look up context window size for the configured model.
+    let context_window_size = genesis_provider::model_metadata::lookup(&config.provider.model)
+        .map(|m| m.context_length)
+        .unwrap_or(genesis_provider::model_metadata::DEFAULT_CONTEXT_LENGTH);
 
     let welcome = crate::widgets::welcome::WelcomeWidget::new(
         crate::widgets::welcome::WelcomeInfo {
@@ -171,13 +181,16 @@ pub async fn run_tui(
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
         status_bar: crate::widgets::status_bar::StatusBarWidget::new(
-            "default".to_string(), // TODO: get from config
+            config.provider.model.clone(),
         ),
         overlay: None,
         viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
         clarification: crate::widgets::clarification::ClarificationWidget::new(),
         clear_after_welcome: false,
+        streaming_chars: 0,
+        context_window_size,
+        viewport_width: viewport_area.width,
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -200,6 +213,7 @@ pub async fn run_tui(
                         if let TuiEvent::Resize { width, height } = &tui_event {
                             let clamped = Rect::new(0, 0, *width, *height);
                             term.set_viewport_area(clamped);
+                            app.viewport_width = clamped.width;
                             app.viewport_height = clamped.height;
                         }
                         app.handle_tui_event(tui_event);
@@ -225,9 +239,6 @@ pub async fn run_tui(
                         // Drop the turn future to cancel
                         turn_future = None;
                     }
-                    Some(Submission::Compact) => {
-                        // TODO: trigger context compression
-                    }
                     None => break,
                 }
             }
@@ -244,8 +255,8 @@ pub async fn run_tui(
                     Ok(outcome) => {
                         let _ = agent_tx.send(AgentEvent::TurnComplete {
                             response: outcome.result.response,
-                            input_tokens: outcome.result.total_input_tokens,
-                            output_tokens: outcome.result.total_output_tokens,
+                            input_tokens: outcome.result.total_input_tokens as u64,
+                            output_tokens: outcome.result.total_output_tokens as u64,
                             turns_used: outcome.result.turns_used,
                             tool_calls_made: outcome.result.tool_calls_made,
                         });

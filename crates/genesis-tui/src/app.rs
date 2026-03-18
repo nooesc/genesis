@@ -52,6 +52,12 @@ pub struct App {
     pub clarification: ClarificationWidget,
     /// Force a one-shot terminal clear on the next frame after leaving welcome.
     pub clear_after_welcome: bool,
+    /// Approximate character count during current streaming response (for token estimate).
+    pub streaming_chars: usize,
+    /// Model context window size in tokens (for context % calculation).
+    pub context_window_size: usize,
+    /// Last known viewport width (used for transcript overlay).
+    pub viewport_width: u16,
 }
 
 impl App {
@@ -66,7 +72,8 @@ impl App {
                 }
                 self.frame_requester.schedule_frame();
             }
-            TuiEvent::Resize { height, .. } => {
+            TuiEvent::Resize { width, height } => {
+                self.viewport_width = width;
                 self.viewport_height = height;
                 self.frame_requester.schedule_frame();
             }
@@ -80,11 +87,21 @@ impl App {
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
                 self.turn_start = Some(std::time::Instant::now());
+                self.streaming_chars = 0;
                 self.chat.start_turn();
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Thinking));
             }
             AgentEvent::TextDelta(text) => {
+                self.streaming_chars += text.len();
                 self.chat.append_text(&text);
+                // Transition to Streaming state with approximate token count.
+                // Rough estimate: ~4 chars per token.
+                let approx_tokens = (self.streaming_chars / 4) as u64;
+                let _ = self
+                    .app_tx
+                    .send(AppEvent::UpdateStatus(StatusState::Streaming {
+                        tokens: approx_tokens,
+                    }));
             }
             AgentEvent::ToolCallStart {
                 call_id,
@@ -115,6 +132,16 @@ impl App {
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
+
+                // Update context usage percentage based on cumulative input tokens
+                // relative to the model's context window size.
+                if self.context_window_size > 0 {
+                    let pct = ((self.status_bar.tokens_in as u128 * 100)
+                        / self.context_window_size as u128)
+                        .min(100) as u8;
+                    self.status_bar.set_context_percent(pct);
+                }
+
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
@@ -156,9 +183,10 @@ impl App {
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
                 let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+                let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
                 self.overlay = Some(TranscriptOverlay::from_cells(
                     self.chat.committed_cells(),
-                    80, // will be updated on next resize; 80 is a reasonable default
+                    width,
                     visible_rows,
                 ));
                 self.frame_requester.schedule_frame();
@@ -169,9 +197,6 @@ impl App {
             }
             AppEvent::SlashCommand(cmd) => match cmd.as_str() {
                 "/exit" | "/quit" => self.should_exit = true,
-                "/compact" => {
-                    let _ = self.submission_tx.send(Submission::Compact);
-                }
                 "/clear" => {
                     // Clear committed cells (history will be lost from the viewport,
                     // though it remains in terminal scrollback).
@@ -233,9 +258,10 @@ impl App {
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.command_popup.hide();
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+            let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
             self.overlay = Some(TranscriptOverlay::from_cells(
                 self.chat.committed_cells(),
-                80,
+                width,
                 visible_rows,
             ));
             self.frame_requester.schedule_frame();
@@ -378,6 +404,9 @@ mod tests {
             command_popup: CommandPopup::new(),
             clarification: ClarificationWidget::new(),
             clear_after_welcome: false,
+            streaming_chars: 0,
+            context_window_size: 128_000,
+            viewport_width: 80,
         };
         (app, submission_rx, app_rx)
     }

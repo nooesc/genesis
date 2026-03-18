@@ -41,7 +41,6 @@ pub struct CommandDef {
 const COMMANDS: &[CommandDef] = &[
     CommandDef { name: "/model",       description: "Switch the LLM model" },
     CommandDef { name: "/clear",       description: "Clear conversation history" },
-    CommandDef { name: "/compact",     description: "Compress context window" },
     CommandDef { name: "/exit",        description: "Exit Eve" },
     CommandDef { name: "/help",        description: "Show available commands" },
     CommandDef { name: "/sessions",    description: "List recent sessions" },
