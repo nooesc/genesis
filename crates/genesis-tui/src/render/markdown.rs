@@ -589,10 +589,15 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
 
         if ranges.is_empty() {
             let content = line.trim_end_matches('\n').to_owned();
-            result.push(Line::from(vec![Span::styled(
-                content,
-                Style::default().fg(CODE_FG).bg(CODE_BG),
-            )]));
+            // Set Line::style to reset bg — prevents CODE_BG from bleeding
+            // into trailing buffer cells that ratatui doesn't overwrite.
+            result.push(
+                Line::from(vec![Span::styled(
+                    content,
+                    Style::default().fg(CODE_FG).bg(CODE_BG),
+                )])
+                .style(Style::default()),
+            );
             continue;
         }
 
@@ -609,7 +614,9 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
             })
             .collect();
 
-        result.push(Line::from(spans));
+        // Line::style with default bg ensures trailing cells are cleared,
+        // preventing CODE_BG from bleeding past the code content.
+        result.push(Line::from(spans).style(Style::default()));
     }
 
     result
