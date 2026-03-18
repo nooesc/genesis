@@ -145,6 +145,12 @@ pub(crate) struct AnthropicResponse {
 pub(crate) struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens written to cache on this request (cache miss portion).
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// Tokens read from cache on this request (cache hit portion).
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
 }
 
 impl AnthropicUsage {
@@ -153,6 +159,27 @@ impl AnthropicUsage {
             prompt_tokens: self.input_tokens,
             completion_tokens: self.output_tokens,
             total_tokens: self.input_tokens + self.output_tokens,
+        }
+    }
+
+    /// Log cache hit/miss statistics if any caching occurred.
+    pub fn log_cache_stats(&self) {
+        let cached = self.cache_read_input_tokens;
+        let created = self.cache_creation_input_tokens;
+        if cached > 0 || created > 0 {
+            let total_input = self.input_tokens + cached + created;
+            let hit_pct = if total_input > 0 {
+                (cached as f64 / total_input as f64) * 100.0
+            } else {
+                0.0
+            };
+            tracing::debug!(
+                cache_read_tokens = cached,
+                cache_creation_tokens = created,
+                input_tokens = self.input_tokens,
+                cache_hit_pct = format!("{:.1}%", hit_pct),
+                "anthropic prompt cache stats"
+            );
         }
     }
 }
@@ -355,6 +382,15 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
         }
     }
 
+    // Add cache breakpoints on the conversation prefix (breakpoints 3 & 4).
+    // Breakpoints 1 & 2 are on system message and last tool definition.
+    //
+    // Strategy: place breakpoints at the boundary of the stable conversation
+    // prefix. Messages before these points are likely cached from prior turns.
+    // We target the second-to-last user message (the most recent "stable"
+    // boundary) and the last tool_result block (often the largest content).
+    inject_conversation_cache_breakpoints(&mut messages);
+
     // Convert tools
     let tools: Vec<AnthropicTool> = req
         .tools
@@ -422,6 +458,71 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
     }
 }
 
+/// Inject cache breakpoints on the conversation message prefix.
+///
+/// Places up to 2 additional `cache_control` markers on messages that form
+/// the stable prefix of the conversation. This maximizes cache hit rates
+/// across turns since earlier messages don't change.
+///
+/// Strategy:
+/// - Find the second-to-last user message (the "turn boundary" before
+///   the current turn) and mark its last content block.
+/// - Find the last tool_result-bearing message (often large, benefits
+///   most from caching) and mark its last content block.
+fn inject_conversation_cache_breakpoints(messages: &mut [AnthropicMessage]) {
+    if messages.len() < 4 {
+        // Too few messages to benefit from conversation caching.
+        return;
+    }
+
+    let cache_marker = CacheControl {
+        control_type: "ephemeral".to_owned(),
+    };
+
+    // Find the second-to-last user message index. The last user message is
+    // the current turn (dynamic), but the one before it is stable.
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user")
+        .map(|(i, _)| i)
+        .collect();
+
+    // Mark the second-to-last user message's last content block.
+    if user_indices.len() >= 2 {
+        let target_idx = user_indices[user_indices.len() - 2];
+        if let AnthropicMessageContent::Blocks(ref mut blocks) = messages[target_idx].content {
+            if let Some(AnthropicContentBlock::Text {
+                ref mut cache_control,
+                ..
+            }) = blocks.last_mut()
+            {
+                *cache_control = Some(cache_marker.clone());
+            }
+        }
+    }
+
+    // Mark the last assistant message before the final user message.
+    // This captures the "stable response prefix" that doesn't change.
+    let last_user_idx = user_indices.last().copied().unwrap_or(messages.len());
+    if last_user_idx > 0 {
+        for i in (0..last_user_idx).rev() {
+            if messages[i].role == "assistant" {
+                if let AnthropicMessageContent::Blocks(ref mut blocks) = messages[i].content {
+                    if let Some(AnthropicContentBlock::Text {
+                        ref mut cache_control,
+                        ..
+                    }) = blocks.last_mut()
+                    {
+                        *cache_control = Some(cache_marker);
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Translation: Anthropic → OpenAI
 // ---------------------------------------------------------------------------
@@ -485,6 +586,9 @@ pub(crate) fn from_anthropic_response(resp: AnthropicResponse) -> ChatCompletion
         name: None,
         provider_metadata: None,
     };
+
+    // Log cache hit/miss statistics for observability.
+    resp.usage.log_cache_stats();
 
     ChatCompletionResponse {
         id: resp.id,
@@ -801,6 +905,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
 
@@ -827,6 +933,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 20,
                 output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
 
@@ -859,6 +967,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
 
