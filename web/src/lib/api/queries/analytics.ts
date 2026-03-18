@@ -15,13 +15,3 @@ export function useUsage() {
     queryFn: () => api.get<UsageStats>('/usage'),
   })
 }
-
-export function useToolAnalytics() {
-  return useQuery({
-    queryKey: ['insights', 'tools'],
-    queryFn: async () => {
-      const insights = await api.get<InsightsData>('/insights')
-      return insights.tool_usage
-    },
-  })
-}
