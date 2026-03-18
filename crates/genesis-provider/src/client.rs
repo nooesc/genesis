@@ -857,6 +857,19 @@ impl ChatClient {
         &self.backend
     }
 
+    /// Replace the circuit breaker with one using custom thresholds.
+    pub fn set_circuit_breaker(&mut self, failure_threshold: u32, cooldown_secs: u64) {
+        self.circuit = std::sync::Arc::new(crate::circuit_breaker::CircuitBreaker::new(
+            failure_threshold,
+            std::time::Duration::from_secs(cooldown_secs),
+        ));
+    }
+
+    /// Total number of times the circuit has opened (lifetime).
+    pub fn circuit_open_count(&self) -> u64 {
+        self.circuit.open_count()
+    }
+
     /// Returns the current circuit breaker state for this provider.
     pub fn circuit_state(&self) -> crate::circuit_breaker::CircuitState {
         self.circuit.state()

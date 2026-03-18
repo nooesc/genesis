@@ -564,8 +564,11 @@ impl AgentLoop {
             }
         }
 
+        // Track how many providers were actually attempted.
+        let mut attempted = 1; // primary was already attempted
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            attempted += 1;
             match fallback.complete(request.clone()).await {
                 Ok(response) => {
                     info!(
@@ -586,9 +589,7 @@ impl AgentLoop {
             }
         }
 
-        Err(ProviderError::AllProvidersFailed {
-            count: 1 + self.fallback_clients.len(),
-        })
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Try a streaming completion against the active client, falling back to
@@ -615,8 +616,10 @@ impl AgentLoop {
             }
         }
 
+        let mut attempted = 1; // primary was already attempted
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            attempted += 1;
             match fallback.complete_stream(request.clone()).await {
                 Ok(stream) => {
                     info!(
@@ -637,9 +640,7 @@ impl AgentLoop {
             }
         }
 
-        Err(ProviderError::AllProvidersFailed {
-            count: 1 + self.fallback_clients.len(),
-        })
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Run a single user turn through the agent loop.

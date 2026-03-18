@@ -236,6 +236,37 @@ pub struct ProviderConfig {
     /// when not set. Examples: "hermes", "llama", "mistral", "deepseek_v3".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_parser: Option<String>,
+    /// Circuit breaker configuration for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
+/// Circuit breaker configuration for a provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    /// Number of consecutive failures before opening the circuit (default: 5).
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Seconds to wait in Open state before probing (default: 30).
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+fn default_failure_threshold() -> u32 {
+    5
+}
+
+fn default_cooldown_secs() -> u64 {
+    30
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: default_failure_threshold(),
+            cooldown_secs: default_cooldown_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -703,6 +734,8 @@ struct FileProviderConfig {
     extra_body: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_parser: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -803,6 +836,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
             extra_body: None,
             tool_call_parser: None,
+            circuit_breaker: None,
         },
         tool_provider: None,
         fallback_providers: Vec::new(),
@@ -900,6 +934,7 @@ pub fn load_from_map(
             .or_else(|| prov.and_then(|p| p.api_key_env.clone())),
         extra_body: prov.and_then(|p| p.extra_body.clone()),
         tool_call_parser: prov.and_then(|p| p.tool_call_parser.clone()),
+        circuit_breaker: prov.and_then(|p| p.circuit_breaker.clone()),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -926,6 +961,7 @@ pub fn load_from_map(
             .or_else(|| provider.api_key_env.clone()),
         extra_body: tp.extra_body.clone(),
         tool_call_parser: tp.tool_call_parser.clone(),
+        circuit_breaker: tp.circuit_breaker.clone(),
     });
 
     // Fallback providers — each inherits primary provider defaults when partially specified.
@@ -946,6 +982,10 @@ pub fn load_from_map(
                 .or_else(|| provider.api_key_env.clone()),
             extra_body: fp.extra_body.clone(),
             tool_call_parser: fp.tool_call_parser.clone(),
+            circuit_breaker: fp
+                .circuit_breaker
+                .clone()
+                .or_else(|| provider.circuit_breaker.clone()),
         })
         .collect::<Vec<_>>();
 

@@ -536,11 +536,14 @@ impl<'a> SessionExecutionService<'a> {
                 self.loaded.config.provider.model.as_str(),
             ),
         };
-        let client = client_from_config(
+        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
+        let client = genesis_provider::client_from_config_with_circuit_breaker(
             backend,
             model,
             self.loaded.config.provider.base_url.as_deref(),
             self.loaded.config.provider.api_key_env.as_deref(),
+            cb_cfg.map(|c| c.failure_threshold),
+            cb_cfg.map(|c| c.cooldown_secs),
         )
         .await?;
         debug!(
@@ -589,11 +592,14 @@ impl<'a> SessionExecutionService<'a> {
 
         // Set up tool provider routing if configured
         if let Some(tp) = &self.loaded.config.tool_provider {
-            let tool_client = client_from_config(
+            let tp_cb = tp.circuit_breaker.as_ref();
+            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
                 &tp.backend,
                 &tp.model,
                 tp.base_url.as_deref(),
                 tp.api_key_env.as_deref(),
+                tp_cb.map(|c| c.failure_threshold),
+                tp_cb.map(|c| c.cooldown_secs),
             )
             .await?;
             agent.set_tool_client(tool_client);
@@ -608,11 +614,14 @@ impl<'a> SessionExecutionService<'a> {
         if !self.loaded.config.fallback_providers.is_empty() {
             let mut fallbacks = Vec::new();
             for fp in &self.loaded.config.fallback_providers {
-                let fb_client = client_from_config(
+                let fb_cb = fp.circuit_breaker.as_ref();
+                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
                     &fp.backend,
                     &fp.model,
                     fp.base_url.as_deref(),
                     fp.api_key_env.as_deref(),
+                    fb_cb.map(|c| c.failure_threshold),
+                    fb_cb.map(|c| c.cooldown_secs),
                 )
                 .await?;
                 fallbacks.push(fb_client);
@@ -1797,6 +1806,7 @@ mod tests {
                     api_key_env: None,
                     extra_body: None,
                     tool_call_parser: None,
+                    circuit_breaker: None,
                 },
                 tool_provider: None,
                 fallback_providers: Vec::new(),

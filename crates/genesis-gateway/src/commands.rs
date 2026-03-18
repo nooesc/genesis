@@ -392,6 +392,7 @@ mod tests {
                 api_key_env: None,
                 extra_body: None,
                 tool_call_parser: None,
+                circuit_breaker: None,
             },
             tool_provider: None,
             fallback_providers: Vec::new(),
@@ -422,6 +423,7 @@ mod tests {
             embedding: None,
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
+            telemetry: None,
         }
     }
 

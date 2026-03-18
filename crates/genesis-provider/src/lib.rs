@@ -75,6 +75,22 @@ pub async fn client_from_config(
     Ok(client)
 }
 
+/// Build a `ChatClient` from config, applying circuit breaker thresholds if set.
+pub async fn client_from_config_with_circuit_breaker(
+    backend: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key_env: Option<&str>,
+    failure_threshold: Option<u32>,
+    cooldown_secs: Option<u64>,
+) -> Result<ChatClient, ProviderError> {
+    let mut client = client_from_config(backend, model, base_url, api_key_env).await?;
+    if let (Some(ft), Some(cs)) = (failure_threshold, cooldown_secs) {
+        client.set_circuit_breaker(ft, cs);
+    }
+    Ok(client)
+}
+
 /// Spawn a background task to pre-establish the TCP+TLS connection.
 ///
 /// This runs concurrently with other initialization work (system prompt
