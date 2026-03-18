@@ -67,6 +67,10 @@ pub struct App {
     pub context_window_size: usize,
     /// Last known viewport width (used for transcript overlay).
     pub viewport_width: u16,
+    /// Active tool approval overlay (shown when a tool needs user approval).
+    pub approval: Option<crate::widgets::approval_overlay::ApprovalOverlay>,
+    /// Channel to send approval responses back to the tool execution thread.
+    pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 impl App {
@@ -247,6 +251,29 @@ impl App {
                     self.chat.input.handle_key(key);
                 }
             }
+            return;
+        }
+
+        // When a tool approval is pending, route keys to it first.
+        if let Some(approval) = &mut self.approval {
+            use crate::widgets::approval_overlay::ApprovalAction;
+            let action = approval.handle_key(key);
+            match action {
+                ApprovalAction::Approve => {
+                    if let Some(tx) = self.approval_response.take() {
+                        let _ = tx.send(true);
+                    }
+                    self.approval = None;
+                }
+                ApprovalAction::Deny => {
+                    if let Some(tx) = self.approval_response.take() {
+                        let _ = tx.send(false);
+                    }
+                    self.approval = None;
+                }
+                ApprovalAction::None => {}
+            }
+            self.frame_requester.schedule_frame();
             return;
         }
 
@@ -439,6 +466,8 @@ mod tests {
             streaming_chars: 0,
             context_window_size: 128_000,
             viewport_width: 80,
+            approval: None,
+            approval_response: None,
         };
         (app, submission_rx, app_rx)
     }

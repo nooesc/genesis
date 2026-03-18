@@ -23,6 +23,7 @@ use ratatui::{
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
+pub mod approval;
 pub mod custom_terminal;
 pub mod events;
 pub mod frame_requester;
@@ -123,7 +124,7 @@ fn make_turn_future<'a>(
 /// cross-borrow issues in the `select!` macro expansion.
 pub async fn run_tui(
     config: &GenesisConfig,
-    service: &SessionExecutionService<'_>,
+    service: &mut SessionExecutionService<'_>,
     session_id: &str,
 ) -> Result<(), TuiError> {
     terminal::init()?;
@@ -137,6 +138,13 @@ pub async fn run_tui(
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (submission_tx, mut submission_rx) = mpsc::unbounded_channel::<Submission>();
     let (draw_tx, mut draw_rx) = broadcast::channel::<()>(16);
+
+    // Set up TUI-based tool approval handler.
+    let (approval_tx, mut approval_rx) =
+        mpsc::unbounded_channel::<crate::approval::ApprovalRequest>();
+    service.set_approval_handler(std::sync::Arc::new(
+        crate::approval::TuiApprovalHandler::new(approval_tx),
+    ));
 
     let frame_requester = FrameRequester::new(draw_tx);
 
@@ -204,6 +212,8 @@ pub async fn run_tui(
         streaming_chars: 0,
         context_window_size,
         viewport_width: viewport_area.width,
+        approval: None,
+        approval_response: None,
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -284,6 +294,20 @@ pub async fn run_tui(
             agent_event = agent_rx.recv() => {
                 if let Some(event) = agent_event {
                     app.handle_agent_event(event);
+                }
+            }
+
+            // ── Tool approval requests ───────────────────────────────
+            approval = approval_rx.recv() => {
+                if let Some(req) = approval {
+                    app.approval = Some(
+                        crate::widgets::approval_overlay::ApprovalOverlay::new(
+                            req.tool_name,
+                            &req.arguments,
+                        ),
+                    );
+                    app.approval_response = Some(req.response_tx);
+                    app.frame_requester.schedule_frame();
                 }
             }
 
@@ -518,6 +542,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
                 }
             }
         }
+    }
+
+    // Render tool approval overlay as a modal on top of everything.
+    if let Some(approval) = &app.approval {
+        approval.render(area, buf);
     }
 
     // Write only changed cells to the terminal, then swap buffers.

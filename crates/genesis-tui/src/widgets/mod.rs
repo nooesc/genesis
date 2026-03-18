@@ -1,5 +1,6 @@
 //! Ratatui widget implementations for the Genesis TUI.
 
+pub mod approval_overlay;
 pub mod chat_widget;
 pub mod clarification;
 pub mod command_popup;
