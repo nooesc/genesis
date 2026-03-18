@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { SessionSummary } from '@/lib/api/types'
+import { getPlatformColor } from '@/lib/platforms'
 
 interface AgentCanvasProps {
   sessions: SessionSummary[]
@@ -23,7 +24,7 @@ function layoutSessions(sessions: SessionSummary[]): SessionNode[] {
   return sessions.map((session, i) => {
     const tokens = session.total_input_tokens + session.total_output_tokens
     const angle = (i / sessions.length) * Math.PI * 2 - Math.PI / 2
-    // Outer orbit for older/smaller sessions, inner for newer/larger
+    // Newer sessions (lower index) get outer orbit, older sessions orbit closer to core
     const recency = 1 - i / Math.max(1, sessions.length - 1)
     const radius = 100 + recency * 60
     const size = 4 + (tokens / maxTokens) * 10
@@ -39,22 +40,15 @@ function getToolCategories(toolUsage: Record<string, number>, max: number = 8): 
     .slice(0, max)
 }
 
-const PLATFORM_COLORS: Record<string, string> = {
-  api: '#0891b2',
-  telegram: '#2563eb',
-  discord: '#7c3aed',
-  slack: '#dc2626',
-  whatsapp: '#16a34a',
-  homeassistant: '#f59e0b',
-}
-
-function getPlatformColor(platform: string): string {
-  return PLATFORM_COLORS[platform.toLowerCase()] ?? '#525252'
-}
-
 export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, toolUsage }: AgentCanvasProps) {
   const [tick, setTick] = useState(0)
   const rafRef = useRef<number>(0)
+  const uid = useId()
+
+  // Memoize expensive layout computations so they don't run on every animation frame
+  const nodes = useMemo(() => layoutSessions(sessions.slice(0, 16)), [sessions])
+  const tools = useMemo(() => getToolCategories(toolUsage), [toolUsage])
+  const maxToolCount = tools.length > 0 ? tools[0][1] : 1
 
   // Slow ambient animation (~30fps)
   useEffect(() => {
@@ -75,10 +69,6 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
   const cx = width / 2
   const cy = height / 2
 
-  const nodes = layoutSessions(sessions.slice(0, 16))
-  const tools = getToolCategories(toolUsage)
-  const maxToolCount = tools.length > 0 ? tools[0][1] : 1
-
   // Subtle rotation
   const rotation = tick * 0.15
 
@@ -90,6 +80,10 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
     : `rgba(239,68,68,${0.15 + pulsePhase * 0.1})`
   const coreColor = isHealthy ? '#22c55e' : '#ef4444'
 
+  // Unique gradient IDs to avoid collisions if multiple canvases rendered
+  const coreGlowId = `${uid}-core-glow`
+  const orbitFadeId = `${uid}-orbit-fade`
+
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
@@ -97,21 +91,18 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
       style={{ maxHeight: '100%' }}
     >
       <defs>
-        {/* Radial gradient for core glow */}
-        <radialGradient id="core-glow" cx="50%" cy="50%" r="50%">
+        <radialGradient id={coreGlowId} cx="50%" cy="50%" r="50%">
           <stop offset="0%" stopColor={coreGlow} />
           <stop offset="100%" stopColor="transparent" />
         </radialGradient>
-
-        {/* Gradient for orbit rings */}
-        <radialGradient id="orbit-fade" cx="50%" cy="50%" r="50%">
+        <radialGradient id={orbitFadeId} cx="50%" cy="50%" r="50%">
           <stop offset="60%" stopColor="transparent" />
           <stop offset="100%" stopColor="rgba(8,145,178,0.03)" />
         </radialGradient>
       </defs>
 
       {/* Background gradient */}
-      <circle cx={cx} cy={cy} r={240} fill="url(#orbit-fade)" />
+      <circle cx={cx} cy={cy} r={240} fill={`url(#${orbitFadeId})`} />
 
       {/* Orbit rings */}
       {[100, 130, 160].map(r => (
@@ -141,7 +132,6 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
         const y2 = cy + r * Math.sin(endRad)
         const largeArc = arcAngle > 180 ? 1 : 0
 
-        // Label position
         const midRad = ((startAngle + arcAngle / 2) * Math.PI) / 180
         const lx = cx + (r + 16) * Math.cos(midRad)
         const ly = cy + (r + 16) * Math.sin(midRad)
@@ -179,14 +169,12 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
         const ny = cy + radius * Math.sin(adjustedAngle)
         const color = getPlatformColor(session.platform)
 
-        // Age-based opacity (newer = brighter)
         const ageMs = Date.now() - new Date(session.updated_at).getTime()
         const ageHours = ageMs / (1000 * 60 * 60)
         const opacity = Math.max(0.2, 1 - ageHours / 72)
 
         return (
           <g key={session.id} opacity={opacity}>
-            {/* Connection line to core */}
             <line
               x1={cx}
               y1={cy}
@@ -196,15 +184,7 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
               strokeWidth={0.5}
               opacity={0.15}
             />
-            {/* Node */}
-            <circle
-              cx={nx}
-              cy={ny}
-              r={size}
-              fill={color}
-              opacity={0.7}
-            />
-            {/* Glow for recent sessions */}
+            <circle cx={nx} cy={ny} r={size} fill={color} opacity={0.7} />
             {ageHours < 1 && (
               <circle
                 cx={nx}
@@ -216,7 +196,6 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
                 opacity={0.3 + pulsePhase * 0.2}
               />
             )}
-            {/* Session ID label */}
             <text
               x={nx}
               y={ny + size + 8}
@@ -233,56 +212,20 @@ export function AgentCanvas({ sessions, isHealthy, totalTools, uptimeSeconds, to
       })}
 
       {/* Central core — Eve */}
-      <circle cx={cx} cy={cy} r={60} fill="url(#core-glow)" />
-      <circle
-        cx={cx}
-        cy={cy}
-        r={coreRadius}
-        fill="none"
-        stroke={coreColor}
-        strokeWidth={1.5}
-        opacity={0.6}
-      />
-      <circle
-        cx={cx}
-        cy={cy}
-        r={coreRadius - 6}
-        fill="none"
-        stroke={coreColor}
-        strokeWidth={0.5}
-        opacity={0.3}
-      />
+      <circle cx={cx} cy={cy} r={60} fill={`url(#${coreGlowId})`} />
+      <circle cx={cx} cy={cy} r={coreRadius} fill="none" stroke={coreColor} strokeWidth={1.5} opacity={0.6} />
+      <circle cx={cx} cy={cy} r={coreRadius - 6} fill="none" stroke={coreColor} strokeWidth={0.5} opacity={0.3} />
 
-      {/* Core label */}
-      <text
-        x={cx}
-        y={cy - 4}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill={coreColor}
-        fontSize={14}
-        fontFamily="var(--font-mono)"
-        fontWeight="bold"
-        letterSpacing="3"
-      >
+      <text x={cx} y={cy - 4} textAnchor="middle" dominantBaseline="middle" fill={coreColor} fontSize={14} fontFamily="var(--font-mono)" fontWeight="bold" letterSpacing="3">
         EVE
       </text>
-      <text
-        x={cx}
-        y={cy + 10}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        fill="var(--muted-foreground)"
-        fontSize={8}
-        fontFamily="var(--font-mono)"
-        opacity={0.6}
-      >
+      <text x={cx} y={cy + 10} textAnchor="middle" dominantBaseline="middle" fill="var(--muted-foreground)" fontSize={8} fontFamily="var(--font-mono)" opacity={0.6}>
         {totalTools} tools
       </text>
 
       {/* Uptime ring indicator */}
       {(() => {
-        const maxUptime = 30 * 86400 // 30 days
+        const maxUptime = 30 * 86400
         const fraction = Math.min(uptimeSeconds / maxUptime, 1)
         const r = 38
         const circumference = 2 * Math.PI * r

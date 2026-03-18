@@ -5,6 +5,7 @@ import { useSessions } from '@/lib/api/queries/sessions'
 import { AgentCanvas } from '@/components/monitor/agent-canvas'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { getPlatformColor } from '@/lib/platforms'
 
 export const Route = createFileRoute('/monitor')({
   component: MonitorPage,
@@ -29,7 +30,7 @@ function formatTokens(n: number): string {
 
 function MonitorPage() {
   const { data: health, isLoading: healthLoading } = useHealth()
-  const { data: insights, isLoading: insightsLoading } = useInsights(7)
+  const { data: insights, isLoading: insightsLoading } = useInsights(7, { refetchInterval: 60_000 })
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 20 })
 
   const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
@@ -138,15 +139,3 @@ function StatRow({ label, value, color }: { label: string; value: string; color?
   )
 }
 
-const PLATFORM_COLORS: Record<string, string> = {
-  api: '#0891b2',
-  telegram: '#2563eb',
-  discord: '#7c3aed',
-  slack: '#dc2626',
-  whatsapp: '#16a34a',
-  homeassistant: '#f59e0b',
-}
-
-function getPlatformColor(platform: string): string {
-  return PLATFORM_COLORS[platform.toLowerCase()] ?? '#525252'
-}

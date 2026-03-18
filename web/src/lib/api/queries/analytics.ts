@@ -2,10 +2,15 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../client'
 import type { InsightsData, UsageStats } from '../types'
 
-export function useInsights(days: number = 30) {
+interface InsightsOptions {
+  refetchInterval?: number
+}
+
+export function useInsights(days: number = 30, options?: InsightsOptions) {
   return useQuery({
     queryKey: ['insights', days],
     queryFn: () => api.get<InsightsData>(`/insights?days=${days}`),
+    refetchInterval: options?.refetchInterval,
   })
 }
 
