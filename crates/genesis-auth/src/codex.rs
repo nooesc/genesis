@@ -343,6 +343,15 @@ pub async fn resolve_credentials(auth_store_path: &Path) -> Result<ResolvedCrede
     Ok(creds)
 }
 
+/// Clear the in-memory credentials cache, forcing the next `resolve_credentials()`
+/// call to re-read from disk and potentially refresh the token.
+///
+/// Used by the provider layer when a 401 response indicates the cached token
+/// may have been revoked or expired between the TTL check and the API call.
+pub async fn clear_credentials_cache() {
+    cache().write().await.clear();
+}
+
 fn cache_hit(entry: &CachedEntry) -> bool {
     entry.cached_at.elapsed().as_secs() < CACHE_TTL_SECS
         && !jwt::is_expiring(&entry.creds.api_key, TOKEN_REFRESH_SKEW_SECS)
@@ -551,6 +560,40 @@ mod tests {
         assert_eq!(creds.provider, CODEX_PROVIDER_ID);
         assert_eq!(creds.api_key, fake_jwt);
         assert_eq!(creds.base_url, CODEX_INFERENCE_URL);
+    }
+
+    #[tokio::test]
+    async fn clear_credentials_cache_removes_cached_entries() {
+        // Pre-populate the cache with a dummy entry
+        let path = PathBuf::from("/tmp/test-auth-clear");
+        {
+            let mut guard = cache().write().await;
+            guard.insert(
+                path.clone(),
+                CachedEntry {
+                    creds: ResolvedCredentials {
+                        provider: CODEX_PROVIDER_ID.to_owned(),
+                        api_key: "test-token".to_owned(),
+                        base_url: "https://example.com".to_owned(),
+                        source: store::CredentialSource::Test,
+                    },
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        // Verify it's cached
+        {
+            let guard = cache().read().await;
+            assert!(guard.contains_key(&path));
+        }
+
+        // Clear and verify
+        clear_credentials_cache().await;
+        {
+            let guard = cache().read().await;
+            assert!(guard.is_empty());
+        }
     }
 
     #[tokio::test]

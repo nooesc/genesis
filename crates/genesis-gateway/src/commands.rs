@@ -253,7 +253,7 @@ mod tests {
             .create_session("s1", "telegram", Some("Test"))
             .unwrap();
         store
-            .append_message("s1", "user", Some("Hello"), None, None)
+            .append_message("s1", "user", Some("Hello"), None, None, None)
             .unwrap();
 
         match handle_command("/new", "s1", &store, &test_config()) {
@@ -326,7 +326,7 @@ mod tests {
             .create_session("s1", "telegram", Some("Support"))
             .unwrap();
         store
-            .append_message("s1", "user", Some("Hello"), None, None)
+            .append_message("s1", "user", Some("Hello"), None, None, None)
             .unwrap();
 
         match handle_command("/config", "s1", &store, &test_config()) {
@@ -358,7 +358,7 @@ mod tests {
         let store = test_store();
         store.create_session("s1", "telegram", None).unwrap();
         store
-            .append_message("s1", "user", Some("Hello"), None, None)
+            .append_message("s1", "user", Some("Hello"), None, None, None)
             .unwrap();
 
         match handle_command("/cost", "s1", &store, &test_config()) {
@@ -420,6 +420,8 @@ mod tests {
             toolsets: std::collections::HashMap::new(),
             personality: None,
             embedding: None,
+            display: genesis_config::DisplayConfig::default(),
+            tui: genesis_config::TuiConfig::default(),
         }
     }
 

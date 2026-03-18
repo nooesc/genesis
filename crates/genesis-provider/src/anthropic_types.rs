@@ -483,6 +483,7 @@ pub(crate) fn from_anthropic_response(resp: AnthropicResponse) -> ChatCompletion
         },
         tool_call_id: None,
         name: None,
+        provider_metadata: None,
     };
 
     ChatCompletionResponse {

@@ -28,12 +28,67 @@ const DEFAULT_MAX_TURNS: usize = 20;
 pub enum StreamEvent<'a> {
     /// A text content chunk from the LLM.
     Chunk(&'a str),
+    /// A new agent turn (LLM call) is starting.
+    TurnStarted,
     /// A tool call is about to be executed.
-    ToolCallStart { name: &'a str },
+    ToolCallStart {
+        name: &'a str,
+        /// The provider-assigned tool call ID (e.g. `call_abc123`).
+        call_id: &'a str,
+        /// Short summary of the arguments (max ~40 chars).
+        /// Owned `String` (not `&'a str`) because it's derived/truncated
+        /// from the raw JSON args by `summarize_args()`.
+        args_summary: String,
+    },
     /// A tool call finished executing.
-    ToolCallEnd { name: &'a str },
+    ToolCallEnd {
+        name: &'a str,
+        /// The provider-assigned tool call ID.
+        call_id: &'a str,
+        /// How long the tool call took to execute in milliseconds.
+        duration_ms: u64,
+        /// Whether the tool call succeeded (no `Error:` prefix in output).
+        success: bool,
+    },
+    /// Cumulative token usage for the current streaming turn.
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     /// The agent is requesting clarification from the user.
     ClarificationNeeded { question: &'a str },
+    /// A non-fatal warning (e.g. budget approaching, context pruned).
+    Warning(&'a str),
+}
+
+/// Produce a short summary string (max ~40 chars) from a tool call's JSON
+/// arguments. Tries to show the first key-value pair; falls back to truncating
+/// the raw string.
+fn summarize_args(args_json: &str) -> String {
+    if args_json.is_empty() || args_json == "{}" {
+        return String::new();
+    }
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json)
+    {
+        if let Some((key, val)) = map.iter().next() {
+            let v = match val {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let combined = format!("{key}: {v}");
+            if combined.len() <= 40 {
+                return combined;
+            }
+            let truncated: String = combined.chars().take(37).collect();
+            return format!("{truncated}...");
+        }
+    }
+    let raw = args_json.trim_matches(|c| c == '{' || c == '}').trim();
+    if raw.len() <= 40 {
+        return raw.to_owned();
+    }
+    let truncated: String = raw.chars().take(37).collect();
+    format!("{truncated}...")
 }
 
 /// Result of a complete agent turn (user message → final assistant response).
@@ -803,6 +858,7 @@ impl AgentLoop {
                         tool_calls,
                         tool_call_id: None,
                         name: None,
+                        provider_metadata: None,
                     },
                     finish_reason: Some("stop".to_owned()),
                 };
@@ -903,11 +959,14 @@ impl AgentLoop {
                         self.trajectory.record_assistant_message(text);
                     }
 
-                    // Append the assistant message (with tool_calls) to history
-                    self.messages.push(ChatMessage::assistant_with_tool_calls(
+                    // Append the assistant message (with tool_calls) to history,
+                    // preserving provider_metadata (e.g. reasoning blobs) for multi-turn continuity.
+                    let mut msg = ChatMessage::assistant_with_tool_calls(
                         assistant_msg.content.clone(),
                         tool_calls.clone(),
-                    ));
+                    );
+                    msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                    self.messages.push(msg);
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
@@ -1035,14 +1094,19 @@ impl AgentLoop {
             }
 
             self.trajectory.record_assistant_message(&response_text);
-            self.messages.push(ChatMessage::assistant(&response_text));
+            let mut msg = ChatMessage::assistant(&response_text);
+            msg.provider_metadata = assistant_msg.provider_metadata.clone();
+            self.messages.push(msg);
 
             self.save_trajectory();
             let result = AgentResult {
                 response: response_text,
                 turns_used,
                 tool_calls_made,
-                finished_naturally: choice.finish_reason.as_deref() != Some("length"),
+                finished_naturally: !matches!(
+                    choice.finish_reason.as_deref(),
+                    Some("length") | Some("incomplete")
+                ),
                 total_input_tokens,
                 total_output_tokens,
                 estimated_cost: Some(self.cost.total_cost),
@@ -1134,6 +1198,7 @@ impl AgentLoop {
 
         // Fire turn-start hook (streaming)
         self.hooks.on_turn_start(&hook_session, &user_message);
+        on_event(StreamEvent::TurnStarted);
 
         let tool_defs: Vec<ChatTool> = self
             .tools
@@ -1280,7 +1345,8 @@ impl AgentLoop {
                         }
 
                         if let Some(reason) = update.finish_reason {
-                            finished_naturally = reason != "length";
+                            finished_naturally =
+                                !matches!(reason.as_str(), "length" | "incomplete");
                         }
 
                         if let Some(usage) = update.usage {
@@ -1290,7 +1356,7 @@ impl AgentLoop {
                                 turn_output_tokens.saturating_add(usage.completion_tokens);
                         }
 
-                        streamed_tool_calls.extend(update.tool_calls);
+                        merge_streamed_tool_calls(&mut streamed_tool_calls, update.tool_calls);
                     }
 
                     total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
@@ -1310,6 +1376,10 @@ impl AgentLoop {
                         turn_input_tokens,
                         turn_output_tokens,
                     );
+                    on_event(StreamEvent::TokenUsage {
+                        input_tokens: total_input_tokens,
+                        output_tokens: total_output_tokens,
+                    });
 
                     // If streaming didn't produce native tool calls, try parsing from text
                     if streamed_tool_calls.is_empty() && !response_text.is_empty() {
@@ -1327,6 +1397,7 @@ impl AgentLoop {
                             self.trajectory.record_assistant_message(&response_text);
                         }
 
+                        // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
                         self.messages.push(ChatMessage::assistant_with_tool_calls(
                             if response_text.is_empty() {
                                 None
@@ -1340,6 +1411,8 @@ impl AgentLoop {
                         for tc in &streamed_tool_calls {
                             on_event(StreamEvent::ToolCallStart {
                                 name: &tc.function.name,
+                                call_id: &tc.id,
+                                args_summary: summarize_args(&tc.function.arguments),
                             });
                             self.trajectory
                                 .record_tool_call(&tc.function.name, &tc.function.arguments);
@@ -1357,6 +1430,7 @@ impl AgentLoop {
 
                         // Execute tool calls in parallel.
                         tool_calls_made += streamed_tool_calls.len();
+                        let tool_exec_start = Instant::now();
                         let results = match execute_tool_calls_parallel(
                             &self.tools,
                             &self.subagent_spawner,
@@ -1371,14 +1445,20 @@ impl AgentLoop {
                                 return Err(self.report_error(&hook_session, "tool_execution", err))
                             }
                         };
+                        let tool_exec_duration = tool_exec_start.elapsed();
 
+                        let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
                         let mut clarification = None;
                         for (tc, (result, requires_input)) in
                             streamed_tool_calls.iter().zip(results)
                         {
                             let result = sanitize::sanitize_credentials(&result);
+                            let tool_success = !result.starts_with("Error:");
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
+                                call_id: &tc.id,
+                                duration_ms: tool_exec_duration_ms,
+                                success: tool_success,
                             });
                             self.trajectory
                                 .record_tool_result(&tc.function.name, &result);
@@ -1437,6 +1517,7 @@ impl AgentLoop {
                     }
 
                     self.trajectory.record_assistant_message(&response_text);
+                    // TODO: propagate provider_metadata for streaming reasoning continuity
                     self.messages.push(ChatMessage::assistant(&response_text));
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
@@ -1495,6 +1576,10 @@ impl AgentLoop {
                         ) {
                             return Err(self.report_error(&hook_session, "usage_record", err));
                         }
+                        on_event(StreamEvent::TokenUsage {
+                            input_tokens: total_input_tokens,
+                            output_tokens: total_output_tokens,
+                        });
                     }
 
                     let choice = response.choices.first().ok_or_else(|| {
@@ -1512,15 +1597,19 @@ impl AgentLoop {
                                 self.trajectory.record_assistant_message(text);
                             }
 
-                            self.messages.push(ChatMessage::assistant_with_tool_calls(
+                            let mut msg = ChatMessage::assistant_with_tool_calls(
                                 assistant_msg.content.clone(),
                                 tool_calls.clone(),
-                            ));
+                            );
+                            msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                            self.messages.push(msg);
 
                             // Emit start events and record tool calls.
                             for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart {
                                     name: &tc.function.name,
+                                    call_id: &tc.id,
+                                    args_summary: summarize_args(&tc.function.arguments),
                                 });
                                 self.trajectory
                                     .record_tool_call(&tc.function.name, &tc.function.arguments);
@@ -1538,6 +1627,7 @@ impl AgentLoop {
 
                             // Execute tool calls in parallel.
                             tool_calls_made += tool_calls.len();
+                            let tool_exec_start = Instant::now();
                             let results = match execute_tool_calls_parallel(
                                 &self.tools,
                                 &self.subagent_spawner,
@@ -1556,12 +1646,18 @@ impl AgentLoop {
                                     ))
                                 }
                             };
+                            let tool_exec_duration = tool_exec_start.elapsed();
+                            let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
 
                             let mut clarification = None;
                             for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
                                 let result = sanitize::sanitize_credentials(&result);
+                                let tool_success = !result.starts_with("Error:");
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
+                                    call_id: &tc.id,
+                                    duration_ms: tool_exec_duration_ms,
+                                    success: tool_success,
                                 });
                                 self.trajectory
                                     .record_tool_result(&tc.function.name, &result);
@@ -1638,7 +1734,9 @@ impl AgentLoop {
                     }
 
                     self.trajectory.record_assistant_message(&response_text);
-                    self.messages.push(ChatMessage::assistant(&response_text));
+                    let mut msg = ChatMessage::assistant(&response_text);
+                    msg.provider_metadata = assistant_msg.provider_metadata.clone();
+                    self.messages.push(msg);
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1646,7 +1744,10 @@ impl AgentLoop {
                         response: response_text,
                         turns_used,
                         tool_calls_made,
-                        finished_naturally: choice.finish_reason.as_deref() != Some("length"),
+                        finished_naturally: !matches!(
+                            choice.finish_reason.as_deref(),
+                            Some("length") | Some("incomplete")
+                        ),
                         total_input_tokens,
                         total_output_tokens,
                         estimated_cost: Some(self.cost.total_cost),
@@ -2090,6 +2191,30 @@ fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
         tool_calls,
         finish_reason,
         usage: chunk.usage,
+    }
+}
+
+/// Merge streaming tool call deltas into the accumulated tool calls list.
+///
+/// In SSE streaming (both Chat Completions and Responses API), tool calls
+/// arrive as incremental chunks:
+///   1. First chunk: `id` + `name` + empty `arguments` → new entry
+///   2. Subsequent chunks: empty `id` + empty `name` + argument fragment → append
+///
+/// This function appends argument fragments to the last matching tool call
+/// instead of creating separate ghost entries with empty names.
+fn merge_streamed_tool_calls(accumulated: &mut Vec<ToolCallEntry>, deltas: Vec<ToolCallEntry>) {
+    for delta in deltas {
+        if !delta.id.is_empty() && !delta.function.name.is_empty() {
+            // New tool call — push as a new entry
+            accumulated.push(delta);
+        } else if !delta.function.arguments.is_empty() {
+            // Argument fragment — append to the last tool call
+            if let Some(last) = accumulated.last_mut() {
+                last.function.arguments.push_str(&delta.function.arguments);
+            }
+        }
+        // Ignore entries with empty id, empty name, AND empty arguments
     }
 }
 
@@ -3477,6 +3602,40 @@ mod tests {
     fn iteration_budget_default_is_none() {
         let config = AgentLoopConfig::default();
         assert!(config.max_iterations.is_none());
+    }
+
+    #[test]
+    fn summarize_args_empty_input() {
+        assert_eq!(summarize_args(""), "");
+        assert_eq!(summarize_args("{}"), "");
+    }
+
+    #[test]
+    fn summarize_args_simple_object() {
+        let args = r#"{"command":"git status"}"#;
+        assert_eq!(summarize_args(args), "command: git status");
+    }
+
+    #[test]
+    fn summarize_args_truncates_long_value() {
+        let args =
+            r#"{"path":"/very/long/path/that/definitely/exceeds/forty/characters/limit/here"}"#;
+        let summary = summarize_args(args);
+        assert!(summary.len() <= 40);
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn summarize_args_non_string_value() {
+        let args = r#"{"count":42}"#;
+        assert_eq!(summarize_args(args), "count: 42");
+    }
+
+    #[test]
+    fn summarize_args_invalid_json_fallback() {
+        let args = "not json";
+        let summary = summarize_args(args);
+        assert_eq!(summary, "not json");
     }
 
     #[test]

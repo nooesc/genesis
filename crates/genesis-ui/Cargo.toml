@@ -1,0 +1,15 @@
+[package]
+name = "genesis-ui"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+owo-colors.workspace = true
+unicode-width.workspace = true
+termimad.workspace = true
+syntect.workspace = true
+image.workspace = true
+
+[dev-dependencies]

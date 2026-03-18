@@ -1050,6 +1050,8 @@ pub(crate) mod tests {
                 toolsets: std::collections::HashMap::new(),
                 personality: None,
                 embedding: None,
+                display: genesis_config::DisplayConfig::default(),
+                tui: genesis_config::TuiConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1099,6 +1101,8 @@ pub(crate) mod tests {
                 toolsets: std::collections::HashMap::new(),
                 personality: None,
                 embedding: None,
+                display: genesis_config::DisplayConfig::default(),
+                tui: genesis_config::TuiConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

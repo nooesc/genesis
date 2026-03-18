@@ -12,6 +12,8 @@ clap.workspace = true
 clap_complete.workspace = true
 futures-util.workspace = true
 genesis-auth = { path = "../genesis-auth" }
+genesis-tui = { path = "../genesis-tui" }
+genesis-ui = { path = "../genesis-ui" }
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
 genesis-gateway = { path = "../genesis-gateway" }
@@ -20,9 +22,11 @@ genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-tools = { path = "../genesis-tools" }
 genesis-types = { path = "../genesis-types" }
+dirs.workspace = true
 rand.workspace = true
 rustyline.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 sha2.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true

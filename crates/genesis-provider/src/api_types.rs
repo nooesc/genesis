@@ -265,6 +265,10 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Provider-specific metadata (e.g. codex reasoning blobs).
+    /// Skipped during serialization to external APIs; populated from storage.
+    #[serde(skip_serializing, default)]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 impl ChatMessage {
@@ -276,6 +280,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -287,6 +292,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -303,6 +309,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -314,6 +321,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -328,6 +336,7 @@ impl ChatMessage {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -339,6 +348,7 @@ impl ChatMessage {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
+            provider_metadata: None,
         }
     }
 
@@ -833,6 +843,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         };
 
         let json = serde_json::to_string(&msg).expect("should serialize");
@@ -957,6 +968,29 @@ mod tests {
             .with_tool_choice(ToolChoice::Required);
         let json = serde_json::to_value(&request).expect("serialize");
         assert_eq!(json["tool_choice"], "required");
+    }
+
+    #[test]
+    fn provider_metadata_not_serialized() {
+        let mut msg = ChatMessage::user("hello");
+        msg.provider_metadata = Some(serde_json::json!({"codex_reasoning_items": []}));
+        let json = serde_json::to_value(&msg).expect("should serialize");
+        assert!(!json.as_object().unwrap().contains_key("provider_metadata"));
+    }
+
+    #[test]
+    fn provider_metadata_deserializes_when_present() {
+        let raw = r#"{"role": "assistant", "content": "hi", "provider_metadata": {"key": "value"}}"#;
+        let msg: ChatMessage = serde_json::from_str(raw).expect("should deserialize");
+        assert!(msg.provider_metadata.is_some());
+        assert_eq!(msg.provider_metadata.unwrap()["key"], "value");
+    }
+
+    #[test]
+    fn provider_metadata_defaults_to_none() {
+        let raw = r#"{"role": "assistant", "content": "hi"}"#;
+        let msg: ChatMessage = serde_json::from_str(raw).expect("should deserialize");
+        assert!(msg.provider_metadata.is_none());
     }
 
     #[test]

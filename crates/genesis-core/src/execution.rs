@@ -237,6 +237,16 @@ impl<'a> SessionExecutionService<'a> {
         self.mcp.clone()
     }
 
+    /// Return (builtin_tool_count, mcp_tool_count).
+    pub async fn tool_counts(&self) -> (usize, usize) {
+        let builtin = crate::default_tool_count();
+        let mcp = match self.mcp.as_ref() {
+            Some(m) => m.tool_count().await,
+            None => 0,
+        };
+        (builtin, mcp)
+    }
+
     pub fn ensure_session(
         &self,
         session_id: &str,
@@ -1096,12 +1106,19 @@ pub fn persist_new_messages(
             .map(serde_json::to_string)
             .transpose()?;
 
+        let provider_metadata_json = message
+            .provider_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+
         store.append_message(
             session_id,
             &message.role,
             message.content_text(),
             message.tool_call_id.as_deref(),
             tool_calls_json.as_deref(),
+            provider_metadata_json.as_deref(),
         )?;
     }
 
@@ -1133,6 +1150,11 @@ pub fn restore_chat_history(
                 tool_calls,
                 tool_call_id: message.tool_call_id,
                 name: None,
+                provider_metadata: message
+                    .provider_metadata
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?,
             })
         })
         .collect()
@@ -1158,9 +1180,14 @@ fn maybe_inject_skill_nudge(store: &SessionStore, session_id: &str, result: &Age
             turns_used = result.turns_used,
             "injecting skill creation nudge"
         );
-        if let Err(e) =
-            store.append_message(session_id, "system", Some(SKILL_CREATION_NUDGE), None, None)
-        {
+        if let Err(e) = store.append_message(
+            session_id,
+            "system",
+            Some(SKILL_CREATION_NUDGE),
+            None,
+            None,
+            None,
+        ) {
             warn!(error = %e, "failed to persist skill creation nudge");
         }
     }
@@ -1450,6 +1477,7 @@ mod tests {
             ),
             mirror: false,
             mirror_source: None,
+            provider_metadata: None,
             created_at: "2026-03-08 12:00:00".to_owned(),
         }])
         .expect("history should restore");
@@ -1490,6 +1518,7 @@ mod tests {
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
+            provider_metadata: None,
         }];
 
         persist_new_messages(&store, "session-1", &messages).expect("messages should persist");
@@ -1534,7 +1563,7 @@ mod tests {
             .create_session("session-1", "cli", None)
             .expect("session should be created");
         store
-            .append_message("session-1", "user", Some("prior context"), None, None)
+            .append_message("session-1", "user", Some("prior context"), None, None, None)
             .expect("prior message should persist");
 
         let loaded = test_loaded_config(data_dir, database_path.clone());
@@ -1785,6 +1814,8 @@ mod tests {
                 toolsets: std::collections::HashMap::new(),
                 personality: Some("default".to_owned()),
                 embedding: None,
+                display: genesis_config::DisplayConfig::default(),
+                tui: genesis_config::TuiConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
