@@ -563,6 +563,17 @@ fn infer_backend(model: &str) -> (&'static str, &'static str) {
 }
 
 impl ToolRuntime {
+    /// Start the filesystem watcher for the tool result cache.
+    /// Should be called once after constructing the runtime.
+    pub fn start_cache_watcher(&self, dir: &std::path::Path) {
+        self.registry.cache().start_watching(dir);
+    }
+
+    /// Return a snapshot of tool cache statistics.
+    pub fn cache_stats(&self) -> genesis_tools::cache::CacheStats {
+        self.registry.cache().stats()
+    }
+
     /// Set the default working directory for shell commands.
     /// Used by worktree isolation to redirect tool execution.
     pub fn set_default_working_dir(&mut self, dir: String) {
