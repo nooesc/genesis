@@ -28,7 +28,13 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 thiserror.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+
+[features]
+embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }

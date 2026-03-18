@@ -359,6 +359,19 @@ pub(crate) struct HealthResponse {
     pub total_tools: usize,
 }
 
+/// JSON metrics response for the dashboard.
+#[derive(Debug, Serialize)]
+struct MetricsJsonResponse {
+    uptime_seconds: u64,
+    requests_total: u64,
+    errors_total: u64,
+    input_tokens_total: u64,
+    output_tokens_total: u64,
+    stream_requests_total: u64,
+    total_sessions: usize,
+    active_schedules: usize,
+}
+
 /// Detailed MCP server status response.
 #[derive(Debug, Serialize)]
 pub(crate) struct McpStatusResponse {
@@ -433,12 +446,47 @@ fn build_cors_layer(gateway: Option<&genesis_config::GatewayConfig>) -> CorsLaye
     }
 }
 
+#[cfg(feature = "embed-ui")]
+mod web_assets {
+    #[derive(rust_embed::Embed)]
+    #[folder = "../../web/dist/"]
+    pub struct Assets;
+}
+
+#[cfg(feature = "embed-ui")]
+async fn static_file_handler(uri: axum::http::Uri) -> impl axum::response::IntoResponse {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+
+    if let Some(file) = web_assets::Assets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return (
+            [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+            file.data,
+        )
+            .into_response();
+    }
+
+    // SPA fallback
+    match web_assets::Assets::get("index.html") {
+        Some(index) => (
+            [(header::CONTENT_TYPE, "text/html".to_string())],
+            index.data,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Build the axum Router with all routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = build_cors_layer(state.loaded.config.gateway.as_ref());
 
-    // Protected routes (require API key when configured/required)
-    let protected = Router::new()
+    // API routes nested under /api/ (require API key when configured/required).
+    // These are all the primary REST endpoints for the dashboard and clients.
+    let api_routes = Router::new()
         .route("/chat", post(chat_handler))
         .route("/chat/stream", post(chat_stream_handler))
         .route("/chat/ws", get(websocket_handler))
@@ -552,7 +600,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/guardrails/check", post(guardrails_check_handler))
         // Config introspection
         .route("/config", get(config_handler))
-        // OpenAI-compatible API
+        // JSON metrics for the web dashboard
+        .route("/metrics/json", get(metrics_json_handler))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth_middleware,
+        ));
+
+    // Root-level protected routes: OpenAI-compatible API and Prometheus metrics.
+    // These stay at the root path (not under /api/) for compatibility with
+    // existing integrations, but still require API key authentication.
+    let root_protected = Router::new()
         .route(
             "/v1/chat/completions",
             post(openai_chat_completions_handler),
@@ -586,22 +644,33 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/signal/webhook", post(platforms::signal::webhook_handler))
         .route("/signal/poll", post(platforms::signal::poll_handler));
 
-    // Rate-limited routes (protected + platform webhooks)
+    // Rate-limited routes (api_routes nested under /api/, root_protected, and platform webhooks)
     let rate_limited = Router::new()
-        .merge(protected)
+        .nest("/api", api_routes)
+        .merge(root_protected)
         .merge(platform_webhooks)
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             rate_limit_middleware,
         ));
 
-    // Public routes
-    Router::new()
+    // Public routes at root (no auth, no rate limiting for health checks)
+    let app = Router::new()
         .route("/health", get(health_handler))
         .route("/health/mcp", get(mcp_status_handler))
+        // /api/health is also public — health checks must not require an API key
+        .route("/api/health", get(health_handler))
+        .route("/api/health/mcp", get(mcp_status_handler))
         .route("/.well-known/agent.json", get(agent_card_handler))
-        .merge(rate_limited)
-        .layer(middleware::from_fn(request_logging_middleware))
+        .merge(rate_limited);
+
+    #[cfg(not(feature = "embed-ui"))]
+    let app = app;
+
+    #[cfg(feature = "embed-ui")]
+    let app = app.fallback(static_file_handler);
+
+    app.layer(middleware::from_fn(request_logging_middleware))
         .layer(cors)
         .with_state(state)
 }
@@ -933,6 +1002,32 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
         .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
         .body(axum::body::Body::from(body))
         .unwrap_or_else(|_| Response::new(axum::body::Body::empty()))
+}
+
+/// JSON metrics endpoint for the web dashboard.
+///
+/// Returns the same counters as the Prometheus endpoint but in a structured
+/// JSON format that is easier for browser-based clients to consume.
+async fn metrics_json_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<MetricsJsonResponse> {
+    let db_path = &state.loaded.config.storage.database_path;
+    let total_sessions = SessionStore::new(db_path).session_count().unwrap_or(0) as usize;
+    let active_schedules = ScheduleStore::new(db_path)
+        .list_enabled()
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    Json(MetricsJsonResponse {
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        requests_total: state.requests_total.load(Ordering::Relaxed),
+        errors_total: state.errors_total.load(Ordering::Relaxed),
+        input_tokens_total: state.input_tokens_total.load(Ordering::Relaxed),
+        output_tokens_total: state.output_tokens_total.load(Ordering::Relaxed),
+        stream_requests_total: state.stream_requests_total.load(Ordering::Relaxed),
+        total_sessions,
+        active_schedules,
+    })
 }
 
 /// Query parameters for listing sessions.
@@ -4284,6 +4379,157 @@ mod tests {
         assert!(req.stream.is_none());
     }
 
+    /// Build a minimal `AppState` backed by a temp-dir SQLite database.
+    ///
+    /// Returns both the `Arc<AppState>` and the `TempDir` guard so the caller keeps the
+    /// directory alive for the duration of the test.
+    ///
+    /// Used by router integration tests so they don't touch the real filesystem.
+    #[cfg(test)]
+    fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        create_test_state_with_key(None, false)
+    }
+
+    /// Like `create_test_state` but allows configuring API key authentication.
+    #[cfg(test)]
+    fn create_test_state_with_key(
+        api_key: Option<String>,
+        api_key_required: bool,
+    ) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir should succeed");
+        let database_path = dir.path().join("genesis.db");
+        // Bootstrap the schema so AgentBus persistence doesn't fail on first access.
+        genesis_storage::bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let config = genesis_config::GenesisConfig {
+            schema_version: 1,
+            profile: "test".to_owned(),
+            provider: genesis_config::ProviderConfig {
+                backend: "openai".to_owned(),
+                model: "gpt-4.1-mini".to_owned(),
+                base_url: None,
+                api_key_env: None,
+                extra_body: None,
+                tool_call_parser: None,
+            },
+            tool_provider: None,
+            fallback_providers: Vec::new(),
+            mcp_servers: std::collections::HashMap::new(),
+            storage: genesis_config::StorageConfig {
+                data_dir: dir.path().to_path_buf(),
+                database_path: database_path.clone(),
+            },
+            runtime: genesis_config::RuntimeConfig {
+                max_concurrency: 4,
+                allow_destructive_tools: false,
+                max_turns: 20,
+                max_context_messages: None,
+                budget_limit: None,
+                terminal: None,
+                thinking_budget: None,
+                max_context_tokens: None,
+                max_iterations: None,
+                context_security: genesis_config::ContextSecurityPolicy::default(),
+                reasoning_effort: None,
+                cache: None,
+                tool_filter: None,
+                guardrails: None,
+            },
+            gateway: None,
+            toolsets: std::collections::HashMap::new(),
+            personality: None,
+            embedding: None,
+        };
+        let loaded = genesis_config::LoadedConfig {
+            config,
+            paths: genesis_config::AppPaths {
+                config_path: dir.path().join("genesis.toml"),
+                data_dir: dir.path().to_path_buf(),
+                database_path,
+            },
+        };
+        let state = Arc::new(AppState::new(
+            loaded,
+            api_key,
+            api_key_required,
+            None,
+            None,
+            Vec::new(),
+        ));
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn api_routes_accessible_under_api_prefix() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // /health at root should return 200
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health at root must return 200"
+        );
+
+        // /api/health should also return 200
+        let req = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/api/health must return 200"
+        );
+    }
+
+    /// Verify that `/api/health` is accessible without authentication even when an API key is
+    /// configured, while a protected route like `/api/sessions` correctly returns 401.
+    #[tokio::test]
+    async fn api_health_is_public_even_with_auth_configured() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) =
+            create_test_state_with_key(Some("test-key".to_string()), true);
+        let app = build_router(state);
+
+        // /api/health must return 200 with NO Authorization header
+        let req = Request::builder()
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/api/health must be reachable without auth even when a key is configured"
+        );
+
+        // A protected route must return 401 when no Authorization header is sent
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/sessions must require auth when api_key_required is true"
+        );
+    }
+
     #[test]
     fn histogram_buckets_no_double_counting() {
         // Boundaries: 100, 500, 1000
@@ -4331,5 +4577,31 @@ mod tests {
             output.contains("test_duration_ms_count 3"),
             "count should be 3, got:\n{output}"
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_json_returns_structured_data() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/metrics/json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("uptime_seconds").is_some());
+        assert!(json.get("requests_total").is_some());
+        assert!(json.get("errors_total").is_some());
+        assert!(json.get("input_tokens_total").is_some());
+        assert!(json.get("output_tokens_total").is_some());
     }
 }
