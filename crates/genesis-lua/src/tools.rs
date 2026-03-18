@@ -51,7 +51,7 @@ impl LuaToolRegistry {
             return Err(LuaRuntimeError::DuplicateLuaToolName { name });
         }
 
-        let parameters = optional_json_value(lua, &spec, "parameters", plugin_name)?;
+        let parameters = optional_parameter_schema(lua, &spec, plugin_name)?;
         let run = required_function(&spec, "run", plugin_name)?;
         let handler = lua.create_registry_value(run)?;
         let registration = LuaRegisteredTool {
@@ -123,28 +123,72 @@ fn required_function(
         })
 }
 
-fn optional_json_value(
+fn optional_parameter_schema(
     lua: &Lua,
     spec: &Table,
-    field: &str,
     plugin_name: &str,
 ) -> Result<Option<serde_json::Value>, LuaRuntimeError> {
     let value = spec
-        .get::<Option<Value>>(field)
+        .get::<Option<Value>>("parameters")
         .map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
             plugin_name: plugin_name.to_owned(),
-            reason: format!("invalid `{field}`: {source}"),
+            reason: format!("invalid `parameters`: {source}"),
         })?;
 
-    value
-        .map(|value| {
-            lua.from_value(value)
-                .map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let table = match value {
+        Value::Table(table) => table,
+        _ => {
+            return Err(LuaRuntimeError::InvalidLuaToolDefinition {
+                plugin_name: plugin_name.to_owned(),
+                reason: "`parameters` must be a table".to_owned(),
+            })
+        }
+    };
+
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+
+    for pair in table.pairs::<String, Table>() {
+        let (name, definition) =
+            pair.map_err(|source| LuaRuntimeError::InvalidLuaToolDefinition {
+                plugin_name: plugin_name.to_owned(),
+                reason: format!("invalid parameter definition: {source}"),
+            })?;
+        let mut schema = match lua.from_value::<serde_json::Value>(Value::Table(definition.clone())) {
+            Ok(serde_json::Value::Object(object)) => object,
+            Ok(_) => {
+                return Err(LuaRuntimeError::InvalidLuaToolDefinition {
                     plugin_name: plugin_name.to_owned(),
-                    reason: format!("`{field}` could not be serialized: {source}"),
+                    reason: format!("parameter `{name}` must serialize to an object"),
                 })
-        })
-        .transpose()
+            }
+            Err(source) => {
+                return Err(LuaRuntimeError::InvalidLuaToolDefinition {
+                    plugin_name: plugin_name.to_owned(),
+                    reason: format!("parameter `{name}` could not be serialized: {source}"),
+                })
+            }
+        };
+
+        if matches!(schema.remove("required"), Some(serde_json::Value::Bool(true))) {
+            required.push(serde_json::Value::String(name.clone()));
+        }
+
+        properties.insert(name, serde_json::Value::Object(schema));
+    }
+
+    let mut root = serde_json::Map::new();
+    root.insert("type".to_owned(), serde_json::Value::String("object".to_owned()));
+    root.insert("properties".to_owned(), serde_json::Value::Object(properties));
+    if !required.is_empty() {
+        root.insert("required".to_owned(), serde_json::Value::Array(required));
+    }
+
+    Ok(Some(serde_json::Value::Object(root)))
 }
 
 fn to_output(lua: &Lua, tool_name: &str, value: Value) -> Result<LuaToolOutput, LuaRuntimeError> {

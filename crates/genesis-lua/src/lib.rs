@@ -266,11 +266,14 @@ genesis.register_tool({
         assert_eq!(
             tools[0].definition.parameters,
             Some(json!({
-                "path": {
-                    "type": "string",
-                    "description": "Path to inspect",
-                    "required": true,
-                }
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to inspect",
+                    }
+                },
+                "required": ["path"]
             }))
         );
     }
