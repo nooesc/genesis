@@ -1,11 +1,12 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
   LayoutDashboard, MessagesSquare, Brain, Database,
-  Clock, Wrench, BarChart3, FileText, Settings,
+  Clock, Wrench, BarChart3, FileText, Settings, Radar,
 } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/monitor', label: 'Monitor', icon: Radar },
   { to: '/sessions', label: 'Sessions', icon: MessagesSquare },
   { to: '/skills', label: 'Skills', icon: Brain },
   { to: '/memories', label: 'Memories', icon: Database },
