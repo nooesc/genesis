@@ -22,12 +22,14 @@ interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[]
   data: TData[]
   onRowClick?: (row: TData) => void
+  meta?: Record<string, unknown>
 }
 
 export function DataTable<TData, TValue>({
   columns,
   data,
   onRowClick,
+  meta,
 }: DataTableProps<TData, TValue>) {
   const [sorting, setSorting] = React.useState<SortingState>([])
 
@@ -40,6 +42,7 @@ export function DataTable<TData, TValue>({
     onSortingChange: setSorting,
     state: { sorting },
     initialState: { pagination: { pageSize: 10 } },
+    meta,
   })
 
   return (

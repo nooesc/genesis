@@ -28,11 +28,12 @@ function formatDateLabel(dateStr: string): string {
 }
 
 export function TokenChart({ tokensPerDay }: TokenChartProps) {
-  const data: ChartDataPoint[] = Object.entries(tokensPerDay)
+  // tokensPerDay is [date, input_tokens, output_tokens][]
+  const data: ChartDataPoint[] = [...tokensPerDay]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, tokens]) => ({
+    .map(([date, inp, out]) => ({
       date: formatDateLabel(date),
-      tokens,
+      tokens: inp + out,
     }))
 
   if (data.length === 0) {

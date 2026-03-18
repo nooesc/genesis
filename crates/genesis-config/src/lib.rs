@@ -54,6 +54,9 @@ pub struct GenesisConfig {
     /// TUI (terminal user interface) settings.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// OpenTelemetry telemetry export configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 /// Display and UI settings for the CLI.
@@ -607,6 +610,38 @@ fn default_retry_backoff_ms() -> u64 {
     1000
 }
 
+/// OpenTelemetry telemetry export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    /// Whether telemetry export is enabled (default: true when section present).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// OTLP endpoint for trace export (default: http://localhost:4317).
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    /// Service name reported in traces (default: "genesis").
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_owned()
+}
+
+fn default_service_name() -> String {
+    "genesis".to_owned()
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            otlp_endpoint: default_otlp_endpoint(),
+            service_name: default_service_name(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -650,6 +685,8 @@ struct FileConfig {
     display: Option<DisplayConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tui: Option<TuiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    telemetry: Option<TelemetryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -796,6 +833,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         embedding: None,
         display: DisplayConfig::default(),
         tui: TuiConfig::default(),
+        telemetry: None,
     })
 }
 
@@ -965,6 +1003,7 @@ pub fn load_from_map(
             embedding: file_config.embedding,
             display: file_config.display.unwrap_or_default(),
             tui: file_config.tui.unwrap_or_default(),
+            telemetry: file_config.telemetry,
         },
         paths: AppPaths {
             config_path: paths.config_path,

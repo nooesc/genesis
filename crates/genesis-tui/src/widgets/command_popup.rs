@@ -40,6 +40,7 @@ pub struct CommandDef {
 
 const COMMANDS: &[CommandDef] = &[
     CommandDef { name: "/help",        description: "Show keybindings and commands" },
+    CommandDef { name: "/models",      description: "Browse and switch models" },
     CommandDef { name: "/clear",       description: "Clear conversation history" },
     CommandDef { name: "/exit",        description: "Exit Eve" },
 ];
