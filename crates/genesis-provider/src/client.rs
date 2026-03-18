@@ -28,7 +28,7 @@ pub type ChatCompletionChunkStream =
 /// All providers (OpenAI, OpenRouter, Anthropic via compatible proxy, local
 /// vLLM/Ollama, etc.) speak the same request format, so one client handles
 /// them all. The only difference is `base_url`, `api_key`, and `model`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChatClient {
     http: reqwest::Client,
     endpoint: String,
@@ -37,6 +37,9 @@ pub struct ChatClient {
     backend: String,
     /// API key stored separately for backends using query-param auth (Gemini).
     api_key: Option<String>,
+    /// Circuit breaker — tracks consecutive failures and short-circuits
+    /// when the provider is likely down.
+    circuit: std::sync::Arc<crate::circuit_breaker::CircuitBreaker>,
 }
 
 impl ChatClient {
@@ -118,6 +121,7 @@ impl ChatClient {
             model: provider.model.clone(),
             backend,
             api_key,
+            circuit: std::sync::Arc::new(crate::circuit_breaker::CircuitBreaker::with_defaults()),
         })
     }
 
@@ -241,6 +245,29 @@ impl ChatClient {
 
     /// Send a chat completion request and return the parsed response.
     pub async fn complete(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        // Check circuit breaker before making the request.
+        if !self.circuit.allow_request() {
+            return Err(ProviderError::CircuitOpen {
+                failures: self.circuit.consecutive_failures(),
+                cooldown_secs: 30,
+            });
+        }
+
+        let result = self.complete_inner(request).await;
+
+        // Record success or failure in the circuit breaker.
+        match &result {
+            Ok(_) => self.circuit.record_success(),
+            Err(_) => self.circuit.record_failure(),
+        }
+
+        result
+    }
+
+    async fn complete_inner(
         &self,
         mut request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ProviderError> {
@@ -464,6 +491,18 @@ impl ChatClient {
         &self,
         mut request: ChatCompletionRequest,
     ) -> Result<ChatCompletionChunkStream, ProviderError> {
+        // Check circuit breaker for streaming too.
+        if !self.circuit.allow_request() {
+            return Err(ProviderError::CircuitOpen {
+                failures: self.circuit.consecutive_failures(),
+                cooldown_secs: 30,
+            });
+        }
+        // Note: streaming success/failure is harder to track since errors
+        // may occur mid-stream. We record success at connection time and
+        // rely on the non-streaming path for failure tracking.
+        self.circuit.record_success();
+
         let started_at = Instant::now();
         if request.model.is_empty() {
             request.model = self.model.clone();
@@ -806,6 +845,16 @@ impl ChatClient {
     /// Returns the backend identifier (e.g., "openai", "anthropic").
     pub fn backend(&self) -> &str {
         &self.backend
+    }
+
+    /// Returns the current circuit breaker state for this provider.
+    pub fn circuit_state(&self) -> crate::circuit_breaker::CircuitState {
+        self.circuit.state()
+    }
+
+    /// Returns the number of consecutive failures tracked by the circuit breaker.
+    pub fn circuit_failures(&self) -> u32 {
+        self.circuit.consecutive_failures()
     }
 
     /// Attempt a single retry with fresh credentials (codex 401 recovery).

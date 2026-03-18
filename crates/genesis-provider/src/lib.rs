@@ -1,5 +1,6 @@
 mod anthropic_types;
 mod api_types;
+pub mod circuit_breaker;
 mod client;
 mod error;
 mod gemini_types;
@@ -15,6 +16,7 @@ pub use api_types::{
     FunctionCall, ImageUrl, JsonSchemaSpec, MessageContent, ResponseFormat, ThinkingConfig,
     ToolCallEntry, ToolChoice,
 };
+pub use circuit_breaker::{CircuitBreaker, CircuitState};
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
 pub use resolve::{resolve, ResolvedProvider, OPENAI_BASE_URL};
