@@ -32,7 +32,7 @@ async fn main() {
         .ok()
         .and_then(|lc| lc.config.telemetry);
 
-    let _guard = init_tracing(tui_active, telemetry_config.as_ref());
+    let guard = init_tracing(tui_active, telemetry_config.as_ref());
 
     match run(cli).await {
         Ok(output) => {
@@ -42,6 +42,8 @@ async fn main() {
         }
         Err(error) => {
             eprintln!("\x1b[38;2;215;95;95m{error}\x1b[0m");
+            // Drop the guard first to flush any pending OTel spans before exiting.
+            drop(guard);
             std::process::exit(1);
         }
     }
