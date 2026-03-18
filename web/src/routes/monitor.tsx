@@ -35,7 +35,7 @@ function MonitorPage() {
 
   const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
   const totalTokens7d = insights
-    ? Object.values(insights.tokens_per_day).reduce((sum, v) => sum + v, 0)
+    ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0)
     : 0
 
   const isLoading = healthLoading || insightsLoading || sessionsLoading
@@ -52,7 +52,7 @@ function MonitorPage() {
             isHealthy={isHealthy}
             totalTools={health?.total_tools ?? 0}
             uptimeSeconds={health?.uptime_seconds ?? 0}
-            toolUsage={insights?.tool_usage ?? {}}
+            toolUsage={insights?.tool_usage ?? []}
           />
         )}
       </div>
@@ -109,7 +109,7 @@ function MonitorPage() {
           </CardHeader>
           <CardContent className="pb-3">
             <div className="flex flex-wrap gap-2">
-              {Object.entries(insights?.platform_breakdown ?? {}).map(([platform, count]) => (
+              {(insights?.platform_breakdown ?? []).map(([platform, count]) => (
                 <div key={platform} className="flex items-center gap-1.5">
                   <div
                     className="h-2 w-2 rounded-full"

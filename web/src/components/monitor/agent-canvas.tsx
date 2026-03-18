@@ -7,7 +7,7 @@ interface AgentCanvasProps {
   isHealthy: boolean
   totalTools: number
   uptimeSeconds: number
-  toolUsage: Record<string, number>
+  toolUsage: [string, number][]
 }
 
 interface SessionNode {
@@ -32,8 +32,8 @@ function layoutSessions(sessions: SessionSummary[]): SessionNode[] {
   })
 }
 
-function getToolCategories(toolUsage: Record<string, number>, max: number = 10): [string, number][] {
-  return Object.entries(toolUsage)
+function getToolCategories(toolUsage: [string, number][], max: number = 10): [string, number][] {
+  return [...toolUsage]
     .sort(([, a], [, b]) => b - a)
     .slice(0, max)
 }
