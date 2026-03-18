@@ -32,6 +32,9 @@ pub struct GenesisConfig {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
+    /// Lua plugin runtime settings.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
     /// Gateway-specific settings (session policies, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<GatewayConfig>,
@@ -249,6 +252,30 @@ pub struct RuntimeConfig {
     /// against the specified rules before processing / returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<GuardrailsConfig>,
+}
+
+/// Lua plugin runtime configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_plugin_hook_timeout_ms")]
+    pub hook_timeout_ms: u64,
+    #[serde(default = "default_plugin_tool_timeout_ms")]
+    pub tool_timeout_ms: u64,
+    #[serde(default = "default_plugin_auto_disable_after")]
+    pub auto_disable_after: u32,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hook_timeout_ms: default_plugin_hook_timeout_ms(),
+            tool_timeout_ms: default_plugin_tool_timeout_ms(),
+            auto_disable_after: default_plugin_auto_disable_after(),
+        }
+    }
 }
 
 /// Configuration for filtering which tools are available to the agent.
@@ -563,12 +590,22 @@ fn default_max_retries() -> u32 {
 fn default_retry_backoff_ms() -> u64 {
     1000
 }
+fn default_plugin_hook_timeout_ms() -> u64 {
+    5_000
+}
+fn default_plugin_tool_timeout_ms() -> u64 {
+    120_000
+}
+fn default_plugin_auto_disable_after() -> u32 {
+    3
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
     pub data_dir: PathBuf,
     pub database_path: PathBuf,
+    pub plugin_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -595,6 +632,8 @@ struct FileConfig {
     storage: Option<FileStorageConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<FileRuntimeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugins: Option<PluginsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<GatewayConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -747,6 +786,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             tool_filter: None,
             guardrails: None,
         },
+        plugins: PluginsConfig::default(),
         gateway: None,
         toolsets: HashMap::new(),
         personality: None,
@@ -916,6 +956,7 @@ pub fn load_from_map(
                 database_path: database_path.clone(),
             },
             runtime,
+            plugins: file_config.plugins.unwrap_or_default(),
             gateway: file_config.gateway,
             toolsets: file_config.toolsets.unwrap_or_default(),
             personality: file_config.personality,
@@ -927,6 +968,7 @@ pub fn load_from_map(
             config_path: paths.config_path,
             data_dir,
             database_path,
+            plugin_dir: paths.plugin_dir,
         },
     })
 }
@@ -941,6 +983,7 @@ impl AppPaths {
         Ok(Self {
             config_path,
             database_path: data_dir.join(DEFAULT_DATABASE_FILE),
+            plugin_dir: data_dir.join("plugins"),
             data_dir,
         })
     }
@@ -1681,6 +1724,49 @@ toolsets:
     fn toolsets_default_empty() {
         let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(config.config.toolsets.is_empty());
+    }
+
+    #[test]
+    fn app_paths_include_plugin_dir() {
+        let paths = super::AppPaths::resolve(None).expect("paths should resolve");
+        assert!(paths.plugin_dir.ends_with("genesis/plugins"));
+    }
+
+    #[test]
+    fn example_config_includes_plugin_runtime_settings() {
+        let config = super::example_config(None).expect("example config should load");
+        assert!(config.plugins.enabled);
+        assert_eq!(config.plugins.hook_timeout_ms, 5_000);
+        assert_eq!(config.plugins.tool_timeout_ms, 120_000);
+        assert_eq!(config.plugins.auto_disable_after, 3);
+    }
+
+    #[test]
+    fn plugins_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openai
+  model: gpt-4.1-mini
+plugins:
+  enabled: true
+  hook_timeout_ms: 1500
+  tool_timeout_ms: 9000
+  auto_disable_after: 5
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        assert!(loaded.config.plugins.enabled);
+        assert_eq!(loaded.config.plugins.hook_timeout_ms, 1_500);
+        assert_eq!(loaded.config.plugins.tool_timeout_ms, 9_000);
+        assert_eq!(loaded.config.plugins.auto_disable_after, 5);
     }
 
     #[test]
