@@ -13,6 +13,7 @@ import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as SkillsRouteImport } from './routes/skills'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SchedulesRouteImport } from './routes/schedules'
+import { Route as MonitorRouteImport } from './routes/monitor'
 import { Route as MemoriesRouteImport } from './routes/memories'
 import { Route as AuditRouteImport } from './routes/audit'
 import { Route as AnalyticsRouteImport } from './routes/analytics'
@@ -38,6 +39,11 @@ const SettingsRoute = SettingsRouteImport.update({
 const SchedulesRoute = SchedulesRouteImport.update({
   id: '/schedules',
   path: '/schedules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MonitorRoute = MonitorRouteImport.update({
+  id: '/monitor',
+  path: '/monitor',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MemoriesRoute = MemoriesRouteImport.update({
@@ -76,6 +82,7 @@ export interface FileRoutesByFullPath {
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -88,6 +95,7 @@ export interface FileRoutesByTo {
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -101,6 +109,7 @@ export interface FileRoutesById {
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -115,6 +124,7 @@ export interface FileRouteTypes {
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -152,6 +164,7 @@ export interface RootRouteChildren {
   AnalyticsRoute: typeof AnalyticsRoute
   AuditRoute: typeof AuditRoute
   MemoriesRoute: typeof MemoriesRoute
+  MonitorRoute: typeof MonitorRoute
   SchedulesRoute: typeof SchedulesRoute
   SettingsRoute: typeof SettingsRoute
   SkillsRoute: typeof SkillsRoute
@@ -188,6 +201,13 @@ declare module '@tanstack/react-router' {
       path: '/schedules'
       fullPath: '/schedules'
       preLoaderRoute: typeof SchedulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/monitor': {
+      id: '/monitor'
+      path: '/monitor'
+      fullPath: '/monitor'
+      preLoaderRoute: typeof MonitorRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/memories': {
@@ -240,6 +260,7 @@ const rootRouteChildren: RootRouteChildren = {
   AnalyticsRoute: AnalyticsRoute,
   AuditRoute: AuditRoute,
   MemoriesRoute: MemoriesRoute,
+  MonitorRoute: MonitorRoute,
   SchedulesRoute: SchedulesRoute,
   SettingsRoute: SettingsRoute,
   SkillsRoute: SkillsRoute,
