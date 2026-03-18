@@ -149,6 +149,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_token_efficient_tools: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -162,6 +163,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_token_efficient_tools: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -175,6 +177,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_token_efficient_tools: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -188,6 +191,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_token_efficient_tools: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -201,6 +205,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_token_efficient_tools: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -212,6 +217,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_vision: true,
                 supports_citations: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -225,6 +231,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_thinking: true,
                 requires_thought_signatures: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -237,6 +244,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
                 supports_thinking: true,
                 requires_thought_signatures: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -247,6 +255,7 @@ pub fn known_metadata() -> HashMap<&'static str, ModelMetadata> {
             capabilities: ModelCapabilities {
                 supports_vision: true,
                 supports_context_caching: true,
+                supports_batch_api: true,
                 ..cap()
             },
         },
@@ -473,10 +482,17 @@ mod tests {
     }
 
     #[test]
-    fn openai_models_support_batch_api() {
+    fn batch_api_flagged_for_supported_providers() {
         let db = known_metadata();
+        // OpenAI
         assert!(db["gpt-4.1"].capabilities.supports_batch_api);
         assert!(db["o4-mini"].capabilities.supports_batch_api);
+        // Anthropic (Message Batches API)
+        assert!(db["claude-sonnet-4-20250514"].capabilities.supports_batch_api);
+        assert!(db["claude-haiku-4-5"].capabilities.supports_batch_api);
+        // Google (Batch API)
+        assert!(db["gemini-2.5-pro"].capabilities.supports_batch_api);
+        assert!(db["gemini-2.0-flash"].capabilities.supports_batch_api);
     }
 
     #[test]
