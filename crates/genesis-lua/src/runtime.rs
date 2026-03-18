@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{Lua, LuaSerdeExt};
 use thiserror::Error;
 
-use crate::{api::install_genesis_api, discover_plugins};
+use crate::{api::install_genesis_api, discovery::discover_plugins_best_effort};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LuaSessionContext {
@@ -131,8 +131,8 @@ impl LuaRuntime {
             return Ok(());
         }
 
-        let plugins = match discover_plugins(&config.plugin_dir) {
-            Ok(plugins) => plugins,
+        let report = match discover_plugins_best_effort(&config.plugin_dir) {
+            Ok(report) => report,
             Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -143,7 +143,10 @@ impl LuaRuntime {
                 return Ok(());
             }
         };
-        for plugin in plugins {
+        self.plugin_errors
+            .extend(report.errors.into_iter().map(|err| err.to_string()));
+
+        for plugin in report.plugins {
             let source = match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
                 LuaRuntimeError::ReadPluginSource {
                     path: plugin.entrypoint.clone(),

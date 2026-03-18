@@ -20,10 +20,32 @@ pub enum PluginKind {
     Package,
 }
 
-pub fn discover_plugins(root: &Path) -> Result<Vec<DiscoveredPlugin>, LuaRuntimeError> {
-    let mut plugins = Vec::new();
-    let mut names = HashSet::new();
+#[derive(Debug, Default)]
+pub(crate) struct DiscoveryReport {
+    pub plugins: Vec<DiscoveredPlugin>,
+    pub errors: Vec<LuaRuntimeError>,
+}
 
+pub fn discover_plugins(root: &Path) -> Result<Vec<DiscoveredPlugin>, LuaRuntimeError> {
+    Ok(scan_plugins(root, false)?.plugins)
+}
+
+pub(crate) fn discover_plugins_best_effort(root: &Path) -> Result<DiscoveryReport, LuaRuntimeError> {
+    scan_plugins(root, true)
+}
+
+fn ensure_unique_name(names: &mut HashSet<String>, name: &str) -> Result<(), LuaRuntimeError> {
+    if !names.insert(name.to_owned()) {
+        return Err(LuaRuntimeError::DuplicatePluginName {
+            name: name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn scan_plugins(root: &Path, best_effort: bool) -> Result<DiscoveryReport, LuaRuntimeError> {
+    let mut report = DiscoveryReport::default();
+    let mut names = HashSet::new();
     let mut entries = fs::read_dir(root)
         .map_err(|source| LuaRuntimeError::ReadPluginDirectory {
             path: root.to_path_buf(),
@@ -37,74 +59,76 @@ pub fn discover_plugins(root: &Path) -> Result<Vec<DiscoveredPlugin>, LuaRuntime
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| LuaRuntimeError::ReadPluginEntry {
+        match discover_plugin_entry(entry.path(), &mut names) {
+            Ok(Some(plugin)) => report.plugins.push(plugin),
+            Ok(None) => {}
+            Err(err) if best_effort => report.errors.push(err),
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(report)
+}
+
+fn discover_plugin_entry(
+    path: PathBuf,
+    names: &mut HashSet<String>,
+) -> Result<Option<DiscoveredPlugin>, LuaRuntimeError> {
+    let file_type = fs::metadata(&path)
+        .map(|meta| meta.file_type())
+        .map_err(|source| LuaRuntimeError::ReadPluginEntry {
             path: path.clone(),
             source,
         })?;
 
-        if file_type.is_file() && path.extension().is_some_and(|ext| ext == "lua") {
-            let name = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .ok_or_else(|| LuaRuntimeError::InvalidPluginFilename { path: path.clone() })?
-                .to_owned();
-            ensure_unique_name(&mut names, &name)?;
+    if file_type.is_file() && path.extension().is_some_and(|ext| ext == "lua") {
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| LuaRuntimeError::InvalidPluginFilename { path: path.clone() })?
+            .to_owned();
+        ensure_unique_name(names, &name)?;
 
-            let manifest = PluginManifest::for_single_file(name.clone());
-            plugins.push(DiscoveredPlugin {
-                name,
-                kind: PluginKind::SingleFile,
-                root: path.clone(),
-                entrypoint: path,
-                manifest,
-            });
-            continue;
+        let manifest = PluginManifest::for_single_file(name.clone());
+        return Ok(Some(DiscoveredPlugin {
+            name,
+            kind: PluginKind::SingleFile,
+            root: path.clone(),
+            entrypoint: path,
+            manifest,
+        }));
+    }
+
+    if file_type.is_dir() {
+        let entrypoint = path.join("init.lua");
+        let manifest_path = path.join("plugin.toml");
+        if !(entrypoint.is_file() && manifest_path.is_file()) {
+            return Ok(None);
         }
 
-        if file_type.is_dir() {
-            let entrypoint = path.join("init.lua");
-            let manifest_path = path.join("plugin.toml");
-            if !(entrypoint.is_file() && manifest_path.is_file()) {
-                continue;
-            }
-
-            let manifest_raw =
-                fs::read_to_string(&manifest_path).map_err(|source| {
-                    LuaRuntimeError::ReadPluginManifest {
-                        path: manifest_path.clone(),
-                        source,
-                    }
-                })?;
-            let manifest: PluginManifest = toml::from_str(&manifest_raw).map_err(|source| {
-                LuaRuntimeError::ParsePluginManifest {
-                    path: manifest_path.clone(),
-                    source,
-                }
+        let manifest_raw =
+            fs::read_to_string(&manifest_path).map_err(|source| LuaRuntimeError::ReadPluginManifest {
+                path: manifest_path.clone(),
+                source,
             })?;
-            let name = manifest.plugin.name.clone();
-            ensure_unique_name(&mut names, &name)?;
+        let manifest: PluginManifest =
+            toml::from_str(&manifest_raw).map_err(|source| LuaRuntimeError::ParsePluginManifest {
+                path: manifest_path.clone(),
+                source,
+            })?;
+        let name = manifest.plugin.name.clone();
+        ensure_unique_name(names, &name)?;
 
-            plugins.push(DiscoveredPlugin {
-                name,
-                kind: PluginKind::Package,
-                root: path,
-                entrypoint,
-                manifest,
-            });
-        }
+        return Ok(Some(DiscoveredPlugin {
+            name,
+            kind: PluginKind::Package,
+            root: path,
+            entrypoint,
+            manifest,
+        }));
     }
 
-    Ok(plugins)
-}
-
-fn ensure_unique_name(names: &mut HashSet<String>, name: &str) -> Result<(), LuaRuntimeError> {
-    if !names.insert(name.to_owned()) {
-        return Err(LuaRuntimeError::DuplicatePluginName {
-            name: name.to_owned(),
-        });
-    }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]

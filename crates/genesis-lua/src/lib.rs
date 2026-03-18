@@ -140,6 +140,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_skips_bad_manifest_and_loads_healthy_siblings() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("good.lua"), "genesis.log('good loaded')")
+            .expect("good plugin should write");
+
+        let broken_dir = dir.path().join("broken-package");
+        fs::create_dir(&broken_dir).expect("broken package dir should exist");
+        fs::write(broken_dir.join("init.lua"), "return true").expect("init.lua should write");
+        fs::write(
+            broken_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "broken"
+"#,
+        )
+        .expect("plugin.toml should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
+        assert_eq!(runtime.plugin_errors().len(), 1);
+        assert!(
+            runtime.plugin_errors()[0].contains("plugin.toml"),
+            "broken manifest should be identified in recorded errors: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
+    fn runtime_skips_duplicate_named_plugin_and_loads_unique_plugins() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("alpha.lua"), "genesis.log('alpha loaded')")
+            .expect("alpha plugin should write");
+        fs::write(dir.path().join("gamma.lua"), "genesis.log('gamma loaded')")
+            .expect("gamma plugin should write");
+
+        let dup_dir = dir.path().join("beta-package");
+        fs::create_dir(&dup_dir).expect("duplicate package dir should exist");
+        fs::write(dup_dir.join("init.lua"), "return true").expect("init.lua should write");
+        fs::write(
+            dup_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "alpha"
+version = "0.1.0"
+"#,
+        )
+        .expect("plugin.toml should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
+
+        assert_eq!(
+            runtime.plugin_names(),
+            vec!["alpha".to_owned(), "gamma".to_owned()],
+        );
+        assert_eq!(
+            runtime.logs(),
+            vec!["alpha loaded".to_owned(), "gamma loaded".to_owned()],
+        );
+        assert_eq!(runtime.plugin_errors().len(), 1);
+        assert!(
+            runtime.plugin_errors()[0].contains("duplicate plugin name `alpha`"),
+            "duplicate plugin error should be recorded: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
     fn test_runtime(
         plugin_dir: &std::path::Path,
         config_values: BTreeMap<String, String>,
