@@ -5,6 +5,7 @@ mod client;
 mod error;
 mod gemini_types;
 pub mod model_metadata;
+pub mod openrouter_models;
 pub mod parsers;
 pub mod pricing;
 mod resolve;

@@ -6,6 +6,7 @@ pub mod clarification;
 pub mod command_popup;
 pub mod help_overlay;
 pub mod input_widget;
+pub mod model_picker;
 pub mod status_bar;
 pub mod transcript;
 pub mod welcome;

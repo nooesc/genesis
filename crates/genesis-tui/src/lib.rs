@@ -226,7 +226,23 @@ pub async fn run_tui(
     // It lives here as an Option and gets polled in select!.
     let mut turn_future: Option<Pin<Box<dyn Future<Output = TurnResult> + '_>>> = None;
 
+    let mut pending_model_switch: Option<String> = None;
+
     loop {
+        // Process deferred model switch — must drop turn_future first
+        // to release the immutable borrow on `service`.
+        if let Some(model_id) = pending_model_switch.take() {
+            // Drop any active turn future to release the borrow on service.
+            turn_future = None;
+            let (backend, model) = if let Some(pos) = model_id.find('/') {
+                (model_id[..pos].to_owned(), model_id.clone())
+            } else {
+                ("openrouter".to_owned(), model_id.clone())
+            };
+            service.set_model_override(backend, model);
+            tracing::info!(model_id = model_id.as_str(), "model switched via picker");
+        }
+
         tokio::select! {
             // ── Terminal events — always active ──────────────────────
             ct_event = crossterm_events.next() => {
@@ -262,6 +278,12 @@ pub async fn run_tui(
                     Some(Submission::Interrupt) => {
                         // Drop the turn future to cancel
                         turn_future = None;
+                    }
+                    Some(Submission::ModelSwitch(_model_id)) => {
+                        // Model switch is handled below, outside the select
+                        // block, to avoid borrow conflicts with turn_future.
+                        // Store it for deferred processing.
+                        pending_model_switch = Some(_model_id);
                     }
                     None => break,
                 }
@@ -325,6 +347,18 @@ pub async fn run_tui(
                         // In alternate-screen mode, history insertion is handled
                         // by the transcript overlay and does not write to
                         // terminal scrollback.
+                    }
+                    if matches!(&event, AppEvent::FetchModels) {
+                        // Spawn async model fetch.
+                        let tx = app.app_tx.clone();
+                        let cache_dir = config.storage.data_dir.join("cache");
+                        tokio::spawn(async move {
+                            let result =
+                                genesis_provider::openrouter_models::fetch_models(None, &cache_dir)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                            let _ = tx.send(AppEvent::ModelsFetched(result));
+                        });
                     }
                     app.handle_app_event(event);
                 }
@@ -390,6 +424,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         match overlay {
             app::ActiveOverlay::Transcript(t) => t.render(area, buf),
             app::ActiveOverlay::Help(h) => h.render(area, buf),
+            app::ActiveOverlay::Models(m) => m.render(area, buf),
         }
         let _ = term.draw_diff();
         term.swap_buffers();
