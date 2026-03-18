@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -20,24 +19,20 @@ pub enum CachePolicy {
     Invalidates,
 }
 
-/// Key for a cached tool result: hash of (tool_name, sorted arguments).
+/// Key for a cached tool result: tool name + full argument map.
+///
+/// Uses the full argument map for equality to avoid hash-collision risks.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CacheKey {
     tool_name: String,
-    /// Arguments are already `BTreeMap` so iteration order is deterministic.
-    arguments_hash: u64,
+    arguments: BTreeMap<String, String>,
 }
 
 impl CacheKey {
     fn new(tool_name: &str, arguments: &BTreeMap<String, String>) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (k, v) in arguments {
-            k.hash(&mut hasher);
-            v.hash(&mut hasher);
-        }
         CacheKey {
             tool_name: tool_name.to_owned(),
-            arguments_hash: hasher.finish(),
+            arguments: arguments.clone(),
         }
     }
 }
@@ -92,7 +87,18 @@ impl CacheInner {
         }
     }
 
-    fn get(
+    /// Check if a cached entry exists and is not expired (read-only).
+    fn peek(&self, key: &CacheKey) -> Option<(String, BTreeMap<String, String>)> {
+        if let Some(entry) = self.entries.get(key) {
+            if Instant::now() < entry.expires_at {
+                return Some((entry.content.clone(), entry.metadata.clone()));
+            }
+        }
+        None
+    }
+
+    /// Get a cached entry, evicting it if expired. Requires write access.
+    fn get_or_evict(
         &mut self,
         key: &CacheKey,
     ) -> Option<(String, BTreeMap<String, String>)> {
@@ -145,23 +151,41 @@ impl CacheInner {
         );
     }
 
-    /// Invalidate all cache entries that depend on the given path or any path
-    /// that is a child of the given path.
+    /// Invalidate cache entries for the given changed path.
+    ///
+    /// - Exact match: entries whose tracked path == changed path
+    /// - Child-of: entries whose tracked path is a descendant of a changed directory
+    ///   (e.g., file write invalidates parent directory's list_dir)
+    ///
+    /// Note: we intentionally do NOT do `canonical.starts_with(tracked)` (ancestor
+    /// invalidation) because `list_dir` only lists immediate children — a deep
+    /// nested file change shouldn't invalidate an ancestor `list_dir` cache.
+    /// The exception is when the changed file is a direct child of the tracked dir.
     fn invalidate_path(&mut self, changed_path: &Path) {
         let canonical = match std::fs::canonicalize(changed_path) {
             Ok(p) => p,
             Err(_) => changed_path.to_path_buf(),
         };
 
-        // Collect keys to invalidate: exact match + entries whose tracked path
-        // starts with the changed path (for directory-level tools).
         let mut keys_to_remove = Vec::new();
 
         for (tracked, keys) in &self.path_index {
-            if tracked == &canonical
-                || tracked.starts_with(&canonical)
-                || canonical.starts_with(tracked)
-            {
+            // Exact match: file read cache for the changed file.
+            if tracked == &canonical {
+                keys_to_remove.extend(keys.iter().cloned());
+                continue;
+            }
+            // tracked is a descendant of (or lives under) the changed path.
+            // e.g., tracked="/workspace/src/foo.rs", changed="/workspace/src"
+            // This handles directory-level changes invalidating file caches underneath.
+            if tracked.starts_with(&canonical) {
+                keys_to_remove.extend(keys.iter().cloned());
+                continue;
+            }
+            // Changed path is a direct child of the tracked directory.
+            // e.g., tracked="/workspace/src", changed="/workspace/src/new_file.rs"
+            // This handles list_dir invalidation when a file is added/removed.
+            if canonical.parent() == Some(tracked.as_path()) {
                 keys_to_remove.extend(keys.iter().cloned());
             }
         }
@@ -208,6 +232,18 @@ struct WatcherHandle {
     _watcher: notify::RecommendedWatcher,
 }
 
+/// Directories to exclude from recursive FS watching.
+const WATCH_EXCLUDE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".next",
+    ".nuxt",
+];
+
 impl ToolCache {
     pub fn new() -> Self {
         ToolCache {
@@ -221,10 +257,12 @@ impl ToolCache {
     pub fn start_watching(&self, dir: &Path) {
         let inner = Arc::clone(&self.inner);
 
-        // Simple debounce: track last-invalidated paths to avoid thundering herd.
+        // Debounce: track last-invalidated paths to avoid thundering herd.
+        // Bounded: prune entries older than the debounce window.
         let last_events: Arc<RwLock<HashMap<PathBuf, Instant>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let debounce_window = Duration::from_millis(200);
+        let prune_threshold = Duration::from_secs(10);
 
         let watcher = notify::recommended_watcher(
             move |result: Result<Event, notify::Error>| match result {
@@ -248,7 +286,20 @@ impl ToolCache {
                         Err(_) => return,
                     };
 
+                    // Prune stale debounce entries periodically.
+                    if last.len() > 1000 {
+                        last.retain(|_, &mut t| now.duration_since(t) < prune_threshold);
+                    }
+
                     for path in &event.paths {
+                        // Skip events in noise directories.
+                        if WATCH_EXCLUDE_DIRS
+                            .iter()
+                            .any(|d| path.components().any(|c| c.as_os_str() == *d))
+                        {
+                            continue;
+                        }
+
                         // Simple debounce: skip if we processed this path very recently.
                         if let Some(&last_time) = last.get(path) {
                             if now.duration_since(last_time) < debounce_window {
@@ -287,13 +338,30 @@ impl ToolCache {
     }
 
     /// Look up a cached result. Returns `Some((content, metadata))` on hit.
+    ///
+    /// Uses a read lock first to check for a valid entry (fast path), falling
+    /// back to a write lock only when eviction of an expired entry is needed.
     pub fn get(
         &self,
         tool_name: &str,
         arguments: &BTreeMap<String, String>,
     ) -> Option<(String, BTreeMap<String, String>)> {
         let key = CacheKey::new(tool_name, arguments);
-        self.inner.write().ok()?.get(&key)
+
+        // Fast path: read lock to check for valid (non-expired) entry.
+        if let Ok(inner) = self.inner.read() {
+            if let Some(result) = inner.peek(&key) {
+                // Need write lock to bump stats, but the data is valid.
+                drop(inner);
+                if let Ok(mut w) = self.inner.write() {
+                    w.stats.hits += 1;
+                }
+                return Some(result);
+            }
+        }
+
+        // Slow path: write lock to handle eviction of expired entries.
+        self.inner.write().ok()?.get_or_evict(&key)
     }
 
     /// Store a tool result in the cache.
@@ -498,16 +566,16 @@ mod tests {
     }
 
     #[test]
-    fn write_invalidates_read_cache_for_parent_directory() {
+    fn write_invalidates_list_dir_for_direct_parent() {
         let cache = ToolCache::new();
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("sub").join("test.txt");
-        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        let sub_dir = dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let file_path = sub_dir.join("test.txt");
         std::fs::write(&file_path, "hello").unwrap();
 
         // Cache a list_dir for the parent.
         let mut args = BTreeMap::new();
-        let sub_dir = dir.path().join("sub");
         args.insert("path".to_owned(), sub_dir.to_string_lossy().to_string());
 
         cache.insert(
@@ -521,10 +589,44 @@ mod tests {
 
         assert!(cache.get("list_dir", &args).is_some());
 
-        // Invalidate via a file write inside the directory.
+        // Invalidate via a direct child file write.
         cache.invalidate_path(&file_path);
 
         assert!(cache.get("list_dir", &args).is_none());
+    }
+
+    #[test]
+    fn deep_nested_write_does_not_invalidate_ancestor_list_dir() {
+        let cache = ToolCache::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("src");
+        let deep_dir = sub_dir.join("deep");
+        std::fs::create_dir_all(&deep_dir).unwrap();
+        let deep_file = deep_dir.join("file.rs");
+        std::fs::write(&deep_file, "fn main() {}").unwrap();
+
+        // Cache a list_dir for "src/".
+        let mut args = BTreeMap::new();
+        args.insert("path".to_owned(), sub_dir.to_string_lossy().to_string());
+
+        cache.insert(
+            "list_dir",
+            &args,
+            "deep/".to_owned(),
+            BTreeMap::new(),
+            Duration::from_secs(60),
+            Some(sub_dir.clone()),
+        );
+
+        assert!(cache.get("list_dir", &args).is_some());
+
+        // Modify a deeply nested file — should NOT invalidate the ancestor list_dir.
+        cache.invalidate_path(&deep_file);
+
+        assert!(
+            cache.get("list_dir", &args).is_some(),
+            "deep nested change should NOT invalidate ancestor list_dir"
+        );
     }
 
     #[test]
