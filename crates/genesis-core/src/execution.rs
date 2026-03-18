@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use genesis_config::{LoadedConfig, TerminalConfig};
@@ -38,6 +38,44 @@ struct SandboxExecutorImpl {
     manager: Arc<SandboxManager>,
     backend: Arc<dyn SandboxBackend>,
     config: SandboxConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LuaRuntimeCacheKey {
+    session_id: String,
+    provider_backend: String,
+    provider_model: String,
+    delivery_platform: String,
+    personality: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct LuaRuntimeCacheSlot {
+    runtime: OnceLock<Option<Arc<LuaRuntime>>>,
+}
+
+#[cfg(test)]
+static LUA_RUNTIME_BUILD_COUNTS: OnceLock<Mutex<HashMap<LuaRuntimeCacheKey, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn record_lua_runtime_build(key: &LuaRuntimeCacheKey) {
+    let counts = LUA_RUNTIME_BUILD_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut counts = counts.lock().expect("lua runtime build counter should not be poisoned");
+    *counts.entry(key.clone()).or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn lua_runtime_build_count(key: &LuaRuntimeCacheKey) -> usize {
+    LUA_RUNTIME_BUILD_COUNTS
+        .get()
+        .and_then(|counts| {
+            counts
+                .lock()
+                .ok()
+                .and_then(|counts| counts.get(key).copied())
+        })
+        .unwrap_or(0)
 }
 
 impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
@@ -80,8 +118,8 @@ pub struct SessionExecutionService<'a> {
     personality_override: Option<String>,
     /// Cached sandbox components for lifecycle-managed backends (persists across turns).
     sandbox: std::sync::OnceLock<Option<SandboxComponents>>,
-    /// Cached Lua runtimes keyed by session id so plugin state persists across turns.
-    lua_runtime_cache: Mutex<HashMap<String, Arc<LuaRuntime>>>,
+    /// Cached Lua runtimes keyed by effective runtime identity.
+    lua_runtime_cache: Mutex<HashMap<LuaRuntimeCacheKey, Arc<LuaRuntimeCacheSlot>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,15 +292,32 @@ impl<'a> SessionExecutionService<'a> {
             .or(self.loaded.config.personality.as_deref())
     }
 
-    fn lua_runtime_config(&self, session_id: &str, platform: DeliveryPlatform) -> LuaRuntimeConfig {
+    fn lua_runtime_cache_key(
+        &self,
+        session_id: &str,
+        platform: &DeliveryPlatform,
+    ) -> LuaRuntimeCacheKey {
         let (backend, model) = self.effective_provider_selection();
-        let personality = self.effective_personality();
-        let platform = delivery_platform_str(&platform).to_owned();
+        LuaRuntimeCacheKey {
+            session_id: session_id.to_owned(),
+            provider_backend: backend.to_owned(),
+            provider_model: model.to_owned(),
+            delivery_platform: delivery_platform_str(platform).to_owned(),
+            personality: self.effective_personality().map(str::to_owned),
+        }
+    }
+
+    fn lua_runtime_config(&self, session_id: &str, platform: &DeliveryPlatform) -> LuaRuntimeConfig {
+        let cache_key = self.lua_runtime_cache_key(session_id, platform);
+        let personality = cache_key.personality.clone();
         let mut config_values = BTreeMap::new();
         config_values.insert("profile".to_owned(), self.loaded.config.profile.clone());
-        config_values.insert("provider_backend".to_owned(), backend.to_owned());
-        config_values.insert("provider_model".to_owned(), model.to_owned());
-        config_values.insert("delivery_platform".to_owned(), platform.clone());
+        config_values.insert("provider_backend".to_owned(), cache_key.provider_backend.clone());
+        config_values.insert("provider_model".to_owned(), cache_key.provider_model.clone());
+        config_values.insert(
+            "delivery_platform".to_owned(),
+            cache_key.delivery_platform.clone(),
+        );
         config_values.insert(
             "plugins_enabled".to_owned(),
             self.loaded.config.plugins.enabled.to_string(),
@@ -283,19 +338,19 @@ impl<'a> SessionExecutionService<'a> {
             "plugin_dir".to_owned(),
             self.loaded.paths.plugin_dir.to_string_lossy().into_owned(),
         );
-        if let Some(personality) = personality {
-            config_values.insert("personality".to_owned(), personality.to_owned());
+        if let Some(ref personality) = personality {
+            config_values.insert("personality".to_owned(), personality.clone());
         }
 
         LuaRuntimeConfig {
             plugin_dir: self.loaded.paths.plugin_dir.clone(),
             session: LuaSessionContext {
-                id: session_id.to_owned(),
-                model: model.to_owned(),
+                id: cache_key.session_id,
+                model: cache_key.provider_model,
                 turn_count: 0,
                 total_tokens: 0,
-                platform,
-                personality: personality.map(str::to_owned),
+                platform: cache_key.delivery_platform,
+                personality,
             },
             config_values,
         }
@@ -310,37 +365,40 @@ impl<'a> SessionExecutionService<'a> {
             return None;
         }
 
-        if let Some(runtime) = self
-            .lua_runtime_cache
-            .lock()
-            .expect("lua runtime cache mutex should not be poisoned")
-            .get(session_id)
-            .cloned()
-        {
-            return Some(runtime);
-        }
-
-        let config = self.lua_runtime_config(session_id, platform);
-        let runtime = match LuaRuntime::builder().with_config(config).build() {
-            Ok(runtime) => Arc::new(runtime),
-            Err(error) => {
-                warn!(
-                    session_id = session_id,
-                    error = %error,
-                    "failed to initialize lua runtime"
-                );
-                return None;
-            }
+        let cache_key = self.lua_runtime_cache_key(session_id, &platform);
+        let slot = {
+            let mut cache = self
+                .lua_runtime_cache
+                .lock()
+                .expect("lua runtime cache mutex should not be poisoned");
+            Arc::clone(
+                cache
+                    .entry(cache_key.clone())
+                    .or_insert_with(|| Arc::new(LuaRuntimeCacheSlot::default())),
+            )
         };
 
-        let mut cache = self
-            .lua_runtime_cache
-            .lock()
-            .expect("lua runtime cache mutex should not be poisoned");
-        let cached = cache
-            .entry(session_id.to_owned())
-            .or_insert_with(|| Arc::clone(&runtime));
-        Some(Arc::clone(cached))
+        let runtime = slot.runtime.get_or_init(|| {
+            #[cfg(test)]
+            record_lua_runtime_build(&cache_key);
+            let config = self.lua_runtime_config(&cache_key.session_id, &platform);
+            match LuaRuntime::builder().with_config(config).build() {
+                Ok(runtime) => Some(Arc::new(runtime)),
+                Err(error) => {
+                    warn!(
+                        session_id = cache_key.session_id,
+                        provider_backend = cache_key.provider_backend,
+                        provider_model = cache_key.provider_model,
+                        delivery_platform = cache_key.delivery_platform,
+                        error = %error,
+                        "failed to initialize lua runtime"
+                    );
+                    None
+                }
+            }
+        });
+
+        runtime.clone()
     }
 
     /// Return the MCP manager if connected, for sharing with other subsystems.
@@ -1568,14 +1626,24 @@ mod tests {
     use genesis_config::{
         AppPaths, GenesisConfig, LoadedConfig, ProviderConfig, RuntimeConfig, StorageConfig,
     };
+    use genesis_lua::LuaRuntime;
     use genesis_provider::ChatMessage;
     use genesis_provider::MessageContent;
     use genesis_storage::{bootstrap, SessionStore, StoredMessage};
     use genesis_types::DeliveryPlatform;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
+
+    fn runtime_string(runtime: &LuaRuntime, expr: &str) -> String {
+        runtime
+            .eval_string(expr)
+            .expect("lua expression should evaluate")
+            .as_str()
+            .expect("lua expression should return a string")
+            .to_owned()
+    }
 
     #[test]
     fn restore_chat_history_round_trips_tool_calls() {
@@ -1972,6 +2040,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lua_runtime_rebuilds_when_personality_override_changes() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+
+        let first = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should load");
+        service.set_personality_override("pirate".to_owned());
+        let second = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should reload after personality change");
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "personality changes should invalidate cached runtime"
+        );
+        assert_eq!(
+            runtime_string(&second, "return genesis.session.personality"),
+            "pirate"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_runtime_rebuilds_when_model_override_changes() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+
+        let first = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should load");
+        service.set_model_override("anthropic".to_owned(), "claude-3.7-sonnet".to_owned());
+        let second = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should reload after model change");
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "model changes should invalidate cached runtime"
+        );
+        assert_eq!(
+            runtime_string(&second, "return genesis.session.model"),
+            "claude-3.7-sonnet"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_runtime_rebuilds_when_delivery_platform_changes() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let service = SessionExecutionService::new(&loaded);
+
+        let first = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should load");
+        let second = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Slack)
+            .expect("runtime should reload after platform change");
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "platform changes should invalidate cached runtime"
+        );
+        assert_eq!(
+            runtime_string(&second, "return genesis.session.platform"),
+            "slack"
+        );
+    }
+
+    #[tokio::test]
     async fn lua_runtime_separates_sessions() {
         let dir = tempdir().expect("tempdir");
         let data_dir = dir.path().join("data");
@@ -2063,8 +2220,52 @@ mod tests {
                 .lua_runtime_cache
                 .lock()
                 .expect("runtime cache mutex should not be poisoned")
-                .contains_key("session-1"),
+                .contains_key(&service.lua_runtime_cache_key("session-1", &DeliveryPlatform::Cli)),
             "building an agent loop should warm the lua runtime"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lua_runtime_initializes_once_for_concurrent_same_identity_requests() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+
+        let db_path = data_dir.join("genesis.db");
+        let loaded = Box::leak(Box::new(test_loaded_config(data_dir, db_path)));
+        let service = Arc::new(SessionExecutionService::new(loaded));
+        let barrier = Arc::new(Barrier::new(2));
+        let cache_key = service.lua_runtime_cache_key("session-concurrent", &DeliveryPlatform::Cli);
+
+        let first_service = Arc::clone(&service);
+        let first_barrier = Arc::clone(&barrier);
+        let first = tokio::task::spawn_blocking(move || {
+            first_barrier.wait();
+            first_service
+                .lua_runtime_for_session("session-concurrent", DeliveryPlatform::Cli)
+                .expect("runtime should load")
+        });
+
+        let second_service = Arc::clone(&service);
+        let second_barrier = Arc::clone(&barrier);
+        let second = tokio::task::spawn_blocking(move || {
+            second_barrier.wait();
+            second_service
+                .lua_runtime_for_session("session-concurrent", DeliveryPlatform::Cli)
+                .expect("runtime should load")
+        });
+
+        let first = first.await.expect("first task should finish");
+        let second = second.await.expect("second task should finish");
+
+        assert!(Arc::ptr_eq(&first, &second), "same identity should share runtime");
+        assert_eq!(
+            super::lua_runtime_build_count(&cache_key),
+            1,
+            "concurrent first access should initialize the runtime once"
         );
     }
 
