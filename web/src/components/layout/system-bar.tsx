@@ -37,7 +37,7 @@ export function SystemBar() {
   const { data: insights } = useInsights(7)
 
   const totalTokens7d = insights
-    ? Object.values(insights.tokens_per_day).reduce((sum, v) => sum + v, 0)
+    ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0)
     : 0
 
   const isHealthy = health?.status === 'ok' || health?.status === 'healthy'
