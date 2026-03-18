@@ -14,6 +14,7 @@ genesis-provider.path = "../genesis-provider"
 ratatui.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+pulldown-cmark.workspace = true
 syntect.workspace = true
 unicode-width.workspace = true
 thiserror.workspace = true
