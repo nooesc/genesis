@@ -11,16 +11,15 @@ export const Route = createRootRoute({
 
 function RootLayout() {
   const [commandOpen, setCommandOpen] = useState(false)
-  const router = useRouterState()
-  // Use pathname as key to trigger page-enter animation on route change
-  const pageKey = router.location.pathname
+  // Only subscribe to pathname changes to avoid unnecessary re-renders
+  const pageKey = useRouterState({ select: (s) => s.location.pathname })
 
   return (
     <div className="flex h-screen flex-col bg-background">
       <SystemBar />
       <ConnectionBanner />
       <main className="flex-1 overflow-auto p-6">
-        <div key={pageKey} className="page-enter">
+        <div key={pageKey} className="page-enter h-full">
           <Outlet />
         </div>
       </main>

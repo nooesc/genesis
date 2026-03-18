@@ -195,16 +195,11 @@
 
 /* === Page transitions === */
 
-/* Route content enters with fade + subtle upward slide */
+/* Route content enters with subtle upward slide (transform only — no opacity
+   to avoid compound-fade with card-stagger children) */
 @keyframes page-enter {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { transform: translateY(6px); }
+  to { transform: translateY(0); }
 }
 
 .page-enter {
@@ -239,3 +234,14 @@
 .card-stagger > *:nth-child(10) { animation-delay: 360ms; }
 .card-stagger > *:nth-child(11) { animation-delay: 400ms; }
 .card-stagger > *:nth-child(12) { animation-delay: 440ms; }
+
+/* Accessibility: disable all motion for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .page-enter {
+    animation: none;
+  }
+
+  .card-stagger > * {
+    animation: none;
+  }
+}
