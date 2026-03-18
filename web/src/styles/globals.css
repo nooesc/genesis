@@ -245,3 +245,36 @@
     animation: none;
   }
 }
+
+/* === PWA / Mobile === */
+
+/* Safe area insets for notched devices (iPhone X+) */
+@supports (padding: env(safe-area-inset-top)) {
+  .system-bar {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .dock {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Touch-friendly targets on mobile */
+@media (pointer: coarse) {
+  .dock-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* Prevent iOS rubber-band overscroll on the shell (but allow in main) */
+html, body {
+  overscroll-behavior: none;
+}
+
+/* Standalone PWA: hide browser chrome indicators */
+@media (display-mode: standalone) {
+  .system-bar {
+    padding-top: max(4px, env(safe-area-inset-top, 0px));
+  }
+}
