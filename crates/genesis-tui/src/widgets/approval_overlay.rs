@@ -132,6 +132,9 @@ impl ApprovalOverlay {
             height: modal_height,
         };
 
+        // Draw shadow behind the modal for depth.
+        crate::render::render_shadow(modal_area, buf);
+
         // Draw background (dim existing content).
         self.draw_border(modal_area, buf);
 
