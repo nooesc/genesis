@@ -37,3 +37,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sy
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[features]
+local-embeddings = [
+    "genesis-core/local-embeddings",
+    "genesis-gateway/local-embeddings",
+]

@@ -56,6 +56,7 @@ struct EmbeddingData {
 pub struct EmbeddingProvider {
     http: reqwest::Client,
     endpoint: String,
+    backend: String,
     model: String,
     dimensions: Option<usize>,
 }
@@ -98,9 +99,15 @@ impl EmbeddingProvider {
         Ok(Self {
             http,
             endpoint,
+            backend: resolved.backend,
             model: resolved.model,
             dimensions: config.dimensions,
         })
+    }
+
+    /// The backend name this provider is configured for.
+    pub fn backend(&self) -> &str {
+        &self.backend
     }
 
     /// The model name this provider is configured for.
@@ -606,6 +613,21 @@ mod tests {
         let all = store.all_embeddings().unwrap();
         assert_eq!(all[0].1.len(), 3);
         assert!((all[0].1[0] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn local_backend_builds_without_api_key() {
+        let config = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "sentence-transformers/all-MiniLM-L6-v2".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+
+        let provider = EmbeddingProvider::from_config(&config).expect("provider should build");
+        assert_eq!(provider.backend(), "local");
+        assert_eq!(provider.model(), "sentence-transformers/all-MiniLM-L6-v2");
     }
 
     #[tokio::test]

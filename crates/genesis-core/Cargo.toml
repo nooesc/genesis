@@ -31,6 +31,10 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
 uuid.workspace = true
+fastembed = { workspace = true, optional = true }
+
+[features]
+local-embeddings = ["dep:fastembed"]
 
 [dev-dependencies]
 insta = { workspace = true }
