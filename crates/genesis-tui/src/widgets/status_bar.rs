@@ -715,6 +715,57 @@ mod tests {
         }
     }
 
+    // ── Snapshot tests ────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_idle_status_bar() {
+        let widget = make_widget();
+        let line = widget.to_line();
+        let spans_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!(spans_text);
+    }
+
+    #[test]
+    fn snapshot_thinking_status_bar() {
+        let mut widget = make_widget();
+        widget.set_state(StatusState::Thinking);
+        let line = widget.to_line();
+        let spans_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!(spans_text);
+    }
+
+    #[test]
+    fn snapshot_tool_running_status_bar() {
+        let mut widget = make_widget();
+        widget.set_state(StatusState::ToolRunning {
+            tool_name: "shell_exec".to_string(),
+        });
+        let line = widget.to_line();
+        let spans_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!(spans_text);
+    }
+
+    #[test]
+    fn snapshot_streaming_status_bar() {
+        let mut widget = make_widget();
+        widget.set_state(StatusState::Streaming { tokens: 256 });
+        let line = widget.to_line();
+        let spans_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!(spans_text);
+    }
+
+    #[test]
+    fn snapshot_status_bar_with_tokens() {
+        let mut widget = make_widget();
+        widget.tokens_in = 5000;
+        widget.tokens_out = 1200;
+        let line = widget.to_line();
+        let spans_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!(spans_text);
+    }
+
+    // ── Non-snapshot tests ────────────────────────────────────────────
+
     #[test]
     fn idle_renders_without_sprite() {
         let widget = make_widget();

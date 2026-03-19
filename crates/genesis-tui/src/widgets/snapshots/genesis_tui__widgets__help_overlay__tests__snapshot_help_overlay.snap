@@ -1,0 +1,34 @@
+---
+source: crates/genesis-tui/src/widgets/help_overlay.rs
+expression: buffer_to_string(&buf)
+---
+ Help — j/k scroll, Ctrl+D/U page, g/G top/bottom, q to clos
+                                                            
+  ◆ Eve — Genesis TUI Help                                  
+                                                            
+  Keybindings                                               
+  ───────────                                               
+  Enter         Submit message                              
+  Ctrl+J        Insert newline (multi-line input)           
+  Ctrl+C        Interrupt running turn                      
+  Ctrl+D        Exit Eve                                    
+  Ctrl+P        Open command palette                        
+  Ctrl+K        Delete from cursor to end of line           
+  Ctrl+T        Toggle transcript overlay                   
+  Tab           Toggle Plan/Act mode                        
+  @             File path completion                        
+  Up/Down       Navigate input history / lines              
+  Home/End      Move cursor to start/end of line            
+  Ctrl+U        Delete from cursor to start of line         
+  Esc           Close overlay / dismiss popup               
+                                                            
+  Slash Commands                                            
+  ──────────────                                            
+  /clear        Clear conversation history                  
+  /compact      Compress context window                     
+  /exit         Exit Eve                                    
+  /help         Show this help screen                       
+  /plan         Toggle Plan/Act mode                        
+  /theme        Cycle through built-in themes               
+                                                            
+  Overlay Navigation
