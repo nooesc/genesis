@@ -553,6 +553,18 @@ fn collect_rows<T>(
 
 /// Check whether a column exists in a table (used for idempotent migrations).
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    // All callers pass compile-time string literals. Validate identifiers
+    // unconditionally (not just in debug builds) as defense-in-depth.
+    assert!(
+        table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "column_exists: table name must be alphanumeric, got {table:?}"
+    );
+    assert!(
+        column
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "column_exists: column name must be alphanumeric, got {column:?}"
+    );
     conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
         .is_ok()
 }
@@ -3753,10 +3765,16 @@ impl MemoryStore {
         let kind = note.kind.clone();
         let content = note.content.clone();
         let linked_ids = note.linked_ids.clone();
-        let keywords_json =
-            serde_json::to_string(&note.keywords).expect("memory note keywords should serialize");
-        let tags_json =
-            serde_json::to_string(&note.tags).expect("memory note tags should serialize");
+        // Vec<String> serialization is infallible in practice; fall back to
+        // empty array and log to stderr if it somehow fails.
+        let keywords_json = serde_json::to_string(&note.keywords).unwrap_or_else(|e| {
+            eprintln!("warning: failed to serialize memory keywords: {e}");
+            "[]".to_owned()
+        });
+        let tags_json = serde_json::to_string(&note.tags).unwrap_or_else(|e| {
+            eprintln!("warning: failed to serialize memory tags: {e}");
+            "[]".to_owned()
+        });
 
         tx.execute(
             "INSERT INTO memories (
@@ -8294,5 +8312,470 @@ mod embedding_store_tests {
             .expect("memory_vec should exist after storing an embedding");
 
         assert_eq!(count, 1);
+    }
+}
+
+#[cfg(test)]
+mod audit_log_store_tests {
+    use super::{bootstrap, AuditLogStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn log_and_retrieve_recent_entries() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = AuditLogStore::new(&database_path);
+
+        let details_a = serde_json::json!({"tool": "shell", "command": "ls"});
+        let details_b = serde_json::json!({"tool": "read_file", "path": "/tmp/x"});
+        let details_c = serde_json::json!({"model": "gpt-4", "tokens": 100});
+
+        store
+            .log(Some("s1"), "tool_call_start", &details_a)
+            .expect("first log should succeed");
+        store
+            .log(Some("s1"), "tool_call_end", &details_b)
+            .expect("second log should succeed");
+        store
+            .log(Some("s2"), "llm_response", &details_c)
+            .expect("third log should succeed");
+
+        let recent = store.recent(10).expect("recent should succeed");
+
+        assert_eq!(recent.len(), 3);
+        // Most recent first (ORDER BY id DESC)
+        assert_eq!(recent[0].event_type, "llm_response");
+        assert_eq!(recent[1].event_type, "tool_call_end");
+        assert_eq!(recent[2].event_type, "tool_call_start");
+    }
+
+    #[test]
+    fn log_and_filter_by_event_type() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = AuditLogStore::new(&database_path);
+
+        let details = serde_json::json!({"info": "test"});
+
+        store
+            .log(Some("s1"), "tool_call_start", &details)
+            .expect("log should succeed");
+        store
+            .log(Some("s1"), "llm_response", &details)
+            .expect("log should succeed");
+        store
+            .log(Some("s2"), "tool_call_start", &details)
+            .expect("log should succeed");
+        store
+            .log(Some("s2"), "config_change", &details)
+            .expect("log should succeed");
+
+        let tool_starts = store
+            .by_event_type("tool_call_start", 10)
+            .expect("by_event_type should succeed");
+
+        assert_eq!(tool_starts.len(), 2);
+        for entry in &tool_starts {
+            assert_eq!(entry.event_type, "tool_call_start");
+        }
+
+        let llm = store
+            .by_event_type("llm_response", 10)
+            .expect("by_event_type should succeed");
+        assert_eq!(llm.len(), 1);
+        assert_eq!(llm[0].event_type, "llm_response");
+
+        let missing = store
+            .by_event_type("nonexistent", 10)
+            .expect("by_event_type should succeed for missing type");
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn log_and_filter_by_session() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = AuditLogStore::new(&database_path);
+
+        let details = serde_json::json!({"action": "test"});
+
+        store
+            .log(Some("session-a"), "tool_call_start", &details)
+            .expect("log should succeed");
+        store
+            .log(Some("session-a"), "tool_call_end", &details)
+            .expect("log should succeed");
+        store
+            .log(Some("session-b"), "llm_response", &details)
+            .expect("log should succeed");
+        store
+            .log(None, "config_change", &details)
+            .expect("log with no session should succeed");
+
+        let session_a = store
+            .by_session("session-a", 10)
+            .expect("by_session should succeed");
+        assert_eq!(session_a.len(), 2);
+        for entry in &session_a {
+            assert_eq!(entry.session_id.as_deref(), Some("session-a"));
+        }
+
+        let session_b = store
+            .by_session("session-b", 10)
+            .expect("by_session should succeed");
+        assert_eq!(session_b.len(), 1);
+        assert_eq!(session_b[0].session_id.as_deref(), Some("session-b"));
+
+        let session_c = store
+            .by_session("session-c", 10)
+            .expect("by_session should succeed for missing session");
+        assert!(session_c.is_empty());
+    }
+
+    #[test]
+    fn stats_counts_by_event_type() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = AuditLogStore::new(&database_path);
+
+        let details = serde_json::json!({"x": 1});
+
+        // 3 tool_call_start, 2 llm_response, 1 config_change
+        for _ in 0..3 {
+            store
+                .log(Some("s1"), "tool_call_start", &details)
+                .expect("log should succeed");
+        }
+        for _ in 0..2 {
+            store
+                .log(Some("s1"), "llm_response", &details)
+                .expect("log should succeed");
+        }
+        store
+            .log(Some("s1"), "config_change", &details)
+            .expect("log should succeed");
+
+        let stats = store.stats().expect("stats should succeed");
+
+        assert_eq!(stats.len(), 3);
+
+        // Stats are ordered by count descending
+        let stats_map: std::collections::HashMap<&str, i64> =
+            stats.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        assert_eq!(stats_map.get("tool_call_start"), Some(&3));
+        assert_eq!(stats_map.get("llm_response"), Some(&2));
+        assert_eq!(stats_map.get("config_change"), Some(&1));
+    }
+
+    #[test]
+    fn purge_older_than_removes_old_entries() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = AuditLogStore::new(&database_path);
+
+        let details = serde_json::json!({"purge": "test"});
+
+        // Insert an entry and then manually backdate it via raw SQL
+        store
+            .log(Some("s1"), "old_event", &details)
+            .expect("log should succeed");
+
+        // Insert a recent entry
+        store
+            .log(Some("s1"), "recent_event", &details)
+            .expect("log should succeed");
+
+        // Backdate the first entry to 60 days ago
+        let conn =
+            rusqlite::Connection::open(&database_path).expect("open connection should succeed");
+        conn.execute(
+            "UPDATE audit_log SET created_at = datetime('now', '-60 days')
+             WHERE event_type = 'old_event'",
+            [],
+        )
+        .expect("backdate should succeed");
+
+        // Purge entries older than 30 days
+        let deleted = store
+            .purge_older_than(30)
+            .expect("purge_older_than should succeed");
+        assert_eq!(deleted, 1);
+
+        // Only the recent entry should remain
+        let remaining = store.recent(10).expect("recent should succeed");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].event_type, "recent_event");
+    }
+}
+
+#[cfg(test)]
+mod pairing_store_tests {
+    use super::{bootstrap, PairingStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn generate_and_verify_pairing_code() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        let code = store
+            .generate_code("telegram", "user123", "Alice")
+            .expect("generate_code should succeed");
+        assert!(code.is_some(), "code should be generated");
+
+        let pending = store
+            .list_pending(Some("telegram"))
+            .expect("list_pending should succeed");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].code, code.unwrap());
+        assert_eq!(pending[0].user_id, "user123");
+        assert_eq!(pending[0].user_name, "Alice");
+        assert_eq!(pending[0].platform, "telegram");
+    }
+
+    #[test]
+    fn approve_code_moves_to_approved() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        let code = store
+            .generate_code("discord", "user456", "Bob")
+            .expect("generate_code should succeed")
+            .expect("code should be generated");
+
+        let approved = store
+            .approve_code("discord", &code)
+            .expect("approve_code should succeed");
+        assert!(approved.is_some(), "approved user should be returned");
+
+        let approved_user = approved.unwrap();
+        assert_eq!(approved_user.platform, "discord");
+        assert_eq!(approved_user.user_id, "user456");
+        assert_eq!(approved_user.user_name, "Bob");
+
+        // Verify it appears in the approved list
+        let approved_list = store
+            .list_approved(Some("discord"))
+            .expect("list_approved should succeed");
+        assert_eq!(approved_list.len(), 1);
+        assert_eq!(approved_list[0].user_id, "user456");
+
+        // Verify it's no longer in the pending list
+        let pending = store
+            .list_pending(Some("discord"))
+            .expect("list_pending should succeed");
+        assert!(
+            pending.is_empty(),
+            "pending list should be empty after approval"
+        );
+    }
+
+    #[test]
+    fn revoke_user_removes_from_approved() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        // Generate and approve
+        let code = store
+            .generate_code("slack", "user789", "Charlie")
+            .expect("generate_code should succeed")
+            .expect("code should be generated");
+        store
+            .approve_code("slack", &code)
+            .expect("approve_code should succeed");
+
+        // Confirm approved
+        assert!(
+            store
+                .is_approved("slack", "user789")
+                .expect("is_approved should succeed"),
+            "user should be approved"
+        );
+
+        // Revoke
+        let revoked = store
+            .revoke("slack", "user789")
+            .expect("revoke should succeed");
+        assert!(revoked, "revoke should return true for existing user");
+
+        // Confirm no longer approved
+        assert!(
+            !store
+                .is_approved("slack", "user789")
+                .expect("is_approved should succeed"),
+            "user should no longer be approved after revocation"
+        );
+
+        let approved_list = store
+            .list_approved(Some("slack"))
+            .expect("list_approved should succeed");
+        assert!(
+            approved_list.is_empty(),
+            "approved list should be empty after revocation"
+        );
+    }
+
+    #[test]
+    fn expired_codes_not_returned() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        let code = store
+            .generate_code("telegram", "user_exp", "Expired User")
+            .expect("generate_code should succeed")
+            .expect("code should be generated");
+
+        // Verify it's in pending
+        let pending = store
+            .list_pending(Some("telegram"))
+            .expect("list_pending should succeed");
+        assert_eq!(pending.len(), 1);
+
+        // Backdate the code to 2 hours ago (beyond the 1-hour TTL)
+        let conn =
+            rusqlite::Connection::open(&database_path).expect("open connection should succeed");
+        conn.execute(
+            "UPDATE pairing_pending SET created_at = datetime('now', '-7200 seconds')
+             WHERE code = ?1",
+            rusqlite::params![code],
+        )
+        .expect("backdate should succeed");
+
+        // list_pending cleans up expired codes, so the expired code should not be returned
+        let pending_after = store
+            .list_pending(Some("telegram"))
+            .expect("list_pending should succeed");
+        assert!(
+            pending_after.is_empty(),
+            "expired codes should not appear in pending list"
+        );
+
+        // Trying to approve an expired code should also fail
+        let approved = store
+            .approve_code("telegram", &code)
+            .expect("approve_code should succeed");
+        assert!(approved.is_none(), "expired code should not be approvable");
+    }
+
+    #[test]
+    fn is_approved_returns_correct_status() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        // Unknown user should not be approved
+        assert!(
+            !store
+                .is_approved("telegram", "unknown_user")
+                .expect("is_approved should succeed"),
+            "unknown user should not be approved"
+        );
+
+        // Generate and approve a user
+        let code = store
+            .generate_code("telegram", "known_user", "Known")
+            .expect("generate_code should succeed")
+            .expect("code should be generated");
+        store
+            .approve_code("telegram", &code)
+            .expect("approve_code should succeed");
+
+        // Approved user should return true
+        assert!(
+            store
+                .is_approved("telegram", "known_user")
+                .expect("is_approved should succeed"),
+            "approved user should return true"
+        );
+
+        // Different platform should return false
+        assert!(
+            !store
+                .is_approved("discord", "known_user")
+                .expect("is_approved should succeed"),
+            "user approved on different platform should return false"
+        );
+    }
+
+    #[test]
+    fn clear_pending_removes_codes() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = PairingStore::new(&database_path);
+
+        // Generate codes on two platforms. Sleep between calls to avoid
+        // XORShift seed collisions from identical nanosecond timestamps.
+        store
+            .generate_code("telegram", "user_a", "A")
+            .expect("generate_code should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .generate_code("telegram", "user_b", "B")
+            .expect("generate_code should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .generate_code("discord", "user_c", "C")
+            .expect("generate_code should succeed");
+
+        // Clear only telegram pending codes
+        let cleared = store
+            .clear_pending(Some("telegram"))
+            .expect("clear_pending should succeed");
+        assert_eq!(cleared, 2);
+
+        // Telegram pending should be empty
+        let tg_pending = store
+            .list_pending(Some("telegram"))
+            .expect("list_pending should succeed");
+        assert!(
+            tg_pending.is_empty(),
+            "telegram pending should be empty after clear"
+        );
+
+        // Discord pending should still exist
+        let dc_pending = store
+            .list_pending(Some("discord"))
+            .expect("list_pending should succeed");
+        assert_eq!(dc_pending.len(), 1);
+
+        // Clear all remaining
+        let cleared_all = store
+            .clear_pending(None)
+            .expect("clear_pending should succeed");
+        assert_eq!(cleared_all, 1);
+
+        let all_pending = store
+            .list_pending(None)
+            .expect("list_pending should succeed");
+        assert!(
+            all_pending.is_empty(),
+            "all pending should be empty after clear_pending(None)"
+        );
     }
 }
