@@ -81,7 +81,7 @@ impl UserData for SessionView {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .id
                 .clone())
         });
@@ -89,7 +89,7 @@ impl UserData for SessionView {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .model
                 .clone())
         });
@@ -97,21 +97,21 @@ impl UserData for SessionView {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .turn_count)
         });
         fields.add_field_method_get("total_tokens", |_, this| {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .total_tokens)
         });
         fields.add_field_method_get("platform", |_, this| {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .platform
                 .clone())
         });
@@ -119,7 +119,7 @@ impl UserData for SessionView {
             Ok(this
                 .ctx
                 .lock()
-                .expect("session context lock poisoned")
+                .map_err(|e| mlua::Error::external(format!("session context lock poisoned: {e}")))?
                 .personality
                 .clone())
         });
