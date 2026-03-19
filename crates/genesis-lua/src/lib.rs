@@ -59,6 +59,7 @@ mod tests {
 
     #[test]
     fn runtime_builder_is_constructible() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let runtime = crate::LuaRuntime::builder().build();
         assert!(runtime.is_ok());
     }
@@ -703,6 +704,51 @@ genesis.register_personality({
             .expect("personality should be registered");
 
         assert_eq!(prompt, "Dynamic prompt for cli");
+    }
+
+    #[test]
+    fn runtime_strict_personality_prompt_errors_for_unknown_personality() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let err = runtime
+            .strict_personality_prompt("missing")
+            .expect_err("unknown selected personality should fail");
+        assert!(
+            err.to_string()
+                .contains("unknown lua personality `missing`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_strict_personality_prompt_errors_when_build_prompt_fails() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("broken_adaptive.lua"),
+            r#"
+genesis.register_personality({
+    name = "broken-adaptive",
+    description = "A broken dynamic lua personality",
+    system_prompt = "Fallback prompt.",
+    build_prompt = function(_ctx)
+        error("boom")
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let err = runtime
+            .strict_personality_prompt("broken-adaptive")
+            .expect_err("broken selected personality should fail");
+
+        assert!(
+            err.to_string()
+                .contains("failed to build prompt for lua personality `broken-adaptive`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -1448,7 +1494,13 @@ version = "0.1.0"
         std::env::remove_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS");
 
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
 
         assert_eq!(runtime.hook_timeout_ms(), 7);
         assert_eq!(runtime.tool_timeout_ms(), 120_000);
@@ -1464,7 +1516,13 @@ version = "0.1.0"
         std::env::set_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS", "11");
 
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
 
         assert_eq!(runtime.hook_timeout_ms(), 5_000);
         assert_eq!(runtime.tool_timeout_ms(), 11);
@@ -1563,6 +1621,21 @@ tools = [{tools_list}]
     }
 
     fn test_runtime_with_disabled_plugins_and_verbose(
+        plugin_dir: &std::path::Path,
+        config_values: BTreeMap<String, String>,
+        disabled_plugins: Vec<String>,
+        plugin_verbose: Option<bool>,
+    ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        build_test_runtime_with_disabled_plugins_and_verbose(
+            plugin_dir,
+            config_values,
+            disabled_plugins,
+            plugin_verbose,
+        )
+    }
+
+    fn build_test_runtime_with_disabled_plugins_and_verbose(
         plugin_dir: &std::path::Path,
         mut config_values: BTreeMap<String, String>,
         disabled_plugins: Vec<String>,
