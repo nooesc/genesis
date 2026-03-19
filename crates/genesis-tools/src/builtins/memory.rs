@@ -85,15 +85,16 @@ impl ToolHandler for MemoryRecallTool {
 
         let database_path = context.db_path();
         let store = MemoryStore::new(&database_path);
-        let memories = store
-            .graph_search(query, limit)
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!(
-                    "failed to search memories in `{}`: {error}",
-                    database_path.display()
-                ),
-            })?;
+        let memories =
+            store
+                .graph_search(query, limit)
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "failed to search memories in `{}`: {error}",
+                        database_path.display()
+                    ),
+                })?;
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
@@ -116,6 +117,7 @@ impl ToolHandler for MemoryRecallTool {
                 ("tool".to_owned(), call.name.clone()),
                 ("query".to_owned(), query.clone()),
                 ("limit".to_owned(), limit.to_string()),
+                ("mode".to_owned(), "graph".to_owned()),
             ]),
         })
     }
@@ -131,7 +133,7 @@ fn extract_keywords(key: &str, value: &str) -> Vec<String> {
         .chain(value.split(|c: char| !c.is_ascii_alphanumeric()))
         .filter_map(|token| {
             let token = token.trim().to_ascii_lowercase();
-            if token.is_empty() || !seen.insert(token.clone()) {
+            if token.len() < 2 || !seen.insert(token.clone()) {
                 None
             } else {
                 Some(token)
@@ -308,5 +310,14 @@ mod tests {
         let context = ctx(dir.path().to_string_lossy().as_ref());
 
         assert_eq!(context.db_path(), dir.path().join("genesis.db"));
+    }
+
+    #[test]
+    fn extract_keywords_skips_single_character_tokens() {
+        let keywords = super::extract_keywords("i", "Rust is a systems language");
+
+        assert!(keywords.contains(&"rust".to_owned()));
+        assert!(!keywords.contains(&"i".to_owned()));
+        assert!(!keywords.contains(&"a".to_owned()));
     }
 }

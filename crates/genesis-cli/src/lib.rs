@@ -619,7 +619,7 @@ pub enum MemoryCommand {
         )]
         limit: usize,
     },
-    #[command(about = "Search memories using full-text search")]
+    #[command(about = "Search memories")]
     Search {
         /// Search query
         query: String,
@@ -628,7 +628,7 @@ pub enum MemoryCommand {
         #[arg(
             long,
             default_value = "keyword",
-            value_parser = ["keyword", "graph", "hybrid"],
+            value_parser = ["keyword", "vector", "graph", "hybrid"],
             help = "Search mode"
         )]
         mode: String,
@@ -1792,20 +1792,25 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     }
                 }
                 MemoryCommand::Search { query, limit, mode } => {
+                    let mode_name = mode.clone();
                     let mode =
                         genesis_core::embedding::SearchMode::from_str_opt(Some(mode.as_str()));
                     let memories = match mode {
-                        genesis_core::embedding::SearchMode::Keyword => store.search(&query, limit)?,
+                        genesis_core::embedding::SearchMode::Keyword => {
+                            store.search(&query, limit)?
+                        }
                         genesis_core::embedding::SearchMode::Graph => store
                             .graph_search(&query, limit)?
                             .into_iter()
                             .map(|item| item.memory)
                             .collect(),
-                        genesis_core::embedding::SearchMode::Hybrid => {
+                        genesis_core::embedding::SearchMode::Vector
+                        | genesis_core::embedding::SearchMode::Hybrid => {
                             let config = loaded.config.embedding.as_ref().ok_or_else(|| {
                                 CliError::Other(
-                                    "memory search mode 'hybrid' requires an [embedding] configuration"
-                                        .to_owned(),
+                                    format!(
+                                        "memory search mode '{mode_name}' requires an [embedding] configuration"
+                                    ),
                                 )
                             })?;
                             let provider =
@@ -1830,7 +1835,6 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                             .map(|item| item.memory)
                             .collect()
                         }
-                        genesis_core::embedding::SearchMode::Vector => unreachable!(),
                     };
                     if cli.json {
                         Ok(serde_json::to_string_pretty(&memories)?)
