@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ always() && github.event_name == 'pull_request' }}
     steps:
-      - name: Create or update PR summary comment
+      - name: Post CI results comment
         uses: actions/github-script@v7
         continue-on-error: true
         with:
@@ -145,65 +145,80 @@ jobs:
             const fmt = '${{ needs.checks.outputs.fmt }}';
             const clippy = '${{ needs.checks.outputs.clippy }}';
             const test = '${{ needs.checks.outputs.test }}';
-            const totalLoc = '${{ needs.checks.outputs.total_loc }}';
-            const testLoc = '${{ needs.checks.outputs.test_loc }}';
-            const testCases = '${{ needs.checks.outputs.test_cases }}';
-            const crateCount = '${{ needs.checks.outputs.crate_count }}';
             const overall = '${{ needs.checks.outputs.overall }}';
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const prNumber = context.payload.pull_request.number;
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const formatStatus = (status) => {
-              if (status === 'success') {
-                return '✅';
-              }
-              if (status === 'skipped') {
-                return '⚪';
-              }
-              return '❌';
-            };
+            const icon = (s) => s === 'success' ? '✅' : s === 'skipped' ? '⚪' : '❌';
             const overallIcon = overall === 'passed' ? '✅' : '❌';
-            const tableRows = [
+            const body = [
+              marker,
+              `## ${overallIcon} Rust CI — **${overall.toUpperCase()}**`,
+              '',
               '| Check | Status |',
               '| --- | --- |',
-              `| cargo fmt --all -- --check | ${formatStatus(fmt)} |`,
-              `| cargo clippy --workspace -- -D warnings | ${formatStatus(clippy)} |`,
-              `| cargo nextest run --workspace --locked | ${formatStatus(test)} |`,
-            ];
-            const statsRows = [
-              '| Metric | Value |',
-              '| --- | --- |',
-              `| Total Rust LOC | ${totalLoc || 'n/a'} |`,
-              `| Estimated test LOC | ${testLoc || 'n/a'} |`,
-              `| Estimated test cases | ${testCases || 'n/a'} |`,
-              `| Workspace crate count | ${crateCount || 'n/a'} |`,
-            ];
-            const body = `${marker}\n## Rust CI Summary\n\nResult: ${overallIcon} **${overall.toUpperCase()}**\n\n${tableRows.join('\n')}\n\n### Codebase Snapshot\n${statsRows.join('\n')}\n\nWorkflow run: [${context.workflow} #${context.runNumber}](${runUrl})`;
+              `| \`cargo fmt\` | ${icon(fmt)} |`,
+              `| \`cargo clippy\` | ${icon(clippy)} |`,
+              `| \`cargo nextest\` | ${icon(test)} |`,
+              '',
+              `[Workflow run](${runUrl})`,
+            ].join('\n');
 
             const { data: comments } = await github.rest.issues.listComments({
-              owner,
-              repo,
-              issue_number: prNumber,
-              per_page: 100,
+              owner, repo, issue_number: prNumber, per_page: 100,
             });
-            const authUser = (await github.rest.users.getAuthenticated()).data.login;
-            const existing = comments.find((comment) =>
-              comment.user?.login === authUser && comment.body?.includes(marker),
-            );
-
+            const me = (await github.rest.users.getAuthenticated()).data.login;
+            const existing = comments.find((c) => c.user?.login === me && c.body?.includes(marker));
+            const args = { owner, repo, body };
             if (existing) {
-              await github.rest.issues.updateComment({
-                owner,
-                repo,
-                comment_id: existing.id,
-                body,
-              });
+              await github.rest.issues.updateComment({ ...args, comment_id: existing.id });
             } else {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: prNumber,
-                body,
-              });
+              await github.rest.issues.createComment({ ...args, issue_number: prNumber });
+            }
+
+      - name: Post codebase stats comment
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const marker = '<!-- rust-codebase-stats -->';
+            const totalLoc = Number('${{ needs.checks.outputs.total_loc }}') || 0;
+            const testLoc = Number('${{ needs.checks.outputs.test_loc }}') || 0;
+            const testCases = '${{ needs.checks.outputs.test_cases }}' || 'n/a';
+            const crateCount = '${{ needs.checks.outputs.crate_count }}' || 'n/a';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            const prodLoc = totalLoc - testLoc;
+            const testPct = totalLoc > 0 ? ((testLoc / totalLoc) * 100).toFixed(1) : '0.0';
+            const fmt = (n) => n.toLocaleString('en-US');
+
+            const body = [
+              marker,
+              '## Codebase Snapshot',
+              '',
+              `| | Lines | % |`,
+              `| --- | ---: | ---: |`,
+              `| Production | **${fmt(prodLoc)}** | ${(100 - Number(testPct)).toFixed(1)}% |`,
+              `| Tests | **${fmt(testLoc)}** | ${testPct}% |`,
+              `| **Total** | **${fmt(totalLoc)}** | |`,
+              '',
+              `| Metric | |`,
+              `| --- | ---: |`,
+              `| Test cases | **${testCases}** |`,
+              `| Workspace crates | **${crateCount}** |`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const me = (await github.rest.users.getAuthenticated()).data.login;
+            const existing = comments.find((c) => c.user?.login === me && c.body?.includes(marker));
+            const args = { owner, repo, body };
+            if (existing) {
+              await github.rest.issues.updateComment({ ...args, comment_id: existing.id });
+            } else {
+              await github.rest.issues.createComment({ ...args, issue_number: prNumber });
             }
