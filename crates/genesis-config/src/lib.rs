@@ -341,18 +341,26 @@ pub struct RuntimeConfig {
 /// Batch API routing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BatchApiConfig {
-    /// When to use the Batch API: "auto" (batch/eval commands only),
-    /// "always", or "never". Default: "auto".
-    #[serde(default = "default_batch_mode")]
-    pub mode: String,
+    /// When to use the Batch API. Default: Auto.
+    #[serde(default)]
+    pub mode: BatchApiMode,
     /// Maximum seconds to wait for batch completion before falling back
     /// to the standard API. Default: 3600 (1 hour).
     #[serde(default = "default_batch_timeout")]
     pub timeout_secs: u64,
 }
 
-fn default_batch_mode() -> String {
-    "auto".to_owned()
+/// When to route requests through the OpenAI Batch API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchApiMode {
+    /// Use Batch API for eval/batch commands, standard API for chat.
+    #[default]
+    Auto,
+    /// Always use the Batch API (even for interactive commands).
+    Always,
+    /// Never use the Batch API.
+    Never,
 }
 
 fn default_batch_timeout() -> u64 {
@@ -362,7 +370,7 @@ fn default_batch_timeout() -> u64 {
 impl Default for BatchApiConfig {
     fn default() -> Self {
         Self {
-            mode: default_batch_mode(),
+            mode: BatchApiMode::default(),
             timeout_secs: default_batch_timeout(),
         }
     }

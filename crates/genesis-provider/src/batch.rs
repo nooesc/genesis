@@ -165,7 +165,7 @@ impl BatchClient {
         Ok(results)
     }
 
-    /// Generate JSONL from a list of chat completion requests.
+    /// Upload JSONL content as a file via the OpenAI Files API.
     async fn upload_file(&self, jsonl: &str) -> Result<String, ProviderError> {
         let form = reqwest::multipart::Form::new()
             .text("purpose", "batch")
@@ -366,7 +366,12 @@ pub fn generate_jsonl(requests: &[ChatCompletionRequest]) -> Result<String, Prov
         })?;
         lines.push(json);
     }
-    Ok(lines.join("\n"))
+    // JSONL spec requires each record to end with a newline.
+    let mut output = lines.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    Ok(output)
 }
 
 /// Parse JSONL batch output into ordered results.
