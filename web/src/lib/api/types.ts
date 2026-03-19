@@ -23,6 +23,20 @@ export interface McpStatusResponse {
   total_prompts: number
 }
 
+export interface CacheStatsResponse {
+  enabled: boolean
+  entries: number
+  total_hits: number
+}
+
+export interface WebhookStatusResponse {
+  configured: boolean
+  delivered: number
+  retried: number
+  failed: number
+  dead_letter_count: number
+}
+
 export interface MetricsJsonResponse {
   uptime_seconds: number
   requests_total: number
