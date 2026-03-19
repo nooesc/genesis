@@ -614,7 +614,7 @@ fn create_memory_vec_table(
     database_path: &Path,
     dimensions: usize,
 ) -> Result<(), StorageError> {
-    exec_migration(
+    match exec_migration(
         conn,
         database_path,
         &format!(
@@ -623,7 +623,38 @@ fn create_memory_vec_table(
                 embedding float[{dimensions}] distance_metric=cosine
             );"
         ),
-    )
+    ) {
+        Ok(()) => Ok(()),
+        Err(StorageError::Sqlite { source, .. })
+            if source.to_string().contains("already exists") =>
+        {
+            match memory_vec_declared_dimensions(conn, database_path)? {
+                Some(existing) if existing == dimensions => Ok(()),
+                Some(existing) => Err(StorageError::EmbeddingDimensionMismatch {
+                    path: database_path.to_path_buf(),
+                    expected: existing,
+                    actual: dimensions,
+                }),
+                None => Err(StorageError::Sqlite {
+                    path: database_path.to_path_buf(),
+                    source,
+                }),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn memory_embeddings_count(conn: &Connection, database_path: &Path) -> Result<usize, StorageError> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| {
+            row.get(0)
+        })
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    Ok(count as usize)
 }
 
 fn ensure_memory_vec_table(
@@ -631,21 +662,9 @@ fn ensure_memory_vec_table(
     database_path: &Path,
     dimensions: usize,
 ) -> Result<(), StorageError> {
-    let embedding_dimensions = detect_uniform_embedding_dimensions(conn, database_path)?;
-    if let Some(existing) = embedding_dimensions {
-        if existing != dimensions {
-            return Err(StorageError::EmbeddingDimensionMismatch {
-                path: database_path.to_path_buf(),
-                expected: existing,
-                actual: dimensions,
-            });
-        }
-    }
-
     match memory_vec_declared_dimensions(conn, database_path)? {
-        None => create_memory_vec_table(conn, database_path, dimensions),
         Some(existing) if existing == dimensions => Ok(()),
-        Some(existing) if embedding_dimensions.is_none() => {
+        Some(existing) if memory_embeddings_count(conn, database_path)? == 0 => {
             conn.execute("DROP TABLE memory_vec", [])
                 .map_err(|source| StorageError::Sqlite {
                     path: database_path.to_path_buf(),
@@ -658,6 +677,18 @@ fn ensure_memory_vec_table(
             expected: existing,
             actual: dimensions,
         }),
+        None => {
+            if let Some(existing) = detect_uniform_embedding_dimensions(conn, database_path)? {
+                if existing != dimensions {
+                    return Err(StorageError::EmbeddingDimensionMismatch {
+                        path: database_path.to_path_buf(),
+                        expected: existing,
+                        actual: dimensions,
+                    });
+                }
+            }
+            create_memory_vec_table(conn, database_path, dimensions)
+        }
     }
 }
 
@@ -3439,20 +3470,12 @@ impl MemoryStore {
 
         let connection = open(&self.database_path)?;
         let Some(expected_dimensions) =
-            detect_uniform_embedding_dimensions(&connection, &self.database_path)?
+            memory_vec_declared_dimensions(&connection, &self.database_path)?
         else {
             return Ok(Vec::new());
         };
 
         if expected_dimensions != query_embedding.len() {
-            return Err(StorageError::EmbeddingDimensionMismatch {
-                path: self.database_path.clone(),
-                expected: expected_dimensions,
-                actual: query_embedding.len(),
-            });
-        }
-
-        if !memory_vec_table_exists(&connection, &self.database_path)? {
             return Ok(Vec::new());
         }
 
@@ -3843,15 +3866,45 @@ impl EmbeddingStore {
     /// Count total stored embeddings.
     pub fn count(&self) -> Result<usize, StorageError> {
         let connection = open(&self.database_path)?;
-        let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| {
-                row.get(0)
-            })
+        memory_embeddings_count(&connection, &self.database_path)
+    }
+
+    /// Returns the current database-wide embedding dimensions when known.
+    pub fn dimensions(&self) -> Result<Option<usize>, StorageError> {
+        let connection = open(&self.database_path)?;
+        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, &self.database_path)?
+        {
+            return Ok(Some(dimensions));
+        }
+        detect_uniform_embedding_dimensions(&connection, &self.database_path)
+    }
+
+    /// Remove all stored embeddings and clear the vector index.
+    pub fn clear(&self) -> Result<(), StorageError> {
+        let mut connection = open(&self.database_path)?;
+        let tx = connection
+            .transaction()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-        Ok(count as usize)
+        tx.execute("DELETE FROM memory_embeddings", [])
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        if memory_vec_table_exists(&tx, &self.database_path)? {
+            tx.execute("DELETE FROM memory_vec", [])
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
+        }
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        Ok(())
     }
 }
 
@@ -7241,6 +7294,19 @@ mod memory_store_tests {
 
         assert_eq!(results[0].memory.id, "mem-hybrid-best");
         assert_eq!(results[0].source, "hybrid");
+    }
+
+    #[test]
+    fn vector_search_returns_empty_when_query_dimensions_drift() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = seed_hybrid_search_fixture(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let results = store
+            .vector_search(&[1.0, 0.0, 0.0], 3)
+            .expect("dimension drift should degrade to empty results");
+
+        assert!(results.is_empty());
     }
 
     #[test]

@@ -1926,22 +1926,63 @@ async fn embed_memories_handler(
     let mut embedded = 0usize;
     let mut skipped = 0usize;
     let mut errors = 0usize;
+    let mut reset = false;
+    let mut first_probe: Option<(String, Vec<f32>)> = None;
+
+    if let (Some(existing_dimensions), Some(first_memory)) = (
+        embedding_store.dimensions().map_err(storage_err)?,
+        memories.first(),
+    ) {
+        match provider.embed_one(&first_memory.content).await {
+            Ok(embedding) => {
+                if embedding.len() != existing_dimensions {
+                    embedding_store.clear().map_err(storage_err)?;
+                    reset = true;
+                    first_probe = Some((first_memory.id.clone(), embedding));
+                }
+            }
+            Err(e) => {
+                if provider.backend() == "local"
+                    && matches!(e, genesis_core::embedding::EmbeddingError::NotConfigured)
+                {
+                    return Err(embedding_runtime_error(
+                        Some(provider.as_ref()),
+                        "bulk embedding",
+                        e,
+                    ));
+                }
+                tracing::warn!(memory_id = %first_memory.id, error = %e, "failed to probe embedding dimensions");
+                errors += 1;
+            }
+        }
+    }
 
     for memory in &memories {
-        if embedding_store.has_embedding(&memory.id).unwrap_or(false) {
+        if !reset && embedding_store.has_embedding(&memory.id).unwrap_or(false) {
             skipped += 1;
             continue;
         }
 
-        match genesis_core::embedding::embed_and_store(
-            &memory.id,
-            &memory.content,
-            &embedding_store,
-            &provider,
-            provider.model(),
-        )
-        .await
+        let result = if first_probe
+            .as_ref()
+            .is_some_and(|(memory_id, _)| memory_id == &memory.id)
         {
+            let (_, embedding) = first_probe.take().expect("probe embedding should exist");
+            embedding_store
+                .store(&memory.id, &embedding, provider.model())
+                .map_err(genesis_core::embedding::EmbeddingError::from)
+        } else {
+            genesis_core::embedding::embed_and_store(
+                &memory.id,
+                &memory.content,
+                &embedding_store,
+                &provider,
+                provider.model(),
+            )
+            .await
+        };
+
+        match result {
             Ok(()) => embedded += 1,
             Err(e) => {
                 if provider.backend() == "local"
@@ -1964,6 +2005,7 @@ async fn embed_memories_handler(
         "skipped": skipped,
         "errors": errors,
         "total": memories.len(),
+        "reset": reset,
     })))
 }
 
@@ -4887,6 +4929,45 @@ mod tests {
         assert_eq!(json["errors"], 0);
         assert_eq!(json["total"], 1);
         assert_eq!(EmbeddingStore::new(&db_path).count().unwrap(), 1);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[tokio::test]
+    async fn memories_bulk_embed_resets_embeddings_after_dimension_change() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let embedding_store = EmbeddingStore::new(&db_path);
+        embedding_store
+            .store("mem-local", &[1.0, 0.0], "legacy-model")
+            .expect("legacy embedding should store");
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embedded"], 1);
+        assert_eq!(json["skipped"], 0);
+        assert_eq!(json["errors"], 0);
+        assert_eq!(json["reset"], true);
+        assert_eq!(
+            embedding_store.dimensions().unwrap(),
+            Some(384),
+            "bulk embed should rebuild around the active local model dimension"
+        );
     }
 
     #[cfg(feature = "local-embeddings")]
