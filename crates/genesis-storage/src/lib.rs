@@ -9858,7 +9858,7 @@ mod channel_store_tests {
     }
 
     #[test]
-    fn get_returns_none_for_missing() {
+    fn list_returns_empty_for_unknown_platform() {
         let dir = tempdir().expect("tempdir should exist");
         let database_path = dir.path().join("genesis.db");
         bootstrap(&database_path).expect("bootstrap should succeed");

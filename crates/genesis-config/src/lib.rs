@@ -2435,7 +2435,9 @@ runtime:
 
     #[test]
     fn guardrails_config_absent_when_not_configured() {
-        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        let dir = tempdir().expect("tempdir should exist");
+        let absent = dir.path().join("nonexistent.yaml");
+        let loaded = load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
         assert!(loaded.config.runtime.guardrails.is_none());
     }
 
@@ -2508,7 +2510,9 @@ runtime:
 
     #[test]
     fn tool_filter_config_absent_when_not_configured() {
-        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        let dir = tempdir().expect("tempdir should exist");
+        let absent = dir.path().join("nonexistent.yaml");
+        let loaded = load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
         assert!(loaded.config.runtime.tool_filter.is_none());
     }
 
