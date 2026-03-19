@@ -162,6 +162,9 @@ pub struct TuiConfig {
     /// Granular per-effect toggles (all default to true).
     #[serde(default)]
     pub effects: EffectsConfig,
+    /// Theme name for the TUI. Built-in themes: eve, catppuccin, dracula, tokyonight.
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for TuiConfig {
@@ -173,6 +176,7 @@ impl Default for TuiConfig {
             welcome_screen: true,
             display: TuiDisplayConfig::default(),
             effects: EffectsConfig::default(),
+            theme: default_theme(),
         }
     }
 }
@@ -460,6 +464,9 @@ pub struct CacheConfig {
 
 fn default_true() -> bool {
     true
+}
+fn default_theme() -> String {
+    "eve".to_owned()
 }
 fn default_cpu() -> f32 {
     1.0

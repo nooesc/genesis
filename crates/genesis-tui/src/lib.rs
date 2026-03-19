@@ -32,6 +32,7 @@ pub mod frame_requester;
 pub mod history;
 pub mod render;
 pub mod terminal;
+pub mod theme;
 pub mod widgets;
 
 type TurnResult = Result<SessionTurnOutcome, SessionExecutionError>;
@@ -234,6 +235,7 @@ pub async fn run_tui(
         },
         file_completion: crate::widgets::file_completion::FileCompletion::new(),
         agent_mode: crate::events::AgentMode::default(),
+        active_theme: crate::theme::theme_by_name(&config.tui.theme),
     };
 
     // Schedule an initial frame so the UI renders immediately.

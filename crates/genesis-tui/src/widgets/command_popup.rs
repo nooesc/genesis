@@ -42,6 +42,7 @@ const COMMANDS: &[CommandDef] = &[
     CommandDef { name: "/help",        description: "Show keybindings and commands" },
     CommandDef { name: "/models",      description: "Browse and switch models" },
     CommandDef { name: "/plan",        description: "Toggle Plan/Act mode" },
+    CommandDef { name: "/theme",       description: "Cycle through built-in themes" },
     CommandDef { name: "/compact",     description: "Compact tool display (one line per tool)" },
     CommandDef { name: "/verbose",     description: "Verbose tool display (show output)" },
     CommandDef { name: "/grouped",     description: "Grouped tool display (bordered, no output)" },
