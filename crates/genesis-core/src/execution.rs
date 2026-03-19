@@ -1834,6 +1834,7 @@ mod tests {
                     guardrails: None,
                     core_tools: None,
                     batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

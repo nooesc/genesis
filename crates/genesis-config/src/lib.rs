@@ -339,6 +339,11 @@ pub struct RuntimeConfig {
     /// through OpenAI's Batch API for a 50% cost discount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchApiConfig>,
+    /// Path to a JSON tool policy file for fine-grained permission scoping.
+    /// When set, tool call arguments are checked against allow/deny rules
+    /// before execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy_path: Option<String>,
 }
 
 /// Batch API routing configuration.
@@ -875,6 +880,8 @@ struct FileRuntimeConfig {
     core_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     batch: Option<BatchApiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_policy_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -961,6 +968,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             guardrails: None,
             core_tools: None,
             batch: None,
+            tool_policy_path: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -1124,6 +1132,7 @@ pub fn load_from_map(
         guardrails: rt.and_then(|r| r.guardrails.clone()),
         core_tools: rt.and_then(|r| r.core_tools.clone()),
         batch: rt.and_then(|r| r.batch.clone()),
+        tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
