@@ -40,7 +40,7 @@ const SchedulesRoute = SchedulesRouteImport.update({
   id: '/schedules',
   path: '/schedules',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/schedules.lazy').then((d) => d.Route))
 const MonitorRoute = MonitorRouteImport.update({
   id: '/monitor',
   path: '/monitor',
