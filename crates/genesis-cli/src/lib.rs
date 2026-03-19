@@ -12,18 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{CommandFactory, Parser, Subcommand};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::AgentError;
-use genesis_core::replay::load_and_report;
 use genesis_core::execution::SessionExecutionError;
+use genesis_core::replay::load_and_report;
 use genesis_core::run_doctor;
 use genesis_core::scheduler::{check_due_schedules, CronTime};
 use genesis_gateway::{build_router, AppState};
 use genesis_provider::ProviderError;
 use genesis_storage::{
-    bootstrap, MemoryStore, ScheduleStore, SessionStore,
-    SkillStore, StorageError, SubagentStore,
+    bootstrap, MemoryStore, ScheduleStore, SessionStore, SkillStore, StorageError, SubagentStore,
 };
-use genesis_ui::UiContext;
 use genesis_ui::terminal::ColorMode;
+use genesis_ui::UiContext;
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -33,6 +32,10 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     #[arg(long, global = true, help = "Render machine-readable JSON output")]
     pub json: bool,
+    #[arg(long, global = true, help = "Disable Lua plugin loading for this process")]
+    pub no_plugins: bool,
+    #[arg(long, global = true, help = "Log plugin execution timing and lifecycle events")]
+    pub plugin_verbose: bool,
     /// Color output mode: auto, always, never.
     #[arg(long, global = true, default_value = "auto")]
     pub color: String,
@@ -967,6 +970,7 @@ pub enum CliError {
 }
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
+    let _runtime_override_guard = RuntimeOverrideGuard::apply(&cli);
     // --json implies --color=never (machine-readable output must be plain).
     let color_mode = if cli.json {
         ColorMode::Never
@@ -980,13 +984,28 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
     let ui = UiContext::new(color_mode);
 
     match cli.command {
-        Command::Chat { session_id, resume, prompt, system, last, worktree, clipboard, no_tui } => {
+        Command::Chat {
+            session_id,
+            resume,
+            prompt,
+            system,
+            last,
+            worktree,
+            clipboard,
+            no_tui,
+        } => {
             if no_tui || !std::io::stdout().is_terminal() {
                 // Legacy rustyline path
-                chat::run_chat(cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui).await
+                chat::run_chat(
+                    cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui,
+                )
+                .await
             } else {
                 // Ratatui TUI path
-                chat::run_chat_tui(cli.config, session_id, resume, prompt, system, last, worktree).await
+                chat::run_chat_tui(
+                    cli.config, session_id, resume, prompt, system, last, worktree,
+                )
+                .await
             }
         }
         Command::Doctor {
@@ -1196,7 +1215,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 )
                 .map_err(|e| CliError::Replay(e.to_string()))?;
                 if cli.json {
-                    Ok(serde_json::to_string_pretty(&commands::eval::eval_summary_to_json(&summary))?)
+                    Ok(serde_json::to_string_pretty(
+                        &commands::eval::eval_summary_to_json(&summary),
+                    )?)
                 } else {
                     Ok(commands::eval::format_eval_summary(&summary))
                 }
@@ -1204,9 +1225,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             EvalCommand::Compare { left, right } => {
                 let comparison = commands::eval::compare_replay_reports(&left, &right)?;
                 if cli.json {
-                    Ok(serde_json::to_string_pretty(&commands::eval::eval_comparison_to_json(
-                        &comparison,
-                    ))?)
+                    Ok(serde_json::to_string_pretty(
+                        &commands::eval::eval_comparison_to_json(&comparison),
+                    )?)
                 } else {
                     Ok(commands::eval::format_eval_comparison(&comparison))
                 }
@@ -1223,12 +1244,16 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             EvalCommand::ImportSharegpt { file, output } => {
                 commands::eval::run_eval_import_sharegpt(&file, &output)
             }
-            EvalCommand::Merge { sources, output, dedup } => {
-                commands::eval::run_eval_merge(&sources, &output, dedup)
-            }
-            EvalCommand::Convert { input, output, format } => {
-                commands::eval::run_eval_convert(&input, &output, &format)
-            }
+            EvalCommand::Merge {
+                sources,
+                output,
+                dedup,
+            } => commands::eval::run_eval_merge(&sources, &output, dedup),
+            EvalCommand::Convert {
+                input,
+                output,
+                format,
+            } => commands::eval::run_eval_convert(&input, &output, &format),
             EvalCommand::Stats {
                 dir,
                 recursive,
@@ -1246,7 +1271,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     failures_only,
                 )?;
                 if cli.json {
-                    Ok(serde_json::to_string_pretty(&commands::eval::eval_stats_to_json(&stats))?)
+                    Ok(serde_json::to_string_pretty(
+                        &commands::eval::eval_stats_to_json(&stats),
+                    )?)
                 } else {
                     Ok(commands::eval::format_eval_stats(&stats))
                 }
@@ -1259,15 +1286,19 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             } => {
                 commands::eval::run_eval_quality(&dir, recursive, min_score, worst_first, cli.json)
             }
-            EvalCommand::AutoTag { dir, recursive, dry_run } => {
-                commands::eval::run_eval_auto_tag(&dir, recursive, dry_run, cli.json)
-            }
+            EvalCommand::AutoTag {
+                dir,
+                recursive,
+                dry_run,
+            } => commands::eval::run_eval_auto_tag(&dir, recursive, dry_run, cli.json),
             EvalCommand::TagStats { dir, recursive } => {
                 commands::eval::run_eval_tag_stats(&dir, recursive, cli.json)
             }
-            EvalCommand::Deduplicate { dir, recursive, remove } => {
-                commands::eval::run_eval_deduplicate(&dir, recursive, remove, cli.json)
-            }
+            EvalCommand::Deduplicate {
+                dir,
+                recursive,
+                remove,
+            } => commands::eval::run_eval_deduplicate(&dir, recursive, remove, cli.json),
             EvalCommand::Filter {
                 dir,
                 output,
@@ -1282,9 +1313,18 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 max_steps,
                 tool,
             } => commands::eval::run_eval_filter(
-                &dir, &output, recursive, model.as_deref(), tag.as_deref(),
-                min_quality, max_quality, success_only, failure_only,
-                min_steps, max_steps, tool.as_deref(),
+                &dir,
+                &output,
+                recursive,
+                model.as_deref(),
+                tag.as_deref(),
+                min_quality,
+                max_quality,
+                success_only,
+                failure_only,
+                min_steps,
+                max_steps,
+                tool.as_deref(),
             ),
             EvalCommand::Split {
                 dir,
@@ -1323,9 +1363,19 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 limit,
                 seed,
             } => commands::eval::run_eval_pipeline(
-                &dir, &output, recursive, validate, auto_tag,
-                min_quality, success_only, tag.as_deref(), model.as_deref(),
-                format.as_deref(), manifest, limit, seed,
+                &dir,
+                &output,
+                recursive,
+                validate,
+                auto_tag,
+                min_quality,
+                success_only,
+                tag.as_deref(),
+                model.as_deref(),
+                format.as_deref(),
+                manifest,
+                limit,
+                seed,
             ),
             EvalCommand::Validate {
                 dir,
@@ -1367,7 +1417,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     if cli.json {
                         Ok(serde_json::to_string_pretty(&display_messages)?)
                     } else {
-                        Ok(format::format_session_messages(&session.id, display_messages))
+                        Ok(format::format_session_messages(
+                            &session.id,
+                            display_messages,
+                        ))
                     }
                 }
                 SessionsCommand::Export { id, format: fmt } => {
@@ -1423,14 +1476,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Err(CliError::SessionNotFound(id))
                     }
                 }
-                SessionsCommand::Import { file, format: fmt, title } => {
-                    format::run_session_import(
-                        &store,
-                        &file,
-                        fmt.as_deref(),
-                        title.as_deref(),
-                    )
-                }
+                SessionsCommand::Import {
+                    file,
+                    format: fmt,
+                    title,
+                } => format::run_session_import(&store, &file, fmt.as_deref(), title.as_deref()),
             }
         }
         Command::Skills(skills_command) => {
@@ -1488,11 +1538,12 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         imported += 1;
                     }
 
-                    Ok(format!("imported {imported} skill(s) from {}", file.display()))
+                    Ok(format!(
+                        "imported {imported} skill(s) from {}",
+                        file.display()
+                    ))
                 }
-                SkillsCommand::Scan { dir } => {
-                    format::run_skills_scan(&dir, cli.json)
-                }
+                SkillsCommand::Scan { dir } => format::run_skills_scan(&dir, cli.json),
                 SkillsCommand::Search { query, dir } => {
                     format::run_skills_search(&store, &query, dir.as_deref(), cli.json)
                 }
@@ -1575,7 +1626,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
-        Command::Model(model_command) => commands::misc::run_model(cli.config, model_command, cli.json),
+        Command::Model(model_command) => {
+            commands::misc::run_model(cli.config, model_command, cli.json)
+        }
         Command::Serve { host, port } => commands::serve::run_serve(cli.config, &host, port).await,
         Command::Nudge => commands::serve::run_nudge(cli.config).await,
         Command::Insights { days } => {
@@ -1586,7 +1639,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if cli.json {
                 Ok(serde_json::to_string_pretty(&insights)?)
             } else {
-                Ok(format::format_insights(&insights, &loaded.config.provider.model))
+                Ok(format::format_insights(
+                    &insights,
+                    &loaded.config.provider.model,
+                ))
             }
         }
         Command::Init {
@@ -1603,13 +1659,25 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 Ok(serde_yaml::to_string(&loaded.config)?)
             }
         }
-        Command::Run { prompt, session_id, raw, system, stream, images } => {
-            chat::run_oneshot(cli.config, &prompt, session_id, raw, cli.json, system, stream, &images, &ui).await
+        Command::Run {
+            prompt,
+            session_id,
+            raw,
+            system,
+            stream,
+            images,
+        } => {
+            chat::run_oneshot(
+                cli.config, &prompt, session_id, raw, cli.json, system, stream, &images, &ui,
+            )
+            .await
         }
         Command::Status => {
             let loaded = load(cli.config.as_deref())?;
             if cli.json {
-                Ok(serde_json::to_string_pretty(&format::build_status_json(&loaded))?)
+                Ok(serde_json::to_string_pretty(&format::build_status_json(
+                    &loaded,
+                ))?)
             } else {
                 Ok(format::build_status_text(&loaded, &ui))
             }
@@ -1677,15 +1745,20 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
-        Command::Mcp(mcp_command) => commands::misc::run_mcp(cli.config, mcp_command, cli.json).await,
-        Command::Benchmark { runs, tool_provider } => {
-            commands::misc::run_benchmark(cli.config, runs, tool_provider, cli.json).await
+        Command::Mcp(mcp_command) => {
+            commands::misc::run_mcp(cli.config, mcp_command, cli.json).await
         }
+        Command::Benchmark {
+            runs,
+            tool_provider,
+        } => commands::misc::run_benchmark(cli.config, runs, tool_provider, cli.json).await,
         Command::Pairing(pairing_command) => {
             commands::misc::run_pairing(cli.config, pairing_command, cli.json).await
         }
         Command::Toolset(toolset_command) => commands::misc::run_toolset(toolset_command, cli.json),
-        Command::Personality(personality_command) => commands::misc::run_personality(personality_command, cli.json),
+        Command::Personality(personality_command) => {
+            commands::misc::run_personality(personality_command, cli.json)
+        }
         Command::Workflow(WorkflowCommand::Validate { file }) => {
             let yaml = fs::read_to_string(&file)
                 .map_err(|e| CliError::Other(format!("failed to read {file}: {e}")))?;
@@ -1755,8 +1828,60 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             clap_complete::generate(shell, &mut cmd, "genesis", &mut io::stdout());
             Ok(String::new())
         }
-        Command::Uninstall { remove_data, remove_config, force } => {
+        Command::Uninstall {
+            remove_data,
+            remove_config,
+            force,
+        } => {
             commands::init::run_uninstall(cli.config.as_deref(), remove_data, remove_config, force)
+        }
+    }
+}
+
+struct RuntimeOverrideGuard {
+    no_plugins_previous: Option<Option<String>>,
+    plugin_verbose_previous: Option<Option<String>>,
+}
+
+impl RuntimeOverrideGuard {
+    fn apply(cli: &Cli) -> Self {
+        let mut guard = Self {
+            no_plugins_previous: None,
+            plugin_verbose_previous: None,
+        };
+        if cli.no_plugins {
+            guard.no_plugins_previous = Some(std::env::var("GENESIS_NO_PLUGINS").ok());
+            unsafe {
+                std::env::set_var("GENESIS_NO_PLUGINS", "1");
+            }
+        }
+        if cli.plugin_verbose {
+            guard.plugin_verbose_previous = Some(std::env::var("GENESIS_PLUGIN_VERBOSE").ok());
+            unsafe {
+                std::env::set_var("GENESIS_PLUGIN_VERBOSE", "1");
+            }
+        }
+        guard
+    }
+}
+
+impl Drop for RuntimeOverrideGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.no_plugins_previous.take() {
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var("GENESIS_NO_PLUGINS", value),
+                    None => std::env::remove_var("GENESIS_NO_PLUGINS"),
+                }
+            }
+        }
+        if let Some(previous) = self.plugin_verbose_previous.take() {
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var("GENESIS_PLUGIN_VERBOSE", value),
+                    None => std::env::remove_var("GENESIS_PLUGIN_VERBOSE"),
+                }
+            }
         }
     }
 }
@@ -1840,24 +1965,23 @@ mod tests {
     use clap::Parser;
     use tempfile::tempdir;
 
-    use crate::format::{
-        context_template, export_session_markdown, format_insights,
-        format_memory_list, format_schedule_list, format_session_list,
-        format_usage_stats, format_session_messages, format_skill, format_skill_list,
-        format_subagent, format_subagent_list,
-    };
     use crate::chat::default_session_id;
-    use crate::slash::handle_chat_command;
     use crate::commands::batch::{batch_output_path, parse_batch_input_line, sha256_hex};
     use crate::commands::eval::run_eval_export_chatml;
     use crate::commands::eval::run_eval_quality;
     use crate::commands::misc::{
-        known_models, run_compress, run_personality, run_toolset,
-        parse_compression_format, parse_compression_level,
+        known_models, parse_compression_format, parse_compression_level, run_compress,
+        run_personality, run_toolset,
     };
     use crate::commands::serve::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
     };
+    use crate::format::{
+        context_template, export_session_markdown, format_insights, format_memory_list,
+        format_schedule_list, format_session_list, format_session_messages, format_skill,
+        format_skill_list, format_subagent, format_subagent_list, format_usage_stats,
+    };
+    use crate::slash::handle_chat_command;
     use chrono::{LocalResult, TimeZone};
     use genesis_core::execution::delivery_platform_from_str;
     use genesis_storage::{InsightsData, SessionSummary, StoredSchedule, StoredSkill, UsageStats};
@@ -1941,16 +2065,19 @@ mod tests {
     #[test]
     fn formats_session_list_for_humans() {
         let ui = UiContext::new(ColorMode::Never);
-        let output = format_session_list(&[SessionSummary {
-            id: "session-1".to_owned(),
-            title: None,
-            platform: "cli".to_owned(),
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            parent_session_id: None,
-            created_at: "2026-03-08 12:00:00".to_owned(),
-            updated_at: "2026-03-08 12:05:00".to_owned(),
-        }], &ui);
+        let output = format_session_list(
+            &[SessionSummary {
+                id: "session-1".to_owned(),
+                title: None,
+                platform: "cli".to_owned(),
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                parent_session_id: None,
+                created_at: "2026-03-08 12:00:00".to_owned(),
+                updated_at: "2026-03-08 12:05:00".to_owned(),
+            }],
+            &ui,
+        );
 
         assert!(output.contains("genesis sessions"));
         assert!(output.contains("session-1"));
@@ -2202,6 +2329,8 @@ provider:
         let output = run(Cli {
             config: Some(config_path),
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Bootstrap(BootstrapCommand::Config),
         })
@@ -2233,6 +2362,8 @@ storage:
         let output = run(Cli {
             config: Some(config_path),
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Storage(StorageCommand::Bootstrap),
         })
@@ -2269,6 +2400,66 @@ storage:
                 assert_eq!(port, 8080);
             }
             other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_global_plugin_flags() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "--no-plugins",
+            "--plugin-verbose",
+            "run",
+            "hello",
+        ])
+        .expect("global plugin flags should parse");
+
+        assert!(cli.no_plugins);
+        assert!(cli.plugin_verbose);
+        assert!(matches!(cli.command, Command::Run { .. }));
+    }
+
+    #[test]
+    fn runtime_override_guard_sets_and_restores_plugin_env() {
+        unsafe {
+            std::env::remove_var("GENESIS_NO_PLUGINS");
+            std::env::set_var("GENESIS_PLUGIN_VERBOSE", "0");
+        }
+
+        {
+            let _guard = RuntimeOverrideGuard::apply(&Cli {
+                config: None,
+                json: false,
+                no_plugins: true,
+                plugin_verbose: true,
+                color: "auto".to_owned(),
+                command: Command::Status,
+            });
+
+            assert_eq!(
+                std::env::var("GENESIS_NO_PLUGINS").as_deref(),
+                Ok("1"),
+                "guard should enable no-plugins override"
+            );
+            assert_eq!(
+                std::env::var("GENESIS_PLUGIN_VERBOSE").as_deref(),
+                Ok("1"),
+                "guard should enable plugin-verbose override"
+            );
+        }
+
+        assert!(
+            std::env::var("GENESIS_NO_PLUGINS").is_err(),
+            "guard should restore missing GENESIS_NO_PLUGINS"
+        );
+        assert_eq!(
+            std::env::var("GENESIS_PLUGIN_VERBOSE").as_deref(),
+            Ok("0"),
+            "guard should restore existing GENESIS_PLUGIN_VERBOSE value"
+        );
+
+        unsafe {
+            std::env::remove_var("GENESIS_PLUGIN_VERBOSE");
         }
     }
 
@@ -2328,6 +2519,8 @@ storage:
         let output = run(Cli {
             config: Some(config_path),
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::Show),
         })
@@ -2351,6 +2544,8 @@ storage:
         let output = run(Cli {
             config: Some(config_path.clone()),
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::Set {
                 model: "gpt-5".to_owned(),
@@ -2382,6 +2577,8 @@ storage:
         let output = run(Cli {
             config: Some(config_path),
             json: true,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::Show),
         })
@@ -2399,6 +2596,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::List { backend: None }),
         })
@@ -2416,6 +2615,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::List {
                 backend: Some("openai".to_owned()),
@@ -2434,6 +2635,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: true,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Model(ModelCommand::List { backend: None }),
         })
@@ -2464,6 +2667,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Tools,
         })
@@ -2854,6 +3059,8 @@ storage:
         let output = run(Cli {
             config: Some(config_path.clone()),
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Init {
                 backend: None,
@@ -2876,6 +3083,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: false,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Info,
         })
@@ -2894,6 +3103,8 @@ storage:
         let output = run(Cli {
             config: None,
             json: true,
+            no_plugins: false,
+            plugin_verbose: false,
             color: "auto".to_owned(),
             command: Command::Info,
         })
@@ -3736,8 +3947,12 @@ storage:
         });
         std::fs::write(&path, serde_json::to_string_pretty(&trajectory).unwrap()).unwrap();
 
-        crate::commands::batch::discard_low_quality_trajectory(dir.path().to_str().unwrap(), "low", 0.5)
-            .expect("quality discard should succeed");
+        crate::commands::batch::discard_low_quality_trajectory(
+            dir.path().to_str().unwrap(),
+            "low",
+            0.5,
+        )
+        .expect("quality discard should succeed");
         assert!(!path.exists());
     }
 
@@ -3786,9 +4001,13 @@ storage:
         )
         .unwrap();
 
-        let output =
-            crate::commands::eval::run_eval_deduplicate(dir.path().to_str().unwrap(), false, true, false)
-                .expect("deduplicate should succeed");
+        let output = crate::commands::eval::run_eval_deduplicate(
+            dir.path().to_str().unwrap(),
+            false,
+            true,
+            false,
+        )
+        .expect("deduplicate should succeed");
 
         assert!(output.contains("duplicate groups: 1"));
         assert!(output.contains("removed files:    1"));
@@ -3863,8 +4082,9 @@ storage:
         write("b.json", &["success"]);
         write("c.json", &["shell"]);
 
-        let output = crate::commands::eval::run_eval_tag_stats(dir.path().to_str().unwrap(), false, false)
-            .expect("tag stats should succeed");
+        let output =
+            crate::commands::eval::run_eval_tag_stats(dir.path().to_str().unwrap(), false, false)
+                .expect("tag stats should succeed");
 
         assert!(output.contains("shell: 2"));
         assert!(output.contains("success: 2"));
@@ -4043,11 +4263,21 @@ storage:
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
         store.create_session("s-undo", "cli", None).expect("create");
-        store.append_message("s-undo", "system", Some("You are Eve."), None, None, None).unwrap();
-        store.append_message("s-undo", "user", Some("Hello"), None, None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Hi!"), None, None, None).unwrap();
-        store.append_message("s-undo", "user", Some("How are you?"), None, None, None).unwrap();
-        store.append_message("s-undo", "assistant", Some("Great!"), None, None, None).unwrap();
+        store
+            .append_message("s-undo", "system", Some("You are Eve."), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "user", Some("Hello"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "assistant", Some("Hi!"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "user", Some("How are you?"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-undo", "assistant", Some("Great!"), None, None, None)
+            .unwrap();
 
         let result = handle_chat_command("/undo", "s-undo", &store);
         assert!(result.is_some());
@@ -4066,12 +4296,27 @@ storage:
         let db = dir.path().join("genesis.db");
         genesis_storage::bootstrap(&db).expect("bootstrap");
         let store = genesis_storage::SessionStore::new(&db);
-        store.create_session("s-undo2", "cli", None).expect("create");
-        store.append_message("s-undo2", "user", Some("search for X"), None, None, None).unwrap();
+        store
+            .create_session("s-undo2", "cli", None)
+            .expect("create");
+        store
+            .append_message("s-undo2", "user", Some("search for X"), None, None, None)
+            .unwrap();
         // assistant with tool call, tool result, then final assistant response
         store.append_message("s-undo2", "assistant", None, Some(r#"[{"id":"t1","type":"function","function":{"name":"web_search","arguments":"{}"}}]"#), None, None).unwrap();
-        store.append_message("s-undo2", "tool", Some("result"), None, None, None).unwrap();
-        store.append_message("s-undo2", "assistant", Some("Here's what I found"), None, None, None).unwrap();
+        store
+            .append_message("s-undo2", "tool", Some("result"), None, None, None)
+            .unwrap();
+        store
+            .append_message(
+                "s-undo2",
+                "assistant",
+                Some("Here's what I found"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let result = handle_chat_command("/undo", "s-undo2", &store);
         let output = result.unwrap();
@@ -4673,10 +4918,16 @@ storage:
             "tags": ["baseline", "with_tools"]
         });
 
-        std::fs::write(&left, serde_json::to_string_pretty(&left_trajectory).unwrap())
-            .expect("write left");
-        std::fs::write(&right, serde_json::to_string_pretty(&right_trajectory).unwrap())
-            .expect("write right");
+        std::fs::write(
+            &left,
+            serde_json::to_string_pretty(&left_trajectory).unwrap(),
+        )
+        .expect("write left");
+        std::fs::write(
+            &right,
+            serde_json::to_string_pretty(&right_trajectory).unwrap(),
+        )
+        .expect("write right");
 
         let comparison = crate::commands::eval::compare_replay_reports(
             left.to_str().unwrap(),
@@ -4689,9 +4940,11 @@ storage:
         )
         .expect("write right");
 
-        let comparison =
-            crate::commands::eval::compare_replay_reports(left.to_str().unwrap(), right.to_str().unwrap())
-                .expect("comparison should build");
+        let comparison = crate::commands::eval::compare_replay_reports(
+            left.to_str().unwrap(),
+            right.to_str().unwrap(),
+        )
+        .expect("comparison should build");
 
         assert_eq!(comparison.left_session_id, "left-session");
         assert_eq!(comparison.right_session_id, "right-session");
@@ -4868,8 +5121,9 @@ storage:
         std::fs::write(&input, serde_json::to_string_pretty(&trajectory).unwrap())
             .expect("write trajectory");
 
-        let output = crate::commands::eval::run_eval_export_sharegpt(dir.path().to_str().unwrap(), false)
-            .expect("sharegpt export should succeed");
+        let output =
+            crate::commands::eval::run_eval_export_sharegpt(dir.path().to_str().unwrap(), false)
+                .expect("sharegpt export should succeed");
         let line = output.lines().next().expect("one jsonl line");
         let parsed: serde_json::Value = serde_json::from_str(line).expect("valid jsonl object");
 
@@ -4891,8 +5145,11 @@ storage:
             "outcome": { "type": "success" },
             "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
-            .expect("write jsonl");
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .expect("write jsonl");
 
         let result = crate::commands::eval::run_eval_import_chatml(
             input.to_str().unwrap(),
@@ -4930,8 +5187,11 @@ storage:
                 {"from": "gpt", "value": "hi there"}
             ]
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap()))
-            .expect("write jsonl");
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .expect("write jsonl");
 
         let result = crate::commands::eval::run_eval_import_sharegpt(
             input.to_str().unwrap(),
@@ -5097,8 +5357,18 @@ storage:
         std::fs::write(src.join("s3.json"), serde_json::to_string(&t3).unwrap()).unwrap();
 
         let result = crate::commands::eval::run_eval_filter(
-            src.to_str().unwrap(), out.to_str().unwrap(), false,
-            Some("gpt-4"), None, None, None, true, false, None, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            Some("gpt-4"),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+            None,
         )
         .expect("filter should succeed");
 
@@ -5129,8 +5399,18 @@ storage:
         std::fs::write(src.join("s2.json"), serde_json::to_string(&t2).unwrap()).unwrap();
 
         let result = crate::commands::eval::run_eval_filter(
-            src.to_str().unwrap(), out.to_str().unwrap(), false,
-            None, Some("coding"), None, None, false, false, None, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            None,
+            Some("coding"),
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
         )
         .expect("filter should succeed");
 
@@ -5201,14 +5481,24 @@ storage:
         let test2 = dir.path().join("e2");
 
         crate::commands::eval::run_eval_split(
-            src.to_str().unwrap(), train1.to_str().unwrap(), test1.to_str().unwrap(),
-            0.6, Some(99), false,
-        ).unwrap();
+            src.to_str().unwrap(),
+            train1.to_str().unwrap(),
+            test1.to_str().unwrap(),
+            0.6,
+            Some(99),
+            false,
+        )
+        .unwrap();
 
         crate::commands::eval::run_eval_split(
-            src.to_str().unwrap(), train2.to_str().unwrap(), test2.to_str().unwrap(),
-            0.6, Some(99), false,
-        ).unwrap();
+            src.to_str().unwrap(),
+            train2.to_str().unwrap(),
+            test2.to_str().unwrap(),
+            0.6,
+            Some(99),
+            false,
+        )
+        .unwrap();
 
         let names1: Vec<String> = std::fs::read_dir(&train1)
             .unwrap()
@@ -5333,8 +5623,14 @@ storage:
         .unwrap();
 
         let result = crate::commands::eval::run_eval_manifest(
-            dir.path().to_str().unwrap(), "test-ds", "a test", false, false, false,
-        ).expect("manifest should succeed");
+            dir.path().to_str().unwrap(),
+            "test-ds",
+            "a test",
+            false,
+            false,
+            false,
+        )
+        .expect("manifest should succeed");
 
         assert!(result.contains("test-ds"));
         assert!(result.contains("files: 1"));
@@ -5405,8 +5701,19 @@ storage:
         std::fs::write(src.join("bad.json"), serde_json::to_string(&bad).unwrap()).unwrap();
 
         let result = crate::commands::eval::run_eval_pipeline(
-            src.to_str().unwrap(), out.to_str().unwrap(),
-            false, true, true, None, true, None, None, None, false, None, None,
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            true,
+            true,
+            None,
+            true,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
         )
         .expect("pipeline should succeed");
 
@@ -5443,8 +5750,19 @@ storage:
         }
 
         let result = crate::commands::eval::run_eval_pipeline(
-            src.to_str().unwrap(), out.to_str().unwrap(),
-            false, false, false, None, false, None, None, None, false, Some(3), Some(42),
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            false,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(3),
+            Some(42),
         )
         .expect("pipeline should succeed");
 
@@ -5490,9 +5808,8 @@ storage:
         });
         std::fs::write(src.join("empty.json"), serde_json::to_string(&t3).unwrap()).unwrap();
 
-        let result = crate::commands::eval::run_eval_validate(
-            src.to_str().unwrap(), false, false,
-        ).expect("validate should succeed");
+        let result = crate::commands::eval::run_eval_validate(src.to_str().unwrap(), false, false)
+            .expect("validate should succeed");
 
         assert!(result.contains("1 valid"));
         assert!(result.contains("2 invalid"));
@@ -5513,9 +5830,8 @@ storage:
         });
         std::fs::write(src.join("good.json"), serde_json::to_string(&t).unwrap()).unwrap();
 
-        let result = crate::commands::eval::run_eval_validate(
-            src.to_str().unwrap(), false, true,
-        ).expect("validate with remove should succeed");
+        let result = crate::commands::eval::run_eval_validate(src.to_str().unwrap(), false, true)
+            .expect("validate with remove should succeed");
 
         assert!(result.contains("removed 1 invalid"));
         assert!(!src.join("bad.json").exists());
@@ -5565,8 +5881,13 @@ storage:
         }
 
         let result = crate::commands::eval::run_eval_sample(
-            src.to_str().unwrap(), out.to_str().unwrap(), 3, Some(42), false,
-        ).expect("sample should succeed");
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            3,
+            Some(42),
+            false,
+        )
+        .expect("sample should succeed");
 
         assert!(result.contains("sampled 3/10"));
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 3);
@@ -5586,8 +5907,13 @@ storage:
         std::fs::write(src.join("s1.json"), serde_json::to_string(&t).unwrap()).unwrap();
 
         let result = crate::commands::eval::run_eval_sample(
-            src.to_str().unwrap(), out.to_str().unwrap(), 100, Some(1), false,
-        ).expect("sample should succeed");
+            src.to_str().unwrap(),
+            out.to_str().unwrap(),
+            100,
+            Some(1),
+            false,
+        )
+        .expect("sample should succeed");
 
         assert!(result.contains("sampled 1/1"));
     }
@@ -5673,7 +5999,11 @@ storage:
             "outcome": { "type": "success" },
             "chatml": "<|im_start|>system\nYou are Eve.<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\nhi<|im_end|>\n"
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
 
         crate::commands::eval::run_eval_convert(
             input.to_str().unwrap(),
@@ -5703,7 +6033,11 @@ storage:
                 { "from": "gpt", "value": "hi" }
             ]
         });
-        std::fs::write(&input, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+        std::fs::write(
+            &input,
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
 
         crate::commands::eval::run_eval_convert(
             input.to_str().unwrap(),

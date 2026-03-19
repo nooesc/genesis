@@ -214,6 +214,13 @@ fn config_bool(values: &BTreeMap<String, String>, key: &str, default: bool) -> b
         .unwrap_or(default)
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
 fn strip_unsafe_globals(lua: &Lua) -> Result<(), LuaRuntimeError> {
     let globals = lua.globals();
     globals.set("io", Value::Nil)?;
@@ -253,7 +260,10 @@ impl LuaRuntime {
             "plugin_auto_disable_after",
             DEFAULT_AUTO_DISABLE_AFTER,
         );
-        let plugin_verbose = config_bool(&config.config_values, "plugin_verbose", false);
+        let plugin_verbose = env_bool(
+            "GENESIS_PLUGIN_VERBOSE",
+            config_bool(&config.config_values, "plugin_verbose", false),
+        );
         let memory_limit_bytes = config_usize(
             &config.config_values,
             "plugin_memory_limit_bytes",

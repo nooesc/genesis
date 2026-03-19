@@ -80,6 +80,16 @@ fn lua_runtime_build_count(key: &LuaRuntimeCacheKey) -> usize {
         .unwrap_or(0)
 }
 
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn plugins_enabled(loaded: &LoadedConfig) -> bool {
+    loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS")
+}
+
 impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
     fn execute_in_sandbox(
         &self,
@@ -294,6 +304,10 @@ impl<'a> SessionExecutionService<'a> {
             .or(self.loaded.config.personality.as_deref())
     }
 
+    fn plugins_enabled(&self) -> bool {
+        plugins_enabled(self.loaded)
+    }
+
     fn lua_runtime_cache_key(
         &self,
         session_id: &str,
@@ -332,7 +346,7 @@ impl<'a> SessionExecutionService<'a> {
         );
         config_values.insert(
             "plugins_enabled".to_owned(),
-            self.loaded.config.plugins.enabled.to_string(),
+            self.plugins_enabled().to_string(),
         );
         config_values.insert(
             "plugin_hook_timeout_ms".to_owned(),
@@ -385,7 +399,7 @@ impl<'a> SessionExecutionService<'a> {
         session_id: &str,
         platform: DeliveryPlatform,
     ) -> Option<Arc<LuaRuntime>> {
-        if !self.loaded.config.plugins.enabled {
+        if !self.plugins_enabled() {
             return None;
         }
 
@@ -1198,7 +1212,7 @@ struct ExecutionSubagentSpawner {
 
 impl ExecutionSubagentSpawner {
     fn build_lua_runtime(&self, child_session_id: &str) -> Option<Arc<LuaRuntime>> {
-        if !self.loaded.config.plugins.enabled {
+        if !plugins_enabled(self.loaded.as_ref()) {
             return None;
         }
 
@@ -1217,7 +1231,7 @@ impl ExecutionSubagentSpawner {
         config_values.insert("delivery_platform".to_owned(), "cli".to_owned());
         config_values.insert(
             "plugins_enabled".to_owned(),
-            self.loaded.config.plugins.enabled.to_string(),
+            plugins_enabled(self.loaded.as_ref()).to_string(),
         );
         config_values.insert(
             "plugin_hook_timeout_ms".to_owned(),
@@ -2448,6 +2462,32 @@ genesis.register_personality({
                 .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
                 .is_none(),
             "disabled plugins should not create a runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_runtime_skips_creation_when_disabled_by_env() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let service = SessionExecutionService::new(&loaded);
+
+        unsafe {
+            std::env::set_var("GENESIS_NO_PLUGINS", "1");
+        }
+        let runtime = service.lua_runtime_for_session("session-1", DeliveryPlatform::Cli);
+        unsafe {
+            std::env::remove_var("GENESIS_NO_PLUGINS");
+        }
+
+        assert!(
+            runtime.is_none(),
+            "GENESIS_NO_PLUGINS should suppress runtime creation"
         );
     }
 
