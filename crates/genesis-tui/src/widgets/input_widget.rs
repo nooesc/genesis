@@ -30,6 +30,15 @@ const CURSOR_STYLE: Style = Style::new()
     .fg(rgb(genesis_ui::colors::UI_TEXT))
     .add_modifier(Modifier::REVERSED);
 
+/// Style for the placeholder main text ("Ask Eve anything...").
+const PLACEHOLDER_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_DIM));
+
+/// Style for the placeholder hint ("/ for commands").
+const PLACEHOLDER_HINT_STYLE: Style = Style::new().fg(rgb(genesis_ui::colors::UI_MUTED));
+
+/// Style for the multi-line hint shown below the placeholder.
+const MULTILINE_HINT_STYLE: Style = Style::new().fg(rgb((80, 80, 80)));
+
 /// Maximum number of visible rows for the input area (excluding border).
 const MAX_INPUT_ROWS: u16 = 10;
 
@@ -278,6 +287,12 @@ impl InputWidget {
             return;
         }
 
+        // ── Placeholder when buffer is empty ─────────────────────────────
+        if self.buffer.is_empty() {
+            self.render_placeholder(area, buf, show_cursor);
+            return;
+        }
+
         let lines: Vec<&str> = self.buffer.split('\n').collect();
         let visible_lines = (area.height as usize).min(lines.len());
 
@@ -364,6 +379,98 @@ impl InputWidget {
                     cell.set_symbol(" ");
                     cell.set_style(if show_cursor { CURSOR_STYLE } else { TEXT_STYLE });
                 }
+            }
+        }
+    }
+
+    // ── Placeholder rendering ──────────────────────────────────────────
+
+    /// Render the placeholder text when the buffer is empty.
+    ///
+    /// Shows `you> Ask Eve anything... (/ for commands)` on the first row
+    /// with the cursor at the prefix end, and `Shift+Enter for newline` as
+    /// a dimmer hint on the second row (if there is room).
+    fn render_placeholder(&self, area: Rect, buf: &mut Buffer, show_cursor: bool) {
+        let row = area.y;
+        let mut x = area.x;
+
+        // Draw "you> " prefix.
+        for ch in PREFIX.chars() {
+            if x >= area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                let mut s = String::with_capacity(ch.len_utf8());
+                s.push(ch);
+                cell.set_symbol(&s);
+                cell.set_style(PREFIX_STYLE);
+            }
+            x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        }
+
+        // Block cursor right after prefix.
+        let cursor_x = x;
+        if show_cursor && cursor_x < area.x + area.width {
+            if let Some(cell) = buf.cell_mut((cursor_x, row)) {
+                cell.set_symbol(" ");
+                cell.set_style(CURSOR_STYLE);
+            }
+        }
+
+        // Draw "Ask Eve anything... " in dim style (after the cursor position).
+        let placeholder_main = "Ask Eve anything... ";
+        let placeholder_hint = "(/ for commands)";
+        // Start the placeholder text at cursor_x (overlapping the cursor char
+        // is fine — the cursor block appears on top of the first placeholder char).
+        let mut px = cursor_x;
+        for ch in placeholder_main.chars() {
+            if px >= area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((px, row)) {
+                let mut s = String::with_capacity(ch.len_utf8());
+                s.push(ch);
+                cell.set_symbol(&s);
+                // The first cell is the cursor; keep its style.
+                if show_cursor && px == cursor_x {
+                    cell.set_style(CURSOR_STYLE);
+                } else {
+                    cell.set_style(PLACEHOLDER_STYLE);
+                }
+            }
+            px += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        }
+
+        // Draw "(/ for commands)" in muted style.
+        for ch in placeholder_hint.chars() {
+            if px >= area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((px, row)) {
+                let mut s = String::with_capacity(ch.len_utf8());
+                s.push(ch);
+                cell.set_symbol(&s);
+                cell.set_style(PLACEHOLDER_HINT_STYLE);
+            }
+            px += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+        }
+
+        // Draw "Shift+Enter for newline" hint on the second row if space allows.
+        if area.height >= 2 {
+            let hint_row = area.y + 1;
+            let hint_text = "Shift+Enter for newline";
+            let mut hx = area.x + PREFIX_WIDTH as u16;
+            for ch in hint_text.chars() {
+                if hx >= area.x + area.width {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((hx, hint_row)) {
+                    let mut s = String::with_capacity(ch.len_utf8());
+                    s.push(ch);
+                    cell.set_symbol(&s);
+                    cell.set_style(MULTILINE_HINT_STYLE);
+                }
+                hx += 1;
             }
         }
     }
@@ -956,5 +1063,69 @@ mod tests {
             w.insert_char('a');
         }
         assert_eq!(w.height(80), MAX_INPUT_ROWS);
+    }
+
+    // ── Placeholder tests ───────────────────────────────────────────────
+
+    /// Helper: render the widget into a fresh buffer and return the raw cell symbols
+    /// concatenated for each row (trimmed of trailing spaces).
+    fn render_to_strings(w: &InputWidget, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        w.render(area, &mut buf);
+        (0..height)
+            .map(|row| {
+                let mut s = String::new();
+                for col in 0..width {
+                    if let Some(cell) = buf.cell((col, row)) {
+                        s.push_str(cell.symbol());
+                    }
+                }
+                s.trim_end().to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn placeholder_shown_when_empty() {
+        let w = InputWidget::new();
+        let rows = render_to_strings(&w, 60, 2);
+        let first_line = &rows[0];
+        // Must contain the prefix and placeholder text.
+        assert!(
+            first_line.contains("you>"),
+            "expected 'you>' prefix, got: {first_line}"
+        );
+        assert!(
+            first_line.contains("Ask Eve anything..."),
+            "expected placeholder text, got: {first_line}"
+        );
+        assert!(
+            first_line.contains("(/ for commands)"),
+            "expected hint text, got: {first_line}"
+        );
+        // Second row should contain the multi-line hint.
+        let second_line = &rows[1];
+        assert!(
+            second_line.contains("Shift+Enter for newline"),
+            "expected multi-line hint, got: {second_line}"
+        );
+    }
+
+    #[test]
+    fn placeholder_hidden_when_buffer_has_content() {
+        let mut w = InputWidget::new();
+        w.handle_key(key(KeyCode::Char('x')));
+        let rows = render_to_strings(&w, 60, 2);
+        let first_line = &rows[0];
+        assert!(
+            !first_line.contains("Ask Eve anything..."),
+            "placeholder should not appear when buffer has content, got: {first_line}"
+        );
+        // The typed character should appear.
+        assert!(
+            first_line.contains("x"),
+            "expected typed char, got: {first_line}"
+        );
     }
 }

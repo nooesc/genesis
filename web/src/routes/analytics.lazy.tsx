@@ -14,6 +14,7 @@ import { formatTokens } from '@/lib/utils'
 import { Sparkline } from '@/components/dashboard/sparkline'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPlatformColor } from '@/lib/platforms'
+import { SectionHeader } from '@/components/shared/section-header'
 
 export const Route = createLazyFileRoute('/analytics')({
   component: AnalyticsPage,
@@ -224,16 +225,7 @@ function PlatformBars({ data }: { data: [string, number][] }) {
   )
 }
 
-function SectionHeader({ title }: { title: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/50">
-        {title}
-      </span>
-      <div className="h-px flex-1 bg-border/20" />
-    </div>
-  )
-}
+// SectionHeader imported from shared component
 
 function AnalyticsPage() {
   const [period, setPeriod] = React.useState<Period>(30)

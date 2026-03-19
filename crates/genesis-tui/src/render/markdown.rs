@@ -35,8 +35,10 @@ use crate::history::rgb;
 const ACCENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
 /// Default plain-text colour.
 const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
-/// Dim colour for blockquote prefix, horizontal rules.
+/// Dim colour for blockquote prefix, horizontal rules, code-fence dashes.
 const DIM: Color = rgb(genesis_ui::colors::UI_DIM);
+/// Muted colour for code-fence language labels.
+const MUTED: Color = rgb(genesis_ui::colors::UI_MUTED);
 /// Inline-code background.
 const CODE_BG: Color = Color::Rgb(50, 50, 50);
 /// Inline-code foreground.
@@ -246,6 +248,11 @@ impl MarkdownWriter {
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, code)) = self.code_block.take() {
+                    // Emit language label line if the fence specified a language.
+                    if !lang.is_empty() {
+                        self.emit_code_lang_label(&lang);
+                    }
+
                     let highlighted = highlight_code(&code, &lang);
                     // Add blockquote prefix to code lines if needed.
                     if self.blockquote_depth > 0 {
@@ -438,6 +445,32 @@ impl MarkdownWriter {
                 }
             }
         }
+    }
+
+    /// Emit a `─[ lang ]────…` label line above a fenced code block.
+    fn emit_code_lang_label(&mut self, lang: &str) {
+        const LABEL_WIDTH: usize = 40;
+        let lang_lower = lang.to_lowercase();
+        // "─[ rust ]" = 1 dash + "[ " + lang + " ]" = 5 fixed chars + lang len
+        let prefix_len = 1 + 2 + lang_lower.len() + 2; // "─" + "[ " + lang + " ]"
+        let trail = LABEL_WIDTH.saturating_sub(prefix_len);
+
+        let mut spans = Vec::new();
+
+        // Blockquote prefix if needed.
+        if self.blockquote_depth > 0 {
+            let bq = "│ ".repeat(self.blockquote_depth);
+            spans.push(Span::styled(bq, Style::default().fg(DIM)));
+        }
+
+        spans.push(Span::styled("─[ ", Style::default().fg(DIM)));
+        spans.push(Span::styled(lang_lower, Style::default().fg(MUTED)));
+        spans.push(Span::styled(
+            format!(" ]{}", "─".repeat(trail)),
+            Style::default().fg(DIM),
+        ));
+
+        self.lines.push(Line::from(spans));
     }
 
     /// Render the accumulated table data into lines.
@@ -755,7 +788,8 @@ mod tests {
         let md = "```rust\nlet x = 42;\n```";
         let lines = markdown_to_lines(md);
         assert!(!lines.is_empty(), "code fence should produce at least one line");
-        for line in &lines {
+        // Skip the first line (language label) — only code lines have CODE_BG.
+        for line in lines.iter().skip(1) {
             for span in &line.spans {
                 assert_eq!(
                     span.style.bg,
@@ -778,6 +812,50 @@ mod tests {
         let md = "```\nline1\nline2\nline3\n```";
         let lines = markdown_to_lines(md);
         assert_eq!(lines.len(), 3, "each code line should map to one ratatui Line");
+    }
+
+    #[test]
+    fn code_fence_with_lang_has_label_line() {
+        let md = "```rust\nlet x = 42;\n```";
+        let lines = markdown_to_lines(md);
+        // First line should be the language label.
+        let first_text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            first_text.contains("rust"),
+            "label line should contain the language name: {first_text}"
+        );
+        assert!(
+            first_text.contains("─"),
+            "label line should contain dash chars: {first_text}"
+        );
+        // The language name span should use MUTED colour.
+        let lang_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("rust"))
+            .expect("should have a span containing 'rust'");
+        assert_eq!(lang_span.style.fg, Some(MUTED));
+    }
+
+    #[test]
+    fn code_fence_without_lang_has_no_label() {
+        let md = "```\nhello world\n```";
+        let lines = markdown_to_lines(md);
+        // No label line — every line should have CODE_BG spans (code content only).
+        for line in &lines {
+            let has_dash_label = line
+                .spans
+                .iter()
+                .any(|s| s.content.contains("─[") || s.content.contains("─[ "));
+            assert!(
+                !has_dash_label,
+                "bare code fence should not have a language label"
+            );
+        }
     }
 
     // ── Headers ──────────────────────────────────────────────────────────
