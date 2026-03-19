@@ -55,7 +55,14 @@ impl ApprovalOverlay {
             .iter()
             .map(|(k, v)| {
                 // Truncate long values for display.
-                let display = if v.len() > 200 {
+                let display = if k == "old_text" || k == "new_text" || k == "content" {
+                    // Keep more content for diff preview (up to 2000 chars).
+                    if v.len() > 2000 {
+                        format!("{}…", &v[..v.floor_char_boundary(2000)])
+                    } else {
+                        v.clone()
+                    }
+                } else if v.len() > 200 {
                     format!("{}…", &v[..v.floor_char_boundary(200)])
                 } else {
                     v.clone()
@@ -89,7 +96,8 @@ impl ApprovalOverlay {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => ApprovalAction::Deny,
             // Scroll
             (KeyCode::Down | KeyCode::Char('j'), _) => {
-                let max = self.arg_lines.len().saturating_sub(1);
+                let content_len = self.build_content_lines(80).len();
+                let max = content_len.saturating_sub(1);
                 self.scroll = self.scroll.saturating_add(1).min(max);
                 ApprovalAction::None
             }
@@ -322,6 +330,21 @@ impl ApprovalOverlay {
                 }
                 return lines_or_empty(lines);
             }
+
+            // File edit tool without diff or content (e.g. delete_file with only path).
+            // Show remaining non-path args and return without falling through to generic.
+            for (key, value) in &self.arg_lines {
+                if key != "path" {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {key}: "),
+                            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(value.clone(), Style::default().fg(DIM)),
+                    ]));
+                }
+            }
+            return lines_or_empty(lines);
         }
 
         // Default: generic key-value rendering.
