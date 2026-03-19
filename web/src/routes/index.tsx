@@ -9,8 +9,8 @@ import { PlatformBreakdown } from '@/components/dashboard/platform-breakdown'
 import { RecentSessions } from '@/components/dashboard/recent-sessions'
 import { ActivityFeed } from '@/components/dashboard/activity-feed'
 import { ToolHeatmap } from '@/components/dashboard/tool-heatmap'
+import { SectionHeader } from '@/components/shared/section-header'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatUptime, formatTokens, isHealthyStatus } from '@/lib/utils'
 
 export const Route = createFileRoute('/')({
@@ -51,176 +51,150 @@ function DashboardPage() {
     : 0
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       {/* Row 1: System gauges + KPI metrics */}
-      <div className="card-stagger grid grid-cols-1 gap-4 lg:grid-cols-12">
+      <div className="card-stagger grid grid-cols-1 gap-3 lg:grid-cols-12">
         {/* Health gauge */}
-        <Card className="lg:col-span-2">
-          <CardContent className="flex items-center justify-center py-4">
-            {healthLoading ? (
-              <Skeleton className="h-[100px] w-[100px] rounded-full" />
-            ) : (
-              <HealthGauge
-                value={isHealthy ? uptimeFraction : 0.15}
-                label={isHealthy ? 'OK' : health ? '!!' : '?'}
-                status={isHealthy ? 'success' : health ? 'error' : 'warning'}
-                sublabel={health ? `Up ${formatUptime(health.uptime_seconds)}` : 'unreachable'}
-              />
-            )}
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-center rounded-md border border-border/20 bg-card/20 py-4 lg:col-span-2">
+          {healthLoading ? (
+            <Skeleton className="h-[100px] w-[100px] rounded-full" />
+          ) : (
+            <HealthGauge
+              value={isHealthy ? uptimeFraction : 0.15}
+              label={isHealthy ? 'OK' : health ? '!!' : '?'}
+              status={isHealthy ? 'success' : health ? 'error' : 'warning'}
+              sublabel={health ? `Up ${formatUptime(health.uptime_seconds)}` : 'unreachable'}
+            />
+          )}
+        </div>
 
         {/* Metric cards with sparklines */}
-        <Card className="lg:col-span-3">
-          <CardContent className="flex items-center justify-between gap-3 p-4">
-            <div className="flex flex-col">
-              <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
-                Tokens (7d)
-              </span>
-              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-                {insightsLoading ? '—' : formatTokens(totalTokens7d)}
-              </span>
-              <span className="font-mono text-[10px] text-muted-foreground/40">
-                input + output
-              </span>
-            </div>
-            {tokensPerDayValues.length >= 2 && (
-              <Sparkline data={tokensPerDayValues} width={80} height={28} color="#0891b2" />
-            )}
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between gap-3 rounded-md border border-border/20 bg-card/20 px-4 py-3 lg:col-span-3">
+          <div className="flex flex-col">
+            <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+              Tokens (7d)
+            </span>
+            <span className="mt-0.5 font-mono text-lg font-bold tabular-nums text-foreground/90">
+              {insightsLoading ? '—' : formatTokens(totalTokens7d)}
+            </span>
+            <span className="font-mono text-[9px] text-muted-foreground/30">
+              input + output
+            </span>
+          </div>
+          {tokensPerDayValues.length >= 2 && (
+            <Sparkline data={tokensPerDayValues} width={80} height={28} color="#0891b2" />
+          )}
+        </div>
 
-        <Card className="lg:col-span-3">
-          <CardContent className="flex items-center justify-between gap-3 p-4">
-            <div className="flex flex-col">
-              <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
-                Sessions (7d)
-              </span>
-              <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-                {insightsLoading ? '—' : insights?.sessions_count ?? 0}
-              </span>
-              <span className="font-mono text-[10px] text-muted-foreground/40">
-                v{health?.version ?? '—'}
-              </span>
-            </div>
-            {sessionsPerDayValues.length >= 2 && (
-              <Sparkline data={sessionsPerDayValues} width={80} height={28} color="#a855f7" />
-            )}
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-between gap-3 rounded-md border border-border/20 bg-card/20 px-4 py-3 lg:col-span-3">
+          <div className="flex flex-col">
+            <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+              Sessions (7d)
+            </span>
+            <span className="mt-0.5 font-mono text-lg font-bold tabular-nums text-foreground/90">
+              {insightsLoading ? '—' : insights?.sessions_count ?? 0}
+            </span>
+            <span className="font-mono text-[9px] text-muted-foreground/30">
+              v{health?.version ?? '—'}
+            </span>
+          </div>
+          {sessionsPerDayValues.length >= 2 && (
+            <Sparkline data={sessionsPerDayValues} width={80} height={28} color="#a855f7" />
+          )}
+        </div>
 
-        <Card className="lg:col-span-2">
-          <CardContent className="flex flex-col gap-1 p-4">
-            <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
-              Tools
-            </span>
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {health?.total_tools ?? 0}
-            </span>
-            <span className="font-mono text-[10px] text-muted-foreground/40">
-              {health?.mcp_servers ?? 0} MCP
-            </span>
-          </CardContent>
-        </Card>
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-4 py-3 lg:col-span-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Tools
+          </span>
+          <span className="font-mono text-lg font-bold tabular-nums text-foreground/90">
+            {health?.total_tools ?? 0}
+          </span>
+          <span className="font-mono text-[9px] text-muted-foreground/30">
+            {health?.mcp_servers ?? 0} MCP
+          </span>
+        </div>
 
-        <Card className="lg:col-span-2">
-          <CardContent className="flex flex-col gap-1 p-4">
-            <span className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground/60">
-              Schedules
-            </span>
-            <span className="font-mono text-xl font-bold tabular-nums text-foreground">
-              {health?.active_schedules ?? 0}
-            </span>
-            <span className="font-mono text-[10px] text-muted-foreground/40">
-              active
-            </span>
-          </CardContent>
-        </Card>
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-4 py-3 lg:col-span-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Schedules
+          </span>
+          <span className="font-mono text-lg font-bold tabular-nums text-foreground/90">
+            {health?.active_schedules ?? 0}
+          </span>
+          <span className="font-mono text-[9px] text-muted-foreground/30">
+            active
+          </span>
+        </div>
       </div>
 
       {/* Row 2: Token chart + Tool heatmap */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
-              Token Throughput (7d)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pb-4">
-            {insightsLoading ? (
-              <Skeleton className="h-[200px] w-full rounded" />
-            ) : (
-              <TokenChart tokensPerDay={insights?.tokens_per_day ?? []} />
-            )}
-          </CardContent>
-        </Card>
+      <SectionHeader title="Throughput" />
+      <div className="card-stagger grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="rounded-md border border-border/20 bg-card/20 p-3 lg:col-span-2">
+          <div className="mb-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40">
+            Token Throughput (7d)
+          </div>
+          {insightsLoading ? (
+            <Skeleton className="h-[200px] w-full rounded" />
+          ) : (
+            <TokenChart tokensPerDay={insights?.tokens_per_day ?? []} />
+          )}
+        </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
-              Tool Usage Heatmap
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pb-4">
-            {insightsLoading ? (
-              <Skeleton className="h-[200px] w-full rounded" />
-            ) : (
-              <ToolHeatmap toolUsage={insights?.tool_usage ?? []} />
-            )}
-          </CardContent>
-        </Card>
+        <div className="rounded-md border border-border/20 bg-card/20 p-3">
+          <div className="mb-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40">
+            Tool Usage Heatmap
+          </div>
+          {insightsLoading ? (
+            <Skeleton className="h-[200px] w-full rounded" />
+          ) : (
+            <ToolHeatmap toolUsage={insights?.tool_usage ?? []} />
+          )}
+        </div>
       </div>
 
       {/* Row 3: Activity feed + Platform breakdown + Recent sessions */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
-              Live Activity
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="max-h-[300px] overflow-auto pb-4">
+      <SectionHeader title="Activity" />
+      <div className="card-stagger grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="rounded-md border border-border/20 bg-card/20 p-3">
+          <div className="mb-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40">
+            Live Activity
+          </div>
+          <div className="max-h-[280px] overflow-auto">
             <ActivityFeed />
-          </CardContent>
-        </Card>
+          </div>
+        </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
-              Platform Breakdown
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pb-4">
-            {insightsLoading ? (
-              <div className="flex flex-col gap-3">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <Skeleton key={i} className="h-6 w-full rounded" />
-                ))}
-              </div>
-            ) : (
-              <PlatformBreakdown data={platformEntries} />
-            )}
-          </CardContent>
-        </Card>
+        <div className="rounded-md border border-border/20 bg-card/20 p-3">
+          <div className="mb-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40">
+            Platform Breakdown
+          </div>
+          {insightsLoading ? (
+            <div className="flex flex-col gap-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-6 w-full rounded" />
+              ))}
+            </div>
+          ) : (
+            <PlatformBreakdown data={platformEntries} />
+          )}
+        </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/60">
-              Recent Sessions
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pb-4">
-            {sessionsLoading ? (
-              <div className="flex flex-col gap-2">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className="h-8 w-full rounded" />
-                ))}
-              </div>
-            ) : (
-              <RecentSessions sessions={sessions ?? []} />
-            )}
-          </CardContent>
-        </Card>
+        <div className="rounded-md border border-border/20 bg-card/20 p-3">
+          <div className="mb-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/40">
+            Recent Sessions
+          </div>
+          {sessionsLoading ? (
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-8 w-full rounded" />
+              ))}
+            </div>
+          ) : (
+            <RecentSessions sessions={sessions ?? []} />
+          )}
+        </div>
       </div>
     </div>
   )
