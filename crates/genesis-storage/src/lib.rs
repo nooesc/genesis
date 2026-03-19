@@ -553,17 +553,17 @@ fn collect_rows<T>(
 
 /// Check whether a column exists in a table (used for idempotent migrations).
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    // Validate identifiers to prevent SQL injection (all callers use
-    // compile-time literals, but defense-in-depth doesn't hurt).
-    debug_assert!(
+    // All callers pass compile-time string literals. Validate identifiers
+    // unconditionally (not just in debug builds) as defense-in-depth.
+    assert!(
         table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-        "table name must be alphanumeric"
+        "column_exists: table name must be alphanumeric, got {table:?}"
     );
-    debug_assert!(
+    assert!(
         column
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_'),
-        "column name must be alphanumeric"
+        "column_exists: column name must be alphanumeric, got {column:?}"
     );
     conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
         .is_ok()
@@ -3765,9 +3765,16 @@ impl MemoryStore {
         let kind = note.kind.clone();
         let content = note.content.clone();
         let linked_ids = note.linked_ids.clone();
-        let keywords_json =
-            serde_json::to_string(&note.keywords).unwrap_or_else(|_| "[]".to_owned());
-        let tags_json = serde_json::to_string(&note.tags).unwrap_or_else(|_| "[]".to_owned());
+        // Vec<String> serialization is infallible in practice; fall back to
+        // empty array and log to stderr if it somehow fails.
+        let keywords_json = serde_json::to_string(&note.keywords).unwrap_or_else(|e| {
+            eprintln!("warning: failed to serialize memory keywords: {e}");
+            "[]".to_owned()
+        });
+        let tags_json = serde_json::to_string(&note.tags).unwrap_or_else(|e| {
+            eprintln!("warning: failed to serialize memory tags: {e}");
+            "[]".to_owned()
+        });
 
         tx.execute(
             "INSERT INTO memories (
@@ -8722,13 +8729,16 @@ mod pairing_store_tests {
 
         let store = PairingStore::new(&database_path);
 
-        // Generate codes on two platforms
+        // Generate codes on two platforms. Sleep between calls to avoid
+        // XORShift seed collisions from identical nanosecond timestamps.
         store
             .generate_code("telegram", "user_a", "A")
             .expect("generate_code should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .generate_code("telegram", "user_b", "B")
             .expect("generate_code should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .generate_code("discord", "user_c", "C")
             .expect("generate_code should succeed");
