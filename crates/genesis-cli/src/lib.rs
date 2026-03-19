@@ -15,8 +15,6 @@ use genesis_core::agent_loop::AgentError;
 use genesis_core::replay::load_and_report;
 use genesis_core::execution::SessionExecutionError;
 use genesis_core::run_doctor;
-use genesis_core::scheduler::{check_due_schedules, CronTime};
-use genesis_gateway::{build_router, AppState};
 use genesis_provider::ProviderError;
 use genesis_storage::{
     bootstrap, MemoryStore, ScheduleStore, SessionStore,
@@ -4678,7 +4676,7 @@ storage:
         std::fs::write(&right, serde_json::to_string_pretty(&right_trajectory).unwrap())
             .expect("write right");
 
-        let comparison = crate::commands::eval::compare_replay_reports(
+        let _comparison = crate::commands::eval::compare_replay_reports(
             left.to_str().unwrap(),
             right.to_str().unwrap(),
         )

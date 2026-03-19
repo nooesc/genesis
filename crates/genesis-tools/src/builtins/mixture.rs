@@ -246,7 +246,7 @@ mod tests {
             .split(',')
             .filter_map(|s| {
                 let s = s.trim();
-                s.split_once('/').or_else(|| Some(("openai", s)))
+                s.split_once('/').or(Some(("openai", s)))
             })
             .take(MAX_MODELS)
             .collect();
