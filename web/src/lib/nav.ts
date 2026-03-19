@@ -23,6 +23,6 @@ export const navRoutes: NavRoute[] = [
   { to: '/schedules', label: 'Schedules', icon: Clock, keywords: 'cron timer jobs automation', shortcut: '7' },
   { to: '/tools', label: 'Tools', icon: Wrench, keywords: 'functions registry mcp', shortcut: '8' },
   { to: '/analytics', label: 'Analytics', icon: BarChart3, keywords: 'stats usage tokens charts', shortcut: '9' },
-  { to: '/audit', label: 'Audit Log', icon: FileText, keywords: 'history actions log events' },
+  { to: '/audit', label: 'Audit Log', icon: FileText, keywords: 'history actions log events', shortcut: '9' },
   { to: '/settings', label: 'Settings', icon: Settings, keywords: 'config preferences', shortcut: '0' },
 ]

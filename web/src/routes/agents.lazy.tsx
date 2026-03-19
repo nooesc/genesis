@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { formatUptime, isHealthyStatus } from '@/lib/utils'
 import { getPlatformColor } from '@/lib/platforms'
 import {
-  Bot, Server, Webhook, Clock, Cpu, Activity,
+  Bot, Server, Clock, Cpu, Activity,
   MessageSquare, Globe,
 } from 'lucide-react'
 
@@ -14,43 +14,34 @@ export const Route = createLazyFileRoute('/agents')({
   component: AgentsPage,
 })
 
-// --- Topology Node Component ---
 function TopoNode({
   label,
   subtitle,
   status,
   icon: Icon,
   accent,
-  size = 'md',
 }: {
   label: string
   subtitle?: string
   status?: 'online' | 'offline' | 'idle'
   icon: React.ComponentType<{ className?: string }>
   accent?: string
-  size?: 'sm' | 'md' | 'lg'
 }) {
-  const sizeClasses = {
-    sm: 'px-3 py-2',
-    md: 'px-4 py-3',
-    lg: 'px-5 py-4',
-  }
-
   return (
-    <div className={`rounded-lg border border-border/40 bg-card/40 ${sizeClasses[size]} transition-colors hover:border-border/60`}>
-      <div className="flex items-center gap-2.5">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-muted/30">
-          <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+    <div className="rounded-lg border border-border/40 bg-card/40 px-3 py-2 transition-colors hover:border-border/60">
+      <div className="flex items-center gap-2">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-muted/30">
+          <Icon className="h-3 w-3 text-muted-foreground" />
         </div>
         <div className="min-w-0">
-          <div className="font-mono text-[11px] font-medium text-foreground/80">{label}</div>
+          <div className="truncate font-mono text-[10px] font-medium text-foreground/80">{label}</div>
           {subtitle && (
-            <div className="truncate font-mono text-[9px] text-muted-foreground/40">{subtitle}</div>
+            <div className="truncate font-mono text-[8px] text-muted-foreground/40">{subtitle}</div>
           )}
         </div>
       </div>
       {status && (
-        <div className="mt-2 flex items-center gap-1.5">
+        <div className="mt-1.5 flex items-center gap-1.5">
           <div
             className={`h-1.5 w-1.5 rounded-full ${
               status === 'online' ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.5)]'
@@ -59,34 +50,18 @@ function TopoNode({
             }`}
             style={accent && status === 'online' ? { backgroundColor: accent, boxShadow: `0 0 4px ${accent}60` } : undefined}
           />
-          <span className={`font-mono text-[9px] ${
+          <span className={`font-mono text-[8px] ${
             status === 'online' ? 'text-emerald-400'
             : status === 'offline' ? 'text-red-400'
             : 'text-muted-foreground/40'
           }`}
-          style={accent && status === 'online' ? { color: accent } : undefined}
+            style={accent && status === 'online' ? { color: accent } : undefined}
           >
             {status === 'online' ? 'Online' : status === 'offline' ? 'Offline' : 'Idle'}
           </span>
         </div>
       )}
     </div>
-  )
-}
-
-// --- SVG Connector (dashed line between two points) ---
-function Connector({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: number }) {
-  // Step connector (right-angle path like Railway)
-  const midY = (y1 + y2) / 2
-  return (
-    <path
-      d={`M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`}
-      fill="none"
-      stroke="var(--border)"
-      strokeWidth={1}
-      strokeDasharray="4 4"
-      opacity={0.4}
-    />
   )
 }
 
@@ -118,52 +93,40 @@ function AgentsPage() {
         Agent Topology
       </h1>
 
-      {/* Topology Canvas */}
-      <div className="relative min-h-[500px] overflow-hidden rounded-lg border border-border/20 bg-[#0b0b0b] p-6">
-        {/* Background grid */}
+      <div className="relative overflow-hidden rounded-lg border border-border/20 bg-[#0b0b0b] p-6">
+        {/* Dot grid background */}
         <div className="pointer-events-none absolute inset-0 opacity-[0.03]" style={{
           backgroundImage: 'radial-gradient(circle, var(--foreground) 1px, transparent 1px)',
           backgroundSize: '24px 24px',
         }} />
 
-        {/* SVG connectors layer */}
-        <svg className="pointer-events-none absolute inset-0 h-full w-full" preserveAspectRatio="none">
-          {/* Eve → MCP servers (left side) */}
-          {mcpServers.map((_, i) => (
-            <Connector
-              key={`mcp-${i}`}
-              x1={380}
-              y1={200}
-              x2={120}
-              y2={80 + i * 90}
-            />
-          ))}
-          {/* Eve → Platforms (right side) */}
-          {platforms.map((_, i) => (
-            <Connector
-              key={`plat-${i}`}
-              x1={580}
-              y1={200}
-              x2={780}
-              y2={80 + i * 80}
-            />
-          ))}
-          {/* Eve → Schedules (bottom) */}
-          {activeSchedules.map((_, i) => (
-            <Connector
-              key={`sched-${i}`}
-              x1={480}
-              y1={280}
-              x2={300 + i * 200}
-              y2={420}
-            />
-          ))}
-        </svg>
+        {/* 3-column topology: Services | Eve | Platforms */}
+        <div className="relative z-10 flex items-start justify-center gap-6">
+          {/* Left: MCP Services */}
+          <div className="flex w-48 flex-col gap-2 pt-12">
+            {mcpServers.length > 0 && (
+              <>
+                <span className="mb-1 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
+                  MCP Services
+                </span>
+                {mcpServers.map((server) => (
+                  <div key={server.name} className="flex items-center gap-2">
+                    <TopoNode
+                      label={server.name}
+                      status={server.connected ? 'online' : 'offline'}
+                      icon={Server}
+                    />
+                    {/* Connector dash */}
+                    <div className="h-px w-6 border-t border-dashed border-border/30" />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
 
-        {/* Positioned nodes */}
-        <div className="relative z-10">
-          {/* Central Eve node */}
-          <div className="absolute left-1/2 top-[140px] -translate-x-1/2">
+          {/* Center: Eve */}
+          <div className="flex flex-col items-center gap-4">
+            {/* Eve Card */}
             <div className="rounded-xl border-2 border-primary/30 bg-card/60 px-6 py-4 shadow-lg shadow-primary/5">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
@@ -188,68 +151,31 @@ function AgentsPage() {
                 </span>
               </div>
               <div className="mt-2 flex gap-4">
-                <Stat icon={Cpu} value={String(health?.total_tools ?? 0)} label="tools" />
-                <Stat icon={Activity} value={String(health?.total_sessions ?? 0)} label="sessions" />
-                <Stat icon={Clock} value={String(health?.active_schedules ?? 0)} label="schedules" />
+                <MiniStat icon={Cpu} value={String(health?.total_tools ?? 0)} label="tools" />
+                <MiniStat icon={Activity} value={String(health?.total_sessions ?? 0)} label="sessions" />
+                <MiniStat icon={Clock} value={String(health?.active_schedules ?? 0)} label="schedules" />
               </div>
             </div>
-          </div>
 
-          {/* MCP Servers — left column */}
-          {mcpServers.length > 0 && (
-            <div className="absolute left-8 top-[40px] flex flex-col gap-2">
-              <span className="mb-1 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
-                MCP Services
-              </span>
-              {mcpServers.map((server) => (
-                <TopoNode
-                  key={server.name}
-                  label={server.name}
-                  subtitle={`${server.connected ? 'connected' : 'disconnected'}`}
-                  status={server.connected ? 'online' : 'offline'}
-                  icon={Server}
-                  size="sm"
-                />
-              ))}
-            </div>
-          )}
+            {/* Vertical connector to schedules */}
+            {activeSchedules.length > 0 && (
+              <div className="h-8 w-px border-l border-dashed border-border/30" />
+            )}
 
-          {/* Platform connections — right column */}
-          {platforms.length > 0 && (
-            <div className="absolute right-8 top-[40px] flex flex-col gap-2">
-              <span className="mb-1 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
-                Platforms
-              </span>
-              {platforms.map(([platform, count]) => (
-                <TopoNode
-                  key={platform}
-                  label={platform}
-                  subtitle={`${count} sessions`}
-                  status="online"
-                  icon={platform === 'api' ? Globe : platform.includes('webhook') ? Webhook : MessageSquare}
-                  accent={getPlatformColor(platform)}
-                  size="sm"
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Active schedules — bottom row */}
-          {activeSchedules.length > 0 && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2">
+            {/* Schedules (below Eve) */}
+            {activeSchedules.length > 0 && (
               <div className="flex flex-col items-center gap-2">
                 <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
                   Active Schedules
                 </span>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap justify-center gap-2">
                   {activeSchedules.slice(0, 4).map((schedule) => (
                     <TopoNode
                       key={schedule.id}
-                      label={schedule.id}
+                      label={schedule.destination || schedule.id}
                       subtitle={schedule.cron_expression}
                       status="idle"
                       icon={Clock}
-                      size="sm"
                     />
                   ))}
                   {activeSchedules.length > 4 && (
@@ -259,15 +185,39 @@ function AgentsPage() {
                   )}
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          {/* Right: Platforms */}
+          <div className="flex w-48 flex-col gap-2 pt-12">
+            {platforms.length > 0 && (
+              <>
+                <span className="mb-1 font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
+                  Platforms
+                </span>
+                {platforms.map(([platform, count]) => (
+                  <div key={platform} className="flex items-center gap-2">
+                    {/* Connector dash */}
+                    <div className="h-px w-6 border-t border-dashed border-border/30" />
+                    <TopoNode
+                      label={platform}
+                      subtitle={`${count} sessions`}
+                      status="online"
+                      icon={platform === 'api' ? Globe : MessageSquare}
+                      accent={getPlatformColor(platform)}
+                    />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
-function Stat({ icon: Icon, value, label }: { icon: React.ComponentType<{ className?: string }>; value: string; label: string }) {
+function MiniStat({ icon: Icon, value, label }: { icon: React.ComponentType<{ className?: string }>; value: string; label: string }) {
   return (
     <div className="flex items-center gap-1.5">
       <Icon className="h-3 w-3 text-muted-foreground/30" />
