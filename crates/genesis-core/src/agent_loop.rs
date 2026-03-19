@@ -1218,7 +1218,7 @@ impl AgentLoop {
                     let executable_tool_calls: Vec<ToolCallEntry> = effective_tool_calls
                         .iter()
                         .zip(veto_reasons.iter())
-                        .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                        .filter(|(_, veto)| veto.is_none()).map(|(tc, _)| tc.clone())
                         .collect();
                     let tool_start = Instant::now();
                     let executed_results = if executable_tool_calls.is_empty() {
@@ -1738,7 +1738,7 @@ impl AgentLoop {
                         let executable_tool_calls: Vec<ToolCallEntry> = streamed_tool_calls
                             .iter()
                             .zip(veto_reasons.iter())
-                            .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                            .filter(|(_, veto)| veto.is_none()).map(|(tc, _)| tc.clone())
                             .collect();
                         let tool_exec_start = Instant::now();
                         let executed_results = if executable_tool_calls.is_empty() {
@@ -1977,7 +1977,7 @@ impl AgentLoop {
                             let executable_tool_calls: Vec<ToolCallEntry> = tool_calls
                                 .iter()
                                 .zip(veto_reasons.iter())
-                                .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                                .filter(|(_, veto)| veto.is_none()).map(|(tc, _)| tc.clone())
                                 .collect();
                             let tool_exec_start = Instant::now();
                             let executed_results = if executable_tool_calls.is_empty() {

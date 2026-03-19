@@ -40,7 +40,6 @@ pub trait McpTransport: Send + Sync {
 }
 
 /// Stdio transport — spawns a subprocess and communicates via stdin/stdout.
-#[allow(dead_code)]
 pub struct StdioTransport {
     /// Channel to send outgoing messages to the writer task.
     outgoing_tx: mpsc::UnboundedSender<String>,

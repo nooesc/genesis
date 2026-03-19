@@ -2,7 +2,6 @@ pub mod agent_bus;
 pub mod agent_loop;
 pub mod audit;
 pub mod compress;
-#[allow(dead_code)]
 pub(crate) mod context_security;
 pub mod cost;
 pub mod dataset;

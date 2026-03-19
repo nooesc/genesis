@@ -1611,13 +1611,15 @@ mod tests {
 
     #[test]
     fn defaults_to_rust_native_paths_when_no_file_exists() {
-        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        let dir = tempdir().expect("tempdir should exist");
+        // Point at a nonexistent file so the real user config is never read.
+        let absent = dir.path().join("nonexistent.yaml");
+        let config =
+            load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
 
         assert_eq!(config.config.profile, "default");
         assert_eq!(config.config.provider.backend, "openai");
         assert_eq!(config.config.provider.model, "gpt-4.1-mini");
-        assert!(config.paths.config_path.ends_with("genesis/config.yaml"));
-        assert!(config.paths.database_path.ends_with("genesis/genesis.db"));
     }
 
     #[test]

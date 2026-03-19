@@ -177,8 +177,6 @@ pub enum LuaRuntimeError {
         #[from]
         source: mlua::Error,
     },
-    #[error("lua runtime initialization is not implemented yet")]
-    NotImplemented,
 }
 
 impl LuaRuntime {

@@ -220,6 +220,7 @@ impl UserData for GenesisApi {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn install_genesis_api(
     lua: &Lua,
     config: &LuaRuntimeConfig,

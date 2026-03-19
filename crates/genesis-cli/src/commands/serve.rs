@@ -96,7 +96,7 @@ pub(crate) async fn run_serve(
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .map_err(|e| CliError::Io(e))?;
+        .map_err(CliError::Io)?;
 
     // Start background scheduler
     let db_path = state.loaded.config.storage.database_path.clone();
