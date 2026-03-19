@@ -51,11 +51,11 @@ function getActionColor(action: string): string {
 }
 
 function AuditRow({ entry, isLast }: { entry: AuditEntry; isLast: boolean }) {
-  const category = categorize(entry.action)
+  const category = categorize(entry.event_type)
   const meta = CATEGORY_META[category]
   const Icon = meta.icon
   const [iconColor, bgColor] = meta.color.split(' ')
-  const actionColor = getActionColor(entry.action)
+  const actionColor = getActionColor(entry.event_type)
 
   return (
     <div className="group flex items-stretch gap-3">
@@ -71,7 +71,7 @@ function AuditRow({ entry, isLast }: { entry: AuditEntry; isLast: boolean }) {
       <div className="min-w-0 flex-1 pb-3">
         <div className="flex items-center gap-2">
           <span className={`font-mono text-[11px] font-medium ${actionColor}`}>
-            {entry.action}
+            {entry.event_type}
           </span>
           {entry.session_id && (
             <Link
@@ -107,7 +107,7 @@ function AuditPage() {
   const categoryCounts = React.useMemo(() => {
     const counts = new Map<ActionCategory, number>()
     for (const entry of entries ?? []) {
-      const cat = categorize(entry.action)
+      const cat = categorize(entry.event_type)
       counts.set(cat, (counts.get(cat) ?? 0) + 1)
     }
     return counts
@@ -117,10 +117,10 @@ function AuditPage() {
     return (entries ?? []).filter((entry) => {
       const matchesSearch =
         !search ||
-        entry.action.toLowerCase().includes(search.toLowerCase()) ||
+        entry.event_type.toLowerCase().includes(search.toLowerCase()) ||
         (entry.session_id?.toLowerCase().includes(search.toLowerCase()) ?? false) ||
         (entry.details?.toLowerCase().includes(search.toLowerCase()) ?? false)
-      const matchesCategory = !categoryFilter || categorize(entry.action) === categoryFilter
+      const matchesCategory = !categoryFilter || categorize(entry.event_type) === categoryFilter
       return matchesSearch && matchesCategory
     })
   }, [entries, search, categoryFilter])

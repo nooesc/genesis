@@ -139,7 +139,7 @@ export interface UsageStats {
 
 export interface AuditEntry {
   id: string
-  action: string
+  event_type: string
   session_id: string | null
   details: string | null
   created_at: string
