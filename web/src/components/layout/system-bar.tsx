@@ -1,6 +1,7 @@
 import { useHealth } from '@/lib/api/queries/health'
 import { useInsights } from '@/lib/api/queries/analytics'
-import { formatUptime, formatTokens, isHealthyStatus } from '@/lib/utils'
+import { useLatestAuditEvent } from '@/lib/api/queries/audit'
+import { formatUptime, formatTokens, isHealthyStatus, formatRelativeTime } from '@/lib/utils'
 import { useEffect, useMemo, useState } from 'react'
 
 function SystemClock() {
@@ -21,6 +22,7 @@ function SystemClock() {
 export function SystemBar() {
   const { data: health, isError } = useHealth()
   const { data: insights } = useInsights(7)
+  const { data: latestEvent } = useLatestAuditEvent()
 
   const totalTokens7d = useMemo(
     () => insights ? insights.tokens_per_day.reduce((sum, [, inp, out]) => sum + inp + out, 0) : 0,
@@ -75,8 +77,13 @@ export function SystemBar() {
         )}
       </div>
 
-      {/* Right: Clock */}
+      {/* Right: Latest event + status + clock */}
       <div className="flex items-center gap-3">
+        {latestEvent && (
+          <span className="max-w-[200px] truncate font-mono text-[9px] text-muted-foreground/25" title={`${latestEvent.action} — ${formatRelativeTime(latestEvent.created_at)}`}>
+            {latestEvent.action}
+          </span>
+        )}
         <span className="font-mono text-[10px] text-muted-foreground/40">
           {isError ? 'OFFLINE' : health ? 'ONLINE' : '...'}
         </span>
