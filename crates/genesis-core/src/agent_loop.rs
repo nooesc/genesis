@@ -3264,6 +3264,7 @@ mod tests {
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         AgentLoop::with_history(
@@ -3410,6 +3411,7 @@ tools = [{tools_list}]
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         AgentLoop::with_history(
@@ -3881,6 +3883,7 @@ tools = [{tools_list}]
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         let mut agent = AgentLoop::with_history(
@@ -3942,6 +3945,7 @@ tools = [{tools_list}]
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         let mut agent = AgentLoop::with_history(
@@ -4093,6 +4097,7 @@ tools = [{tools_list}]
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         let mut agent = AgentLoop::new(
@@ -5016,6 +5021,7 @@ end)
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         let mut agent = AgentLoop::new(
@@ -5101,6 +5107,7 @@ end)
             max_concurrency: 4,
             allow_destructive_tools: false,
             provider_backend: "openai".to_owned(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         });
 
         let mut agent = AgentLoop::new(

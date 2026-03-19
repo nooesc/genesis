@@ -73,6 +73,20 @@ pub struct DisplayConfig {
     pub tool_progress: ToolDisplayMode,
 }
 
+/// Tool approval mode controlling when tools require interactive confirmation.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// Original behavior: destructive tools allowed by flag, Always-policy
+    /// tools go through approval handler.
+    #[default]
+    Auto,
+    /// Read-only tools auto-approved; everything else requires approval.
+    Smart,
+    /// Every non-Never tool requires approval.
+    Manual,
+}
+
 /// Controls how tool call progress is displayed in the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -346,6 +360,10 @@ pub struct RuntimeConfig {
     /// When set, tool calls are checked against allow/deny rules before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_policy_path: Option<String>,
+    /// Tool approval mode (auto, smart, manual). Controls when tools require
+    /// interactive confirmation before execution.
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 
 /// Batch API routing configuration.
@@ -930,6 +948,8 @@ struct FileRuntimeConfig {
     batch: Option<BatchApiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_policy_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_mode: Option<ApprovalMode>,
 }
 
 #[derive(Debug, Error)]
@@ -1017,6 +1037,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             core_tools: None,
             batch: None,
             tool_policy_path: None,
+            approval_mode: ApprovalMode::default(),
         },
         plugins: PluginsConfig::default(),
         gateway: None,
@@ -1182,6 +1203,7 @@ pub fn load_from_map(
         core_tools: rt.and_then(|r| r.core_tools.clone()),
         batch: rt.and_then(|r| r.batch.clone()),
         tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
+        approval_mode: rt.and_then(|r| r.approval_mode).unwrap_or_default(),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -2286,5 +2308,56 @@ routing:
         assert_eq!(routing.cheap_model.as_deref(), Some("haiku-4.5"));
         assert_eq!(routing.top_model.as_deref(), Some("opus-4.6"));
         assert_eq!(routing.default_tier, "cheap");
+    }
+
+    #[test]
+    fn approval_mode_defaults_to_auto() {
+        assert_eq!(
+            super::ApprovalMode::default(),
+            super::ApprovalMode::Auto,
+        );
+    }
+
+    #[test]
+    fn approval_mode_from_yaml() {
+        let yaml = "\"smart\"";
+        let mode: super::ApprovalMode = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(mode, super::ApprovalMode::Smart);
+
+        let yaml = "\"manual\"";
+        let mode: super::ApprovalMode = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(mode, super::ApprovalMode::Manual);
+
+        let yaml = "\"auto\"";
+        let mode: super::ApprovalMode = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(mode, super::ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn approval_mode_loaded_from_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "runtime:\n  approval_mode: smart\n",
+        )
+        .expect("write");
+
+        let loaded = load_from_map(Some(&config_path), &std::collections::BTreeMap::new())
+            .expect("config should load");
+        assert_eq!(
+            loaded.config.runtime.approval_mode,
+            super::ApprovalMode::Smart,
+        );
+    }
+
+    #[test]
+    fn approval_mode_defaults_when_absent_in_config() {
+        let loaded = load_from_map(None, &std::collections::BTreeMap::new())
+            .expect("config should load");
+        assert_eq!(
+            loaded.config.runtime.approval_mode,
+            super::ApprovalMode::Auto,
+        );
     }
 }

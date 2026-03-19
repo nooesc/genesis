@@ -419,6 +419,7 @@ mod tests {
                 core_tools: None,
                 batch: None,
                 tool_policy_path: None,
+                approval_mode: genesis_config::ApprovalMode::default(),
             },
             gateway: None,
             plugins: genesis_config::PluginsConfig::default(),

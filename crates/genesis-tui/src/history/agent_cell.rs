@@ -47,7 +47,8 @@ impl AgentCell {
     /// Render the cell into the given buffer area.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = ratatui::widgets::Paragraph::new(lines);
+        let paragraph = ratatui::widgets::Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(area, buf);
     }
 
@@ -100,24 +101,7 @@ pub(crate) fn prefix_markdown_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
-    let width = wrap_width.max(1) as usize;
-    let mut rows: usize = 0;
-    for line in lines {
-        let line_width = line
-            .spans
-            .iter()
-            .map(|span| span.content.width())
-            .sum::<usize>();
-        let wrapped = if line_width == 0 {
-            1
-        } else {
-            (line_width.saturating_sub(1) / width) + 1
-        };
-        rows = rows.saturating_add(wrapped);
-    }
-    rows.try_into().unwrap_or(u16::MAX)
-}
+use super::wrapped_row_count;
 
 #[cfg(test)]
 mod tests {
