@@ -345,6 +345,24 @@ impl ToolCell {
         }
     }
 
+    /// Extract the first line of the output, truncated to `max_chars` characters.
+    ///
+    /// Returns `None` if there is no output or the first line is blank.
+    fn error_context(&self, max_chars: usize) -> Option<String> {
+        let output = self.output.as_deref()?;
+        let first_line = output.lines().find(|l| !l.trim().is_empty())?;
+        let trimmed = first_line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.chars().count() > max_chars {
+            let s: String = trimmed.chars().take(max_chars).collect();
+            Some(format!("{s}…"))
+        } else {
+            Some(trimmed.to_owned())
+        }
+    }
+
     /// Single-line summary: `  [tool_name] 1.2s ok`
     fn summary_lines(&self) -> Vec<Line<'static>> {
         let duration_str = self.fmt_duration();
@@ -398,6 +416,24 @@ impl ToolCell {
         )]);
 
         lines.push(status_line);
+
+        // On failure, show a brief error reason (first line of output) if available.
+        if !self.success {
+            if let Some(reason) = self.error_context(60) {
+                let error_line = Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        reason,
+                        Style::default()
+                            .fg(COLOR_FAIL)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Span::styled(" │", Style::default().fg(UI_DIM)),
+                ]);
+                lines.push(error_line);
+            }
+        }
+
         lines.push(bottom);
         lines
     }
@@ -470,6 +506,26 @@ impl ToolCell {
         )]);
 
         lines.push(status_line);
+
+        // On failure, show a brief error reason (first line of output) if available.
+        // In verbose mode the output block above may already show the full text, but
+        // the error context line on the status row still helps readability at a glance.
+        if !self.success {
+            if let Some(reason) = self.error_context(60) {
+                let error_line = Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        reason,
+                        Style::default()
+                            .fg(COLOR_FAIL)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                    Span::styled(" │", Style::default().fg(UI_DIM)),
+                ]);
+                lines.push(error_line);
+            }
+        }
+
         lines.push(bottom);
         lines
     }
@@ -685,6 +741,125 @@ mod tests {
         assert!(
             output_line.contains('…'),
             "long output should be truncated with ellipsis: {output_line:?}"
+        );
+    }
+
+    // ── Error context tests ───────────────────────────────────────────────
+
+    #[test]
+    fn grouped_failure_with_output_shows_error_context() {
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output("permission denied");
+        let lines = cell.to_scrollback_lines(80);
+        // grouped + error context: top + args + status + error + bottom = 5
+        assert_eq!(lines.len(), 5, "grouped fail with output should be 5 lines, got {}", lines.len());
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("permission denied"),
+            "grouped fail should show error context: {all_text:?}"
+        );
+    }
+
+    #[test]
+    fn grouped_failure_without_output_no_error_context_line() {
+        let cell = make_cell(false).with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        // No output → no extra line: top + args + status + bottom = 4
+        assert_eq!(lines.len(), 4, "grouped fail without output should be 4 lines");
+    }
+
+    #[test]
+    fn grouped_success_with_output_no_error_context_line() {
+        let cell = make_cell(true)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output("some output");
+        let lines = cell.to_scrollback_lines(80);
+        // success: error context is not shown even if there is output
+        assert_eq!(lines.len(), 4, "grouped success should remain 4 lines");
+    }
+
+    #[test]
+    fn verbose_failure_with_output_shows_error_context() {
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Verbose)
+            .with_output("command not found");
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("command not found"),
+            "verbose fail should show error context: {all_text:?}"
+        );
+    }
+
+    #[test]
+    fn summary_failure_with_output_no_error_context() {
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Summary)
+            .with_output("permission denied");
+        let lines = cell.to_scrollback_lines(80);
+        // Summary is always exactly 1 line regardless of output.
+        assert_eq!(lines.len(), 1, "summary mode should always be 1 line");
+    }
+
+    #[test]
+    fn error_context_truncated_at_60_chars() {
+        let long_error = "E".repeat(80);
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output(&long_error);
+        let lines = cell.to_scrollback_lines(80);
+        // Should have the error context line (index 3).
+        let error_line: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            error_line.contains('…'),
+            "long error context should be truncated with ellipsis: {error_line:?}"
+        );
+    }
+
+    #[test]
+    fn error_context_uses_first_non_blank_line() {
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output("\n\nactual error on third line\nmore stuff");
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("actual error on third line"),
+            "should show first non-blank line: {all_text:?}"
+        );
+        assert!(
+            !all_text.contains("more stuff"),
+            "should only show first line: {all_text:?}"
+        );
+    }
+
+    #[test]
+    fn error_context_span_uses_fail_color() {
+        let cell = make_cell(false)
+            .with_display_mode(ToolDisplayMode::Grouped)
+            .with_output("some error");
+        let lines = cell.to_scrollback_lines(80);
+        // error context line is at index 3 (top + args + status + error)
+        let error_line = &lines[3];
+        // The second span (index 1) holds the error text.
+        let text_span = &error_line.spans[1];
+        assert_eq!(
+            text_span.style.fg,
+            Some(COLOR_FAIL),
+            "error context span should use COLOR_FAIL"
         );
     }
 

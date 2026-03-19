@@ -476,17 +476,66 @@ fn format_tool_summary(builtin: usize, mcp: usize) -> String {
     format!("{total} total ({builtin} built-in, {mcp} MCP)")
 }
 
-/// Truncate a path string to at most `max_len` characters, replacing the
-/// start with "..." if needed.
+/// Truncate a path string to at most `max_len` characters, splitting at
+/// path boundaries so directory names are not chopped mid-word.
+///
+/// When the full path exceeds `max_len`, the function keeps the last 2-3
+/// path segments and prepends `…/` (single-character ellipsis). If even
+/// the last segment is too long, it falls back to a simple character cut.
+///
+/// ## Examples
+///
+/// ```text
+/// /Users/coler/dev-personal/genesis  (max 30)  →  …/dev-personal/genesis
+/// /short                              (max 40)  →  /short
+/// ```
 fn truncate_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
-        path.to_string()
-    } else if max_len <= 3 {
-        ".".repeat(max_len)
-    } else {
-        let suffix = &path[path.len() - (max_len - 3)..];
-        format!("...{suffix}")
+        return path.to_string();
     }
+
+    // The ellipsis prefix occupies 2 characters: "…/"
+    const ELLIPSIS_PREFIX: &str = "\u{2026}/";
+    const ELLIPSIS_LEN: usize = 2; // "…" is 1 char + "/"
+
+    if max_len <= ELLIPSIS_LEN {
+        // Not enough room for even the prefix — fall back to dots.
+        return ".".repeat(max_len);
+    }
+
+    let budget = max_len - ELLIPSIS_LEN;
+
+    // Split the path into segments and try to fit as many trailing
+    // segments as possible within `budget`.
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    let mut included = 0usize; // number of chars for included segments
+    let mut count = 0usize; // number of segments included
+    for seg in segments.iter().rev() {
+        let seg_cost = if count == 0 {
+            seg.len()
+        } else {
+            seg.len() + 1 // +1 for the '/' before it
+        };
+        if included + seg_cost > budget {
+            break;
+        }
+        included += seg_cost;
+        count += 1;
+    }
+
+    if count == 0 {
+        // Even the last segment alone is too long — fall back to a
+        // character-boundary cut of the last segment.
+        let last = segments.last().unwrap_or(&path);
+        let suffix_chars: String = last.chars().rev().take(budget).collect::<Vec<_>>().into_iter().rev().collect();
+        return format!("{ELLIPSIS_PREFIX}{suffix_chars}");
+    }
+
+    // Build the truncated path from the last `count` segments.
+    let start = segments.len() - count;
+    let suffix = segments[start..].join("/");
+    format!("{ELLIPSIS_PREFIX}{suffix}")
 }
 
 /// Compute the visual width of a ratatui Line (sum of span content widths).
@@ -812,11 +861,39 @@ mod tests {
     }
 
     #[test]
-    fn truncate_path_long_gets_ellipsis() {
-        let long = "/home/user/very/deeply/nested/project/src/main.rs";
-        let result = truncate_path(long, 20);
-        assert!(result.starts_with("..."));
-        assert_eq!(result.len(), 20);
+    fn truncate_path_long_uses_path_boundary() {
+        let long = "/Users/coler/dev-personal/genesis";
+        let result = truncate_path(long, 30);
+        // Should keep trailing segments at a path boundary with "…/" prefix.
+        assert!(
+            result.starts_with('\u{2026}'),
+            "should start with ellipsis, got: {result}"
+        );
+        assert!(
+            result.contains("genesis"),
+            "should preserve the last segment, got: {result}"
+        );
+        assert!(
+            result.len() <= 30,
+            "should fit within budget, got len={}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn truncate_path_preserves_multiple_trailing_segments() {
+        let path = "/home/user/very/deeply/nested/project/src/main.rs";
+        let result = truncate_path(path, 25);
+        // Should include as many trailing segments as fit.
+        assert!(result.starts_with('\u{2026}'));
+        assert!(result.contains("main.rs"));
+        assert!(result.len() <= 25);
+    }
+
+    #[test]
+    fn truncate_path_very_short_budget() {
+        let result = truncate_path("/a/very/long/path", 2);
+        assert_eq!(result.len(), 2);
     }
 
     #[test]

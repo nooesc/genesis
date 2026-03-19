@@ -8,6 +8,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     text::Line,
     widgets::{Paragraph, Widget as _, Wrap},
 };
@@ -211,11 +212,25 @@ impl ChatWidget {
             return 0;
         }
         let mut total: u16 = 0;
+        let mut prev_is_user: Option<bool> = None;
         for cell in &self.committed_cells {
+            let cur_is_user = matches!(cell, HistoryCell::User(_));
+            if let Some(prev) = prev_is_user {
+                if cur_is_user != prev {
+                    // Turn boundary separator row.
+                    total = total.saturating_add(1);
+                }
+            }
+            prev_is_user = Some(cur_is_user);
             total = total.saturating_add(cell.height(width).max(1));
         }
         if let Some(active) = &self.active_cell {
             if !active.text_buffer.is_empty() {
+                // Account for a separator before the active cell if last committed
+                // cell was a User cell (active cell is always an agent response).
+                if prev_is_user == Some(true) {
+                    total = total.saturating_add(1);
+                }
                 // Rough estimate: use line count based on prefix_markdown_lines.
                 let lines = crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
                 let h = wrapped_row_count(&lines, width).max(1);
@@ -317,30 +332,98 @@ impl ChatWidget {
         }
 
         // ── Committed cells (most recent first, bottom-up) ────────────
-        // Walk committed cells in reverse and allocate rows.
-        let mut cells_to_render: Vec<(u16, &HistoryCell)> = Vec::new();
+        // Walk committed cells in reverse and allocate rows, including
+        // 1-row turn separators between user and agent/tool groups.
+        //
+        // `needs_sep` tracks whether a separator is needed *above* the
+        // most-recently-collected cell. We look one cell further back
+        // and check whether the turn type differs.
+        struct CellEntry<'a> {
+            height: u16,
+            cell: &'a HistoryCell,
+            /// True when a separator should be rendered *below* this cell
+            /// (i.e. between this cell and the next-newer one).
+            separator_after: bool,
+        }
+
+        let mut entries: Vec<CellEntry<'_>> = Vec::new();
         let mut used = 0u16;
+        let mut prev_is_user: Option<bool> = None;
         for cell in self.committed_cells.iter().rev() {
+            let cur_is_user = matches!(cell, HistoryCell::User(_));
             let h = cell.height(area.width).max(1);
-            if used + h > remaining_rows {
+
+            // Check whether a separator is needed between this cell and
+            // the one we collected just before (which is *newer* since we
+            // walk in reverse). The separator row is charged to the total
+            // height budget.
+            let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
+            let cost = h + if needs_sep { 1 } else { 0 };
+            if used + cost > remaining_rows {
                 break;
             }
-            cells_to_render.push((h, cell));
-            used += h;
+
+            // The separator conceptually sits between the current cell and
+            // the previous (newer) one. We mark the current cell as having
+            // a separator after it.
+            entries.push(CellEntry {
+                height: h,
+                cell,
+                separator_after: needs_sep,
+            });
+            used += cost;
+            prev_is_user = Some(cur_is_user);
+        }
+
+        // Also account for a separator between the last committed cell
+        // and the active cell, if the active cell was rendered above.
+        let active_sep = if active_text_info.is_some() {
+            // Active cell is always an agent response. If the last committed
+            // cell (first in `entries` since entries is newest-first) is a
+            // User cell, we need a separator.
+            entries
+                .first()
+                .is_some_and(|e| matches!(e.cell, HistoryCell::User(_)))
+        } else {
+            false
+        };
+        if active_sep && used < remaining_rows {
+            // Mark the newest entry as needing a separator *after* it
+            // (between it and the active cell rendered above).
+            //
+            // But we stored `separator_after` relative to the *next older*
+            // cell during the reverse walk. For the active-cell boundary
+            // we handle it separately during rendering.
+            used += 1;
         }
 
         // Render from oldest to newest (reverse the reversed list).
-        cells_to_render.reverse();
+        entries.reverse();
         let mut row_cursor = bottom_y.saturating_sub(used);
-        for (h, cell) in cells_to_render {
+
+        let sep_style =
+            Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+
+        for entry in &entries {
             let cell_area = Rect {
                 x: area.x,
                 y: row_cursor,
                 width: area.width,
-                height: h,
+                height: entry.height,
             };
-            cell.render(cell_area, buf);
-            row_cursor += h;
+            entry.cell.render(cell_area, buf);
+            row_cursor += entry.height;
+
+            if entry.separator_after {
+                render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
+                row_cursor += 1;
+            }
+        }
+
+        // Render a separator between the last committed cell and the
+        // active streaming cell, if needed.
+        if active_sep {
+            render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
         }
     }
 
@@ -366,6 +449,16 @@ impl Default for ChatWidget {
 /// markdown formatting applied so styles appear live as the agent types.
 fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
     prefix_markdown_lines(text)
+}
+
+/// Draw a dim horizontal `─` separator across a single row.
+fn render_turn_separator(x: u16, y: u16, width: u16, style: Style, buf: &mut Buffer) {
+    for col in x..x + width {
+        if let Some(cell) = buf.cell_mut((col, y)) {
+            cell.set_symbol("─");
+            cell.set_style(style);
+        }
+    }
 }
 
 fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
@@ -570,5 +663,93 @@ mod tests {
         cw.add_user_message("hello".to_string());
         let h = cw.visible_content_height(80);
         assert!(h >= 1, "should have at least 1 row for user message, got {h}");
+    }
+
+    #[test]
+    fn visible_content_height_includes_turn_separators() {
+        let mut cw = ChatWidget::new();
+        // User message (1 row) + separator (1 row) + agent response (1 row) = 3
+        cw.add_user_message("hello".to_string());
+        cw.start_turn();
+        cw.append_text("hi");
+        cw.complete_turn();
+
+        let h = cw.visible_content_height(80);
+        // User(1) + separator(1) + Agent(1) = 3
+        assert_eq!(h, 3, "should include separator between user and agent, got {h}");
+    }
+
+    #[test]
+    fn visible_content_height_no_separator_between_same_turn_type() {
+        let mut cw = ChatWidget::new();
+        // Two consecutive agent cells (no user cell between them)
+        cw.start_turn();
+        cw.append_text("first response");
+        cw.complete_turn();
+        cw.start_turn();
+        cw.append_text("second response");
+        cw.complete_turn();
+
+        let h = cw.visible_content_height(80);
+        // Agent(1) + Agent(1) = 2, no separator between same types
+        assert_eq!(h, 2, "no separator between same turn types, got {h}");
+    }
+
+    #[test]
+    fn render_messages_draws_separator_between_turns() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hi".to_string());
+        cw.start_turn();
+        cw.append_text("hello");
+        cw.complete_turn();
+
+        // Render into a buffer tall enough for all content.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // The separator should contain '─' characters somewhere in the buffer.
+        let has_separator = (0..area.height).any(|row| {
+            (0..area.width).all(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "─")
+            })
+        });
+        assert!(
+            has_separator,
+            "should render a horizontal separator between user and agent turns"
+        );
+    }
+
+    #[test]
+    fn render_messages_no_separator_between_tool_cells() {
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        cw.append_text("Running tools.");
+        cw.tool_call_start("c1".into(), "shell".into(), "ls".into());
+        cw.tool_call_end("c1", true, std::time::Duration::from_millis(100));
+        cw.tool_call_start("c2".into(), "shell".into(), "pwd".into());
+        cw.tool_call_end("c2", true, std::time::Duration::from_millis(50));
+        cw.complete_turn();
+
+        // Agent + Tool + Tool = 3 cells, all in the same agent turn.
+        // No separator should appear (all are agent-side).
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // Count rows that are entirely '─' characters (full-width separators).
+        let separator_count = (0..area.height)
+            .filter(|&row| {
+                (0..area.width).all(|col| {
+                    buf.cell((col, row))
+                        .map_or(false, |c| c.symbol() == "─")
+                })
+            })
+            .count();
+        assert_eq!(
+            separator_count, 0,
+            "no turn separator between consecutive agent/tool cells"
+        );
     }
 }
