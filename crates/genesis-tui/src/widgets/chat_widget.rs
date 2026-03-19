@@ -5,6 +5,8 @@
 //! 2. Above that: ActiveCell text (if a turn is running) — word-wrapped with `eve> ` prefix
 //! 3. Remaining space: most recent committed cells, filling from the bottom up
 
+use std::collections::HashSet;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -16,9 +18,14 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
-use crate::history::tool_cell::{ToolCell, ToolDisplayMode};
+use crate::history::tool_cell::{
+    tool_group_summary_height, tool_group_summary_line, ToolCell, ToolDisplayMode,
+};
 use crate::history::user_cell::UserCell;
 use crate::widgets::input_widget::InputWidget;
+
+/// Minimum number of consecutive tool cells required to form a collapsible group.
+const MIN_GROUP_SIZE: usize = 2;
 
 /// A single in-flight tool call tracked during a streaming turn.
 pub struct ActiveToolCall {
@@ -65,6 +72,10 @@ pub struct ChatWidget {
     pub input: InputWidget,
     /// Cache for parsed active-cell markdown lines.
     active_cell_cache: Option<ActiveCellCache>,
+    /// Indices of tool groups that are expanded (keyed by `start_idx` in
+    /// `committed_cells`). Groups not present here are rendered as a
+    /// collapsed single-line summary.
+    pub expanded_tool_groups: HashSet<usize>,
 }
 
 impl ChatWidget {
@@ -76,6 +87,7 @@ impl ChatWidget {
             active_cell: None,
             input: InputWidget::new(),
             active_cell_cache: None,
+            expanded_tool_groups: HashSet::new(),
         }
     }
 
@@ -203,6 +215,45 @@ impl ChatWidget {
         &self.committed_cells
     }
 
+    // ── Tool group detection ──────────────────────────────────────────────
+
+    /// Identify ranges of consecutive tool cells that should be grouped.
+    ///
+    /// Returns `(start_idx, count)` pairs for groups of [`MIN_GROUP_SIZE`]+
+    /// consecutive `HistoryCell::Tool` entries in `committed_cells`.
+    pub fn find_tool_groups(&self) -> Vec<(usize, usize)> {
+        let mut groups = Vec::new();
+        let mut i = 0;
+        while i < self.committed_cells.len() {
+            if matches!(self.committed_cells[i], HistoryCell::Tool(_)) {
+                let start = i;
+                while i < self.committed_cells.len()
+                    && matches!(self.committed_cells[i], HistoryCell::Tool(_))
+                {
+                    i += 1;
+                }
+                let count = i - start;
+                if count >= MIN_GROUP_SIZE {
+                    groups.push((start, count));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        groups
+    }
+
+    /// Check if a committed-cell index falls within a tool group.
+    ///
+    /// Returns `Some((start, count))` if the index is part of a group,
+    /// `None` otherwise.
+    fn group_containing(idx: usize, groups: &[(usize, usize)]) -> Option<(usize, usize)> {
+        groups
+            .iter()
+            .find(|(start, count)| idx >= *start && idx < start + count)
+            .copied()
+    }
+
     /// Compute the total visible content height (committed cells + active cell)
     /// for the given width, without actually rendering anything.
     ///
@@ -211,10 +262,43 @@ impl ChatWidget {
         if width == 0 {
             return 0;
         }
+        let tool_groups = self.find_tool_groups();
         let mut total: u16 = 0;
         let mut prev_is_user: Option<bool> = None;
-        for cell in &self.committed_cells {
+        let mut i = 0;
+        while i < self.committed_cells.len() {
+            let cell = &self.committed_cells[i];
             let cur_is_user = matches!(cell, HistoryCell::User(_));
+
+            // Check if this index starts a tool group.
+            if let Some((start, count)) = Self::group_containing(i, &tool_groups) {
+                if i == start {
+                    // Separator between user turn and this group?
+                    if let Some(prev) = prev_is_user {
+                        if cur_is_user != prev {
+                            total = total.saturating_add(1);
+                        }
+                    }
+                    if self.expanded_tool_groups.contains(&start) {
+                        // Expanded: render each tool cell individually.
+                        for j in start..start + count {
+                            let c = &self.committed_cells[j];
+                            total = total.saturating_add(c.height(width).max(1));
+                        }
+                    } else {
+                        // Collapsed: single summary line.
+                        total =
+                            total.saturating_add(tool_group_summary_height(count));
+                    }
+                    prev_is_user = Some(false); // tool cells are not user cells
+                    i = start + count;
+                    continue;
+                }
+                // Inside a group but not at start — skip (handled by the start case).
+                i += 1;
+                continue;
+            }
+
             if let Some(prev) = prev_is_user {
                 if cur_is_user != prev {
                     // Turn boundary separator row.
@@ -223,6 +307,7 @@ impl ChatWidget {
             }
             prev_is_user = Some(cur_is_user);
             total = total.saturating_add(cell.height(width).max(1));
+            i += 1;
         }
         if let Some(active) = &self.active_cell {
             if !active.text_buffer.is_empty() {
@@ -232,7 +317,8 @@ impl ChatWidget {
                     total = total.saturating_add(1);
                 }
                 // Rough estimate: use line count based on prefix_markdown_lines.
-                let lines = crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
+                let lines =
+                    crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
                 let h = wrapped_row_count(&lines, width).max(1);
                 total = total.saturating_add(h);
             }
@@ -335,38 +421,127 @@ impl ChatWidget {
         // Walk committed cells in reverse and allocate rows, including
         // 1-row turn separators between user and agent/tool groups.
         //
+        // Tool groups (2+ consecutive Tool cells) are collapsed into a
+        // single summary line unless expanded via `expanded_tool_groups`.
+        //
         // `needs_sep` tracks whether a separator is needed *above* the
         // most-recently-collected cell. We look one cell further back
         // and check whether the turn type differs.
-        struct CellEntry<'a> {
-            height: u16,
-            cell: &'a HistoryCell,
-            /// True when a separator should be rendered *below* this cell
-            /// (i.e. between this cell and the next-newer one).
-            separator_after: bool,
+
+        /// A renderable entry in the bottom-up layout pass.
+        enum RenderEntry<'a> {
+            /// A single history cell rendered normally.
+            Single {
+                height: u16,
+                cell: &'a HistoryCell,
+                /// True when a separator should be rendered *below* this entry
+                /// (i.e. between this entry and the next-newer one).
+                separator_after: bool,
+            },
+            /// A collapsed tool group summary (replaces N tool cells).
+            GroupSummary {
+                height: u16,
+                /// The tool cells in this group (oldest first).
+                tools: Vec<&'a ToolCell>,
+                separator_after: bool,
+            },
         }
 
-        let mut entries: Vec<CellEntry<'_>> = Vec::new();
+        let tool_groups = self.find_tool_groups();
+
+        let mut entries: Vec<RenderEntry<'_>> = Vec::new();
         let mut used = 0u16;
         let mut prev_is_user: Option<bool> = None;
-        for cell in self.committed_cells.iter().rev() {
-            let cur_is_user = matches!(cell, HistoryCell::User(_));
-            let h = cell.height(area.width).max(1);
 
-            // Check whether a separator is needed between this cell and
-            // the one we collected just before (which is *newer* since we
-            // walk in reverse). The separator row is charged to the total
-            // height budget.
-            let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
+        // Reverse walk index.
+        let mut ri = self.committed_cells.len();
+        while ri > 0 {
+            ri -= 1;
+            let cell = &self.committed_cells[ri];
+            let cur_is_user = matches!(cell, HistoryCell::User(_));
+
+            // Check if this cell is part of a tool group.
+            if let Some((start, count)) = Self::group_containing(ri, &tool_groups) {
+                // When walking in reverse, we first encounter the *last* cell
+                // of the group. Process the entire group at once from the
+                // group's start index.
+                if ri != start + count - 1 {
+                    // Not the last element — we already processed this group.
+                    continue;
+                }
+
+                let needs_sep =
+                    prev_is_user.is_some_and(|prev| prev != cur_is_user);
+
+                if self.expanded_tool_groups.contains(&start) {
+                    // Expanded: emit each tool cell individually (in reverse).
+                    let mut group_cost = 0u16;
+                    let mut temp: Vec<RenderEntry<'_>> = Vec::new();
+                    for j in (start..start + count).rev() {
+                        let tc = &self.committed_cells[j];
+                        let h = tc.height(area.width).max(1);
+                        group_cost += h;
+                        temp.push(RenderEntry::Single {
+                            height: h,
+                            cell: tc,
+                            separator_after: false,
+                        });
+                    }
+                    // The first entry of the expanded group carries the sep.
+                    if let Some(RenderEntry::Single {
+                        separator_after, ..
+                    }) = temp.last_mut()
+                    {
+                        *separator_after = needs_sep;
+                    }
+                    let total_cost =
+                        group_cost + if needs_sep { 1 } else { 0 };
+                    if used + total_cost > remaining_rows {
+                        break;
+                    }
+                    entries.extend(temp);
+                    used += total_cost;
+                } else {
+                    // Collapsed: single summary line.
+                    let h = tool_group_summary_height(count);
+                    let cost = h + if needs_sep { 1 } else { 0 };
+                    if used + cost > remaining_rows {
+                        break;
+                    }
+                    // Collect ToolCell refs for the summary renderer.
+                    let tools: Vec<&ToolCell> = (start..start + count)
+                        .filter_map(|j| {
+                            if let HistoryCell::Tool(tc) = &self.committed_cells[j]
+                            {
+                                Some(tc)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    entries.push(RenderEntry::GroupSummary {
+                        height: h,
+                        tools,
+                        separator_after: needs_sep,
+                    });
+                    used += cost;
+                }
+
+                prev_is_user = Some(false); // tools are agent-side
+                // Skip past the rest of the group.
+                ri = start;
+                continue;
+            }
+
+            // Normal (non-grouped) cell.
+            let h = cell.height(area.width).max(1);
+            let needs_sep =
+                prev_is_user.is_some_and(|prev| prev != cur_is_user);
             let cost = h + if needs_sep { 1 } else { 0 };
             if used + cost > remaining_rows {
                 break;
             }
-
-            // The separator conceptually sits between the current cell and
-            // the previous (newer) one. We mark the current cell as having
-            // a separator after it.
-            entries.push(CellEntry {
+            entries.push(RenderEntry::Single {
                 height: h,
                 cell,
                 separator_after: needs_sep,
@@ -381,19 +556,16 @@ impl ChatWidget {
             // Active cell is always an agent response. If the last committed
             // cell (first in `entries` since entries is newest-first) is a
             // User cell, we need a separator.
-            entries
-                .first()
-                .is_some_and(|e| matches!(e.cell, HistoryCell::User(_)))
+            entries.first().is_some_and(|e| match e {
+                RenderEntry::Single { cell, .. } => {
+                    matches!(cell, HistoryCell::User(_))
+                }
+                RenderEntry::GroupSummary { .. } => false,
+            })
         } else {
             false
         };
         if active_sep && used < remaining_rows {
-            // Mark the newest entry as needing a separator *after* it
-            // (between it and the active cell rendered above).
-            //
-            // But we stored `separator_after` relative to the *next older*
-            // cell during the reverse walk. For the active-cell boundary
-            // we handle it separately during rendering.
             used += 1;
         }
 
@@ -405,18 +577,57 @@ impl ChatWidget {
             Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
 
         for entry in &entries {
-            let cell_area = Rect {
-                x: area.x,
-                y: row_cursor,
-                width: area.width,
-                height: entry.height,
-            };
-            entry.cell.render(cell_area, buf);
-            row_cursor += entry.height;
-
-            if entry.separator_after {
-                render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
-                row_cursor += 1;
+            match entry {
+                RenderEntry::Single {
+                    height,
+                    cell,
+                    separator_after,
+                } => {
+                    let cell_area = Rect {
+                        x: area.x,
+                        y: row_cursor,
+                        width: area.width,
+                        height: *height,
+                    };
+                    cell.render(cell_area, buf);
+                    row_cursor += height;
+                    if *separator_after {
+                        render_turn_separator(
+                            area.x,
+                            row_cursor,
+                            area.width,
+                            sep_style,
+                            buf,
+                        );
+                        row_cursor += 1;
+                    }
+                }
+                RenderEntry::GroupSummary {
+                    height,
+                    tools,
+                    separator_after,
+                } => {
+                    let lines = tool_group_summary_line(tools);
+                    let paragraph = Paragraph::new(lines);
+                    let cell_area = Rect {
+                        x: area.x,
+                        y: row_cursor,
+                        width: area.width,
+                        height: *height,
+                    };
+                    paragraph.render(cell_area, buf);
+                    row_cursor += height;
+                    if *separator_after {
+                        render_turn_separator(
+                            area.x,
+                            row_cursor,
+                            area.width,
+                            sep_style,
+                            buf,
+                        );
+                        row_cursor += 1;
+                    }
+                }
             }
         }
 
@@ -750,6 +961,160 @@ mod tests {
         assert_eq!(
             separator_count, 0,
             "no turn separator between consecutive agent/tool cells"
+        );
+    }
+
+    // ── Tool group tests ──────────────────────────────────────────────────
+
+    /// Helper: build a widget with an agent cell followed by N tool cells.
+    fn widget_with_tools(tool_count: usize) -> ChatWidget {
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        cw.append_text("Running tools.");
+        for i in 0..tool_count {
+            let id = format!("c{i}");
+            cw.tool_call_start(id.clone(), "shell".into(), format!("cmd{i}"));
+            cw.tool_call_end(&id, true, std::time::Duration::from_millis(100));
+        }
+        cw.complete_turn();
+        cw
+    }
+
+    #[test]
+    fn find_tool_groups_no_tools() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hi".to_string());
+        assert!(cw.find_tool_groups().is_empty());
+    }
+
+    #[test]
+    fn find_tool_groups_single_tool_no_group() {
+        let cw = widget_with_tools(1);
+        // 1 tool cell is below the threshold — no group.
+        assert!(
+            cw.find_tool_groups().is_empty(),
+            "a single tool cell should not form a group"
+        );
+    }
+
+    #[test]
+    fn find_tool_groups_two_tools_forms_group() {
+        let cw = widget_with_tools(2);
+        let groups = cw.find_tool_groups();
+        assert_eq!(groups.len(), 1, "two consecutive tools should form one group");
+        let (start, count) = groups[0];
+        assert_eq!(count, 2);
+        // The agent cell is at index 0, tools at 1 and 2.
+        assert_eq!(start, 1);
+    }
+
+    #[test]
+    fn find_tool_groups_three_tools_forms_group() {
+        let cw = widget_with_tools(3);
+        let groups = cw.find_tool_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], (1, 3));
+    }
+
+    #[test]
+    fn find_tool_groups_separated_by_agent() {
+        let mut cw = ChatWidget::new();
+        // Turn 1: 2 tools
+        cw.start_turn();
+        cw.tool_call_start("a".into(), "shell".into(), "ls".into());
+        cw.tool_call_end("a", true, std::time::Duration::from_millis(50));
+        cw.tool_call_start("b".into(), "shell".into(), "pwd".into());
+        cw.tool_call_end("b", true, std::time::Duration::from_millis(50));
+        cw.complete_turn();
+        // Turn 2: agent text + 2 tools
+        cw.start_turn();
+        cw.append_text("more");
+        cw.tool_call_start("c".into(), "grep".into(), "foo".into());
+        cw.tool_call_end("c", true, std::time::Duration::from_millis(50));
+        cw.tool_call_start("d".into(), "grep".into(), "bar".into());
+        cw.tool_call_end("d", true, std::time::Duration::from_millis(50));
+        cw.complete_turn();
+
+        let groups = cw.find_tool_groups();
+        assert_eq!(groups.len(), 2, "should have two separate tool groups");
+    }
+
+    #[test]
+    fn collapsed_group_reduces_visible_height() {
+        let cw = widget_with_tools(3);
+        // With grouping (collapsed by default): agent(1) + summary(1) = 2
+        let collapsed_h = cw.visible_content_height(80);
+
+        let mut cw_expanded = widget_with_tools(3);
+        // Expand the group to compare.
+        let groups = cw_expanded.find_tool_groups();
+        cw_expanded.expanded_tool_groups.insert(groups[0].0);
+        let expanded_h = cw_expanded.visible_content_height(80);
+
+        assert!(
+            collapsed_h < expanded_h,
+            "collapsed height ({collapsed_h}) should be less than expanded ({expanded_h})"
+        );
+    }
+
+    #[test]
+    fn expanded_tool_groups_field_starts_empty() {
+        let cw = ChatWidget::new();
+        assert!(cw.expanded_tool_groups.is_empty());
+    }
+
+    #[test]
+    fn render_collapsed_group_shows_summary() {
+        let mut cw = widget_with_tools(3);
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // The summary line should contain the triangle marker.
+        let has_triangle = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "\u{25b8}")
+            })
+        });
+        assert!(
+            has_triangle,
+            "collapsed group should render the triangle marker"
+        );
+    }
+
+    #[test]
+    fn render_expanded_group_shows_individual_tools() {
+        let mut cw = widget_with_tools(3);
+        let groups = cw.find_tool_groups();
+        cw.expanded_tool_groups.insert(groups[0].0);
+
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // Should NOT contain the triangle (group is expanded).
+        let has_triangle = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "\u{25b8}")
+            })
+        });
+        assert!(
+            !has_triangle,
+            "expanded group should not render the summary triangle"
+        );
+
+        // Should contain tool border characters (from grouped tool cells).
+        let has_border = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "\u{250c}")
+            })
+        });
+        assert!(
+            has_border,
+            "expanded group should render individual tool cell borders"
         );
     }
 }
