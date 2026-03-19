@@ -7090,6 +7090,89 @@ mod memory_store_tests {
         assert_eq!(results[0].memory.id, "mem-hybrid-best");
         assert_eq!(results[0].source, "hybrid");
     }
+
+    #[test]
+    #[ignore = "benchmark harness for local performance checks"]
+    fn hybrid_search_benchmark_10k_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("benchmark.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )
+        .unwrap();
+
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
+                memory_rowid integer primary key,
+                embedding float[4] distance_metric=cosine
+            );",
+            [],
+        )
+        .unwrap();
+
+        for i in 0..10_000 {
+            let id = format!("mem-{i}");
+            let content = if i % 200 == 0 {
+                format!("genesis memory note {i}")
+            } else {
+                format!("background semantic note {i}")
+            };
+            tx.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, content],
+            )
+            .unwrap();
+            let rowid = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, 'fact', ?2)",
+                rusqlite::params![rowid, content],
+            )
+            .unwrap();
+
+            let embedding = if i % 200 == 0 {
+                [1.0_f32, 0.0, 0.0, 0.0]
+            } else {
+                [0.0_f32, 1.0, 0.0, 0.0]
+            };
+            let blob = super::embedding_to_blob(&embedding);
+            tx.execute(
+                "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
+                 VALUES (?1, ?2, 'benchmark-model', 4, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, &blob],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO memory_vec (memory_rowid, embedding) VALUES (?1, ?2)",
+                rusqlite::params![rowid, &blob],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let started = std::time::Instant::now();
+        let results = store
+            .hybrid_search("genesis memory", &[1.0, 0.0, 0.0, 0.0], 10)
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), 10);
+        println!(
+            "hybrid_search_benchmark_10k_memories: {:?} for {} results",
+            elapsed,
+            results.len()
+        );
+    }
 }
 
 #[cfg(test)]
