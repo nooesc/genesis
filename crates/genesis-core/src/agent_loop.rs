@@ -445,7 +445,9 @@ impl AgentLoop {
             None => return all_defs, // No core set = send everything
         };
 
-        let core_set: HashSet<&str> = core.iter().map(String::as_str).collect();
+        let mut core_set: HashSet<&str> = core.iter().map(String::as_str).collect();
+        // Always include find_tools when filtering is active so discovery works.
+        core_set.insert("find_tools");
         all_defs
             .into_iter()
             .filter(|t| {
@@ -793,9 +795,13 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
-            // Filter tools to core set + discovered tools each iteration
-            // (discovered set may grow during the turn).
-            let tool_defs = self.filter_tool_defs(all_tool_defs.clone());
+            // When core set filtering is active, recompute the filtered set
+            // each iteration (discovered set may grow). Otherwise use all tools.
+            let tool_defs = if self.config.core_tools.is_some() {
+                self.filter_tool_defs(all_tool_defs.clone())
+            } else {
+                all_tool_defs.clone()
+            };
 
             // Check cancellation at each turn boundary
             if self.cancelled.load(Ordering::Relaxed) {
@@ -1100,16 +1106,19 @@ impl AgentLoop {
                     for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
                         let result = sanitize::sanitize_credentials(&result);
 
-                        // When find_tools returns results, extract discovered
-                        // tool names and add them to the active set.
-                        if tc.function.name == "find_tools" && !result.starts_with("Error:") && !result.starts_with("No tools") {
+                        // When find_tools returns results and core set filtering is active,
+                        // extract discovered tool names and add them to the active set.
+                        if self.config.core_tools.is_some()
+                            && tc.function.name == "find_tools"
+                            && !result.starts_with("Error:")
+                            && !result.starts_with("No tools")
+                        {
                             for line in result.lines() {
                                 let trimmed = line.trim();
                                 // find_tools output format: "  **tool_name** — description"
                                 if let Some(rest) = trimmed.strip_prefix("**") {
                                     if let Some(name_end) = rest.find("**") {
-                                        let name = &rest[..name_end];
-                                        self.discover_tool(name);
+                                        self.discover_tool(&rest[..name_end]);
                                     }
                                 }
                             }
@@ -1325,8 +1334,11 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
-            // Filter tools to core set + discovered tools each iteration.
-            let tool_defs = self.filter_tool_defs(all_tool_defs.clone());
+            let tool_defs = if self.config.core_tools.is_some() {
+                self.filter_tool_defs(all_tool_defs.clone())
+            } else {
+                all_tool_defs.clone()
+            };
 
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal (streaming)");
@@ -1568,8 +1580,13 @@ impl AgentLoop {
                         {
                             let result = sanitize::sanitize_credentials(&result);
 
-                            // Extract discovered tool names from find_tools results.
-                            if tc.function.name == "find_tools" && !result.starts_with("Error:") && !result.starts_with("No tools") {
+                            // Extract discovered tool names from find_tools results
+                            // (only when core set filtering is active).
+                            if self.config.core_tools.is_some()
+                                && tc.function.name == "find_tools"
+                                && !result.starts_with("Error:")
+                                && !result.starts_with("No tools")
+                            {
                                 for line in result.lines() {
                                     let trimmed = line.trim();
                                     if let Some(rest) = trimmed.strip_prefix("**") {
