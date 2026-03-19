@@ -76,6 +76,11 @@ impl CircuitBreaker {
         }
     }
 
+    /// Create a circuit breaker with custom thresholds.
+    pub fn with_config(failure_threshold: u32, cooldown_secs: u32) -> Self {
+        Self::new(failure_threshold, Duration::from_secs(cooldown_secs as u64))
+    }
+
     /// Create a circuit breaker with default settings (5 failures, 30s cooldown).
     pub fn with_defaults() -> Self {
         Self::new(5, Duration::from_secs(30))
@@ -184,6 +189,80 @@ impl Default for CircuitBreaker {
     }
 }
 
+/// Thread-safe registry of shared circuit breakers keyed by provider identity.
+///
+/// When the gateway and `SessionExecutionService` share a registry, every
+/// session's `ChatClient` re-uses the *same* `Arc<CircuitBreaker>` for a
+/// given `(backend, model)` pair.  This lets the health endpoint report
+/// live circuit state without owning the clients themselves.
+pub struct CircuitBreakerRegistry {
+    breakers: Mutex<std::collections::HashMap<String, std::sync::Arc<CircuitBreaker>>>,
+}
+
+impl CircuitBreakerRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            breakers: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Return the canonical key for a provider.
+    fn key(backend: &str, model: &str) -> String {
+        format!("{}:{}", backend.to_ascii_lowercase(), model)
+    }
+
+    /// Get or create a circuit breaker for the given provider.
+    ///
+    /// If a breaker already exists for `(backend, model)` it is returned
+    /// (the threshold / cooldown of the existing breaker are *not* changed).
+    /// Otherwise a new one is created with the given settings (or defaults).
+    pub fn get_or_create(
+        &self,
+        backend: &str,
+        model: &str,
+        failure_threshold: Option<u32>,
+        cooldown_secs: Option<u64>,
+    ) -> std::sync::Arc<CircuitBreaker> {
+        let key = Self::key(backend, model);
+        let mut map = self.breakers.lock().unwrap();
+        map.entry(key)
+            .or_insert_with(|| {
+                let cb = match (failure_threshold, cooldown_secs) {
+                    (Some(ft), Some(cs)) => {
+                        CircuitBreaker::new(ft, Duration::from_secs(cs))
+                    }
+                    _ => CircuitBreaker::with_defaults(),
+                };
+                std::sync::Arc::new(cb)
+            })
+            .clone()
+    }
+
+    /// Snapshot of all tracked circuit breakers with their current state.
+    ///
+    /// Returns `(key, state, consecutive_failures, open_count)` tuples.
+    pub fn snapshot(&self) -> Vec<(String, CircuitState, u32, u64)> {
+        let map = self.breakers.lock().unwrap();
+        map.iter()
+            .map(|(k, cb)| (k.clone(), cb.state(), cb.consecutive_failures(), cb.open_count()))
+            .collect()
+    }
+
+    /// Look up the live state for a specific provider.
+    pub fn get(&self, backend: &str, model: &str) -> Option<std::sync::Arc<CircuitBreaker>> {
+        let key = Self::key(backend, model);
+        let map = self.breakers.lock().unwrap();
+        map.get(&key).cloned()
+    }
+}
+
+impl Default for CircuitBreakerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -280,5 +359,65 @@ mod tests {
         assert_eq!(CircuitState::Closed.to_string(), "closed");
         assert_eq!(CircuitState::Open.to_string(), "open");
         assert_eq!(CircuitState::HalfOpen.to_string(), "half-open");
+    }
+
+    #[test]
+    fn custom_threshold_opens_at_configured_count() {
+        let cb = CircuitBreaker::with_config(2, 10);
+        cb.record_failure();
+        assert!(cb.allow_request()); // 1 failure, threshold is 2
+        cb.record_failure();
+        assert!(!cb.allow_request()); // 2 failures, circuit opens
+    }
+
+    // ── Registry tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn registry_returns_same_breaker_for_same_provider() {
+        let reg = CircuitBreakerRegistry::new();
+        let a = reg.get_or_create("OpenAI", "gpt-4.1", Some(3), Some(30));
+        let b = reg.get_or_create("openai", "gpt-4.1", Some(5), Some(60));
+        // Same Arc — threshold of first creation wins.
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn registry_returns_different_breakers_for_different_providers() {
+        let reg = CircuitBreakerRegistry::new();
+        let a = reg.get_or_create("openai", "gpt-4.1", None, None);
+        let b = reg.get_or_create("anthropic", "claude-sonnet-4", None, None);
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn registry_get_returns_none_for_unknown() {
+        let reg = CircuitBreakerRegistry::new();
+        assert!(reg.get("openai", "gpt-4.1").is_none());
+    }
+
+    #[test]
+    fn registry_get_returns_existing_breaker() {
+        let reg = CircuitBreakerRegistry::new();
+        let created = reg.get_or_create("openai", "gpt-4.1", Some(2), Some(10));
+        created.record_failure();
+        let got = reg.get("openai", "gpt-4.1").expect("should exist");
+        assert_eq!(got.consecutive_failures(), 1);
+        assert!(std::sync::Arc::ptr_eq(&created, &got));
+    }
+
+    #[test]
+    fn registry_snapshot_reflects_live_state() {
+        let reg = CircuitBreakerRegistry::new();
+        let cb = reg.get_or_create("openai", "gpt-4.1", Some(2), Some(10));
+        cb.record_failure();
+        cb.record_failure(); // → Open
+
+        let snap = reg.snapshot();
+        assert_eq!(snap.len(), 1);
+        let (key, state, failures, opens) = &snap[0];
+        assert_eq!(key, "openai:gpt-4.1");
+        assert_eq!(*state, CircuitState::Open);
+        assert_eq!(*failures, 2);
+        assert_eq!(*opens, 1);
     }
 }

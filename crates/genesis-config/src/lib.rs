@@ -326,6 +326,11 @@ pub struct RuntimeConfig {
     /// against the specified rules before processing / returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<GuardrailsConfig>,
+    /// Circuit breaker settings for provider failover.
+    /// When set on RuntimeConfig, these values serve as a global default
+    /// for any provider that does not specify its own circuit_breaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 /// Configuration for filtering which tools are available to the agent.
@@ -776,6 +781,8 @@ struct FileRuntimeConfig {
     tool_filter: Option<ToolFilterConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     guardrails: Option<GuardrailsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -860,6 +867,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             cache: None,
             tool_filter: None,
             guardrails: None,
+            circuit_breaker: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -1020,6 +1028,7 @@ pub fn load_from_map(
         cache: rt.and_then(|r| r.cache.clone()),
         tool_filter: rt.and_then(|r| r.tool_filter.clone()),
         guardrails: rt.and_then(|r| r.guardrails.clone()),
+        circuit_breaker: rt.and_then(|r| r.circuit_breaker.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -1963,5 +1972,48 @@ tool_mode = "verbose"
             let deserialized: AltScreenMode = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, variant);
         }
+    }
+
+    #[test]
+    fn circuit_breaker_config_defaults() {
+        let cfg = super::CircuitBreakerConfig::default();
+        assert_eq!(cfg.failure_threshold, 5);
+        assert_eq!(cfg.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn circuit_breaker_config_parsed_from_runtime_section() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+provider:
+  backend: openai
+  model: gpt-4.1-mini
+runtime:
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown_secs: 60
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let cb = loaded
+            .config
+            .runtime
+            .circuit_breaker
+            .expect("circuit_breaker should be set");
+        assert_eq!(cb.failure_threshold, 3);
+        assert_eq!(cb.cooldown_secs, 60);
+    }
+
+    #[test]
+    fn circuit_breaker_config_absent_when_not_configured() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(config.config.runtime.circuit_breaker.is_none());
     }
 }

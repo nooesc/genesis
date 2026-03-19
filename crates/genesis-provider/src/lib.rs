@@ -17,7 +17,7 @@ pub use api_types::{
     FunctionCall, ImageUrl, JsonSchemaSpec, MessageContent, ResponseFormat, ThinkingConfig,
     ToolCallEntry, ToolChoice,
 };
-pub use circuit_breaker::{CircuitBreaker, CircuitState};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerRegistry, CircuitState};
 pub use client::{ChatClient, ChatCompletionChunkStream};
 pub use error::ProviderError;
 pub use resolve::{resolve, ResolvedProvider, OPENAI_BASE_URL};
@@ -88,6 +88,26 @@ pub async fn client_from_config_with_circuit_breaker(
     if let (Some(ft), Some(cs)) = (failure_threshold, cooldown_secs) {
         client.set_circuit_breaker(ft, cs);
     }
+    Ok(client)
+}
+
+/// Build a `ChatClient` using a shared [`CircuitBreakerRegistry`].
+///
+/// The registry ensures that every client targeting the same
+/// `(backend, model)` pair shares one `Arc<CircuitBreaker>`, enabling the
+/// gateway health endpoint to report live circuit state.
+pub async fn client_from_config_with_registry(
+    backend: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key_env: Option<&str>,
+    failure_threshold: Option<u32>,
+    cooldown_secs: Option<u64>,
+    registry: &CircuitBreakerRegistry,
+) -> Result<ChatClient, ProviderError> {
+    let mut client = client_from_config(backend, model, base_url, api_key_env).await?;
+    let shared_cb = registry.get_or_create(backend, model, failure_threshold, cooldown_secs);
+    client.set_shared_circuit_breaker(shared_cb);
     Ok(client)
 }
 

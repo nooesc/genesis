@@ -193,6 +193,8 @@ pub struct AppState {
     pub(crate) request_duration_histogram: Mutex<HistogramBuckets>,
     /// Agent message bus for inter-agent communication.
     pub agent_bus: genesis_core::agent_bus::AgentBus,
+    /// Shared circuit breaker registry for live provider health reporting.
+    pub circuit_registry: std::sync::Arc<genesis_provider::CircuitBreakerRegistry>,
 }
 
 impl AppState {
@@ -232,6 +234,7 @@ impl AppState {
             stream_requests_total: AtomicU64::new(0),
             request_duration_histogram: Mutex::new(HistogramBuckets::new(DURATION_BUCKETS)),
             agent_bus: genesis_core::agent_bus::AgentBus::with_persistence(&bus_db_path),
+            circuit_registry: std::sync::Arc::new(genesis_provider::CircuitBreakerRegistry::new()),
         }
     }
 }
@@ -371,11 +374,19 @@ pub(crate) struct ProviderInfo {
     pub circuit_breaker: Option<CircuitBreakerInfo>,
 }
 
-/// Circuit breaker configuration info for health display.
+/// Circuit breaker state and configuration for health display.
 #[derive(Debug, Serialize)]
 pub(crate) struct CircuitBreakerInfo {
+    /// Configured failure threshold before the circuit opens.
     pub failure_threshold: u32,
+    /// Configured cooldown before probing (seconds).
     pub cooldown_secs: u64,
+    /// Live state: "closed", "open", or "half-open".
+    pub state: String,
+    /// Live count of consecutive failures since last success.
+    pub consecutive_failures: u32,
+    /// Lifetime count of times the circuit has opened.
+    pub open_count: u64,
 }
 
 /// JSON metrics response for the dashboard.
@@ -837,27 +848,45 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         None => 0,
     };
     let builtin_tools = genesis_core::default_tool_count();
-    // Build provider status list for health reporting.
+    // Build provider status list with live circuit breaker state.
+    let registry = &state.circuit_registry;
     let mut providers = Vec::new();
+
+    // Helper: build CircuitBreakerInfo with live state from the shared registry.
+    let build_cb_info =
+        |backend: &str, model: &str, cfg: Option<&genesis_config::CircuitBreakerConfig>| -> Option<CircuitBreakerInfo> {
+            let cb_cfg = cfg?;
+            let live = registry.get(backend, model);
+            Some(CircuitBreakerInfo {
+                failure_threshold: cb_cfg.failure_threshold,
+                cooldown_secs: cb_cfg.cooldown_secs,
+                state: live.as_ref().map_or_else(|| "closed".to_owned(), |cb| cb.state().to_string()),
+                consecutive_failures: live.as_ref().map_or(0, |cb| cb.consecutive_failures()),
+                open_count: live.as_ref().map_or(0, |cb| cb.open_count()),
+            })
+        };
+
     let primary = &state.loaded.config.provider;
     providers.push(ProviderInfo {
         backend: primary.backend.clone(),
         model: primary.model.clone(),
         role: "primary".to_owned(),
-        circuit_breaker: primary.circuit_breaker.as_ref().map(|cb| CircuitBreakerInfo {
-            failure_threshold: cb.failure_threshold,
-            cooldown_secs: cb.cooldown_secs,
-        }),
+        circuit_breaker: build_cb_info(&primary.backend, &primary.model, primary.circuit_breaker.as_ref()),
     });
+    if let Some(tp) = &state.loaded.config.tool_provider {
+        providers.push(ProviderInfo {
+            backend: tp.backend.clone(),
+            model: tp.model.clone(),
+            role: "tool".to_owned(),
+            circuit_breaker: build_cb_info(&tp.backend, &tp.model, tp.circuit_breaker.as_ref()),
+        });
+    }
     for fp in &state.loaded.config.fallback_providers {
         providers.push(ProviderInfo {
             backend: fp.backend.clone(),
             model: fp.model.clone(),
             role: "fallback".to_owned(),
-            circuit_breaker: fp.circuit_breaker.as_ref().map(|cb| CircuitBreakerInfo {
-                failure_threshold: cb.failure_threshold,
-                cooldown_secs: cb.cooldown_secs,
-            }),
+            circuit_breaker: build_cb_info(&fp.backend, &fp.model, fp.circuit_breaker.as_ref()),
         });
     }
 
@@ -2522,7 +2551,8 @@ async fn workflow_run_handler(
         ));
     }
 
-    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let mut service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
     let result = service
         .run_workflow(&workflow, input, session_id)
         .await
@@ -2689,7 +2719,8 @@ async fn eval_run_handler(
         ));
     }
 
-    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let mut service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
     let report = service.run_eval(&suite).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2775,6 +2806,7 @@ async fn chat_handler(
 ) -> Result<Json<ChatResponse>, (StatusCode, String)> {
     let loaded = &state.loaded;
     let mut service = SessionExecutionService::new(loaded);
+    service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
     if let Some(mcp) = &state.mcp {
         service.set_mcp(std::sync::Arc::clone(mcp));
     }
@@ -2971,6 +3003,7 @@ async fn openai_blocking_response(
 
     let loaded = &state.loaded;
     let mut service = SessionExecutionService::new(loaded);
+    service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
     if let Some(mcp) = &state.mcp {
         service.set_mcp(std::sync::Arc::clone(mcp));
     }
@@ -3058,6 +3091,7 @@ async fn openai_streaming_response(
     tokio::spawn(async move {
         let loaded = &state_for_task.loaded;
         let mut service = SessionExecutionService::new(loaded);
+        service.set_circuit_registry(std::sync::Arc::clone(&state_for_task.circuit_registry));
         if let Some(mcp) = &state_for_task.mcp {
             service.set_mcp(std::sync::Arc::clone(mcp));
         }
@@ -3240,6 +3274,7 @@ async fn websocket_session(state: Arc<AppState>, mut socket: axum::extract::ws::
         state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
 
         let mut service = SessionExecutionService::new(&state.loaded);
+        service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
         if let Some(mcp) = &state.mcp {
             service.set_mcp(std::sync::Arc::clone(mcp));
         }
@@ -3413,6 +3448,7 @@ async fn chat_stream_handler(
     tokio::spawn(
         async move {
             let mut service = SessionExecutionService::new(&state_for_task.loaded);
+            service.set_circuit_registry(std::sync::Arc::clone(&state_for_task.circuit_registry));
             if let Some(mcp) = &state_for_task.mcp {
                 service.set_mcp(std::sync::Arc::clone(mcp));
             }
@@ -3642,6 +3678,7 @@ async fn chat_batch_handler(
             };
 
             let mut service = SessionExecutionService::new(&state.loaded);
+            service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
             if let Some(mcp) = &state.mcp {
                 service.set_mcp(std::sync::Arc::clone(mcp));
             }
@@ -3871,6 +3908,60 @@ mod tests {
         assert!(json.contains("\"model\":\"openai/gpt-4.1-mini\""));
         assert!(json.contains("\"total_sessions\":5"));
         assert!(json.contains("\"total_tools\":61"));
+    }
+
+    #[test]
+    fn health_response_serializes_with_circuit_breaker_state() {
+        let resp = HealthResponse {
+            status: "ok".to_owned(),
+            version: "0.1.0".to_owned(),
+            uptime_seconds: 10,
+            model: "openai/gpt-4.1".to_owned(),
+            mcp_servers: 0,
+            active_schedules: 0,
+            total_sessions: 0,
+            total_tools: 0,
+            providers: vec![
+                ProviderInfo {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1".to_owned(),
+                    role: "primary".to_owned(),
+                    circuit_breaker: Some(CircuitBreakerInfo {
+                        failure_threshold: 5,
+                        cooldown_secs: 30,
+                        state: "closed".to_owned(),
+                        consecutive_failures: 0,
+                        open_count: 0,
+                    }),
+                },
+                ProviderInfo {
+                    backend: "anthropic".to_owned(),
+                    model: "claude-sonnet-4-20250514".to_owned(),
+                    role: "tool".to_owned(),
+                    circuit_breaker: None,
+                },
+                ProviderInfo {
+                    backend: "openai".to_owned(),
+                    model: "gpt-4.1-mini".to_owned(),
+                    role: "fallback".to_owned(),
+                    circuit_breaker: Some(CircuitBreakerInfo {
+                        failure_threshold: 3,
+                        cooldown_secs: 60,
+                        state: "open".to_owned(),
+                        consecutive_failures: 3,
+                        open_count: 1,
+                    }),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).expect("should serialize");
+        assert!(json.contains("\"state\":\"closed\""));
+        assert!(json.contains("\"state\":\"open\""));
+        assert!(json.contains("\"role\":\"primary\""));
+        assert!(json.contains("\"role\":\"tool\""));
+        assert!(json.contains("\"role\":\"fallback\""));
+        assert!(json.contains("\"consecutive_failures\":3"));
+        assert!(json.contains("\"open_count\":1"));
     }
 
     #[test]
@@ -4394,6 +4485,7 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                circuit_breaker: None,
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),
@@ -4498,6 +4590,7 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                circuit_breaker: None,
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),

@@ -78,6 +78,8 @@ pub struct SessionExecutionService<'a> {
     personality_override: Option<String>,
     /// Cached sandbox components for lifecycle-managed backends (persists across turns).
     sandbox: std::sync::OnceLock<Option<SandboxComponents>>,
+    /// Shared circuit breaker registry so the gateway can observe live state.
+    circuit_registry: Option<Arc<genesis_provider::CircuitBreakerRegistry>>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,7 @@ impl<'a> SessionExecutionService<'a> {
             model_override: None,
             personality_override: None,
             sandbox: std::sync::OnceLock::new(),
+            circuit_registry: None,
         }
     }
 
@@ -185,6 +188,7 @@ impl<'a> SessionExecutionService<'a> {
             model_override: None,
             personality_override: None,
             sandbox: std::sync::OnceLock::new(),
+            circuit_registry: None,
         })
     }
 
@@ -224,6 +228,15 @@ impl<'a> SessionExecutionService<'a> {
     /// Set an interactive approval handler for tools requiring user confirmation.
     pub fn set_approval_handler(&mut self, handler: Arc<dyn genesis_tools::ApprovalHandler>) {
         self.approval_handler = Some(handler);
+    }
+
+    /// Attach a shared circuit breaker registry.
+    ///
+    /// When set, `ChatClient` instances created by this service will share
+    /// circuit breakers with every other session using the same registry,
+    /// enabling the gateway health endpoint to report live circuit state.
+    pub fn set_circuit_registry(&mut self, registry: Arc<genesis_provider::CircuitBreakerRegistry>) {
+        self.circuit_registry = Some(registry);
     }
 
     /// Set the default working directory for shell commands.
@@ -536,16 +549,35 @@ impl<'a> SessionExecutionService<'a> {
                 self.loaded.config.provider.model.as_str(),
             ),
         };
-        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
-        let client = genesis_provider::client_from_config_with_circuit_breaker(
-            backend,
-            model,
-            self.loaded.config.provider.base_url.as_deref(),
-            self.loaded.config.provider.api_key_env.as_deref(),
-            cb_cfg.map(|c| c.failure_threshold),
-            cb_cfg.map(|c| c.cooldown_secs),
-        )
-        .await?;
+        let cb_cfg = self
+            .loaded
+            .config
+            .provider
+            .circuit_breaker
+            .as_ref()
+            .or(self.loaded.config.runtime.circuit_breaker.as_ref());
+        let client = if let Some(registry) = &self.circuit_registry {
+            genesis_provider::client_from_config_with_registry(
+                backend,
+                model,
+                self.loaded.config.provider.base_url.as_deref(),
+                self.loaded.config.provider.api_key_env.as_deref(),
+                cb_cfg.map(|c| c.failure_threshold),
+                cb_cfg.map(|c| c.cooldown_secs),
+                registry,
+            )
+            .await?
+        } else {
+            genesis_provider::client_from_config_with_circuit_breaker(
+                backend,
+                model,
+                self.loaded.config.provider.base_url.as_deref(),
+                self.loaded.config.provider.api_key_env.as_deref(),
+                cb_cfg.map(|c| c.failure_threshold),
+                cb_cfg.map(|c| c.cooldown_secs),
+            )
+            .await?
+        };
         debug!(
             provider_backend = %backend,
             model = %model,
@@ -592,16 +624,32 @@ impl<'a> SessionExecutionService<'a> {
 
         // Set up tool provider routing if configured
         if let Some(tp) = &self.loaded.config.tool_provider {
-            let tp_cb = tp.circuit_breaker.as_ref();
-            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
-                &tp.backend,
-                &tp.model,
-                tp.base_url.as_deref(),
-                tp.api_key_env.as_deref(),
-                tp_cb.map(|c| c.failure_threshold),
-                tp_cb.map(|c| c.cooldown_secs),
-            )
-            .await?;
+            let tp_cb = tp
+                .circuit_breaker
+                .as_ref()
+                .or(self.loaded.config.runtime.circuit_breaker.as_ref());
+            let tool_client = if let Some(registry) = &self.circuit_registry {
+                genesis_provider::client_from_config_with_registry(
+                    &tp.backend,
+                    &tp.model,
+                    tp.base_url.as_deref(),
+                    tp.api_key_env.as_deref(),
+                    tp_cb.map(|c| c.failure_threshold),
+                    tp_cb.map(|c| c.cooldown_secs),
+                    registry,
+                )
+                .await?
+            } else {
+                genesis_provider::client_from_config_with_circuit_breaker(
+                    &tp.backend,
+                    &tp.model,
+                    tp.base_url.as_deref(),
+                    tp.api_key_env.as_deref(),
+                    tp_cb.map(|c| c.failure_threshold),
+                    tp_cb.map(|c| c.cooldown_secs),
+                )
+                .await?
+            };
             agent.set_tool_client(tool_client);
             debug!(
                 tool_provider_backend = %tp.backend,
@@ -614,16 +662,32 @@ impl<'a> SessionExecutionService<'a> {
         if !self.loaded.config.fallback_providers.is_empty() {
             let mut fallbacks = Vec::new();
             for fp in &self.loaded.config.fallback_providers {
-                let fb_cb = fp.circuit_breaker.as_ref();
-                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
-                    &fp.backend,
-                    &fp.model,
-                    fp.base_url.as_deref(),
-                    fp.api_key_env.as_deref(),
-                    fb_cb.map(|c| c.failure_threshold),
-                    fb_cb.map(|c| c.cooldown_secs),
-                )
-                .await?;
+                let fb_cb = fp
+                    .circuit_breaker
+                    .as_ref()
+                    .or(self.loaded.config.runtime.circuit_breaker.as_ref());
+                let fb_client = if let Some(registry) = &self.circuit_registry {
+                    genesis_provider::client_from_config_with_registry(
+                        &fp.backend,
+                        &fp.model,
+                        fp.base_url.as_deref(),
+                        fp.api_key_env.as_deref(),
+                        fb_cb.map(|c| c.failure_threshold),
+                        fb_cb.map(|c| c.cooldown_secs),
+                        registry,
+                    )
+                    .await?
+                } else {
+                    genesis_provider::client_from_config_with_circuit_breaker(
+                        &fp.backend,
+                        &fp.model,
+                        fp.base_url.as_deref(),
+                        fp.api_key_env.as_deref(),
+                        fb_cb.map(|c| c.failure_threshold),
+                        fb_cb.map(|c| c.cooldown_secs),
+                    )
+                    .await?
+                };
                 fallbacks.push(fb_client);
             }
             agent.set_fallback_clients(fallbacks);
@@ -1830,6 +1894,7 @@ mod tests {
                     cache: None,
                     tool_filter: None,
                     guardrails: None,
+                    circuit_breaker: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

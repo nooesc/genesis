@@ -38,32 +38,6 @@ const BIG_TEXT_HEIGHT: u16 = 4;
 /// Gap between the title and the portrait/info row.
 const TITLE_GAP: u16 = 1;
 
-const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
-    "          .-''''-.          ",
-    "       .-'  .--.  `-.       ",
-    "      /   .'_  _`.   \\      ",
-    "     /   /  ( \\/ )\\   \\     ",
-    "    /   |      /\\  |   \\    ",
-    "    |   |     /  \\ |   |    ",
-    "    |   |   .-''''-.   |    ",
-    "    |   |  /  .--.  \\  |    ",
-    "    |   |  | (____) |  |    ",
-    "    |    \\  \\______/  /|    ",
-    "     \\    `-._____.-' /     ",
-    "      `-.     __    .-'     ",
-    "         `-._/  \\_.-'       ",
-    "           /_/\\_\\           ",
-];
-
-const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
-    "   _.-._   ",
-    " .'_   _`. ",
-    "/_   _\\\\   ",
-    "| |\\_/| |  ",
-    "| | o | |  ",
-    " \\_.-'._/  ",
-    "   /_\\\\    ",
-];
 
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
@@ -96,13 +70,9 @@ const WIDE_BRAILLE_MIN_WIDTH: u16 = 120;
 /// Width of the braille canvas panel in cells.
 const BRAILLE_PANEL_WIDTH: u16 = 20;
 
-/// Welcome screen widget showing portrait art with session info.
+/// Welcome screen widget showing session info with boot status.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
-    /// Split portrait lines used in wide mode.
-    split_art: Vec<Line<'static>>,
-    /// Compact portrait lines used in medium mode.
-    compact_art: Vec<Line<'static>>,
     /// Whether the boot sequence has been triggered.
     boot_triggered: bool,
     /// Areas computed during the last render for effect targeting.
@@ -112,29 +82,14 @@ pub struct WelcomeWidget {
 }
 
 impl WelcomeWidget {
-    /// Create a new welcome widget from session info with optional portrait art.
-    ///
-    /// When a portrait slice is empty, a minimal built-in fallback is used for
-    /// that mode.
-    pub fn new(info: WelcomeInfo, full_art: &[String], compact_art: &[String]) -> Self {
+    /// Create a new welcome widget from session info.
+    pub fn new(info: WelcomeInfo) -> Self {
         Self {
             info,
-            split_art: parse_portrait_art(full_art, DEFAULT_SPLIT_PORTRAIT_ART),
-            compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
             braille_pattern: Pattern::default_particles(18),
         }
-    }
-
-    /// Get the current split portrait lines.
-    fn current_full_art(&self) -> &[Line<'static>] {
-        &self.split_art
-    }
-
-    /// Get the current compact portrait lines.
-    fn current_compact_art(&self) -> &[Line<'static>] {
-        &self.compact_art
     }
 
     /// Returns `true` if the boot sequence has already been triggered.
@@ -226,71 +181,44 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Portrait + braille canvas + info side by side ──────────
-        // Clone art lines up front to release the borrow on `self`.
-        let art: Vec<Line<'static>> = self.current_full_art().to_vec();
-        let art_width = art
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
-        let art_height = art.len() as u16;
+        // ── Boot status + braille canvas + info side by side ─────
+        let boot_status = BootStatusWidget::new(self.boot_status_info());
+        let status_lines = boot_status.lines();
+        let status_height = status_lines.len() as u16;
 
         // Decide if there's room for the braille canvas panel.
         let show_braille = area.width >= WIDE_BRAILLE_MIN_WIDTH;
         let braille_cols = if show_braille { BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP } else { 0 };
 
-        let art_col_width = art_width.min(
+        // Left column: boot status (+ braille canvas if room)
+        let left_col_width = 30u16.min(
             inner.width.saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
         );
-        let braille_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
+        let braille_col_x = inner.x + left_col_width + WIDE_LAYOUT_GAP;
         let info_col_x = braille_col_x + braille_cols;
         let info_col_width = inner.width.saturating_sub(
-            art_col_width + WIDE_LAYOUT_GAP + braille_cols,
+            left_col_width + WIDE_LAYOUT_GAP + braille_cols,
         );
 
-        // Boot status lines
-        let boot_status = BootStatusWidget::new(self.boot_status_info());
-        let status_lines = boot_status.lines();
-        let status_height = status_lines.len() as u16;
-        let status_gap = 1u16;
-
-        // Total left-column content: art + gap + status
-        let left_total = art_height + status_gap + status_height;
+        // Boot status area (left column, vertically centered)
         let left_start_y =
-            below_title_y + remaining_height.saturating_sub(left_total) / 2;
-
-        // Portrait area
-        let art_render_height = art_height.min(remaining_height);
-        let art_area = Rect {
-            x: inner.x,
-            y: left_start_y,
-            width: art_col_width,
-            height: art_render_height,
-        };
-        self.last_areas.portrait = art_area;
-        let art_paragraph = Paragraph::new(art);
-        art_paragraph.render(art_area, buf);
-
-        // Boot status area (below portrait)
-        let status_y = left_start_y + art_render_height + status_gap;
-        let status_render_height = status_height.min(
-            (below_title_y + remaining_height).saturating_sub(status_y),
-        );
+            below_title_y + remaining_height.saturating_sub(status_height) / 2;
+        let status_render_height = status_height.min(remaining_height);
         if status_render_height > 0 {
             let status_area = Rect {
                 x: inner.x,
-                y: status_y,
-                width: art_col_width.max(30),
+                y: left_start_y,
+                width: left_col_width,
                 height: status_render_height,
             };
             self.last_areas.status = status_area;
+            self.last_areas.portrait = status_area; // No portrait; reuse for effects
             boot_status.render(status_area, buf);
         }
 
-        // Braille canvas panel (between portrait and info, only in extra-wide mode)
+        // Braille canvas panel (between status and info, only in extra-wide mode)
         if show_braille && remaining_height >= 3 {
-            let braille_height = remaining_height.min(art_render_height).max(3);
+            let braille_height = remaining_height.min(status_render_height).max(3);
             let braille_y = below_title_y + remaining_height.saturating_sub(braille_height) / 2;
             let braille_area = Rect {
                 x: braille_col_x,
@@ -330,32 +258,14 @@ impl WelcomeWidget {
             return;
         }
 
-        // Clone art lines up front to release the borrow on `self`.
-        let art_lines: Vec<Line<'static>> = self.current_compact_art().to_vec();
-        let art_height = art_lines.len() as u16;
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
-        let gap = 1u16;
 
-        let total_content = art_height + gap + info_height;
-        let start_y = inner.y + inner.height.saturating_sub(total_content) / 2;
+        let start_y = inner.y + inner.height.saturating_sub(info_height) / 2;
 
-        let art_visual_width = art_lines
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
-        let art_x = inner.x + inner.width.saturating_sub(art_visual_width) / 2;
-        let art_area = Rect {
-            x: art_x,
-            y: start_y,
-            width: art_visual_width.min(inner.width),
-            height: art_height.min(inner.height),
-        };
-        self.last_areas.portrait = art_area;
-        self.last_areas.title = art_area; // No big-text in compact mode
-        let art_paragraph = Paragraph::new(art_lines);
-        art_paragraph.render(art_area, buf);
+        // Set areas for effect targeting (no portrait in compact mode).
+        self.last_areas.portrait = inner;
+        self.last_areas.title = inner;
 
         let info_visual_width = info_lines
             .iter()
@@ -363,7 +273,7 @@ impl WelcomeWidget {
             .max()
             .unwrap_or(0) as u16;
         let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_y = start_y + art_height + gap;
+        let info_y = start_y;
         if info_y < inner.y + inner.height {
             let info_area = Rect {
                 x: info_x,
@@ -495,13 +405,6 @@ fn line_visual_width(line: &Line<'_>) -> usize {
     line.spans.iter().map(|s| s.content.width()).sum()
 }
 
-fn parse_portrait_art(source: &[String], fallback: &[&str]) -> Vec<Line<'static>> {
-    if source.is_empty() {
-        fallback.iter().map(|line| parse_ansi_line(line)).collect()
-    } else {
-        parse_ansi_art(source)
-    }
-}
 
 // ── ANSI → ratatui Line parser ─────────────────────────────────────────────
 
@@ -616,13 +519,11 @@ mod tests {
     }
 
     fn sample_widget() -> WelcomeWidget {
-        let split_art = vec!["@@@@".to_string(), "@%%@".to_string()];
-        let compact_art = vec!["++++".to_string(), "+==+".to_string()];
-        WelcomeWidget::new(test_info(), &split_art, &compact_art)
+        WelcomeWidget::new(test_info())
     }
 
     fn default_widget() -> WelcomeWidget {
-        WelcomeWidget::new(test_info(), &[], &[])
+        WelcomeWidget::new(test_info())
     }
 
     fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
@@ -799,8 +700,6 @@ mod tests {
                 tool_count_mcp: 0,
                 skill_count: 0,
             },
-            &[],
-            &[],
         );
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         widget.render(Rect::new(0, 0, 0, 0), &mut buf);
@@ -832,8 +731,6 @@ mod tests {
                 tool_count_mcp: 2,
                 skill_count: 7,
             },
-            &[],
-            &[],
         );
         let lines = widget.info_lines();
         let rendered_lines: Vec<String> = lines.iter().map(line_text).collect();

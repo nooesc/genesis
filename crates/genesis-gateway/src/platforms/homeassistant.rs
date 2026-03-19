@@ -140,7 +140,8 @@ pub async fn webhook_handler(
         state.loaded.config.gateway.as_ref(),
     );
 
-    let service = SessionExecutionService::new(&state.loaded);
+    let mut service = SessionExecutionService::new(&state.loaded);
+    service.set_circuit_registry(std::sync::Arc::clone(&state.circuit_registry));
 
     let outcome = service
         .run_turn(SessionTurnInput {

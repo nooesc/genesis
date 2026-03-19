@@ -125,6 +125,21 @@ impl ChatClient {
         })
     }
 
+    /// Create a client with custom circuit breaker settings.
+    ///
+    /// Same as [`ChatClient::new`] but uses the given thresholds instead of defaults.
+    pub fn with_circuit_config(
+        provider: &ResolvedProvider,
+        failure_threshold: u32,
+        cooldown_secs: u32,
+    ) -> Result<Self, ProviderError> {
+        let mut client = Self::new(provider)?;
+        client.circuit = std::sync::Arc::new(
+            crate::circuit_breaker::CircuitBreaker::with_config(failure_threshold, cooldown_secs),
+        );
+        Ok(client)
+    }
+
     /// Prepare a request body from a `ChatCompletionRequest`, merging
     /// `extra_body` fields into the top-level JSON object and applying
     /// backend-specific optimizations like prompt caching.
@@ -863,6 +878,15 @@ impl ChatClient {
             failure_threshold,
             std::time::Duration::from_secs(cooldown_secs),
         ));
+    }
+
+    /// Replace the circuit breaker with a shared instance.
+    ///
+    /// This allows multiple `ChatClient`s (across sessions) to share the
+    /// same circuit breaker, so that failures in one session trip the
+    /// breaker for all sessions using the same provider.
+    pub fn set_shared_circuit_breaker(&mut self, cb: std::sync::Arc<crate::circuit_breaker::CircuitBreaker>) {
+        self.circuit = cb;
     }
 
     /// Total number of times the circuit has opened (lifetime).

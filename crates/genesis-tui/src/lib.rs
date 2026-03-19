@@ -172,9 +172,6 @@ pub async fn run_tui(
         .map(|m| m.context_length)
         .unwrap_or(genesis_provider::model_metadata::DEFAULT_CONTEXT_LENGTH);
 
-    let full_art = genesis_ui::banner::full_art();
-    let compact_art = genesis_ui::banner::compact_art();
-
     let welcome = crate::widgets::welcome::WelcomeWidget::new(
         crate::widgets::welcome::WelcomeInfo {
             model: config.provider.model.clone(),
@@ -188,8 +185,6 @@ pub async fn run_tui(
             skill_count,
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        &full_art,
-        &compact_art,
     );
 
     let animations_enabled = config.tui.animations
