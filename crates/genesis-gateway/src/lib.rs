@@ -4403,6 +4403,7 @@ mod tests {
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
+            routing: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,
@@ -4508,6 +4509,7 @@ mod tests {
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
+            routing: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,
