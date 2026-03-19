@@ -28,6 +28,7 @@ export function useMemories(params?: MemoriesParams) {
       const res = await api.get<MemoriesResponse>(`/memories${qs ? `?${qs}` : ''}`)
       return res.memories
     },
+    refetchInterval: 60_000,
   })
 }
 

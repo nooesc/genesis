@@ -20,5 +20,6 @@ export function useTools() {
       const mcp = (res.mcp_tools ?? []).map((t) => ({ ...t, source: t.source || 'mcp' }))
       return [...builtin, ...mcp] as ToolInfo[]
     },
+    refetchInterval: 60_000,
   })
 }

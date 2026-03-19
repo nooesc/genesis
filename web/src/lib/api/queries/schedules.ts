@@ -14,5 +14,6 @@ export function useSchedules() {
       const res = await api.get<SchedulesResponse>('/schedules')
       return res.schedules
     },
+    refetchInterval: 30_000,
   })
 }
