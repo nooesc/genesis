@@ -88,6 +88,8 @@ pub struct App {
     pub file_completion: FileCompletion,
     /// Current agent operating mode (Act / Plan).
     pub agent_mode: AgentMode,
+    /// Active color theme for the TUI.
+    pub active_theme: Box<dyn crate::theme::Theme>,
 }
 
 impl App {
@@ -277,6 +279,15 @@ impl App {
                 }
                 "/plan" => {
                     self.agent_mode = self.agent_mode.toggle();
+                    self.frame_requester.schedule_frame();
+                }
+                "/theme" => {
+                    // Cycle through themes: eve -> catppuccin -> dracula -> tokyonight -> eve
+                    let names = crate::theme::THEME_NAMES;
+                    let current = self.active_theme.name().to_owned();
+                    let idx = names.iter().position(|&n| n == current).unwrap_or(0);
+                    let next = names[(idx + 1) % names.len()];
+                    self.active_theme = crate::theme::theme_by_name(next);
                     self.frame_requester.schedule_frame();
                 }
                 "/compact" | "/summary" => {
@@ -718,6 +729,7 @@ mod tests {
             },
             file_completion: FileCompletion::new(),
             agent_mode: AgentMode::default(),
+            active_theme: crate::theme::theme_by_name("eve"),
         };
         (app, submission_rx, app_rx)
     }

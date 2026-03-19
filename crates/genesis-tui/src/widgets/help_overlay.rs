@@ -125,6 +125,7 @@ impl HelpOverlay {
             ("/exit", "Exit Eve"),
             ("/help", "Show this help screen"),
             ("/plan", "Toggle Plan/Act mode"),
+            ("/theme", "Cycle through built-in themes"),
         ];
 
         for (cmd, desc) in commands {
