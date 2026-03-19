@@ -563,15 +563,7 @@ impl<'a> SessionExecutionService<'a> {
             .tool_policy_path
             .as_ref()
             .map(|path| {
-                let expanded = if path.starts_with("~/") {
-                    if let Some(home) = dirs::home_dir() {
-                        format!("{}{}", home.display(), &path[1..])
-                    } else {
-                        path.clone()
-                    }
-                } else {
-                    path.clone()
-                };
+                let expanded = crate::tool_policy::expand_home(path);
                 match crate::tool_policy::ToolPolicy::load(std::path::Path::new(&expanded)) {
                     Ok(policy) => {
                         info!(path = expanded.as_str(), "loaded tool policy");
