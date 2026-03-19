@@ -8779,3 +8779,782 @@ mod pairing_store_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod subagent_store_tests {
+    use super::{bootstrap, SubagentStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn create_and_get_subagent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SubagentStore::new(&database_path);
+        let sub = store
+            .create(
+                "sub-1",
+                "parent-session-1",
+                "child-session-1",
+                "researcher",
+                "find relevant papers",
+            )
+            .expect("create should succeed");
+
+        assert_eq!(sub.id, "sub-1");
+        assert_eq!(sub.parent_session_id, "parent-session-1");
+        assert_eq!(sub.child_session_id, "child-session-1");
+        assert_eq!(sub.name, "researcher");
+        assert_eq!(sub.task, "find relevant papers");
+        assert_eq!(sub.status, "pending");
+        assert!(sub.result.is_none());
+        assert!(sub.error.is_none());
+        assert!(sub.completed_at.is_none());
+
+        let fetched = store
+            .get("sub-1")
+            .expect("get should succeed")
+            .expect("subagent should exist");
+        assert_eq!(fetched.id, "sub-1");
+        assert_eq!(fetched.name, "researcher");
+        assert_eq!(fetched.status, "pending");
+    }
+
+    #[test]
+    fn update_subagent_status() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SubagentStore::new(&database_path);
+        store
+            .create(
+                "sub-2",
+                "parent-1",
+                "child-2",
+                "coder",
+                "implement feature X",
+            )
+            .expect("create should succeed");
+
+        // Transition to running
+        let updated = store
+            .set_running("sub-2")
+            .expect("set_running should succeed");
+        assert!(updated);
+        let sub = store
+            .get("sub-2")
+            .expect("get should succeed")
+            .expect("subagent should exist");
+        assert_eq!(sub.status, "running");
+        assert!(sub.completed_at.is_none());
+
+        // Transition to completed
+        let completed = store
+            .set_completed("sub-2", "feature X implemented successfully")
+            .expect("set_completed should succeed");
+        assert!(completed);
+        let sub = store
+            .get("sub-2")
+            .expect("get should succeed")
+            .expect("subagent should exist");
+        assert_eq!(sub.status, "completed");
+        assert_eq!(
+            sub.result.as_deref(),
+            Some("feature X implemented successfully")
+        );
+        assert!(sub.completed_at.is_some());
+
+        // Create another subagent and transition to failed
+        store
+            .create("sub-3", "parent-1", "child-3", "tester", "run tests")
+            .expect("create should succeed");
+        let failed = store
+            .set_failed("sub-3", "tests timed out")
+            .expect("set_failed should succeed");
+        assert!(failed);
+        let sub = store
+            .get("sub-3")
+            .expect("get should succeed")
+            .expect("subagent should exist");
+        assert_eq!(sub.status, "failed");
+        assert_eq!(sub.error.as_deref(), Some("tests timed out"));
+        assert!(sub.completed_at.is_some());
+    }
+
+    #[test]
+    fn list_by_parent_isolates_sessions() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SubagentStore::new(&database_path);
+
+        // Create subagents under different parent sessions
+        store
+            .create("sub-a1", "parent-A", "child-a1", "worker-1", "task alpha-1")
+            .expect("create should succeed");
+        store
+            .create("sub-a2", "parent-A", "child-a2", "worker-2", "task alpha-2")
+            .expect("create should succeed");
+        store
+            .create("sub-b1", "parent-B", "child-b1", "worker-3", "task beta-1")
+            .expect("create should succeed");
+
+        // List for parent-A
+        let parent_a_subs = store
+            .list_by_parent("parent-A")
+            .expect("list_by_parent should succeed");
+        assert_eq!(parent_a_subs.len(), 2);
+        assert!(parent_a_subs
+            .iter()
+            .all(|s| s.parent_session_id == "parent-A"));
+        let names: Vec<&str> = parent_a_subs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"worker-1"));
+        assert!(names.contains(&"worker-2"));
+
+        // List for parent-B — should be isolated
+        let parent_b_subs = store
+            .list_by_parent("parent-B")
+            .expect("list_by_parent should succeed");
+        assert_eq!(parent_b_subs.len(), 1);
+        assert_eq!(parent_b_subs[0].name, "worker-3");
+
+        // List for non-existent parent — should be empty
+        let empty = store
+            .list_by_parent("parent-C")
+            .expect("list_by_parent should succeed");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn list_by_parent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SubagentStore::new(&database_path);
+
+        // Same parent, different child sessions
+        store
+            .create(
+                "sub-x1",
+                "shared-parent",
+                "child-x1",
+                "analyzer",
+                "analyze data",
+            )
+            .expect("create should succeed");
+        store
+            .create(
+                "sub-x2",
+                "shared-parent",
+                "child-x2",
+                "summarizer",
+                "summarize results",
+            )
+            .expect("create should succeed");
+        store
+            .create(
+                "sub-x3",
+                "shared-parent",
+                "child-x3",
+                "reviewer",
+                "review output",
+            )
+            .expect("create should succeed");
+
+        let subs = store
+            .list_by_parent("shared-parent")
+            .expect("list_by_parent should succeed");
+        assert_eq!(subs.len(), 3);
+        assert!(subs.iter().all(|s| s.parent_session_id == "shared-parent"));
+
+        // Verify each has a distinct child_session_id
+        let child_ids: Vec<&str> = subs.iter().map(|s| s.child_session_id.as_str()).collect();
+        assert!(child_ids.contains(&"child-x1"));
+        assert!(child_ids.contains(&"child-x2"));
+        assert!(child_ids.contains(&"child-x3"));
+
+        // Verify all names are present (order may vary on fast machines
+        // where created_at timestamps coincide).
+        let names: Vec<&str> = subs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"analyzer"));
+        assert!(names.contains(&"summarizer"));
+        assert!(names.contains(&"reviewer"));
+    }
+}
+
+#[cfg(test)]
+mod skill_usage_store_tests {
+    use super::{bootstrap, SkillStore, SkillUsageStore};
+    use tempfile::tempdir;
+
+    /// Helper: create a skill so the foreign-key constraint on skill_usages is satisfied.
+    fn seed_skill(store: &SkillStore, name: &str) {
+        store
+            .upsert(name, "test skill", "do the thing", None, &[])
+            .expect("seed skill should succeed");
+    }
+
+    #[test]
+    fn record_and_list_usage() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let skill_store = SkillStore::new(&database_path);
+        seed_skill(&skill_store, "code-review");
+
+        let store = SkillUsageStore::new(&database_path);
+        let usage = store
+            .record_usage(
+                "code-review",
+                Some("session-1"),
+                "success",
+                Some("worked well"),
+            )
+            .expect("record_usage should succeed");
+
+        assert_eq!(usage.skill_name, "code-review");
+        assert_eq!(usage.session_id.as_deref(), Some("session-1"));
+        assert_eq!(usage.outcome, "success");
+        assert_eq!(usage.feedback.as_deref(), Some("worked well"));
+        assert!(!usage.refined);
+
+        let recent = store
+            .recent_usages("code-review", 10)
+            .expect("recent_usages should succeed");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].skill_name, "code-review");
+        assert_eq!(recent[0].outcome, "success");
+    }
+
+    #[test]
+    fn aggregate_usage_stats() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let skill_store = SkillStore::new(&database_path);
+        seed_skill(&skill_store, "data-extract");
+
+        let store = SkillUsageStore::new(&database_path);
+
+        // Record several usages with mixed outcomes
+        let u1 = store
+            .record_usage("data-extract", Some("s1"), "success", None)
+            .expect("record_usage should succeed");
+        store
+            .record_usage("data-extract", Some("s2"), "success", None)
+            .expect("record_usage should succeed");
+        store
+            .record_usage("data-extract", Some("s3"), "failure", Some("timed out"))
+            .expect("record_usage should succeed");
+        store
+            .record_usage("data-extract", Some("s4"), "partial", None)
+            .expect("record_usage should succeed");
+
+        // Mark the first usage as refined
+        store
+            .mark_refined(u1.id)
+            .expect("mark_refined should succeed");
+
+        let stats = store.stats("data-extract").expect("stats should succeed");
+
+        assert_eq!(stats.skill_name, "data-extract");
+        assert_eq!(stats.total_uses, 4);
+        assert_eq!(stats.successes, 2);
+        assert_eq!(stats.failures, 1);
+        assert_eq!(stats.times_refined, 1);
+        assert!(stats.last_used.is_some());
+    }
+
+    #[test]
+    fn list_usage_respects_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let skill_store = SkillStore::new(&database_path);
+        seed_skill(&skill_store, "bulk-skill");
+
+        let store = SkillUsageStore::new(&database_path);
+
+        // Record 5 usages
+        for i in 0..5 {
+            store
+                .record_usage("bulk-skill", Some(&format!("session-{i}")), "success", None)
+                .expect("record_usage should succeed");
+        }
+
+        // Request only 3
+        let limited = store
+            .recent_usages("bulk-skill", 3)
+            .expect("recent_usages should succeed");
+        assert_eq!(limited.len(), 3);
+
+        // Request all
+        let all = store
+            .recent_usages("bulk-skill", 100)
+            .expect("recent_usages should succeed");
+        assert_eq!(all.len(), 5);
+    }
+
+    #[test]
+    fn usage_records_different_skills() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let skill_store = SkillStore::new(&database_path);
+        seed_skill(&skill_store, "skill-alpha");
+        seed_skill(&skill_store, "skill-beta");
+
+        let store = SkillUsageStore::new(&database_path);
+
+        // Record usages for two different skills
+        store
+            .record_usage("skill-alpha", Some("s1"), "success", None)
+            .expect("record_usage should succeed");
+        store
+            .record_usage("skill-alpha", Some("s2"), "failure", None)
+            .expect("record_usage should succeed");
+        store
+            .record_usage("skill-beta", Some("s3"), "success", None)
+            .expect("record_usage should succeed");
+
+        // Stats should be per-skill
+        let alpha_stats = store.stats("skill-alpha").expect("stats should succeed");
+        assert_eq!(alpha_stats.total_uses, 2);
+        assert_eq!(alpha_stats.successes, 1);
+        assert_eq!(alpha_stats.failures, 1);
+
+        let beta_stats = store.stats("skill-beta").expect("stats should succeed");
+        assert_eq!(beta_stats.total_uses, 1);
+        assert_eq!(beta_stats.successes, 1);
+        assert_eq!(beta_stats.failures, 0);
+
+        // recent_usages should only return records for the requested skill
+        let alpha_recent = store
+            .recent_usages("skill-alpha", 10)
+            .expect("recent_usages should succeed");
+        assert_eq!(alpha_recent.len(), 2);
+        assert!(alpha_recent.iter().all(|u| u.skill_name == "skill-alpha"));
+
+        let beta_recent = store
+            .recent_usages("skill-beta", 10)
+            .expect("recent_usages should succeed");
+        assert_eq!(beta_recent.len(), 1);
+        assert_eq!(beta_recent[0].skill_name, "skill-beta");
+    }
+}
+
+#[cfg(test)]
+mod skill_store_tests {
+    use super::{bootstrap, SkillStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn upsert_and_get_skill() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        let skill = store
+            .upsert(
+                "greet_user",
+                "Greet the user warmly",
+                "Say hello and ask how they are doing",
+                Some("when user says hi"),
+                &["greeting", "social"],
+            )
+            .expect("upsert should succeed");
+
+        assert_eq!(skill.name, "greet_user");
+        assert_eq!(skill.description, "Greet the user warmly");
+        assert_eq!(skill.instructions, "Say hello and ask how they are doing");
+        assert_eq!(skill.trigger_hint.as_deref(), Some("when user says hi"));
+        assert_eq!(skill.tags, vec!["greeting", "social"]);
+        assert_eq!(skill.version, 1);
+
+        let fetched = store
+            .get("greet_user")
+            .expect("get should succeed")
+            .expect("skill should exist");
+
+        assert_eq!(fetched.name, "greet_user");
+        assert_eq!(fetched.description, "Greet the user warmly");
+        assert_eq!(fetched.instructions, "Say hello and ask how they are doing");
+        assert_eq!(fetched.trigger_hint.as_deref(), Some("when user says hi"));
+        assert_eq!(fetched.tags, vec!["greeting", "social"]);
+        assert_eq!(fetched.version, 1);
+    }
+
+    #[test]
+    fn upsert_updates_existing_skill() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        store
+            .upsert(
+                "summarize",
+                "Summarize text",
+                "Provide a brief summary",
+                None,
+                &["text"],
+            )
+            .expect("first upsert should succeed");
+
+        let updated = store
+            .upsert(
+                "summarize",
+                "Summarize any content",
+                "Provide a concise summary with key points",
+                Some("when asked to summarize"),
+                &["text", "analysis"],
+            )
+            .expect("second upsert should succeed");
+
+        assert_eq!(updated.name, "summarize");
+        assert_eq!(updated.description, "Summarize any content");
+        assert_eq!(
+            updated.instructions,
+            "Provide a concise summary with key points"
+        );
+        assert_eq!(
+            updated.trigger_hint.as_deref(),
+            Some("when asked to summarize")
+        );
+        assert_eq!(updated.tags, vec!["text", "analysis"]);
+        assert_eq!(updated.version, 2);
+    }
+
+    #[test]
+    fn list_all_skills() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        store
+            .upsert("alpha_skill", "Alpha", "Do alpha things", None, &[])
+            .expect("upsert alpha should succeed");
+        store
+            .upsert("beta_skill", "Beta", "Do beta things", None, &[])
+            .expect("upsert beta should succeed");
+        store
+            .upsert("gamma_skill", "Gamma", "Do gamma things", None, &[])
+            .expect("upsert gamma should succeed");
+
+        let all = store.list_all().expect("list_all should succeed");
+        assert_eq!(all.len(), 3);
+
+        // list_all orders by name ASC
+        let names: Vec<&str> = all.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha_skill", "beta_skill", "gamma_skill"]);
+    }
+
+    #[test]
+    fn delete_skill() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        store
+            .upsert("to_delete", "Temporary skill", "Will be removed", None, &[])
+            .expect("upsert should succeed");
+
+        assert!(
+            store.get("to_delete").unwrap().is_some(),
+            "skill should exist before delete"
+        );
+
+        let deleted = store.delete("to_delete").expect("delete should succeed");
+        assert!(deleted, "delete should return true for existing skill");
+
+        assert!(
+            store.get("to_delete").unwrap().is_none(),
+            "skill should not exist after delete"
+        );
+
+        let deleted_again = store
+            .delete("to_delete")
+            .expect("delete of missing should succeed");
+        assert!(
+            !deleted_again,
+            "delete should return false for nonexistent skill"
+        );
+    }
+
+    #[test]
+    fn search_by_tag() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        store
+            .upsert(
+                "code_review",
+                "Review code",
+                "Analyze code for issues",
+                None,
+                &["code", "review"],
+            )
+            .expect("upsert code_review should succeed");
+        store
+            .upsert(
+                "write_tests",
+                "Write tests",
+                "Generate test cases",
+                None,
+                &["code", "testing"],
+            )
+            .expect("upsert write_tests should succeed");
+        store
+            .upsert(
+                "draft_email",
+                "Draft an email",
+                "Compose a professional email",
+                None,
+                &["writing", "communication"],
+            )
+            .expect("upsert draft_email should succeed");
+
+        let code_skills = store
+            .find_by_tag("code")
+            .expect("find_by_tag should succeed");
+        assert_eq!(code_skills.len(), 2);
+        let code_names: Vec<&str> = code_skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(code_names.contains(&"code_review"));
+        assert!(code_names.contains(&"write_tests"));
+
+        let review_skills = store
+            .find_by_tag("review")
+            .expect("find_by_tag should succeed");
+        assert_eq!(review_skills.len(), 1);
+        assert_eq!(review_skills[0].name, "code_review");
+
+        let writing_skills = store
+            .find_by_tag("writing")
+            .expect("find_by_tag should succeed");
+        assert_eq!(writing_skills.len(), 1);
+        assert_eq!(writing_skills[0].name, "draft_email");
+
+        let no_match = store
+            .find_by_tag("nonexistent")
+            .expect("find_by_tag should succeed");
+        assert!(no_match.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod user_model_store_tests {
+    use super::{bootstrap, UserModelStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn observe_and_get_trait() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        let observed = store
+            .observe(
+                "preferred_language",
+                "preference",
+                "Rust",
+                Some("session-1"),
+            )
+            .expect("observe should succeed");
+
+        assert_eq!(observed.trait_key, "preferred_language");
+        assert_eq!(observed.category, "preference");
+        assert_eq!(observed.value, "Rust");
+        assert!((observed.confidence - 0.5).abs() < f64::EPSILON);
+        assert_eq!(observed.evidence_count, 1);
+        assert_eq!(observed.source_session.as_deref(), Some("session-1"));
+
+        let fetched = store
+            .get("preferred_language")
+            .expect("get should succeed")
+            .expect("trait should exist");
+
+        assert_eq!(fetched.trait_key, "preferred_language");
+        assert_eq!(fetched.category, "preference");
+        assert_eq!(fetched.value, "Rust");
+        assert!((fetched.confidence - 0.5).abs() < f64::EPSILON);
+        assert_eq!(fetched.evidence_count, 1);
+    }
+
+    #[test]
+    fn observe_updates_existing_trait() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        store
+            .observe("editor", "preference", "vim", Some("s1"))
+            .expect("first observe should succeed");
+
+        let updated = store
+            .observe("editor", "preference", "neovim", Some("s2"))
+            .expect("second observe should succeed");
+
+        assert_eq!(updated.trait_key, "editor");
+        assert_eq!(updated.value, "neovim");
+        // Confidence should increase by 0.1 from 0.5 to 0.6
+        assert!((updated.confidence - 0.6).abs() < f64::EPSILON);
+        assert_eq!(updated.evidence_count, 2);
+        assert_eq!(updated.source_session.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn list_traits() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        store
+            .observe("lang", "preference", "Rust", None)
+            .expect("observe lang");
+        store
+            .observe("tone", "communication_style", "casual", None)
+            .expect("observe tone");
+        store
+            .observe("goal", "goal", "build an AI agent", None)
+            .expect("observe goal");
+
+        let all = store.list_all().expect("list_all should succeed");
+        assert_eq!(all.len(), 3);
+
+        let keys: Vec<&str> = all.iter().map(|t| t.trait_key.as_str()).collect();
+        assert!(keys.contains(&"lang"));
+        assert!(keys.contains(&"tone"));
+        assert!(keys.contains(&"goal"));
+    }
+
+    #[test]
+    fn list_traits_filters_by_category() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        store
+            .observe("lang", "preference", "Rust", None)
+            .expect("observe lang");
+        store
+            .observe("theme", "preference", "dark mode", None)
+            .expect("observe theme");
+        store
+            .observe("tone", "communication_style", "formal", None)
+            .expect("observe tone");
+        store
+            .observe("expertise", "expertise", "systems programming", None)
+            .expect("observe expertise");
+
+        let preferences = store
+            .list_by_category("preference")
+            .expect("list_by_category should succeed");
+        assert_eq!(preferences.len(), 2);
+        let pref_keys: Vec<&str> = preferences.iter().map(|t| t.trait_key.as_str()).collect();
+        assert!(pref_keys.contains(&"lang"));
+        assert!(pref_keys.contains(&"theme"));
+
+        let comm = store
+            .list_by_category("communication_style")
+            .expect("list_by_category should succeed");
+        assert_eq!(comm.len(), 1);
+        assert_eq!(comm[0].trait_key, "tone");
+
+        let empty = store
+            .list_by_category("nonexistent_category")
+            .expect("list_by_category should succeed");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn list_traits_filters_by_min_confidence() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+
+        // First trait: observed once -> confidence 0.5
+        store
+            .observe("low_conf", "preference", "tabs", None)
+            .expect("observe low_conf");
+
+        // Second trait: observed 4 times -> confidence 0.5 + 0.3 = 0.8
+        store
+            .observe("high_conf", "preference", "dark mode", None)
+            .expect("observe high_conf 1");
+        store
+            .observe("high_conf", "preference", "dark mode", None)
+            .expect("observe high_conf 2");
+        store
+            .observe("high_conf", "preference", "dark mode", None)
+            .expect("observe high_conf 3");
+        store
+            .observe("high_conf", "preference", "dark mode", None)
+            .expect("observe high_conf 4");
+
+        // Filter by confidence >= 0.7 should only return high_conf
+        let confident = store
+            .confident_traits(0.7)
+            .expect("confident_traits should succeed");
+        assert_eq!(confident.len(), 1);
+        assert_eq!(confident[0].trait_key, "high_conf");
+        assert!(confident[0].confidence >= 0.7);
+
+        // Filter by confidence >= 0.5 should return both
+        let all_confident = store
+            .confident_traits(0.5)
+            .expect("confident_traits should succeed");
+        assert_eq!(all_confident.len(), 2);
+    }
+
+    #[test]
+    fn delete_trait() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        store
+            .observe("to_remove", "preference", "light mode", None)
+            .expect("observe should succeed");
+
+        assert!(
+            store.get("to_remove").unwrap().is_some(),
+            "trait should exist before delete"
+        );
+
+        let deleted = store.delete("to_remove").expect("delete should succeed");
+        assert!(deleted, "delete should return true for existing trait");
+
+        assert!(
+            store.get("to_remove").unwrap().is_none(),
+            "trait should not exist after delete"
+        );
+
+        let deleted_again = store
+            .delete("to_remove")
+            .expect("delete of missing should succeed");
+        assert!(
+            !deleted_again,
+            "delete should return false for nonexistent trait"
+        );
+    }
+}
