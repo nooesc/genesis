@@ -2375,4 +2375,299 @@ routing:
             super::ApprovalMode::Auto,
         );
     }
+
+    #[test]
+    fn guardrails_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  guardrails:
+    detect_pii: true
+    pii_action: block
+    max_response_length: 10000
+    forbidden_input_patterns:
+      - "DROP TABLE"
+      - "rm -rf /"
+    forbidden_output_patterns:
+      - "password: .*"
+    require_json_output: true
+    max_tokens_per_turn: 5000
+    custom_rules:
+      - name: no_secrets
+        pattern: "SECRET_KEY=.*"
+        applies_to: output
+        action: block
+        message: "Secrets must not appear in output"
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let guardrails = loaded
+            .config
+            .runtime
+            .guardrails
+            .expect("guardrails should be set");
+        assert!(guardrails.detect_pii);
+        assert_eq!(guardrails.pii_action, "block");
+        assert_eq!(guardrails.max_response_length, 10000);
+        assert_eq!(guardrails.forbidden_input_patterns.len(), 2);
+        assert_eq!(guardrails.forbidden_input_patterns[0], "DROP TABLE");
+        assert_eq!(guardrails.forbidden_input_patterns[1], "rm -rf /");
+        assert_eq!(guardrails.forbidden_output_patterns.len(), 1);
+        assert!(guardrails.require_json_output);
+        assert_eq!(guardrails.max_tokens_per_turn, 5000);
+        assert_eq!(guardrails.custom_rules.len(), 1);
+        assert_eq!(guardrails.custom_rules[0].name, "no_secrets");
+        assert_eq!(guardrails.custom_rules[0].pattern, "SECRET_KEY=.*");
+        assert_eq!(guardrails.custom_rules[0].applies_to, "output");
+        assert_eq!(guardrails.custom_rules[0].action, "block");
+        assert_eq!(
+            guardrails.custom_rules[0].message,
+            "Secrets must not appear in output"
+        );
+    }
+
+    #[test]
+    fn guardrails_config_absent_when_not_configured() {
+        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.runtime.guardrails.is_none());
+    }
+
+    #[test]
+    fn guardrails_config_defaults_for_omitted_fields() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  guardrails:
+    detect_pii: true
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let guardrails = loaded
+            .config
+            .runtime
+            .guardrails
+            .expect("guardrails should be set");
+        assert!(guardrails.detect_pii);
+        assert_eq!(guardrails.pii_action, "redact");
+        assert_eq!(guardrails.max_response_length, 0);
+        assert!(guardrails.forbidden_input_patterns.is_empty());
+        assert!(guardrails.forbidden_output_patterns.is_empty());
+        assert!(!guardrails.require_json_output);
+        assert_eq!(guardrails.max_tokens_per_turn, 0);
+        assert!(guardrails.custom_rules.is_empty());
+    }
+
+    #[test]
+    fn tool_filter_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  tool_filter:
+    allow:
+      - shell_exec
+      - read_file
+      - write_file
+    deny:
+      - delete_file
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let tool_filter = loaded
+            .config
+            .runtime
+            .tool_filter
+            .expect("tool_filter should be set");
+        assert_eq!(tool_filter.allow.len(), 3);
+        assert_eq!(tool_filter.allow[0], "shell_exec");
+        assert_eq!(tool_filter.allow[1], "read_file");
+        assert_eq!(tool_filter.allow[2], "write_file");
+        assert_eq!(tool_filter.deny.len(), 1);
+        assert_eq!(tool_filter.deny[0], "delete_file");
+    }
+
+    #[test]
+    fn tool_filter_config_absent_when_not_configured() {
+        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.runtime.tool_filter.is_none());
+    }
+
+    #[test]
+    fn tool_filter_config_allow_only() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  tool_filter:
+    allow:
+      - read_file
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let tool_filter = loaded
+            .config
+            .runtime
+            .tool_filter
+            .expect("tool_filter should be set");
+        assert_eq!(tool_filter.allow, vec!["read_file"]);
+        assert!(tool_filter.deny.is_empty());
+    }
+
+    #[test]
+    fn webhook_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+gateway:
+  webhooks:
+    - url: https://hooks.example.com/genesis
+      secret: my-hmac-secret
+      events:
+        - message_received
+        - response_sent
+      max_retries: 5
+      retry_backoff_ms: 2000
+    - url: https://log.example.com/events
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let gw = loaded.config.gateway.expect("gateway should be set");
+        assert_eq!(gw.webhooks.len(), 2);
+
+        let first = &gw.webhooks[0];
+        assert_eq!(first.url, "https://hooks.example.com/genesis");
+        assert_eq!(first.secret.as_deref(), Some("my-hmac-secret"));
+        assert_eq!(first.events.len(), 2);
+        assert_eq!(first.events[0], "message_received");
+        assert_eq!(first.events[1], "response_sent");
+        assert_eq!(first.max_retries, 5);
+        assert_eq!(first.retry_backoff_ms, 2000);
+
+        let second = &gw.webhooks[1];
+        assert_eq!(second.url, "https://log.example.com/events");
+        assert!(second.secret.is_none());
+        assert!(second.events.is_empty());
+        // Verify defaults for retry settings
+        assert_eq!(second.max_retries, 3);
+        assert_eq!(second.retry_backoff_ms, 1000);
+    }
+
+    #[test]
+    fn webhook_config_empty_when_not_configured() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+gateway:
+  idle_timeout_minutes: 60
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let gw = loaded.config.gateway.expect("gateway should be set");
+        assert!(gw.webhooks.is_empty());
+    }
+
+    #[test]
+    fn cache_config_defaults_are_reasonable() {
+        let defaults = super::CacheConfig::default();
+        assert!(defaults.enabled);
+        assert!(defaults.ttl_seconds > 0, "TTL should be positive");
+        assert_eq!(defaults.ttl_seconds, 3600);
+        assert!(
+            defaults.max_context_messages > 0,
+            "max_context_messages should be positive"
+        );
+        assert_eq!(defaults.max_context_messages, 4);
+    }
+
+    #[test]
+    fn cache_config_parsed_from_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  cache:
+    enabled: true
+    ttl_seconds: 7200
+    max_context_messages: 8
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let cache = loaded.config.runtime.cache.expect("cache should be set");
+        assert!(cache.enabled);
+        assert_eq!(cache.ttl_seconds, 7200);
+        assert_eq!(cache.max_context_messages, 8);
+    }
+
+    #[test]
+    fn cache_config_uses_defaults_for_omitted_fields() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  cache:
+    enabled: false
+"#,
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+
+        let cache = loaded.config.runtime.cache.expect("cache should be set");
+        assert!(!cache.enabled);
+        assert_eq!(cache.ttl_seconds, 3600);
+        assert_eq!(cache.max_context_messages, 4);
+    }
+
+    #[test]
+    fn cache_config_absent_when_not_configured() {
+        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.runtime.cache.is_none());
+    }
 }

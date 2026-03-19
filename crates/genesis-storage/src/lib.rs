@@ -9558,3 +9558,355 @@ mod user_model_store_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod skill_file_store_tests {
+    use super::{bootstrap, SkillFileStore, SkillStore};
+    use tempfile::tempdir;
+
+    /// Helper: create a skill so the foreign key constraint is satisfied.
+    fn create_skill(database_path: &std::path::Path, name: &str) {
+        let store = SkillStore::new(database_path);
+        store
+            .upsert(name, "test skill", "do stuff", None, &[])
+            .expect("skill upsert should succeed");
+    }
+
+    #[test]
+    fn store_and_get_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+        create_skill(&database_path, "my_skill");
+
+        let store = SkillFileStore::new(&database_path);
+        store
+            .store_file("my_skill", "config.yaml", "key: value")
+            .expect("store_file should succeed");
+
+        let content = store
+            .get_file("my_skill", "config.yaml")
+            .expect("get_file should succeed")
+            .expect("file should exist");
+
+        assert_eq!(content, "key: value");
+    }
+
+    #[test]
+    fn list_files_for_skill() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+        create_skill(&database_path, "multi_file_skill");
+
+        let store = SkillFileStore::new(&database_path);
+        store
+            .store_file("multi_file_skill", "b_second.txt", "two")
+            .expect("store second file");
+        store
+            .store_file("multi_file_skill", "a_first.txt", "one")
+            .expect("store first file");
+        store
+            .store_file("multi_file_skill", "c_third.txt", "three")
+            .expect("store third file");
+
+        let files = store
+            .list_files("multi_file_skill")
+            .expect("list_files should succeed");
+
+        assert_eq!(files.len(), 3);
+        // list_files returns file_path ordered ASC
+        assert_eq!(files[0], "a_first.txt");
+        assert_eq!(files[1], "b_second.txt");
+        assert_eq!(files[2], "c_third.txt");
+    }
+
+    #[test]
+    fn delete_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+        create_skill(&database_path, "del_skill");
+
+        let store = SkillFileStore::new(&database_path);
+        store
+            .store_file("del_skill", "to_remove.txt", "ephemeral")
+            .expect("store_file should succeed");
+
+        let deleted = store
+            .delete_file("del_skill", "to_remove.txt")
+            .expect("delete_file should succeed");
+        assert!(deleted, "delete should return true for existing file");
+
+        let gone = store
+            .get_file("del_skill", "to_remove.txt")
+            .expect("get_file should succeed");
+        assert!(gone.is_none(), "file should no longer exist after deletion");
+
+        let deleted_again = store
+            .delete_file("del_skill", "to_remove.txt")
+            .expect("delete of missing file should succeed");
+        assert!(
+            !deleted_again,
+            "delete should return false for nonexistent file"
+        );
+    }
+
+    #[test]
+    fn files_isolated_per_skill() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+        create_skill(&database_path, "skill_a");
+        create_skill(&database_path, "skill_b");
+
+        let store = SkillFileStore::new(&database_path);
+        store
+            .store_file("skill_a", "shared_name.txt", "content from A")
+            .expect("store file for skill_a");
+        store
+            .store_file("skill_b", "shared_name.txt", "content from B")
+            .expect("store file for skill_b");
+        store
+            .store_file("skill_b", "extra.txt", "only in B")
+            .expect("store extra file for skill_b");
+
+        let files_a = store.list_files("skill_a").expect("list_files for skill_a");
+        let files_b = store.list_files("skill_b").expect("list_files for skill_b");
+
+        assert_eq!(files_a.len(), 1);
+        assert_eq!(files_a[0], "shared_name.txt");
+        assert_eq!(files_b.len(), 2);
+
+        let content_a = store
+            .get_file("skill_a", "shared_name.txt")
+            .expect("get_file skill_a")
+            .expect("file should exist for skill_a");
+        let content_b = store
+            .get_file("skill_b", "shared_name.txt")
+            .expect("get_file skill_b")
+            .expect("file should exist for skill_b");
+
+        assert_eq!(content_a, "content from A");
+        assert_eq!(content_b, "content from B");
+    }
+}
+
+#[cfg(test)]
+mod response_cache_store_tests {
+    use super::{bootstrap, ResponseCacheStore};
+    use tempfile::tempdir;
+
+    #[test]
+    fn set_and_get_cached_response() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ResponseCacheStore::new(&database_path);
+        store
+            .set("key-1", "gpt-4", "Hello world", None, 100, 20, 3600)
+            .expect("set should succeed");
+
+        let entry = store
+            .get("key-1")
+            .expect("get should succeed")
+            .expect("entry should exist");
+
+        assert_eq!(entry.cache_key, "key-1");
+        assert_eq!(entry.model, "gpt-4");
+        assert_eq!(entry.response, "Hello world");
+        assert!(entry.tool_calls_json.is_none());
+        assert_eq!(entry.input_tokens, 100);
+        assert_eq!(entry.output_tokens, 20);
+    }
+
+    #[test]
+    fn get_returns_none_for_missing_key() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ResponseCacheStore::new(&database_path);
+        let result = store.get("nonexistent").expect("get should succeed");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn set_overwrites_existing() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ResponseCacheStore::new(&database_path);
+        store
+            .set("dup-key", "gpt-4", "first response", None, 50, 10, 3600)
+            .expect("first set should succeed");
+        store
+            .set(
+                "dup-key",
+                "gpt-4o",
+                "second response",
+                Some("[{\"name\":\"tool\"}]"),
+                80,
+                30,
+                3600,
+            )
+            .expect("second set should succeed");
+
+        let entry = store
+            .get("dup-key")
+            .expect("get should succeed")
+            .expect("entry should exist");
+
+        assert_eq!(entry.model, "gpt-4o");
+        assert_eq!(entry.response, "second response");
+        assert_eq!(
+            entry.tool_calls_json.as_deref(),
+            Some("[{\"name\":\"tool\"}]")
+        );
+        assert_eq!(entry.input_tokens, 80);
+        assert_eq!(entry.output_tokens, 30);
+        // hit_count resets on overwrite because INSERT OR REPLACE resets to 0
+        assert_eq!(entry.hit_count, 0);
+    }
+
+    #[test]
+    fn clear_removes_all_entries() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ResponseCacheStore::new(&database_path);
+        store
+            .set("a", "m1", "r1", None, 10, 5, 3600)
+            .expect("set a");
+        store
+            .set("b", "m2", "r2", None, 20, 10, 3600)
+            .expect("set b");
+        store
+            .set("c", "m3", "r3", None, 30, 15, 3600)
+            .expect("set c");
+
+        let (count_before, _) = store.stats().expect("stats should succeed");
+        assert_eq!(count_before, 3);
+
+        let cleared = store.clear().expect("clear should succeed");
+        assert_eq!(cleared, 3);
+
+        let (count_after, _) = store.stats().expect("stats should succeed");
+        assert_eq!(count_after, 0);
+
+        assert!(store.get("a").expect("get should succeed").is_none());
+        assert!(store.get("b").expect("get should succeed").is_none());
+        assert!(store.get("c").expect("get should succeed").is_none());
+    }
+}
+
+#[cfg(test)]
+mod channel_store_tests {
+    use super::{bootstrap, CachedChannel, ChannelStore};
+    use tempfile::tempdir;
+
+    fn make_channel(
+        platform: &str,
+        id: &str,
+        name: &str,
+        ch_type: &str,
+        is_member: bool,
+    ) -> CachedChannel {
+        CachedChannel {
+            platform: platform.to_string(),
+            channel_id: id.to_string(),
+            channel_name: name.to_string(),
+            channel_type: ch_type.to_string(),
+            is_member,
+            cached_at: String::new(), // ignored on insert; DB sets CURRENT_TIMESTAMP
+        }
+    }
+
+    #[test]
+    fn cache_and_get_channel() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ChannelStore::new(&database_path);
+        let channels = vec![
+            make_channel("slack", "C001", "general", "channel", true),
+            make_channel("slack", "C002", "random", "channel", false),
+        ];
+
+        let inserted = store
+            .upsert_channels("slack", &channels)
+            .expect("upsert_channels should succeed");
+        assert_eq!(inserted, 2);
+
+        let listed = store.list(Some("slack")).expect("list should succeed");
+        assert_eq!(listed.len(), 2);
+
+        // list is ordered by channel_name ASC
+        assert_eq!(listed[0].channel_id, "C001");
+        assert_eq!(listed[0].channel_name, "general");
+        assert_eq!(listed[0].channel_type, "channel");
+        assert!(listed[0].is_member);
+        assert_eq!(listed[0].platform, "slack");
+
+        assert_eq!(listed[1].channel_id, "C002");
+        assert_eq!(listed[1].channel_name, "random");
+        assert!(!listed[1].is_member);
+    }
+
+    #[test]
+    fn get_returns_none_for_missing() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ChannelStore::new(&database_path);
+        let listed = store.list(Some("discord")).expect("list should succeed");
+        assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn update_channel() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = ChannelStore::new(&database_path);
+
+        // Initial insert
+        let initial = vec![
+            make_channel("slack", "C001", "general", "channel", false),
+            make_channel("slack", "C002", "random", "channel", true),
+        ];
+        store
+            .upsert_channels("slack", &initial)
+            .expect("initial upsert");
+
+        // Update: change membership and add a new channel
+        let updated = vec![
+            make_channel("slack", "C001", "general", "channel", true),
+            make_channel("slack", "C003", "engineering", "channel", true),
+        ];
+        store
+            .upsert_channels("slack", &updated)
+            .expect("update upsert");
+
+        let listed = store.list(Some("slack")).expect("list should succeed");
+
+        // upsert_channels deletes old entries for the platform, then inserts fresh ones
+        assert_eq!(listed.len(), 2);
+
+        let names: Vec<&str> = listed.iter().map(|c| c.channel_name.as_str()).collect();
+        assert!(names.contains(&"general"));
+        assert!(names.contains(&"engineering"));
+        // "random" (C002) should be gone — replaced by the new batch
+        assert!(!names.contains(&"random"));
+
+        // Verify the updated membership flag
+        let general = listed.iter().find(|c| c.channel_id == "C001").unwrap();
+        assert!(general.is_member, "general should now be a member");
+    }
+}
