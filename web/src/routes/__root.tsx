@@ -4,6 +4,7 @@ import { Dock } from '@/components/layout/dock'
 import { CommandPalette } from '@/components/layout/command-palette'
 import { ShortcutHelp } from '@/components/layout/shortcut-help'
 import { ConnectionBanner } from '@/components/shared/connection-banner'
+import { Toaster } from '@/components/ui/sonner'
 import { useKeyboardNav } from '@/lib/use-keyboard-nav'
 import { useCallback, useState } from 'react'
 
@@ -41,6 +42,7 @@ function RootLayout() {
       <Dock onCommandPalette={() => setCommandOpen(true)} />
       <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <Toaster />
     </div>
   )
 }
