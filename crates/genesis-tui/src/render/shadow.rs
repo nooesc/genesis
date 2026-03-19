@@ -18,8 +18,7 @@ pub fn render_shadow(area: Rect, buf: &mut Buffer) {
     // Right edge shadow (1 column wide, full height).
     let right_x = area.x + area.width;
     if right_x < buf.area().width {
-        for y in
-            (area.y + OFFSET)..=(area.y + area.height).min(buf.area().height.saturating_sub(1))
+        for y in (area.y + OFFSET)..=(area.y + area.height).min(buf.area().height.saturating_sub(1))
         {
             if let Some(cell) = buf.cell_mut((right_x, y)) {
                 cell.set_symbol("\u{2591}");
@@ -31,9 +30,7 @@ pub fn render_shadow(area: Rect, buf: &mut Buffer) {
     // Bottom edge shadow (full width, 1 row tall).
     let bottom_y = area.y + area.height;
     if bottom_y < buf.area().height {
-        for x in
-            (area.x + OFFSET)..=(area.x + area.width).min(buf.area().width.saturating_sub(1))
-        {
+        for x in (area.x + OFFSET)..=(area.x + area.width).min(buf.area().width.saturating_sub(1)) {
             if let Some(cell) = buf.cell_mut((x, bottom_y)) {
                 cell.set_symbol("\u{2591}");
                 cell.set_style(shadow_style);

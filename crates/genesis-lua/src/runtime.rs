@@ -95,6 +95,7 @@ struct ActivePluginExecution {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LuaRuntimeError {
     #[error("failed to read plugin directory `{path}`: {source}")]
     ReadPluginDirectory {
@@ -177,8 +178,6 @@ pub enum LuaRuntimeError {
         #[from]
         source: mlua::Error,
     },
-    #[error("lua runtime initialization is not implemented yet")]
-    NotImplemented,
 }
 
 impl LuaRuntime {

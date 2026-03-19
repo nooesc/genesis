@@ -534,8 +534,7 @@ fn decayed_importance(
 }
 
 fn sql_placeholders(count: usize) -> String {
-    std::iter::repeat("?")
-        .take(count)
+    std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -571,6 +570,7 @@ fn register_sqlite_vec() {
     SQLITE_VEC_REGISTERED.get_or_init(|| unsafe {
         // SAFETY: `sqlite_vec::sqlite3_vec_init` is the sqlite-vec extension entry point
         // with the exact function signature expected by `sqlite3_auto_extension`.
+        #[allow(clippy::missing_transmute_annotations)]
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
@@ -695,7 +695,7 @@ fn ensure_memory_vec_table(
 ) -> Result<(), StorageError> {
     match memory_vec_declared_dimensions(conn, database_path)? {
         Some(existing) if existing == dimensions => Ok(()),
-        Some(existing) if memory_embeddings_count(conn, database_path)? == 0 => {
+        Some(_existing) if memory_embeddings_count(conn, database_path)? == 0 => {
             conn.execute("DROP TABLE memory_vec", [])
                 .map_err(|source| StorageError::Sqlite {
                     path: database_path.to_path_buf(),

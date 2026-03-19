@@ -80,12 +80,7 @@ mod tests {
     #[test]
     fn draw_box_renders_corners() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 5));
-        draw_box(
-            Rect::new(1, 1, 6, 3),
-            &mut buf,
-            Style::default(),
-            None,
-        );
+        draw_box(Rect::new(1, 1, 6, 3), &mut buf, Style::default(), None);
         assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "┌");
         assert_eq!(buf.cell((6, 1)).unwrap().symbol(), "┐");
         assert_eq!(buf.cell((1, 3)).unwrap().symbol(), "└");
@@ -116,7 +111,12 @@ mod tests {
     fn draw_box_with_fill() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
         let fill = Style::default().bg(ratatui::style::Color::Blue);
-        draw_box(Rect::new(0, 0, 6, 4), &mut buf, Style::default(), Some(fill));
+        draw_box(
+            Rect::new(0, 0, 6, 4),
+            &mut buf,
+            Style::default(),
+            Some(fill),
+        );
         // Interior should have fill style applied
         let interior = buf.cell((2, 1)).unwrap();
         assert_eq!(interior.symbol(), " ");

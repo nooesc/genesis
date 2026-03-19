@@ -121,11 +121,7 @@ impl StatusBar {
 
         let elapsed = self.started_at.map(|s| s.elapsed()).unwrap_or_default();
         let elapsed_str = if elapsed.as_secs() >= 60 {
-            format!(
-                "({}m{}s)",
-                elapsed.as_secs() / 60,
-                elapsed.as_secs() % 60
-            )
+            format!("({}m{}s)", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
         } else {
             format!("({:.1}s)", elapsed.as_secs_f64())
         };
@@ -141,13 +137,11 @@ impl StatusBar {
         };
 
         let dance = match state {
-            BarState::Thinking | BarState::ToolRunning { .. } => {
-                match self.dance_frame % 3 {
-                    0 => " (~'.')~",
-                    1 => " ~('.'~)",
-                    _ => "  ('.')",
-                }
-            }
+            BarState::Thinking | BarState::ToolRunning { .. } => match self.dance_frame % 3 {
+                0 => " (~'.')~",
+                1 => " ~('.'~)",
+                _ => "  ('.')",
+            },
             _ => "",
         };
 
@@ -158,26 +152,13 @@ impl StatusBar {
         };
 
         // ANSI escape sequences for color
-        let bg = format!(
-            "\x1b[48;2;{};{};{}m",
-            UI_MUTED.0, UI_MUTED.1, UI_MUTED.2
-        );
-        let accent = format!(
-            "\x1b[38;2;{};{};{}m",
-            UI_ACCENT.0, UI_ACCENT.1, UI_ACCENT.2
-        );
-        let text_c = format!(
-            "\x1b[38;2;{};{};{}m",
-            UI_TEXT.0, UI_TEXT.1, UI_TEXT.2
-        );
-        let dim = format!(
-            "\x1b[38;2;{};{};{}m",
-            UI_DIM.0, UI_DIM.1, UI_DIM.2
-        );
+        let bg = format!("\x1b[48;2;{};{};{}m", UI_MUTED.0, UI_MUTED.1, UI_MUTED.2);
+        let accent = format!("\x1b[38;2;{};{};{}m", UI_ACCENT.0, UI_ACCENT.1, UI_ACCENT.2);
+        let text_c = format!("\x1b[38;2;{};{};{}m", UI_TEXT.0, UI_TEXT.1, UI_TEXT.2);
+        let dim = format!("\x1b[38;2;{};{};{}m", UI_DIM.0, UI_DIM.1, UI_DIM.2);
 
-        let left = format!(
-            "{accent}\u{2666} {text_c}{state_text}  {dim}{elapsed_str}{text_c}{dance}"
-        );
+        let left =
+            format!("{accent}\u{2666} {text_c}{state_text}  {dim}{elapsed_str}{text_c}{dance}");
         let right = format!(
             "{dim}{session_short}  {}\u{2191} {}\u{2193}  ${:.2}",
             self.tokens_in, self.tokens_out, self.cost

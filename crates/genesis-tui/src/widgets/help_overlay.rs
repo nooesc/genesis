@@ -59,9 +59,7 @@ impl HelpOverlay {
     fn build_content() -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
-        let accent_style = Style::default()
-            .fg(ACCENT)
-            .add_modifier(Modifier::BOLD);
+        let accent_style = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
         let key_style = Style::default().fg(KEY).add_modifier(Modifier::BOLD);
         let desc_style = Style::default().fg(TEXT);
         let dim_style = Style::default().fg(DIM);
@@ -75,14 +73,8 @@ impl HelpOverlay {
         lines.push(Line::default());
 
         // Keybindings section
-        lines.push(Line::from(Span::styled(
-            "  Keybindings",
-            accent_style,
-        )));
-        lines.push(Line::from(Span::styled(
-            "  ───────────",
-            dim_style,
-        )));
+        lines.push(Line::from(Span::styled("  Keybindings", accent_style)));
+        lines.push(Line::from(Span::styled("  ───────────", dim_style)));
 
         let bindings: &[(&str, &str)] = &[
             ("Enter", "Submit message"),
@@ -110,14 +102,8 @@ impl HelpOverlay {
         lines.push(Line::default());
 
         // Slash commands section
-        lines.push(Line::from(Span::styled(
-            "  Slash Commands",
-            accent_style,
-        )));
-        lines.push(Line::from(Span::styled(
-            "  ──────────────",
-            dim_style,
-        )));
+        lines.push(Line::from(Span::styled("  Slash Commands", accent_style)));
+        lines.push(Line::from(Span::styled("  ──────────────", dim_style)));
 
         let commands: &[(&str, &str)] = &[
             ("/clear", "Clear conversation history"),
@@ -142,10 +128,7 @@ impl HelpOverlay {
             "  Overlay Navigation",
             accent_style,
         )));
-        lines.push(Line::from(Span::styled(
-            "  ─────────────────",
-            dim_style,
-        )));
+        lines.push(Line::from(Span::styled("  ─────────────────", dim_style)));
 
         let nav: &[(&str, &str)] = &[
             ("j / Down", "Scroll down one line"),
@@ -307,8 +290,7 @@ mod tests {
     #[test]
     fn q_closes() {
         let mut overlay = HelpOverlay::new();
-        let action =
-            overlay.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), 24);
+        let action = overlay.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), 24);
         assert_eq!(action, HelpAction::Close);
     }
 
@@ -342,7 +324,10 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("Keybindings"), "should contain keybindings section");
+        assert!(
+            text.contains("Keybindings"),
+            "should contain keybindings section"
+        );
         assert!(text.contains("Ctrl+C"), "should list Ctrl+C");
         assert!(text.contains("/help"), "should list /help command");
     }

@@ -411,10 +411,13 @@ impl ToolRegistry {
             })
             .map(|reg| {
                 let name_match = reg.definition.name.to_lowercase().contains(&q);
-                (name_match, ToolSummary {
-                    name: reg.definition.name.clone(),
-                    description: reg.definition.description.clone(),
-                })
+                (
+                    name_match,
+                    ToolSummary {
+                        name: reg.definition.name.clone(),
+                        description: reg.definition.description.clone(),
+                    },
+                )
             })
             .collect();
         results.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1906,7 +1909,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 73);
+        assert_eq!(definitions.len(), 74);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -2398,7 +2401,11 @@ mod tests {
     fn never_policy_exempt_in_all_modes() {
         use genesis_config::ApprovalMode;
 
-        for mode in [ApprovalMode::Auto, ApprovalMode::Smart, ApprovalMode::Manual] {
+        for mode in [
+            ApprovalMode::Auto,
+            ApprovalMode::Smart,
+            ApprovalMode::Manual,
+        ] {
             let mut registry = ToolRegistry::new();
             // No approval handler — so if approval were requested it would fail.
             registry.register(
@@ -2447,7 +2454,10 @@ mod tests {
             },
             &context_with_mode_destructive(genesis_config::ApprovalMode::Smart),
         );
-        assert!(result.is_ok(), "read_file should auto-approve in Smart mode");
+        assert!(
+            result.is_ok(),
+            "read_file should auto-approve in Smart mode"
+        );
     }
 
     #[test]
@@ -2520,7 +2530,11 @@ mod tests {
     fn destructive_blocked_in_all_modes_when_disallowed() {
         use genesis_config::ApprovalMode;
 
-        for mode in [ApprovalMode::Auto, ApprovalMode::Smart, ApprovalMode::Manual] {
+        for mode in [
+            ApprovalMode::Auto,
+            ApprovalMode::Smart,
+            ApprovalMode::Manual,
+        ] {
             let mut registry = ToolRegistry::new();
             registry.register(
                 ToolDefinition {

@@ -179,7 +179,9 @@ impl FileCompletion {
         let title = " Files ";
         let mut col = popup_x + 1;
         for ch in title.chars() {
-            if col >= popup_x + popup_width - 1 { break; }
+            if col >= popup_x + popup_width - 1 {
+                break;
+            }
             if let Some(cell) = buf.cell_mut((col, popup_y)) {
                 cell.set_symbol(&ch.to_string());
                 cell.set_style(Style::default().fg(PATH_FG));
@@ -210,13 +212,19 @@ impl FileCompletion {
             // Content.
             let indicator = if is_selected { "▸ " } else { "  " };
             let display = if path.len() > inner_width.saturating_sub(2) {
-                format!("{}…", &path[..path.floor_char_boundary(inner_width.saturating_sub(3))])
+                format!(
+                    "{}…",
+                    &path[..path.floor_char_boundary(inner_width.saturating_sub(3))]
+                )
             } else {
                 path.clone()
             };
 
             let style = if is_selected {
-                Style::default().fg(SELECTED_TEXT_FG).bg(SELECTED_BG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(SELECTED_TEXT_FG)
+                    .bg(SELECTED_BG)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(NAME_FG)
             };
@@ -228,7 +236,9 @@ impl FileCompletion {
 
             let mut x = popup_x + 1;
             for ch in indicator.chars().chain(display.chars()) {
-                if x >= popup_x + popup_width - 1 { break; }
+                if x >= popup_x + popup_width - 1 {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut((x, row_y)) {
                     cell.set_symbol(&ch.to_string());
                     cell.set_style(style);
@@ -238,7 +248,8 @@ impl FileCompletion {
             // Pad remaining with bg.
             while x < popup_x + popup_width - 1 {
                 if let Some(cell) = buf.cell_mut((x, row_y)) {
-                    cell.set_symbol(" "); cell.set_style(bg_style);
+                    cell.set_symbol(" ");
+                    cell.set_style(bg_style);
                 }
                 x += 1;
             }

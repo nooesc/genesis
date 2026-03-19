@@ -95,9 +95,8 @@ fn blockquote_prefix(depth: usize) -> Vec<Span<'static>> {
 /// The output is `'static` (all strings are owned) so the lines can be stored
 /// in widgets or scrollback without lifetime complications.
 pub fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
-    let opts = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_SMART_PUNCTUATION;
+    let opts =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_SMART_PUNCTUATION;
     let parser = Parser::new_ext(text, opts);
     let mut writer = MarkdownWriter::new();
     writer.process(parser);
@@ -156,7 +155,10 @@ impl MarkdownWriter {
     }
 
     fn current_style(&self) -> Style {
-        self.style_stack.last().copied().unwrap_or(Style::default().fg(TEXT))
+        self.style_stack
+            .last()
+            .copied()
+            .unwrap_or(Style::default().fg(TEXT))
     }
 
     fn push_style(&mut self, style: Style) {
@@ -172,20 +174,16 @@ impl MarkdownWriter {
     /// Emit text with the current style.
     fn push_text(&mut self, text: &str) {
         if self.in_table {
-            self.table_cell_spans.push(Span::styled(
-                text.to_owned(),
-                self.current_style(),
-            ));
+            self.table_cell_spans
+                .push(Span::styled(text.to_owned(), self.current_style()));
             return;
         }
         if let Some((_, ref mut buf)) = self.code_block {
             buf.push_str(text);
             return;
         }
-        self.current_spans.push(Span::styled(
-            text.to_owned(),
-            self.current_style(),
-        ));
+        self.current_spans
+            .push(Span::styled(text.to_owned(), self.current_style()));
     }
 
     /// Finish the current line and start a new one.
@@ -307,7 +305,6 @@ impl MarkdownWriter {
 
             Event::Start(Tag::TableHead) | Event::End(TagEnd::TableHead) => {}
 
-
             Event::Start(Tag::TableRow) => {
                 self.table_rows.push(Vec::new());
             }
@@ -417,9 +414,7 @@ impl MarkdownWriter {
                         let indent = "  ".repeat(depth);
                         // Indent continuation lines to align with list item text.
                         let prefix_width = indent.len() + 2; // "• " or "N. "
-                        self.current_spans.push(Span::raw(
-                            " ".repeat(prefix_width),
-                        ));
+                        self.current_spans.push(Span::raw(" ".repeat(prefix_width)));
                     }
                 }
             }
@@ -430,10 +425,8 @@ impl MarkdownWriter {
 
             Event::Rule => {
                 let rule = "─".repeat(40);
-                self.current_spans.push(Span::styled(
-                    rule,
-                    Style::default().fg(DIM),
-                ));
+                self.current_spans
+                    .push(Span::styled(rule, Style::default().fg(DIM)));
                 self.finish_line();
             }
 
@@ -527,7 +520,11 @@ impl MarkdownWriter {
                 .iter()
                 .enumerate()
                 .map(|(i, &w)| {
-                    let align = self.table_alignments.get(i).copied().unwrap_or(Alignment::None);
+                    let align = self
+                        .table_alignments
+                        .get(i)
+                        .copied()
+                        .unwrap_or(Alignment::None);
                     let seg_width = w + 2;
                     match align {
                         Alignment::Left => {
@@ -544,7 +541,8 @@ impl MarkdownWriter {
                 })
                 .collect::<Vec<_>>()
                 .join("┼");
-            self.lines.push(Line::from(Span::styled(sep, Style::default().fg(DIM))));
+            self.lines
+                .push(Line::from(Span::styled(sep, Style::default().fg(DIM))));
         }
 
         // Render data rows with zebra striping on odd rows.
@@ -572,7 +570,11 @@ impl MarkdownWriter {
                 .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                 .sum();
             let padding = width.saturating_sub(content_len);
-            let align = self.table_alignments.get(i).copied().unwrap_or(Alignment::None);
+            let align = self
+                .table_alignments
+                .get(i)
+                .copied()
+                .unwrap_or(Alignment::None);
 
             let (pad_left, pad_right) = match align {
                 Alignment::Right => (padding, 0),
@@ -664,11 +666,7 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
         let spans: Vec<Span<'static>> = ranges
             .iter()
             .map(|(style, text)| {
-                let fg = Color::Rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                );
+                let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                 let content = text.trim_end_matches('\n').to_owned();
                 Span::styled(content, Style::default().fg(fg).bg(CODE_BG))
             })
@@ -741,7 +739,10 @@ mod tests {
 
     /// Find a span whose content contains the given substring.
     fn find_span<'a>(lines: &'a [Line<'_>], needle: &str) -> Option<&'a Span<'a>> {
-        lines.iter().flat_map(|l| l.spans.iter()).find(|s| s.content.contains(needle))
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains(needle))
     }
 
     // ── Plain text ────────────────────────────────────────────────────────
@@ -814,7 +815,10 @@ mod tests {
     fn code_fence_produces_highlighted_lines() {
         let md = "```rust\nlet x = 42;\n```";
         let lines = markdown_to_lines(md);
-        assert!(!lines.is_empty(), "code fence should produce at least one line");
+        assert!(
+            !lines.is_empty(),
+            "code fence should produce at least one line"
+        );
         // Skip the first line (language label) — only code lines have CODE_BG.
         for line in lines.iter().skip(1) {
             for span in &line.spans {
@@ -838,7 +842,11 @@ mod tests {
     fn code_fence_each_source_line_becomes_ratatui_line() {
         let md = "```\nline1\nline2\nline3\n```";
         let lines = markdown_to_lines(md);
-        assert_eq!(lines.len(), 3, "each code line should map to one ratatui Line");
+        assert_eq!(
+            lines.len(),
+            3,
+            "each code line should map to one ratatui Line"
+        );
     }
 
     #[test]
@@ -846,11 +854,7 @@ mod tests {
         let md = "```rust\nlet x = 42;\n```";
         let lines = markdown_to_lines(md);
         // First line should be the language label.
-        let first_text: String = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let first_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             first_text.contains("rust"),
             "label line should contain the language name: {first_text}"
@@ -892,7 +896,11 @@ mod tests {
         let lines = markdown_to_lines("# Hello");
         assert_eq!(lines.len(), 1);
         let span = find_span(&lines, "Hello").unwrap();
-        assert_eq!(span.style.fg, Some(ACCENT), "header should use accent colour");
+        assert_eq!(
+            span.style.fg,
+            Some(ACCENT),
+            "header should use accent colour"
+        );
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
             "header should be bold"
@@ -970,7 +978,10 @@ mod tests {
     fn unclosed_code_fence_flushes_as_highlighted() {
         let md = "```rust\nlet x = 1;";
         let lines = markdown_to_lines(md);
-        assert!(!lines.is_empty(), "unclosed fence should still produce lines");
+        assert!(
+            !lines.is_empty(),
+            "unclosed fence should still produce lines"
+        );
     }
 
     // ── Blank lines ──────────────────────────────────────────────────────
@@ -987,7 +998,10 @@ mod tests {
     fn blockquote_has_prefix() {
         let lines = markdown_to_lines("> quoted text");
         let text = all_text(&lines);
-        assert!(text.contains("│"), "blockquote should have │ prefix: {text}");
+        assert!(
+            text.contains("│"),
+            "blockquote should have │ prefix: {text}"
+        );
         assert!(text.contains("quoted text"));
     }
 
@@ -1042,7 +1056,10 @@ mod tests {
         let text = all_text(&lines);
         assert!(text.contains("Alice"), "table should contain Alice: {text}");
         assert!(text.contains("Bob"), "table should contain Bob: {text}");
-        assert!(text.contains("│"), "table should have column separator: {text}");
+        assert!(
+            text.contains("│"),
+            "table should have column separator: {text}"
+        );
         // Should have separator line.
         assert!(text.contains("─"), "table should have separator: {text}");
     }
@@ -1054,10 +1071,15 @@ mod tests {
         // First line should be the header row — find any span with bold.
         assert!(!lines.is_empty(), "table should produce lines");
         let header_line = &lines[0];
-        let has_bold = header_line.spans.iter().any(|s| {
-            s.style.add_modifier.contains(Modifier::BOLD) && !s.content.trim().is_empty()
-        });
-        assert!(has_bold, "table header row should have bold spans: {:?}", header_line);
+        let has_bold = header_line
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::BOLD) && !s.content.trim().is_empty());
+        assert!(
+            has_bold,
+            "table header row should have bold spans: {:?}",
+            header_line
+        );
     }
 
     #[test]
@@ -1071,14 +1093,32 @@ mod tests {
         let md = "| H1 | H2 |\n|---|---|\n| A | B |\n| C | D |\n| E | F |";
         let lines = markdown_to_lines(md);
         // line 0 = header, line 1 = separator, line 2 = data row 0, line 3 = data row 1
-        assert!(lines.len() >= 4, "should have header + sep + 2 data rows, got {}", lines.len());
+        assert!(
+            lines.len() >= 4,
+            "should have header + sep + 2 data rows, got {}",
+            lines.len()
+        );
         let striped_line = &lines[3]; // data index 1 (odd) → striped
-        let has_stripe = striped_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
-        assert!(has_stripe, "odd data row should have TABLE_STRIPE_BG: {:?}", striped_line);
+        let has_stripe = striped_line
+            .spans
+            .iter()
+            .any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(
+            has_stripe,
+            "odd data row should have TABLE_STRIPE_BG: {:?}",
+            striped_line
+        );
         // Verify the even data row does NOT have the stripe.
         let even_line = &lines[2]; // data index 0 (even) → no stripe
-        let has_no_stripe = !even_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
-        assert!(has_no_stripe, "even data row should NOT have TABLE_STRIPE_BG: {:?}", even_line);
+        let has_no_stripe = !even_line
+            .spans
+            .iter()
+            .any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(
+            has_no_stripe,
+            "even data row should NOT have TABLE_STRIPE_BG: {:?}",
+            even_line
+        );
     }
 
     #[test]
@@ -1087,8 +1127,15 @@ mod tests {
         let lines = markdown_to_lines(md);
         assert!(!lines.is_empty());
         let header_line = &lines[0];
-        let has_stripe = header_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
-        assert!(!has_stripe, "header row should NOT have TABLE_STRIPE_BG: {:?}", header_line);
+        let has_stripe = header_line
+            .spans
+            .iter()
+            .any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(
+            !has_stripe,
+            "header row should NOT have TABLE_STRIPE_BG: {:?}",
+            header_line
+        );
     }
 
     // ── NEW: Links ───────────────────────────────────────────────────────
@@ -1120,7 +1167,10 @@ mod tests {
     fn horizontal_rule_renders() {
         let lines = markdown_to_lines("---");
         let text = all_text(&lines);
-        assert!(text.contains("─"), "horizontal rule should contain ─: {text}");
+        assert!(
+            text.contains("─"),
+            "horizontal rule should contain ─: {text}"
+        );
     }
 
     // ── NEW: Strikethrough ───────────────────────────────────────────────

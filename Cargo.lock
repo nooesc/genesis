@@ -1794,6 +1794,7 @@ dependencies = [
  "genesis-tools",
  "genesis-types",
  "genesis-ui",
+ "insta",
  "libc",
  "pulldown-cmark",
  "ratatui",

@@ -167,8 +167,14 @@ impl ApprovalOverlay {
                 _ => ACCENT,
             };
             let header = Line::from(vec![
-                Span::styled(" ⚠ ", Style::default().fg(WARNING).add_modifier(Modifier::BOLD)),
-                Span::styled("Approve tool: ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ⚠ ",
+                    Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Approve tool: ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     self.tool_name.clone(),
                     Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -204,11 +210,22 @@ impl ApprovalOverlay {
             let remaining = self.remaining_secs();
             let countdown_text = format!(" [{remaining}s]");
             let footer = Line::from(vec![
-                Span::styled(" y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " y",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" approve  ", Style::default().fg(DIM)),
-                Span::styled("a", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "a",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" always  ", Style::default().fg(DIM)),
-                Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "n",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" deny  ", Style::default().fg(DIM)),
                 Span::styled("Esc", Style::default().fg(DIM)),
                 Span::styled(" cancel", Style::default().fg(DIM)),
@@ -300,9 +317,7 @@ impl ApprovalOverlay {
                     lines.push(Line::from(vec![
                         Span::styled(
                             "  - ",
-                            Style::default()
-                                .fg(DEL_COLOR)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(DEL_COLOR).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(line.to_owned(), Style::default().fg(DEL_COLOR)),
                     ]));
@@ -311,9 +326,7 @@ impl ApprovalOverlay {
                     lines.push(Line::from(vec![
                         Span::styled(
                             "  + ",
-                            Style::default()
-                                .fg(ADD_COLOR)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(ADD_COLOR).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(line.to_owned(), Style::default().fg(ADD_COLOR)),
                     ]));
@@ -421,7 +434,10 @@ mod tests {
         let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
         let remaining = overlay.remaining_secs();
         // Allow a small margin for test execution time.
-        assert!(remaining >= 58 && remaining <= 60, "expected ~60, got {remaining}");
+        assert!(
+            remaining >= 58 && remaining <= 60,
+            "expected ~60, got {remaining}"
+        );
     }
 
     #[test]
@@ -480,9 +496,7 @@ mod tests {
 
     #[test]
     fn shows_arguments() {
-        let args = BTreeMap::from([
-            ("command".to_owned(), "rm -rf /".to_owned()),
-        ]);
+        let args = BTreeMap::from([("command".to_owned(), "rm -rf /".to_owned())]);
         let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &args);
         assert_eq!(overlay.arg_lines.len(), 1);
         assert_eq!(overlay.arg_lines[0].0, "command");

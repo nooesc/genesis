@@ -8,15 +8,15 @@ use crate::events::{AgentEvent, AppEvent, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 
 use crossterm::event::{Event as CrosstermEvent, EventStream};
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use futures_util::StreamExt;
 use genesis_config::GenesisConfig;
-use genesis_storage::SkillStore;
 use genesis_core::agent_loop::StreamEvent;
 use genesis_core::execution::{
     SessionExecutionError, SessionExecutionService, SessionTurnInput, SessionTurnOutcome,
 };
+use genesis_storage::SkillStore;
 use genesis_types::DeliveryPlatform;
-use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -99,8 +99,7 @@ fn make_turn_future<'a>(
                     });
                 }
                 StreamEvent::ClarificationNeeded { question } => {
-                    let _ =
-                        agent_tx.send(AgentEvent::ClarificationNeeded(question.to_string()));
+                    let _ = agent_tx.send(AgentEvent::ClarificationNeeded(question.to_string()));
                 }
                 StreamEvent::TurnStarted
                 | StreamEvent::TokenUsage { .. }
@@ -194,13 +193,12 @@ pub async fn run_tui(
         &compact_art,
     );
 
-    let animations_enabled = config.tui.animations
-        && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
+    let animations_enabled =
+        config.tui.animations && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
     let no_color = std::env::var("NO_COLOR").is_ok();
 
-    let mut status_bar = crate::widgets::status_bar::StatusBarWidget::new(
-        config.provider.model.clone(),
-    );
+    let mut status_bar =
+        crate::widgets::status_bar::StatusBarWidget::new(config.provider.model.clone());
     status_bar.set_effects_enabled(animations_enabled);
 
     let mut app = App {
@@ -226,7 +224,11 @@ pub async fn run_tui(
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
         always_approved_tools: std::collections::HashSet::new(),
-        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color, config.tui.effects.clone()),
+        effects: crate::effects::GenesisEffects::new(
+            animations_enabled,
+            no_color,
+            config.tui.effects.clone(),
+        ),
         idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
             t: 0.0,
             a: 3.0,
@@ -484,7 +486,11 @@ pub async fn run_tui(
 ///
 /// When an overlay is active it occupies the full viewport (no status bar).
 /// Otherwise, the chat widget and status bar share the viewport as usual.
-fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame_dt: std::time::Duration) {
+fn render_frame(
+    term: &mut custom_terminal::CustomTerminal,
+    app: &mut App,
+    frame_dt: std::time::Duration,
+) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -560,7 +566,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame
                 } else {
                     0
                 };
-                let separator_rows = if message_area_height > 0 { SEPARATOR_ROW } else { 0 };
+                let separator_rows = if message_area_height > 0 {
+                    SEPARATOR_ROW
+                } else {
+                    0
+                };
 
                 let message_area = Rect {
                     x: area.x,
@@ -602,7 +612,8 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame
                             // Center the canvas horizontally in the message area.
                             let canvas_x = message_area.x
                                 + message_area.width.saturating_sub(IDLE_CANVAS_WIDTH) / 2;
-                            let canvas_y = message_area.y + content_h
+                            let canvas_y = message_area.y
+                                + content_h
                                 + (remaining.saturating_sub(IDLE_CANVAS_HEIGHT)) / 2;
                             let idle_area = Rect {
                                 x: canvas_x,
@@ -767,7 +778,10 @@ mod tests {
     #[test]
     fn tui_log_path_returns_some() {
         let path = tui_log_path();
-        assert!(path.is_some(), "tui_log_path() should return Some on a system with a home dir");
+        assert!(
+            path.is_some(),
+            "tui_log_path() should return Some on a system with a home dir"
+        );
         let p = path.unwrap();
         assert!(p.ends_with("tui.log"));
         assert!(p.to_string_lossy().contains(".genesis/logs"));

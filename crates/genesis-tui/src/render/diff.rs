@@ -122,11 +122,7 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     let (old_part, rest) = after_at.split_once(' ')?;
     let old_start: u32 = old_part.split(',').next()?.parse().ok()?;
     let new_part = rest.strip_prefix('+')?;
-    let new_start: u32 = new_part
-        .split([',', ' '])
-        .next()?
-        .parse()
-        .ok()?;
+    let new_start: u32 = new_part.split([',', ' ']).next()?.parse().ok()?;
     Some((old_start, new_start))
 }
 

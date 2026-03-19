@@ -128,10 +128,7 @@ impl AgentMode {
 #[derive(Debug)]
 pub enum Submission {
     /// Send a message to the agent.
-    UserMessage {
-        text: String,
-        images: Vec<String>,
-    },
+    UserMessage { text: String, images: Vec<String> },
     /// Interrupt the current turn (Ctrl+C).
     Interrupt,
     /// Switch the active model (from model picker).

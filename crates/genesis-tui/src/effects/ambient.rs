@@ -43,9 +43,7 @@ pub fn status_deactivate(area: Rect) -> Effect {
 ///
 /// Uses an HSL lightness bump that fades back to normal (300ms ping-pong).
 pub fn tool_flash(area: Rect) -> Effect {
-    fx::ping_pong(
-        fx::hsl_shift_fg([0.0, 0.0, 15.0], (300, Interpolation::QuadOut)).with_area(area),
-    )
+    fx::ping_pong(fx::hsl_shift_fg([0.0, 0.0, 15.0], (300, Interpolation::QuadOut)).with_area(area))
 }
 
 // ── Active pulse (Task 14) ──────────────────────────────────────────────────
@@ -57,8 +55,12 @@ pub fn tool_flash(area: Rect) -> Effect {
 /// until cancelled.
 pub fn active_pulse(area: Rect) -> Effect {
     fx::repeating(fx::ping_pong(
-        fx::hsl_shift(None, Some([0.0, 0.0, 3.0]), (1500, Interpolation::SineInOut))
-            .with_area(area),
+        fx::hsl_shift(
+            None,
+            Some([0.0, 0.0, 3.0]),
+            (1500, Interpolation::SineInOut),
+        )
+        .with_area(area),
     ))
 }
 
@@ -87,26 +89,17 @@ pub fn idle_breathing(area: Rect) -> Effect {
 // ── Convenience constructors for GenesisEffects ─────────────────────────────
 
 /// Register the idle glow effect on the given manager.
-pub fn start_idle_glow(
-    manager: &mut tachyonfx::EffectManager<EffectId>,
-    area: Rect,
-) {
+pub fn start_idle_glow(manager: &mut tachyonfx::EffectManager<EffectId>, area: Rect) {
     manager.add_unique_effect(EffectId::IdleGlow, idle_border_glow(area));
 }
 
 /// Register the idle breathing effect on the given manager.
-pub fn start_idle_breathing(
-    manager: &mut tachyonfx::EffectManager<EffectId>,
-    area: Rect,
-) {
+pub fn start_idle_breathing(manager: &mut tachyonfx::EffectManager<EffectId>, area: Rect) {
     manager.add_unique_effect(EffectId::IdleBreathing, idle_breathing(area));
 }
 
 /// Register the active pulse effect on the given manager.
-pub fn start_active_pulse(
-    manager: &mut tachyonfx::EffectManager<EffectId>,
-    area: Rect,
-) {
+pub fn start_active_pulse(manager: &mut tachyonfx::EffectManager<EffectId>, area: Rect) {
     manager.add_unique_effect(EffectId::ActivePulse, active_pulse(area));
 }
 
@@ -172,7 +165,10 @@ mod tests {
 
         let mut buf = Buffer::empty(area);
         manager.process_effects(tachyonfx::Duration::from_millis(100), &mut buf, area);
-        assert!(manager.is_running(), "repeating breathing should keep running");
+        assert!(
+            manager.is_running(),
+            "repeating breathing should keep running"
+        );
     }
 
     #[test]

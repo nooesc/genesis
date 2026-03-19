@@ -476,9 +476,21 @@ mod tests {
     #[test]
     fn gemini_thinking_models_require_thought_signatures() {
         let db = known_metadata();
-        assert!(db["gemini-2.5-pro"].capabilities.requires_thought_signatures);
-        assert!(db["gemini-2.5-flash"].capabilities.requires_thought_signatures);
-        assert!(!db["gemini-2.0-flash"].capabilities.requires_thought_signatures);
+        assert!(
+            db["gemini-2.5-pro"]
+                .capabilities
+                .requires_thought_signatures
+        );
+        assert!(
+            db["gemini-2.5-flash"]
+                .capabilities
+                .requires_thought_signatures
+        );
+        assert!(
+            !db["gemini-2.0-flash"]
+                .capabilities
+                .requires_thought_signatures
+        );
     }
 
     #[test]
@@ -488,7 +500,11 @@ mod tests {
         assert!(db["gpt-4.1"].capabilities.supports_batch_api);
         assert!(db["o4-mini"].capabilities.supports_batch_api);
         // Anthropic (Message Batches API)
-        assert!(db["claude-sonnet-4-20250514"].capabilities.supports_batch_api);
+        assert!(
+            db["claude-sonnet-4-20250514"]
+                .capabilities
+                .supports_batch_api
+        );
         assert!(db["claude-haiku-4-5"].capabilities.supports_batch_api);
         // Google (Batch API)
         assert!(db["gemini-2.5-pro"].capabilities.supports_batch_api);
@@ -531,7 +547,10 @@ mod tests {
         let meta = lookup("gpt-4.1").unwrap();
         assert_eq!(meta.supports_tools(), meta.capabilities.supports_tools);
         assert_eq!(meta.supports_vision(), meta.capabilities.supports_vision);
-        assert_eq!(meta.supports_thinking(), meta.capabilities.supports_thinking);
+        assert_eq!(
+            meta.supports_thinking(),
+            meta.capabilities.supports_thinking
+        );
     }
 
     #[test]
@@ -549,6 +568,10 @@ mod tests {
     #[test]
     fn claude_haiku_35_supports_citations() {
         let db = known_metadata();
-        assert!(db["claude-haiku-3.5-20241022"].capabilities.supports_citations);
+        assert!(
+            db["claude-haiku-3.5-20241022"]
+                .capabilities
+                .supports_citations
+        );
     }
 }

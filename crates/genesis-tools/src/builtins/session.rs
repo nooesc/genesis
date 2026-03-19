@@ -178,7 +178,14 @@ mod tests {
             .create_session("s-1", "cli", Some("Rust debugging"))
             .expect("create session");
         store
-            .append_message("s-1", "user", Some("How do I debug Rust code?"), None, None, None)
+            .append_message(
+                "s-1",
+                "user",
+                Some("How do I debug Rust code?"),
+                None,
+                None,
+                None,
+            )
             .expect("append");
 
         let call = ToolCall {
@@ -246,7 +253,14 @@ mod tests {
             .expect("create session");
         for i in 0..10 {
             store
-                .append_message("s-3", "user", Some(&format!("Message {i}")), None, None, None)
+                .append_message(
+                    "s-3",
+                    "user",
+                    Some(&format!("Message {i}")),
+                    None,
+                    None,
+                    None,
+                )
                 .expect("append");
         }
 

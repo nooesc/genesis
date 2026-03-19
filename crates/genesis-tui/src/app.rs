@@ -1,7 +1,10 @@
 //! Application state and event dispatch.
 
-use crate::events::{AgentEvent, AgentMode, AppEvent, OverlayKind, StatusState, Submission, TuiEvent};
+use crate::events::{
+    AgentEvent, AgentMode, AppEvent, OverlayKind, StatusState, Submission, TuiEvent,
+};
 use crate::frame_requester::FrameRequester;
+use crate::widgets::braille_canvas::Pattern;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
@@ -11,7 +14,6 @@ use crate::widgets::input_widget::InputAction;
 use crate::widgets::model_picker::{ModelPicker, ModelPickerAction};
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
-use crate::widgets::braille_canvas::Pattern;
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -134,7 +136,9 @@ impl App {
                 self.turn_start = Some(std::time::Instant::now());
                 self.streaming_chars = 0;
                 self.chat.start_turn();
-                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Thinking));
+                let _ = self
+                    .app_tx
+                    .send(AppEvent::UpdateStatus(StatusState::Thinking));
             }
             AgentEvent::TextDelta(text) => {
                 self.streaming_chars += text.len();
@@ -157,7 +161,9 @@ impl App {
                     .tool_call_start(call_id, tool_name.clone(), args_summary);
                 let _ = self
                     .app_tx
-                    .send(AppEvent::UpdateStatus(StatusState::ToolRunning { tool_name }));
+                    .send(AppEvent::UpdateStatus(StatusState::ToolRunning {
+                        tool_name,
+                    }));
             }
             AgentEvent::ToolCallEnd {
                 call_id,
@@ -188,15 +194,15 @@ impl App {
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
-                self.status_bar.record_turn_tokens(input_tokens, output_tokens);
+                self.status_bar
+                    .record_turn_tokens(input_tokens, output_tokens);
 
                 // Update context usage percentage. Use the latest turn's
                 // input_tokens (not the cumulative sum) because each LLM call
                 // re-sends the full conversation, so input_tokens already
                 // represents the current context window consumption.
                 if self.context_window_size > 0 {
-                    let pct = ((input_tokens as u128 * 100)
-                        / self.context_window_size as u128)
+                    let pct = ((input_tokens as u128 * 100) / self.context_window_size as u128)
                         .min(100) as u8;
                     self.status_bar.set_context_percent(pct);
                 }
@@ -255,7 +261,11 @@ impl App {
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
                 let visible_rows = self.viewport_height.saturating_sub(2).max(1);
-                let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
+                let width = if self.viewport_width > 0 {
+                    self.viewport_width
+                } else {
+                    80
+                };
                 self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                     self.chat.committed_cells(),
                     width,
@@ -305,26 +315,27 @@ impl App {
                     self.frame_requester.schedule_frame();
                 }
                 "/compact" | "/summary" => {
-                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Summary);
+                    self.chat
+                        .set_tool_display(crate::history::tool_cell::ToolDisplayMode::Summary);
                     self.frame_requester.schedule_frame();
                 }
                 "/verbose" => {
-                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Verbose);
+                    self.chat
+                        .set_tool_display(crate::history::tool_cell::ToolDisplayMode::Verbose);
                     self.frame_requester.schedule_frame();
                 }
                 "/grouped" => {
-                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Grouped);
+                    self.chat
+                        .set_tool_display(crate::history::tool_cell::ToolDisplayMode::Grouped);
                     self.frame_requester.schedule_frame();
                 }
                 "/transcript" => {
                     self.command_popup.hide();
-                    self.overlay = Some(ActiveOverlay::Transcript(
-                        TranscriptOverlay::from_cells(
-                            self.chat.committed_cells(),
-                            self.viewport_width,
-                            24, // default visible rows
-                        ),
-                    ));
+                    self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
+                        self.chat.committed_cells(),
+                        self.viewport_width,
+                        24, // default visible rows
+                    )));
                     self.frame_requester.schedule_frame();
                 }
                 _ => {}
@@ -398,19 +409,19 @@ impl App {
         if let Some(overlay) = &mut self.overlay {
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
             let (should_close, model_selected) = match overlay {
-                ActiveOverlay::Transcript(t) => {
-                    (matches!(t.handle_key(key, visible_rows), TranscriptAction::Close), None)
-                }
-                ActiveOverlay::Help(h) => {
-                    (matches!(h.handle_key(key, visible_rows), HelpAction::Close), None)
-                }
-                ActiveOverlay::Models(m) => {
-                    match m.handle_key(key, visible_rows) {
-                        ModelPickerAction::Close => (true, None),
-                        ModelPickerAction::Select(id) => (true, Some(id)),
-                        ModelPickerAction::None => (false, None),
-                    }
-                }
+                ActiveOverlay::Transcript(t) => (
+                    matches!(t.handle_key(key, visible_rows), TranscriptAction::Close),
+                    None,
+                ),
+                ActiveOverlay::Help(h) => (
+                    matches!(h.handle_key(key, visible_rows), HelpAction::Close),
+                    None,
+                ),
+                ActiveOverlay::Models(m) => match m.handle_key(key, visible_rows) {
+                    ModelPickerAction::Close => (true, None),
+                    ModelPickerAction::Select(id) => (true, Some(id)),
+                    ModelPickerAction::None => (false, None),
+                },
             };
             if should_close {
                 self.overlay = None;
@@ -445,7 +456,11 @@ impl App {
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.command_popup.hide();
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
-            let width = if self.viewport_width > 0 { self.viewport_width } else { 80 };
+            let width = if self.viewport_width > 0 {
+                self.viewport_width
+            } else {
+                80
+            };
             self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                 self.chat.committed_cells(),
                 width,
@@ -528,16 +543,14 @@ impl App {
                         self.chat.input.clear();
                         let new_text = format!("{before}{path} {}", after.trim_start());
                         for c in new_text.trim_end().chars() {
-                            self.chat.input.handle_key(KeyEvent::new(
-                                KeyCode::Char(c),
-                                KeyModifiers::NONE,
-                            ));
+                            self.chat
+                                .input
+                                .handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
                         }
                         // Add trailing space.
-                        self.chat.input.handle_key(KeyEvent::new(
-                            KeyCode::Char(' '),
-                            KeyModifiers::NONE,
-                        ));
+                        self.chat
+                            .input
+                            .handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
                     }
                 }
                 FileCompletionAction::Dismiss => {}
@@ -621,10 +634,7 @@ impl App {
     /// Check whether the approval overlay has timed out, and auto-deny if so.
     /// Returns `true` if the approval was expired and denied.
     pub fn check_approval_timeout(&mut self) -> bool {
-        let expired = self
-            .approval
-            .as_ref()
-            .is_some_and(|a| a.is_expired());
+        let expired = self.approval.as_ref().is_some_and(|a| a.is_expired());
         if expired {
             if let Some(tx) = self.approval_response.take() {
                 let _ = tx.send(false);
@@ -645,12 +655,10 @@ impl App {
                 let _ = req.response_tx.send(true);
                 continue;
             }
-            self.approval = Some(
-                crate::widgets::approval_overlay::ApprovalOverlay::new(
-                    req.tool_name,
-                    &req.arguments,
-                ),
-            );
+            self.approval = Some(crate::widgets::approval_overlay::ApprovalOverlay::new(
+                req.tool_name,
+                &req.arguments,
+            ));
             self.approval_response = Some(req.response_tx);
             return;
         }

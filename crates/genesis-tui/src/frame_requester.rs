@@ -54,16 +54,14 @@ impl FrameRequester {
 /// Background actor that coalesces draw requests and emits rate-limited signals.
 ///
 /// Runs until all [`FrameRequester`] handles are dropped (channel closes).
-async fn frame_scheduler(
-    mut rx: mpsc::UnboundedReceiver<Instant>,
-    draw_tx: broadcast::Sender<()>,
-) {
+async fn frame_scheduler(mut rx: mpsc::UnboundedReceiver<Instant>, draw_tx: broadcast::Sender<()>) {
     let mut last_emitted: Option<Instant> = None;
     let mut next_deadline: Option<Instant> = None;
 
     loop {
         // If no pending deadline, sleep for a very long time until a request arrives.
-        let sleep_until = next_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
+        let sleep_until =
+            next_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
 
         tokio::select! {
             request = rx.recv() => {

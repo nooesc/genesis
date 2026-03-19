@@ -329,5 +329,4 @@ mod tests {
         assert_eq!(*y, 2);
         assert_eq!(cell.symbol(), "X");
     }
-
 }

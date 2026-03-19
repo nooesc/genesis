@@ -124,19 +124,10 @@ fn print_session_info(info: &BannerInfo) {
         format!("{} builtin", info.builtin_tools)
     };
 
-    println!(
-        "  {dim}session   {text}{session_display}{reset}"
-    );
-    println!(
-        "  {dim}model     {text}{}{reset}",
-        info.model
-    );
-    println!(
-        "  {dim}cwd       {text}{cwd}{reset}"
-    );
-    println!(
-        "  {dim}tools     {text}{tools_display}{reset}"
-    );
+    println!("  {dim}session   {text}{session_display}{reset}");
+    println!("  {dim}model     {text}{}{reset}", info.model);
+    println!("  {dim}cwd       {text}{cwd}{reset}");
+    println!("  {dim}tools     {text}{tools_display}{reset}");
 }
 
 /// Print session info without colors.

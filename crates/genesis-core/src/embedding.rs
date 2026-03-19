@@ -414,7 +414,9 @@ pub async fn hybrid_search(
                 })
                 .collect())
         }
-        SearchMode::Graph => memory_store.graph_search(query, limit).map_err(EmbeddingError::from),
+        SearchMode::Graph => memory_store
+            .graph_search(query, limit)
+            .map_err(EmbeddingError::from),
         SearchMode::Vector => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
             let query_embedding = provider.embed_one(query).await?;

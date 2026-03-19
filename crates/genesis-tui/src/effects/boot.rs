@@ -44,11 +44,8 @@ pub fn start_boot_sequence(
     // 3. Status lines — fade from black with 1800ms delay, 1000ms duration.
     let status_effect = fx::sequence(&[
         fx::sleep(1800),
-        fx::fade_from_fg(
-            ratatui::style::Color::Black,
-            (1000, Interpolation::SineOut),
-        )
-        .with_area(status_area),
+        fx::fade_from_fg(ratatui::style::Color::Black, (1000, Interpolation::SineOut))
+            .with_area(status_area),
     ]);
     manager.add_unique_effect(EffectId::BootStatus, status_effect);
 
@@ -82,7 +79,10 @@ mod tests {
 
         start_boot_sequence(&mut manager, title_area, portrait_area, status_area, area);
 
-        assert!(manager.is_running(), "boot sequence should be running after start");
+        assert!(
+            manager.is_running(),
+            "boot sequence should be running after start"
+        );
     }
 
     #[test]
@@ -100,7 +100,10 @@ mod tests {
         let dt = tachyonfx::Duration::from_millis(4000);
         manager.process_effects(dt, &mut buf, area);
 
-        assert!(!manager.is_running(), "boot sequence should be done after 4s");
+        assert!(
+            !manager.is_running(),
+            "boot sequence should be done after 4s"
+        );
     }
 
     #[test]
@@ -118,6 +121,9 @@ mod tests {
         let dt = tachyonfx::Duration::from_millis(1000);
         manager.process_effects(dt, &mut buf, area);
 
-        assert!(manager.is_running(), "boot sequence should still be running at 1s");
+        assert!(
+            manager.is_running(),
+            "boot sequence should still be running at 1s"
+        );
     }
 }

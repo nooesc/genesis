@@ -6958,14 +6958,7 @@ trusted = true
     #[test]
     fn model_browse_parses() {
         let cli = Cli::try_parse_from([
-            "genesis",
-            "model",
-            "browse",
-            "--tools",
-            "--sort",
-            "cheapest",
-            "-n",
-            "5",
+            "genesis", "model", "browse", "--tools", "--sort", "cheapest", "-n", "5",
         ])
         .expect("model browse should parse");
 

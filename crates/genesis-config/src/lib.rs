@@ -1534,10 +1534,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .rate_limit_rpm
         ),
         "tui.theme" => {
-            file_config
-                .tui
-                .get_or_insert_with(TuiConfig::default)
-                .theme = value.to_owned();
+            file_config.tui.get_or_insert_with(TuiConfig::default).theme = value.to_owned();
         }
         _ => {
             return Err(ConfigError::InvalidEnvValue {
@@ -1573,7 +1570,9 @@ pub fn set_plugin_disabled_in_file(
     disabled: bool,
 ) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
-    let plugins = file_config.plugins.get_or_insert_with(PluginsConfig::default);
+    let plugins = file_config
+        .plugins
+        .get_or_insert_with(PluginsConfig::default);
     let needle = plugin_name.trim();
 
     plugins.disabled.retain(|name| name != needle);
@@ -1611,12 +1610,14 @@ mod tests {
 
     #[test]
     fn defaults_to_rust_native_paths_when_no_file_exists() {
-        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        let dir = tempdir().expect("tempdir should exist");
+        // Point at a nonexistent file so the real user config is never read.
+        let absent = dir.path().join("nonexistent.yaml");
+        let config = load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
 
         assert_eq!(config.config.profile, "default");
         assert_eq!(config.config.provider.backend, "openai");
         assert_eq!(config.config.provider.model, "gpt-4.1-mini");
-        assert!(config.paths.config_path.ends_with("genesis/config.yaml"));
         assert!(config.paths.database_path.ends_with("genesis/genesis.db"));
     }
 
@@ -2324,8 +2325,7 @@ routing:
   default_tier: "cheap"
 "#;
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        let routing: super::RoutingConfig =
-            serde_yaml::from_value(val["routing"].clone()).unwrap();
+        let routing: super::RoutingConfig = serde_yaml::from_value(val["routing"].clone()).unwrap();
         assert!(routing.enabled);
         assert_eq!(routing.cheap_model.as_deref(), Some("haiku-4.5"));
         assert_eq!(routing.top_model.as_deref(), Some("opus-4.6"));
@@ -2334,10 +2334,7 @@ routing:
 
     #[test]
     fn approval_mode_defaults_to_auto() {
-        assert_eq!(
-            super::ApprovalMode::default(),
-            super::ApprovalMode::Auto,
-        );
+        assert_eq!(super::ApprovalMode::default(), super::ApprovalMode::Auto,);
     }
 
     #[test]
@@ -2359,11 +2356,7 @@ routing:
     fn approval_mode_loaded_from_config_file() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
-        fs::write(
-            &config_path,
-            "runtime:\n  approval_mode: smart\n",
-        )
-        .expect("write");
+        fs::write(&config_path, "runtime:\n  approval_mode: smart\n").expect("write");
 
         let loaded = load_from_map(Some(&config_path), &std::collections::BTreeMap::new())
             .expect("config should load");
@@ -2375,8 +2368,8 @@ routing:
 
     #[test]
     fn approval_mode_defaults_when_absent_in_config() {
-        let loaded = load_from_map(None, &std::collections::BTreeMap::new())
-            .expect("config should load");
+        let loaded =
+            load_from_map(None, &std::collections::BTreeMap::new()).expect("config should load");
         assert_eq!(
             loaded.config.runtime.approval_mode,
             super::ApprovalMode::Auto,

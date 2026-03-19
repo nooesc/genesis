@@ -189,7 +189,9 @@ pub(crate) fn check_session_expiry(
                 threshold = idle_minutes,
                 "session expired due to idle timeout"
             );
-            let _ = store.delete_session(session_id);
+            if let Err(e) = store.delete_session(session_id) {
+                warn!(session_id, error = %e, "failed to delete session after idle timeout");
+            }
             return true;
         }
     }
@@ -206,7 +208,9 @@ pub(crate) fn check_session_expiry(
             // updated before the reset time, it should be cleared.
             if now >= today_reset && updated_at < today_reset {
                 info!(session_id, reset_hour, "session expired due to daily reset");
-                let _ = store.delete_session(session_id);
+                if let Err(e) = store.delete_session(session_id) {
+                    warn!(session_id, error = %e, "failed to delete session after daily reset");
+                }
                 return true;
             }
         }

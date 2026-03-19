@@ -33,7 +33,7 @@ use genesis_storage::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info, info_span, Instrument};
+use tracing::{error, info, info_span, warn, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -213,7 +213,9 @@ where
         return Ok(Arc::clone(value));
     }
 
-    let _guard = init_lock.lock().expect("embedding provider init lock poisoned");
+    let _guard = init_lock
+        .lock()
+        .expect("embedding provider init lock poisoned");
     if let Some(value) = cache.get() {
         return Ok(Arc::clone(value));
     }
@@ -283,9 +285,11 @@ impl AppState {
             return Ok(None);
         };
 
-        get_or_try_init_arc(&self.embedding_provider_cache, &self.embedding_provider_init, || {
-            build_embedding_provider(config)
-        })
+        get_or_try_init_arc(
+            &self.embedding_provider_cache,
+            &self.embedding_provider_init,
+            || build_embedding_provider(config),
+        )
         .map(Some)
     }
 }
@@ -1804,9 +1808,7 @@ fn embedding_runtime_error(
         {
             return (
                 StatusCode::NOT_IMPLEMENTED,
-                format!(
-                    "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it"
-                ),
+                "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it".to_string(),
             );
         }
     }
@@ -1898,8 +1900,10 @@ async fn delete_memory_handler(
     let deleted = store.delete(&id).map_err(storage_err)?;
 
     if deleted {
-        // Also clean up any associated embedding (best-effort)
-        let _ = EmbeddingStore::new(db_path).delete(&id);
+        // Also clean up any associated embedding
+        if let Err(e) = EmbeddingStore::new(db_path).delete(&id) {
+            warn!(memory_id = %id, error = %e, "failed to delete embedding for memory");
+        }
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
         Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
@@ -3494,9 +3498,13 @@ async fn openai_models_handler(State(state): State<Arc<AppState>>) -> Json<serde
 struct OpenAiCompletionsRequest {
     model: String,
     messages: Vec<serde_json::Value>,
+    /// Accepted for OpenAI API compatibility but not yet forwarded to the
+    /// underlying provider.  Removing these fields would cause deserialization
+    /// errors for clients that send them.
     #[serde(default)]
     #[allow(dead_code)]
     temperature: Option<f64>,
+    /// See `temperature` above.
     #[serde(default)]
     #[allow(dead_code)]
     max_tokens: Option<u32>,
@@ -5160,8 +5168,8 @@ mod tests {
 
     #[test]
     fn get_or_try_init_arc_serializes_concurrent_initializers() {
-        use std::sync::Barrier;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
         use std::thread;
 
         let cache = Arc::new(OnceLock::new());

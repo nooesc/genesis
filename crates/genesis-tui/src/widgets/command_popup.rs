@@ -39,16 +39,46 @@ pub struct CommandDef {
 }
 
 const COMMANDS: &[CommandDef] = &[
-    CommandDef { name: "/help",        description: "Show keybindings and commands" },
-    CommandDef { name: "/models",      description: "Browse and switch models" },
-    CommandDef { name: "/plan",        description: "Toggle Plan/Act mode" },
-    CommandDef { name: "/theme",       description: "Cycle through built-in themes" },
-    CommandDef { name: "/compact",     description: "Compact tool display (one line per tool)" },
-    CommandDef { name: "/verbose",     description: "Verbose tool display (show output)" },
-    CommandDef { name: "/grouped",     description: "Grouped tool display (bordered, no output)" },
-    CommandDef { name: "/transcript",  description: "Open full conversation transcript" },
-    CommandDef { name: "/clear",       description: "Clear conversation history" },
-    CommandDef { name: "/exit",        description: "Exit Eve" },
+    CommandDef {
+        name: "/help",
+        description: "Show keybindings and commands",
+    },
+    CommandDef {
+        name: "/models",
+        description: "Browse and switch models",
+    },
+    CommandDef {
+        name: "/plan",
+        description: "Toggle Plan/Act mode",
+    },
+    CommandDef {
+        name: "/theme",
+        description: "Cycle through built-in themes",
+    },
+    CommandDef {
+        name: "/compact",
+        description: "Compact tool display (one line per tool)",
+    },
+    CommandDef {
+        name: "/verbose",
+        description: "Verbose tool display (show output)",
+    },
+    CommandDef {
+        name: "/grouped",
+        description: "Grouped tool display (bordered, no output)",
+    },
+    CommandDef {
+        name: "/transcript",
+        description: "Open full conversation transcript",
+    },
+    CommandDef {
+        name: "/clear",
+        description: "Clear conversation history",
+    },
+    CommandDef {
+        name: "/exit",
+        description: "Exit Eve",
+    },
 ];
 
 // ── CommandAction ─────────────────────────────────────────────────────────
@@ -243,7 +273,7 @@ impl CommandPopup {
         let popup_y = area
             .y
             .saturating_add(area.height)
-            .saturating_sub(1)           // above the input row
+            .saturating_sub(1) // above the input row
             .saturating_sub(popup_height);
 
         if popup_x + popup_width > area.x + area.width {
@@ -298,16 +328,13 @@ impl CommandPopup {
                         cell.set_symbol(s);
                         cell.set_style(style);
                     }
-                    let char_width =
-                        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                    let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
                     x += char_width;
                 }
             }
             // Pad the rest of the inner area.
             let bg_style = if is_selected {
-                Style::default()
-                    .bg(SELECTED_BG)
-                    .fg(SELECTED_TEXT_FG)
+                Style::default().bg(SELECTED_BG).fg(SELECTED_TEXT_FG)
             } else {
                 Style::default()
             };

@@ -299,14 +299,7 @@ fn welcome_pixel_color(pixel: Rgba<u8>) -> Option<RgbColor> {
     Some(RgbColor::new(r, g, b))
 }
 
-fn is_welcome_background_key(
-    _r: u8,
-    _g: u8,
-    _b: u8,
-    max: u8,
-    chroma: u8,
-    luminance: u8,
-) -> bool {
+fn is_welcome_background_key(_r: u8, _g: u8, _b: u8, max: u8, chroma: u8, luminance: u8) -> bool {
     max <= 14 && chroma <= 10 && luminance <= 12
 }
 
@@ -353,7 +346,10 @@ mod tests {
     #[test]
     fn welcome_images_load() {
         for index in 0..WELCOME_FRAME_COUNT {
-            assert!(welcome_image(index).is_some(), "missing welcome frame {index}");
+            assert!(
+                welcome_image(index).is_some(),
+                "missing welcome frame {index}"
+            );
         }
     }
 
