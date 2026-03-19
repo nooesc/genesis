@@ -155,6 +155,10 @@ pub enum LuaRuntimeError {
     InvalidLuaPersonalityDefinition { plugin_name: String, reason: String },
     #[error("lua personality registration is only available during plugin load")]
     PersonalityRegistrationUnavailable,
+    #[error("unknown lua personality `{name}`")]
+    UnknownLuaPersonality { name: String },
+    #[error("failed to build prompt for lua personality `{name}`: {reason}")]
+    LuaPersonalityPromptFailed { name: String, reason: String },
     #[error("plugin `{plugin_name}` is disabled for this session")]
     PluginDisabled { plugin_name: String },
     #[error("host tool bridge is not configured")]
@@ -461,6 +465,24 @@ impl LuaRuntime {
         }
 
         self.resolve_personality_prompt(entry)
+    }
+
+    pub fn strict_personality_prompt(&self, name: &str) -> Result<String, LuaRuntimeError> {
+        let entry = self
+            .personality_registry
+            .lock()
+            .expect("personality registry mutex should not be poisoned")
+            .personality_entry(name)
+            .ok_or_else(|| LuaRuntimeError::UnknownLuaPersonality {
+                name: name.to_owned(),
+            })?;
+        if self.plugin_disabled(&entry.metadata.plugin_name) {
+            return Err(LuaRuntimeError::PluginDisabled {
+                plugin_name: entry.metadata.plugin_name,
+            });
+        }
+
+        self.resolve_personality_prompt_strict(entry)
     }
 
     pub fn transform_personality_response(&self, response: &str) -> String {
@@ -1069,6 +1091,70 @@ impl LuaRuntime {
                 );
                 self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
                 fallback
+            }
+        }
+    }
+
+    fn resolve_personality_prompt_strict(
+        &self,
+        entry: LuaPersonalityEntry,
+    ) -> Result<String, LuaRuntimeError> {
+        let fallback = entry.metadata.system_prompt.clone();
+        let Some(build_prompt) = entry.build_prompt else {
+            return fallback.ok_or_else(|| LuaRuntimeError::LuaPersonalityPromptFailed {
+                name: entry.metadata.name,
+                reason: "personality does not define a prompt".to_owned(),
+            });
+        };
+
+        let session = self
+            .session_state
+            .lock()
+            .expect("session state mutex should not be poisoned")
+            .clone();
+        let context = self.build_personality_context(&session).map_err(|error| {
+            LuaRuntimeError::LuaPersonalityPromptFailed {
+                name: entry.metadata.name.clone(),
+                reason: format!("failed to build prompt context: {error}"),
+            }
+        })?;
+        let plugin_context = PluginContext::for_execution(
+            entry.metadata.plugin_name.clone(),
+            entry.permissions.clone(),
+        );
+        let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+        let _execution_guard = self.begin_plugin_execution(
+            &entry.metadata.plugin_name,
+            format!("personality `{}`", entry.metadata.name),
+            self.hook_timeout,
+        );
+
+        match build_prompt.call::<Value>(context) {
+            Ok(Value::Nil) => fallback.ok_or_else(|| LuaRuntimeError::LuaPersonalityPromptFailed {
+                name: entry.metadata.name,
+                reason: "build_prompt returned nil and no static system_prompt is defined"
+                    .to_owned(),
+            }),
+            Ok(Value::String(text)) => text.to_str().map(|text| text.to_owned()).map_err(|error| {
+                LuaRuntimeError::LuaPersonalityPromptFailed {
+                    name: entry.metadata.name,
+                    reason: format!("build_prompt returned invalid utf-8: {error}"),
+                }
+            }),
+            Ok(other) => {
+                other
+                    .to_string()
+                    .map_err(|error| LuaRuntimeError::LuaPersonalityPromptFailed {
+                        name: entry.metadata.name,
+                        reason: format!("build_prompt returned unsupported value: {error}"),
+                    })
+            }
+            Err(error) => {
+                self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
+                Err(LuaRuntimeError::LuaPersonalityPromptFailed {
+                    name: entry.metadata.name,
+                    reason: error.to_string(),
+                })
             }
         }
     }

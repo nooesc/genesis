@@ -400,6 +400,7 @@ struct PluginCommandEntry {
     name: String,
     status: String,
     kind: String,
+    source: String,
     version: Option<String>,
     description: Option<String>,
     author: Option<String>,
@@ -507,6 +508,36 @@ fn collect_plugin_entries(
             plugin_entry_from_discovery(plugin, is_disabled)
         })
         .collect();
+    let active_names: std::collections::BTreeSet<_> = entries
+        .iter()
+        .filter(|entry| entry.status == "enabled")
+        .map(|entry| entry.name.clone())
+        .collect();
+
+    for bundled in genesis_lua::bundled_personalities() {
+        let status = if disabled.contains(bundled.name) {
+            "disabled"
+        } else if active_names.contains(bundled.name) {
+            "shadowed"
+        } else {
+            "enabled"
+        };
+        entries.push(PluginCommandEntry {
+            name: bundled.name.to_owned(),
+            status: status.to_owned(),
+            kind: plugin_kind_name(PluginKind::Bundled).to_owned(),
+            source: "built-in".to_owned(),
+            version: None,
+            description: Some(bundled.description.to_owned()),
+            author: None,
+            root: None,
+            entrypoint: None,
+            trusted: false,
+            tools: Vec::new(),
+            hooks: Vec::new(),
+            discovered: true,
+        });
+    }
 
     for missing in disabled {
         if entries.iter().any(|entry| entry.name == missing) {
@@ -516,6 +547,7 @@ fn collect_plugin_entries(
             name: missing,
             status: "disabled".to_owned(),
             kind: "missing".to_owned(),
+            source: "config".to_owned(),
             version: None,
             description: Some("disabled in config, plugin not found on disk".to_owned()),
             author: None,
@@ -528,7 +560,12 @@ fn collect_plugin_entries(
         });
     }
 
-    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| plugin_status_rank(&left.status).cmp(&plugin_status_rank(&right.status)))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
     let errors: Vec<String> = errors
         .into_iter()
         .map(|error: LuaRuntimeError| error.to_string())
@@ -541,6 +578,7 @@ fn plugin_entry_from_discovery(plugin: DiscoveredPlugin, disabled: bool) -> Plug
         name: plugin.name,
         status: if disabled { "disabled" } else { "enabled" }.to_owned(),
         kind: plugin_kind_name(plugin.kind).to_owned(),
+        source: plugin.root.display().to_string(),
         version: Some(plugin.manifest.plugin.version),
         description: plugin.manifest.plugin.description,
         author: plugin.manifest.plugin.author,
@@ -550,6 +588,16 @@ fn plugin_entry_from_discovery(plugin: DiscoveredPlugin, disabled: bool) -> Plug
         tools: plugin.manifest.permissions.tools,
         hooks: plugin.manifest.permissions.hooks,
         discovered: true,
+    }
+}
+
+fn plugin_status_rank(status: &str) -> u8 {
+    match status {
+        "enabled" => 0,
+        "shadowed" => 1,
+        "disabled" => 2,
+        "missing" => 3,
+        _ => 4,
     }
 }
 
@@ -589,16 +637,17 @@ fn render_plugin_list(
     }
 
     let mut lines = vec![format!(
-        "{:<18} {:<9} {:<12} {:<10} {}",
-        "NAME", "STATUS", "KIND", "VERSION", "DESCRIPTION"
+        "{:<18} {:<9} {:<12} {:<10} {:<12} {}",
+        "NAME", "STATUS", "KIND", "VERSION", "SOURCE", "DESCRIPTION"
     )];
     for entry in entries {
         lines.push(format!(
-            "{:<18} {:<9} {:<12} {:<10} {}",
+            "{:<18} {:<9} {:<12} {:<10} {:<12} {}",
             entry.name,
             entry.status,
             entry.kind,
             entry.version.as_deref().unwrap_or("-"),
+            short_plugin_source(&entry.source),
             entry.description.as_deref().unwrap_or("-"),
         ));
     }
@@ -618,14 +667,35 @@ fn render_plugin_info(
     name: &str,
     json: bool,
 ) -> Result<String, CliError> {
-    let entry = entries
+    let matches: Vec<&PluginCommandEntry> =
+        entries.iter().filter(|entry| entry.name == name).collect();
+    if matches.is_empty() {
+        return Err(CliError::Other(unknown_plugin_message(entries, name)));
+    }
+    let entry = matches
         .iter()
-        .find(|entry| entry.name == name)
-        .ok_or_else(|| CliError::Other(unknown_plugin_message(entries, name)))?;
+        .copied()
+        .find(|entry| entry.status != "shadowed")
+        .unwrap_or(matches[0]);
+    let shadowed: Vec<&PluginCommandEntry> = matches
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !same_plugin_entry(candidate, entry) && candidate.status == "shadowed"
+        })
+        .collect();
+    let alternates: Vec<&PluginCommandEntry> = matches
+        .into_iter()
+        .filter(|candidate| {
+            !same_plugin_entry(candidate, entry) && candidate.status != "shadowed"
+        })
+        .collect();
 
     if json {
         return Ok(serde_json::to_string_pretty(&serde_json::json!({
             "plugin": plugin_entry_json(entry),
+            "shadowed": shadowed.iter().map(|entry| plugin_entry_json(entry)).collect::<Vec<_>>(),
+            "alternates": alternates.iter().map(|entry| plugin_entry_json(entry)).collect::<Vec<_>>(),
             "errors": errors,
         }))?);
     }
@@ -634,6 +704,7 @@ fn render_plugin_info(
         format!("Plugin: {}", entry.name),
         format!("Status: {}", entry.status),
         format!("Kind: {}", entry.kind),
+        format!("Source: {}", entry.source),
     ];
     if let Some(version) = &entry.version {
         lines.push(format!("Version: {version}"));
@@ -654,6 +725,30 @@ fn render_plugin_info(
     }
     lines.push(format!("Allowed tools: {}", join_or_none(&entry.tools)));
     lines.push(format!("Allowed hooks: {}", join_or_none(&entry.hooks)));
+    if !shadowed.is_empty() {
+        lines.push(String::new());
+        lines.push("Shadowed entries:".to_owned());
+        for shadowed_entry in shadowed {
+            lines.push(format!(
+                "  - {} [{}]",
+                shadowed_entry.name, shadowed_entry.kind
+            ));
+            lines.push(format!("    Source: {}", shadowed_entry.source));
+            lines.push(format!("    Status: {}", shadowed_entry.status));
+        }
+    }
+    if !alternates.is_empty() {
+        lines.push(String::new());
+        lines.push("Other entries:".to_owned());
+        for alternate_entry in alternates {
+            lines.push(format!(
+                "  - {} [{}]",
+                alternate_entry.name, alternate_entry.kind
+            ));
+            lines.push(format!("    Source: {}", alternate_entry.source));
+            lines.push(format!("    Status: {}", alternate_entry.status));
+        }
+    }
     if !errors.is_empty() {
         lines.push(String::new());
         lines.push("Discovery warnings:".to_owned());
@@ -669,6 +764,7 @@ fn plugin_entry_json(entry: &PluginCommandEntry) -> serde_json::Value {
         "name": entry.name,
         "status": entry.status,
         "kind": entry.kind,
+        "source": entry.source,
         "version": entry.version,
         "description": entry.description,
         "author": entry.author,
@@ -679,6 +775,20 @@ fn plugin_entry_json(entry: &PluginCommandEntry) -> serde_json::Value {
         "hooks": entry.hooks,
         "discovered": entry.discovered,
     })
+}
+
+fn short_plugin_source(source: &str) -> &str {
+    if source == "built-in" {
+        "built-in"
+    } else if source == "config" {
+        "config"
+    } else {
+        "local"
+    }
+}
+
+fn same_plugin_entry(left: &PluginCommandEntry, right: &PluginCommandEntry) -> bool {
+    left.name == right.name && left.kind == right.kind && left.source == right.source
 }
 
 fn join_or_none(items: &[String]) -> String {
@@ -722,9 +832,12 @@ pub(crate) fn run_personality(command: PersonalityCommand, json: bool) -> Result
                     .collect();
                 Ok(serde_json::to_string_pretty(&items).unwrap())
             } else {
-                let mut lines = vec![format!("{:<16} {}", "NAME", "DESCRIPTION")];
+                let mut lines = vec![format!("{:<16} {:<10} {}", "NAME", "SOURCE", "DESCRIPTION")];
                 for p in &personalities {
-                    lines.push(format!("{:<16} {}", p.name, p.description));
+                    lines.push(format!(
+                        "{:<16} {:<10} {}",
+                        p.name, "bundled", p.description
+                    ));
                 }
                 Ok(lines.join("\n"))
             }
@@ -744,13 +857,14 @@ pub(crate) fn run_personality(command: PersonalityCommand, json: bool) -> Result
             if json {
                 Ok(serde_json::to_string_pretty(&serde_json::json!({
                     "name": p.name,
+                    "source": "bundled",
                     "description": p.description,
                     "system_prompt_prefix": p.system_prompt_prefix,
                 }))
                 .unwrap())
             } else {
                 Ok(format!(
-                    "Personality: {}\nDescription: {}\n\nSystem prompt prefix:\n{}",
+                    "Personality: {}\nSource: bundled\nDescription: {}\n\nSystem prompt prefix:\n{}",
                     p.name, p.description, p.system_prompt_prefix
                 ))
             }

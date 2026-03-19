@@ -180,6 +180,8 @@ pub enum SessionExecutionError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("{message}")]
+    Personality { message: String },
     #[error("required MCP servers failed to initialize: {servers:?}")]
     McpStartupFailed { servers: Vec<String> },
 }
@@ -758,17 +760,25 @@ impl<'a> SessionExecutionService<'a> {
             self.personality_override
                 .as_deref()
                 .or(self.loaded.config.personality.as_deref());
-        let lua_personality_prompt = effective_personality.and_then(|name| {
-            lua_runtime
-                .as_ref()
-                .and_then(|runtime| runtime.personality_prompt(name))
-        });
-        if let Some(p) = effective_personality {
-            if let Some(prompt) = lua_personality_prompt.as_deref() {
-                prompt_builder = prompt_builder.personality_prompt(prompt);
-            } else {
-                prompt_builder = prompt_builder.personality(p);
-            }
+        let resolved_personality_prompt = if let Some(p) = effective_personality {
+            let runtime =
+                lua_runtime
+                    .as_ref()
+                    .ok_or_else(|| SessionExecutionError::Personality {
+                        message: format!(
+                            "cannot resolve lua personality `{p}` because the lua runtime is unavailable"
+                        ),
+                    })?;
+            Some(runtime.strict_personality_prompt(p).map_err(|error| {
+                SessionExecutionError::Personality {
+                    message: error.to_string(),
+                }
+            })?)
+        } else {
+            None
+        };
+        if let Some(prompt) = resolved_personality_prompt.as_deref() {
+            prompt_builder = prompt_builder.personality_prompt(prompt);
         }
         if let Some(s) = skills_section.as_deref() {
             prompt_builder = prompt_builder.skills(s);
@@ -2417,6 +2427,84 @@ genesis.register_personality({
         assert!(
             !system.contains("Fallback prompt."),
             "dynamic prompt should replace the static fallback when build_prompt succeeds: {system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_personality_errors_when_missing_from_lua_runtime() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("missing-lua-personality".to_owned());
+
+        let error = match service
+            .build_agent_loop(
+                "session-1".to_owned(),
+                DeliveryPlatform::Cli,
+                Vec::new(),
+                Some("hello"),
+            )
+            .await
+        {
+            Ok(_) => panic!("missing selected personality should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown lua personality `missing-lua-personality`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_personality_errors_when_build_prompt_fails() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("broken.lua"),
+            r#"
+genesis.register_personality({
+    name = "broken-lua",
+    description = "Broken dynamic personality",
+    system_prompt = "Fallback prompt.",
+    build_prompt = function(_)
+        error("kaboom")
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("broken-lua".to_owned());
+
+        let error = match service
+            .build_agent_loop(
+                "session-1".to_owned(),
+                DeliveryPlatform::Cli,
+                Vec::new(),
+                Some("hello"),
+            )
+            .await
+        {
+            Ok(_) => panic!("broken selected personality should fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to build prompt for lua personality `broken-lua`"),
+            "unexpected error: {error}"
         );
     }
 
