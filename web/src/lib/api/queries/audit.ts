@@ -11,6 +11,11 @@ interface AuditQueryOptions {
   refetchInterval?: number
 }
 
+interface AuditResponse {
+  entries: AuditEntry[]
+  count: number
+}
+
 export function useAuditLog(params?: AuditParams, options?: AuditQueryOptions) {
   const searchParams = new URLSearchParams()
   if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
@@ -19,7 +24,22 @@ export function useAuditLog(params?: AuditParams, options?: AuditQueryOptions) {
 
   return useQuery({
     queryKey: ['audit', params],
-    queryFn: () => api.get<AuditEntry[]>(`/audit${qs ? `?${qs}` : ''}`),
+    queryFn: async () => {
+      const res = await api.get<AuditResponse>(`/audit${qs ? `?${qs}` : ''}`)
+      return res.entries
+    },
     refetchInterval: options?.refetchInterval,
+  })
+}
+
+/** Fetch just the latest audit entry for the system bar ticker */
+export function useLatestAuditEvent() {
+  return useQuery({
+    queryKey: ['audit', 'latest'],
+    queryFn: async () => {
+      const res = await api.get<AuditResponse>('/audit?limit=1')
+      return res.entries[0] ?? null
+    },
+    refetchInterval: 10_000,
   })
 }
