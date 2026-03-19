@@ -1618,6 +1618,7 @@ mod tests {
         assert_eq!(config.config.profile, "default");
         assert_eq!(config.config.provider.backend, "openai");
         assert_eq!(config.config.provider.model, "gpt-4.1-mini");
+        assert!(config.paths.database_path.ends_with("genesis/genesis.db"));
     }
 
     #[test]

@@ -95,6 +95,7 @@ struct ActivePluginExecution {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LuaRuntimeError {
     #[error("failed to read plugin directory `{path}`: {source}")]
     ReadPluginDirectory {
