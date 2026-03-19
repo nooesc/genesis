@@ -351,8 +351,8 @@ pub fn execute_code_ptc(
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
 
-    let stdout_bytes = stdout_buf.lock().unwrap();
-    let stderr_bytes = stderr_buf.lock().unwrap();
+    let stdout_bytes = stdout_buf.lock().expect("stdout buffer lock poisoned");
+    let stderr_bytes = stderr_buf.lock().expect("stderr buffer lock poisoned");
     let mut stdout_text = String::from_utf8_lossy(&stdout_bytes).to_string();
     let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
 

@@ -134,23 +134,23 @@ static PII_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
     vec![
         (
             "phone_number",
-            Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap(),
+            Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").expect("PII regex pattern is a compile-time constant"),
         ),
         (
             "email",
-            Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").unwrap(),
+            Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").expect("PII regex pattern is a compile-time constant"),
         ),
         (
             "ssn",
-            Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").unwrap(),
+            Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").expect("PII regex pattern is a compile-time constant"),
         ),
         (
             "credit_card",
-            Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b").unwrap(),
+            Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b").expect("PII regex pattern is a compile-time constant"),
         ),
         (
             "ip_address",
-            Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap(),
+            Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").expect("PII regex pattern is a compile-time constant"),
         ),
     ]
 });

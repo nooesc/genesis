@@ -424,4 +424,175 @@ mod tests {
         let pricing = lookup_pricing("deepseek/deepseek-chat").unwrap();
         assert_eq!(pricing.input_per_million, 0.27);
     }
+
+    #[test]
+    fn lookup_returns_pricing_for_exact_model_match() {
+        // Verify several exact-match models return their known pricing
+        let cases: &[(&str, f64, f64)] = &[
+            ("gpt-4.1", 2.0, 8.0),
+            ("gpt-4.1-nano", 0.10, 0.40),
+            ("gpt-4o", 2.50, 10.0),
+            ("gpt-4o-mini", 0.15, 0.60),
+            ("o3", 2.0, 8.0),
+            ("o3-mini", 1.10, 4.40),
+            ("o4-mini", 1.10, 4.40),
+            ("claude-opus-4", 15.0, 75.0),
+            ("claude-sonnet-4", 3.0, 15.0),
+            ("claude-haiku-4", 0.80, 4.0),
+            ("claude-3.5-sonnet", 3.0, 15.0),
+            ("claude-3.5-haiku", 0.80, 4.0),
+            ("gemini-2.5-pro", 1.25, 10.0),
+            ("gemini-2.0-flash", 0.10, 0.40),
+            ("deepseek-reasoner", 0.55, 2.19),
+            ("deepseek-r1", 0.55, 2.19),
+            ("deepseek-v3", 0.27, 1.10),
+            ("codestral", 0.30, 0.90),
+            ("mistral-small", 0.10, 0.30),
+            ("llama-4-scout", 0.15, 0.40),
+            ("llama-3.3-70b", 0.18, 0.36),
+            ("qwen-2.5-72b", 0.35, 0.70),
+            ("qwen-2.5-coder-32b", 0.15, 0.30),
+            ("qwen-3-235b", 0.50, 1.00),
+            ("qwen-3-30b", 0.15, 0.30),
+            ("grok-3", 3.0, 15.0),
+        ];
+        for &(model, expected_input, expected_output) in cases {
+            let pricing = lookup_pricing(model)
+                .unwrap_or_else(|| panic!("expected pricing for {model}"));
+            assert_eq!(
+                pricing.input_per_million, expected_input,
+                "input pricing mismatch for {model}"
+            );
+            assert_eq!(
+                pricing.output_per_million, expected_output,
+                "output pricing mismatch for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_matching_returns_pricing_for_versioned_variants() {
+        // Model names with date suffixes or extra qualifiers should
+        // match the longest matching prefix in the pricing table.
+        let cases: &[(&str, f64)] = &[
+            ("gpt-4.1-2025-04-14", 2.0),         // matches "gpt-4.1"
+            ("gpt-4o-2025-03-01", 2.50),          // matches "gpt-4o"
+            ("claude-opus-4-20260301", 15.0),      // matches "claude-opus-4"
+            ("gemini-2.5-pro-preview", 1.25),      // matches "gemini-2.5-pro"
+            ("deepseek-chat-0324", 0.27),          // matches "deepseek-chat"
+            ("grok-3-mini-fast", 0.30),            // matches "grok-3-mini"
+            ("llama-4-maverick-instruct", 0.20),   // matches "llama-4-maverick"
+        ];
+        for &(model, expected_input) in cases {
+            let pricing = lookup_pricing(model)
+                .unwrap_or_else(|| panic!("expected prefix match for {model}"));
+            assert_eq!(
+                pricing.input_per_million, expected_input,
+                "prefix match mismatch for {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_model_returns_none_for_various_inputs() {
+        let unknown_models = &[
+            "totally-unknown-model",
+            "gpt-5",
+            "claude-5-opus",
+            "",
+            "openai/nonexistent-model",
+            "some-provider/some-model",
+        ];
+        for model in unknown_models {
+            assert!(
+                lookup_pricing(model).is_none(),
+                "expected None for unknown model {model:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_cost_returns_correct_values_for_known_tokens() {
+        // 1M input tokens + 1M output tokens at claude-opus-4 pricing
+        let cost = estimate_cost("claude-opus-4", 1_000_000, 1_000_000).unwrap();
+        assert!((cost.input_cost - 15.0).abs() < 1e-10);
+        assert!((cost.output_cost - 75.0).abs() < 1e-10);
+        assert!((cost.total_cost - 90.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn estimate_cost_with_zero_tokens_returns_zero() {
+        let cost = estimate_cost("gpt-4.1-mini", 0, 0).unwrap();
+        assert_eq!(cost.input_cost, 0.0);
+        assert_eq!(cost.output_cost, 0.0);
+        assert_eq!(cost.total_cost, 0.0);
+    }
+
+    #[test]
+    fn estimate_cost_with_zero_input_tokens_only_charges_output() {
+        let cost = estimate_cost("gpt-4.1-mini", 0, 1_000_000).unwrap();
+        assert_eq!(cost.input_cost, 0.0);
+        assert!((cost.output_cost - 1.60).abs() < 1e-10);
+        assert!((cost.total_cost - 1.60).abs() < 1e-10);
+    }
+
+    #[test]
+    fn estimate_cost_with_zero_output_tokens_only_charges_input() {
+        let cost = estimate_cost("gpt-4.1-mini", 1_000_000, 0).unwrap();
+        assert!((cost.input_cost - 0.40).abs() < 1e-10);
+        assert_eq!(cost.output_cost, 0.0);
+        assert!((cost.total_cost - 0.40).abs() < 1e-10);
+    }
+
+    #[test]
+    fn all_models_in_table_have_positive_pricing() {
+        for &(name, pricing) in PRICING {
+            assert!(
+                pricing.input_per_million > 0.0,
+                "model {name} has non-positive input pricing: {}",
+                pricing.input_per_million
+            );
+            assert!(
+                pricing.output_per_million > 0.0,
+                "model {name} has non-positive output pricing: {}",
+                pricing.output_per_million
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_match_prefers_longest_prefix() {
+        // "gpt-4.1-mini" is both prefixed by "gpt-4.1" and exact-matched
+        // by "gpt-4.1-mini". The longer/exact match should win.
+        let pricing = lookup_pricing("gpt-4.1-mini-something").unwrap();
+        // Should match "gpt-4.1-mini" (len 12) not "gpt-4.1" (len 7)
+        assert_eq!(pricing.input_per_million, 0.40);
+        assert_eq!(pricing.output_per_million, 1.60);
+    }
+
+    #[test]
+    fn provider_prefix_with_multiple_slashes() {
+        // "some/nested/gpt-4.1-mini" — only last segment matters
+        let pricing = lookup_pricing("provider/sub/gpt-4.1-mini").unwrap();
+        assert_eq!(pricing.input_per_million, 0.40);
+    }
+
+    #[test]
+    fn cost_estimate_display_boundary_at_one_cent() {
+        // Exactly 0.01 should use 2-decimal format
+        let cost = CostEstimate {
+            input_cost: 0.005,
+            output_cost: 0.005,
+            total_cost: 0.01,
+        };
+        assert_eq!(format!("{cost}"), "$0.01");
+
+        // Just below 0.01 should use 4-decimal format
+        let cost = CostEstimate {
+            input_cost: 0.004,
+            output_cost: 0.005,
+            total_cost: 0.009,
+        };
+        assert_eq!(format!("{cost}"), "$0.0090");
+    }
 }
