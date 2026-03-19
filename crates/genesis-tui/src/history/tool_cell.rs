@@ -421,8 +421,11 @@ impl ToolCell {
         // don't already embed output in their content lines.
         if let Some(output) = &self.output {
             let category = tool_category(&self.tool_name);
-            let already_shows_output =
-                matches!(category, ToolCategory::FileWrite | ToolCategory::Search);
+            // FileWrite already renders diffs inline; Search shows result count.
+            // Only skip verbose output when content_lines actually showed it.
+            let already_shows_output = matches!(category, ToolCategory::Search)
+                || (matches!(category, ToolCategory::FileWrite)
+                    && diff::is_unified_diff(output));
             if !already_shows_output {
                 if diff::is_unified_diff(output) {
                     // Render unified diff with colors, gutter, and line numbers.
