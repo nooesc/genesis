@@ -556,6 +556,25 @@ impl<'a> SessionExecutionService<'a> {
         let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
             crate::audit::AuditHooks::shared(db_path);
 
+        let tool_policy = self
+            .loaded
+            .config
+            .runtime
+            .tool_policy_path
+            .as_ref()
+            .and_then(|path| {
+                match crate::tool_policy::ToolPolicy::load(std::path::Path::new(path)) {
+                    Ok(policy) => {
+                        info!(path = path.as_str(), "loaded tool policy");
+                        Some(policy)
+                    }
+                    Err(e) => {
+                        warn!(path = path.as_str(), error = %e, "failed to load tool policy");
+                        None
+                    }
+                }
+            });
+
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
             client,
@@ -586,6 +605,7 @@ impl<'a> SessionExecutionService<'a> {
                 response_format: self.response_format.clone(),
                 core_tools: self.loaded.config.runtime.core_tools.clone(),
                 routing: self.loaded.config.routing.clone(),
+                tool_policy,
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -1834,6 +1854,7 @@ mod tests {
                     guardrails: None,
                     core_tools: None,
                     batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
