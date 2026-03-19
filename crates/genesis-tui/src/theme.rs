@@ -247,12 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_theme_respects_no_color_env() {
-        // Can't reliably test env var in parallel tests,
-        // but test the fallback path:
-        let theme = resolve_theme("dracula");
-        // In CI NO_COLOR may or may not be set
-        assert!(theme.name() == "dracula" || theme.name() == "nocolor");
+    fn resolve_theme_without_no_color_uses_configured() {
+        // When NO_COLOR is not set, resolve_theme returns the configured theme.
+        if std::env::var("NO_COLOR").is_err() {
+            let theme = resolve_theme("dracula");
+            assert_eq!(theme.name(), "dracula");
+        }
     }
 
     #[test]
