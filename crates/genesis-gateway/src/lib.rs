@@ -1719,10 +1719,11 @@ fn build_embedding_provider(
 }
 
 fn embedding_provider_error(
-    config: &genesis_config::EmbeddingConfig,
+    _config: &genesis_config::EmbeddingConfig,
     error: genesis_core::embedding::EmbeddingError,
 ) -> (StatusCode, String) {
-    if config.is_local_backend()
+    #[cfg(not(feature = "local-embeddings"))]
+    if _config.is_local_backend()
         && matches!(
             error,
             genesis_core::embedding::EmbeddingError::NotConfigured
@@ -1741,11 +1742,12 @@ fn embedding_provider_error(
 }
 
 fn embedding_runtime_error(
-    provider: Option<&genesis_core::embedding::EmbeddingProvider>,
+    _provider: Option<&genesis_core::embedding::EmbeddingProvider>,
     context: &str,
     error: genesis_core::embedding::EmbeddingError,
 ) -> (StatusCode, String) {
-    if let Some(provider) = provider {
+    #[cfg(not(feature = "local-embeddings"))]
+    if let Some(provider) = _provider {
         if provider.backend() == "local"
             && matches!(
                 error,
@@ -4696,6 +4698,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "local-embeddings"))]
     #[tokio::test]
     async fn memories_search_returns_not_implemented_for_local_backend() {
         use axum::body::Body;
@@ -4714,6 +4717,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
+    #[cfg(not(feature = "local-embeddings"))]
     #[tokio::test]
     async fn memories_bulk_embed_returns_not_implemented_for_local_backend() {
         use axum::body::Body;
@@ -4733,6 +4737,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
+    #[cfg(not(feature = "local-embeddings"))]
     #[tokio::test]
     async fn memories_single_embed_returns_not_implemented_for_local_backend() {
         use axum::body::Body;
@@ -4750,6 +4755,65 @@ mod tests {
         let resp = app.oneshot(req).await.expect("request should succeed");
 
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[tokio::test]
+    async fn memories_search_uses_local_embeddings() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/memories/search?q=genesis&mode=vector&limit=5")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[tokio::test]
+    async fn memories_bulk_embed_uses_local_embeddings() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[tokio::test]
+    async fn memories_single_embed_uses_local_embeddings() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/mem-local/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
