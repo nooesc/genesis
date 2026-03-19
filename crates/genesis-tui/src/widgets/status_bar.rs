@@ -48,22 +48,21 @@ const TOKEN_COLOR: Color = Color::Rgb(138, 138, 138);
 const SPARKLINE_COLOR: Color = Color::Rgb(120, 112, 148);
 /// Active spinner/dance color.
 const DANCE_COLOR: Color = Color::Rgb(180, 167, 214);
-/// Tool name color (amber).
-const TOOL_COLOR: Color = Color::Rgb(212, 165, 116);
+/// Shimmer highlight color (bright white/lavender).
+const SHIMMER_HIGHLIGHT: Color = Color::Rgb(220, 215, 240);
+/// Dim text color for shimmer base.
+const DIM_TEXT: Color = Color::Rgb(100, 98, 108);
 
 // ── Animation data ──────────────────────────────────────────────────────────
 
 /// Four-frame Eve dance sprites for a smooth sway.
 const EVE_SPRITES: [&str; 4] = ["(~'.')~", "~('.'~)", "(~'.')~", " ('.')>"];
 
-/// Ten-frame Braille spinner for tool execution.
-const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-/// Interval between dance frame advances (thinking).
+/// Interval between dance frame advances (thinking sprite).
 const DANCE_INTERVAL: Duration = Duration::from_millis(400);
 
-/// Interval between spinner frame advances (tool/streaming).
-const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+/// Interval for shimmer animation (~30fps for smooth sweep).
+const SHIMMER_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Maximum number of per-turn token measurements to keep.
 const TOKEN_HISTORY_CAP: usize = 20;
@@ -89,10 +88,12 @@ pub struct StatusBarWidget {
     pub state: StatusState,
     /// Previous state before the last `set_state` call.
     prev_state: Option<StatusState>,
-    /// Current animation frame index.
+    /// Current animation frame index (Eve dance sprite).
     pub sprite_frame: usize,
-    /// When the last frame advance happened.
+    /// When the last shimmer/animation tick happened.
     pub last_tick: Instant,
+    /// When the last dance sprite frame advance happened.
+    last_sprite_tick: Instant,
     /// Git branch name (or cwd fallback). `None` until first populated.
     right_info: Option<String>,
     /// Cumulative input tokens this session.
@@ -109,6 +110,8 @@ pub struct StatusBarWidget {
     heartbeat: Pattern,
     /// Current agent operating mode (Act / Plan).
     agent_mode: AgentMode,
+    /// Shimmer phase (0.0..1.0), advances each tick for the cosine-wave sweep.
+    shimmer_phase: f64,
 }
 
 impl StatusBarWidget {
@@ -124,6 +127,7 @@ impl StatusBarWidget {
             prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
+            last_sprite_tick: Instant::now(),
             right_info: None,
             tokens_in: 0,
             tokens_out: 0,
@@ -132,6 +136,7 @@ impl StatusBarWidget {
             effects_enabled: false,
             heartbeat: Pattern::Flatline,
             agent_mode: AgentMode::default(),
+            shimmer_phase: 0.0,
         }
     }
 
@@ -153,6 +158,7 @@ impl StatusBarWidget {
         self.prev_state = Some(old);
         self.sprite_frame = 0;
         self.last_tick = Instant::now();
+        self.last_sprite_tick = Instant::now();
 
         // Switch heartbeat pattern on state transitions.
         if was_idle && !is_idle {
@@ -214,8 +220,9 @@ impl StatusBarWidget {
     /// idle ambient effects (border glow, breathing) get ticked.
     pub fn animation_interval(&self) -> Duration {
         match &self.state {
-            StatusState::Thinking => DANCE_INTERVAL,
-            StatusState::ToolRunning { .. } | StatusState::Streaming { .. } => SPINNER_INTERVAL,
+            StatusState::Thinking | StatusState::ToolRunning { .. } | StatusState::Streaming { .. } => {
+                SHIMMER_INTERVAL
+            }
             StatusState::Idle => {
                 if self.effects_enabled {
                     IDLE_EFFECTS_INTERVAL
@@ -238,10 +245,18 @@ impl StatusBarWidget {
             return;
         }
 
-        let interval = self.animation_interval();
-        if dt >= interval {
-            self.sprite_frame = self.sprite_frame.wrapping_add(1);
+        // Advance shimmer phase at SHIMMER_INTERVAL cadence (~30fps).
+        if dt >= SHIMMER_INTERVAL {
+            const SHIMMER_SPEED: f64 = 0.04; // ~2s for a full sweep at 33ms ticks
+            self.shimmer_phase = (self.shimmer_phase + SHIMMER_SPEED) % 1.0;
             self.last_tick = now;
+        }
+
+        // Advance dance sprite frame at its own slower cadence.
+        let sprite_dt = now.duration_since(self.last_sprite_tick);
+        if sprite_dt >= DANCE_INTERVAL {
+            self.sprite_frame = self.sprite_frame.wrapping_add(1);
+            self.last_sprite_tick = now;
         }
     }
 
@@ -449,49 +464,24 @@ impl StatusBarWidget {
                 let frame = self.sprite_frame % EVE_SPRITES.len();
                 let sprite = EVE_SPRITES[frame];
                 let elapsed = self.format_elapsed();
-                vec![
-                    Span::styled(
-                        format!(" {sprite} "),
-                        Style::default().fg(DANCE_COLOR).bg(bg),
-                    ),
-                    Span::styled(
-                        format!("thinking {elapsed}"),
-                        Style::default().fg(DIM).bg(bg),
-                    ),
-                ]
+                let mut spans = vec![Span::styled(
+                    format!(" {sprite} "),
+                    Style::default().fg(DANCE_COLOR).bg(bg),
+                )];
+                let text = format!("thinking {elapsed}");
+                spans.extend(shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg));
+                spans
             }
 
             StatusState::ToolRunning { tool_name } => {
-                let spinner = SPINNER_FRAMES[self.sprite_frame % SPINNER_FRAMES.len()];
                 let elapsed = self.format_elapsed();
-                vec![
-                    Span::styled(
-                        format!(" {spinner} "),
-                        Style::default().fg(DANCE_COLOR).bg(bg),
-                    ),
-                    Span::styled(
-                        tool_name.clone(),
-                        Style::default().fg(TOOL_COLOR).bg(bg),
-                    ),
-                    Span::styled(
-                        format!(" {elapsed}"),
-                        Style::default().fg(DIM).bg(bg),
-                    ),
-                ]
+                let text = format!(" {} {}", tool_name, elapsed);
+                shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg)
             }
 
             StatusState::Streaming { tokens } => {
-                let spinner = SPINNER_FRAMES[self.sprite_frame % SPINNER_FRAMES.len()];
-                vec![
-                    Span::styled(
-                        format!(" {spinner} "),
-                        Style::default().fg(DANCE_COLOR).bg(bg),
-                    ),
-                    Span::styled(
-                        format!("streaming · {tokens} tok"),
-                        Style::default().fg(DIM).bg(bg),
-                    ),
-                ]
+                let text = format!(" streaming {} tok ", tokens);
+                shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg)
             }
         }
     }
@@ -638,6 +628,66 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+// ── Shimmer ─────────────────────────────────────────────────────────────────
+
+/// Apply a shimmer effect to text — a cosine-wave color band sweeps across characters.
+///
+/// Based on the Codex CLI pattern: 2-second period, cosine interpolation.
+fn shimmer_spans(
+    text: &str,
+    phase: f64,
+    base_fg: Color,
+    highlight_fg: Color,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![];
+    }
+
+    let padding = 10.0;
+    let total_width = chars.len() as f64 + 2.0 * padding;
+    let band_half_width = total_width / 4.0;
+
+    // Phase maps to position in the sweep (0.0 = start, 1.0 = end).
+    let center = phase * total_width - padding;
+
+    chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| {
+            let dist = (i as f64 - center).abs();
+            let t = if dist < band_half_width {
+                0.5 * (1.0 + (std::f64::consts::PI * dist / band_half_width).cos())
+            } else {
+                0.0
+            };
+
+            let fg = blend_color(base_fg, highlight_fg, (t * 0.9) as f32);
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
+        })
+        .collect()
+}
+
+/// Linearly blend two RGB colors.
+fn blend_color(from: Color, to: Color, t: f32) -> Color {
+    match (from, to) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let r = (r1 as f32 + (r2 as f32 - r1 as f32) * t) as u8;
+            let g = (g1 as f32 + (g2 as f32 - g1 as f32) * t) as u8;
+            let b = (b1 as f32 + (b2 as f32 - b1 as f32) * t) as u8;
+            Color::Rgb(r, g, b)
+        }
+        _ => {
+            if t > 0.5 {
+                to
+            } else {
+                from
+            }
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -652,6 +702,7 @@ mod tests {
             prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
+            last_sprite_tick: Instant::now(),
             right_info: Some("main".to_string()),
             tokens_in: 0,
             tokens_out: 0,
@@ -660,6 +711,7 @@ mod tests {
             effects_enabled: false,
             heartbeat: Pattern::Flatline,
             agent_mode: AgentMode::default(),
+            shimmer_phase: 0.0,
         }
     }
 
@@ -707,6 +759,7 @@ mod tests {
         let mut widget = make_widget();
         widget.set_state(StatusState::Thinking);
         widget.last_tick = Instant::now() - Duration::from_secs(1);
+        widget.last_sprite_tick = Instant::now() - Duration::from_secs(1);
         let before = widget.sprite_frame;
         widget.tick();
         assert_eq!(widget.sprite_frame, before + 1);
@@ -804,9 +857,9 @@ mod tests {
         w.set_effects_enabled(true);
         assert_eq!(w.animation_interval(), IDLE_EFFECTS_INTERVAL);
 
-        // Non-idle states unaffected.
+        // Non-idle states use shimmer interval.
         w.set_state(StatusState::Thinking);
-        assert_eq!(w.animation_interval(), DANCE_INTERVAL);
+        assert_eq!(w.animation_interval(), SHIMMER_INTERVAL);
     }
 
     #[test]
@@ -837,5 +890,53 @@ mod tests {
             matches!(w.heartbeat, Pattern::Flatline),
             "heartbeat should be Flatline when idle"
         );
+    }
+
+    #[test]
+    fn shimmer_produces_per_char_spans() {
+        let spans = shimmer_spans(
+            "hello",
+            0.5,
+            Color::Rgb(50, 50, 50),
+            Color::Rgb(200, 200, 200),
+            Color::Rgb(0, 0, 0),
+        );
+        assert_eq!(spans.len(), 5); // one per character
+    }
+
+    #[test]
+    fn shimmer_empty_text() {
+        let spans = shimmer_spans(
+            "",
+            0.0,
+            Color::Rgb(50, 50, 50),
+            Color::Rgb(200, 200, 200),
+            Color::Rgb(0, 0, 0),
+        );
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn blend_color_midpoint() {
+        let c = blend_color(Color::Rgb(0, 0, 0), Color::Rgb(200, 200, 200), 0.5);
+        assert!(matches!(c, Color::Rgb(r, g, b) if r == 100 && g == 100 && b == 100));
+    }
+
+    #[test]
+    fn blend_color_endpoints() {
+        let from = Color::Rgb(10, 20, 30);
+        let to = Color::Rgb(110, 120, 130);
+        assert_eq!(blend_color(from, to, 0.0), from);
+        assert_eq!(blend_color(from, to, 1.0), to);
+    }
+
+    #[test]
+    fn shimmer_phase_advances_in_tick() {
+        let mut widget = make_widget();
+        widget.state = StatusState::Thinking;
+        widget.last_tick = Instant::now() - Duration::from_millis(100);
+        let old_phase = widget.shimmer_phase;
+        widget.tick();
+        assert!(widget.shimmer_phase > old_phase, "shimmer should advance");
     }
 }
