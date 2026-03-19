@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -69,6 +69,73 @@ fn tool_color(name: &str) -> Color {
 
         _ => CAT_DEFAULT,
     }
+}
+
+// ── Per-tool category dispatch ──────────────────────────────────────────
+
+/// Categorize a tool for specialized rendering.
+enum ToolCategory {
+    Shell,     // shell_exec, docker_exec, ssh_exec, code_execute
+    FileRead,  // read_file, list_dir
+    FileWrite, // write_file, patch_file, create_file, delete_file, …
+    Search,    // glob, search, grep, tree, find_tools
+    Web,       // web_search, web_fetch, browse
+    Default,   // everything else
+}
+
+fn tool_category(name: &str) -> ToolCategory {
+    match name {
+        "shell_exec" | "docker_exec" | "ssh_exec" | "code_execute" => ToolCategory::Shell,
+        "read_file" | "list_dir" => ToolCategory::FileRead,
+        "write_file" | "patch_file" | "create_file" | "delete_file" | "rename_file"
+        | "move_file" => ToolCategory::FileWrite,
+        "glob" | "search" | "grep" | "tree" | "find_tools" => ToolCategory::Search,
+        "web_search" | "web_fetch" | "browse" => ToolCategory::Web,
+        _ if name.starts_with("browser_") => ToolCategory::Web,
+        _ if name.starts_with("git_") => ToolCategory::FileWrite,
+        _ => ToolCategory::Default,
+    }
+}
+
+/// Extract a file path from an args summary string.
+///
+/// The summary typically looks like `path: "src/main.rs"` or just `src/main.rs`.
+fn extract_path(args_summary: &str) -> String {
+    // Try to extract a quoted path first.
+    if let Some(start) = args_summary.find('"') {
+        if let Some(end) = args_summary[start + 1..].find('"') {
+            return args_summary[start + 1..start + 1 + end].to_owned();
+        }
+    }
+    // Otherwise use the part after "path:" or the whole summary.
+    if let Some(rest) = args_summary.strip_prefix("path: ") {
+        rest.trim().to_owned()
+    } else {
+        args_summary.to_owned()
+    }
+}
+
+/// Extract a search pattern from an args summary string.
+fn extract_pattern(args_summary: &str) -> String {
+    if let Some(start) = args_summary.find('"') {
+        if let Some(end) = args_summary[start + 1..].find('"') {
+            return args_summary[start + 1..start + 1 + end].to_owned();
+        }
+    }
+    if let Some(rest) = args_summary.strip_prefix("pattern: ") {
+        rest.trim().to_owned()
+    } else {
+        args_summary.to_owned()
+    }
+}
+
+/// Count results in tool output (lines as a rough result count).
+fn count_results(output: &str) -> usize {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    trimmed.lines().count()
 }
 
 /// Controls how a [`ToolCell`] is rendered.
@@ -166,6 +233,106 @@ impl ToolCell {
 
     // ── Private helpers ────────────────────────────────────────────────────
 
+    /// Produce per-tool-type content lines (between top border and status bar).
+    fn tool_content_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        match tool_category(&self.tool_name) {
+            ToolCategory::Shell => {
+                // Show command prominently with a $ prompt.
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        "$ ",
+                        Style::default()
+                            .fg(CAT_SHELL)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(self.args_summary.clone(), Style::default().fg(CAT_SHELL)),
+                ]));
+            }
+            ToolCategory::FileRead => {
+                // Show file path with underline.
+                let path = extract_path(&self.args_summary);
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        path,
+                        Style::default()
+                            .fg(CAT_READ)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            }
+            ToolCategory::FileWrite => {
+                // Show file path with write-colour underline.
+                let path = extract_path(&self.args_summary);
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        path,
+                        Style::default()
+                            .fg(CAT_WRITE)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+                // If output contains a diff, render it inline.
+                if let Some(output) = &self.output {
+                    if diff::is_unified_diff(output) {
+                        let diff_lines = diff::diff_to_lines(output);
+                        for dl in diff_lines {
+                            let mut spans =
+                                vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                            spans.extend(dl.spans);
+                            lines.push(Line::from(spans));
+                        }
+                    }
+                }
+            }
+            ToolCategory::Search => {
+                // Show search pattern in /…/ notation and result count.
+                let pattern = extract_pattern(&self.args_summary);
+                let count = self
+                    .output
+                    .as_ref()
+                    .map(|o| count_results(o))
+                    .unwrap_or(0);
+                let count_str = if count > 0 {
+                    format!(" ({count} results)")
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(
+                        format!("/{pattern}/"),
+                        Style::default()
+                            .fg(CAT_READ)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                    Span::styled(count_str, Style::default().fg(UI_DIM)),
+                ]));
+            }
+            ToolCategory::Web => {
+                // Show URL or query.
+                lines.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(UI_DIM)),
+                    Span::styled(self.args_summary.clone(), Style::default().fg(CAT_WEB)),
+                ]));
+            }
+            ToolCategory::Default => {
+                // Standard args line.
+                lines.push(Line::from(vec![
+                    Span::styled("  │ args: ", Style::default().fg(UI_DIM)),
+                    Span::styled(self.args_summary.clone(), Style::default().fg(UI_DIM)),
+                    Span::styled(" │", Style::default().fg(UI_DIM)),
+                ]));
+            }
+        }
+
+        lines
+    }
+
     fn fmt_duration(&self) -> String {
         format!("{:.1}s", self.duration.as_secs_f64())
     }
@@ -197,7 +364,7 @@ impl ToolCell {
         vec![line]
     }
 
-    /// Bordered block: tool name, args, optional diff output, duration, status.
+    /// Bordered block: tool name, per-category content, duration, status.
     fn grouped_lines(&self) -> Vec<Line<'static>> {
         let duration_str = self.fmt_duration();
         let (status_str, status_color) = self.status_str();
@@ -210,26 +377,8 @@ impl ToolCell {
             Span::styled(" ─┐", Style::default().fg(UI_DIM)),
         ]);
 
-        // Args line: `  │ args: <summary>   │`
-        let args_line = Line::from(vec![
-            Span::styled("  │ args: ", Style::default().fg(UI_DIM)),
-            Span::styled(self.args_summary.clone(), Style::default().fg(UI_DIM)),
-            Span::styled(" │", Style::default().fg(UI_DIM)),
-        ]);
-
-        let mut lines = vec![top, args_line];
-
-        // If output looks like a unified diff, render it with colors.
-        if let Some(output) = &self.output {
-            if diff::is_unified_diff(output) {
-                let diff_lines = diff::diff_to_lines(output);
-                for dl in diff_lines {
-                    let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
-                    spans.extend(dl.spans);
-                    lines.push(Line::from(spans));
-                }
-            }
-        }
+        let mut lines = vec![top];
+        lines.extend(self.tool_content_lines());
 
         // Status line: `  │ 1.2s ok          │`
         let status_line = Line::from(vec![
@@ -243,59 +392,62 @@ impl ToolCell {
         // Bottom border: `  └─ … ─┘` matching the top border width.
         let fill_width = self.tool_name.len() + 2; // "─ " + name + " ─"
         let bottom_fill = "─".repeat(fill_width);
-        let bottom = Line::from(vec![
-            Span::styled(format!("  └{}┘", bottom_fill), Style::default().fg(UI_DIM)),
-        ]);
+        let bottom = Line::from(vec![Span::styled(
+            format!("  └{}┘", bottom_fill),
+            Style::default().fg(UI_DIM),
+        )]);
 
         lines.push(status_line);
         lines.push(bottom);
         lines
     }
 
-    /// 4-line (or 5-line with output) bordered block including optional output.
+    /// Bordered block including per-category content and optional verbose output.
     fn verbose_lines(&self) -> Vec<Line<'static>> {
         let duration_str = self.fmt_duration();
         let (status_str, status_color) = self.status_str();
 
+        let name_color = tool_color(&self.tool_name);
         let top = Line::from(vec![
             Span::styled("  ┌─ ", Style::default().fg(UI_DIM)),
-            Span::styled(self.tool_name.clone(), Style::default().fg(UI_DIM)),
+            Span::styled(self.tool_name.clone(), Style::default().fg(name_color)),
             Span::styled(" ─┐", Style::default().fg(UI_DIM)),
         ]);
 
-        let args_line = Line::from(vec![
-            Span::styled("  │ args: ", Style::default().fg(UI_DIM)),
-            Span::styled(self.args_summary.clone(), Style::default().fg(UI_DIM)),
-            Span::styled(" │", Style::default().fg(UI_DIM)),
-        ]);
+        let mut lines = vec![top];
+        lines.extend(self.tool_content_lines());
 
-        let mut lines = vec![top, args_line];
-
-        // Output (only in Verbose mode, if output is present).
+        // In verbose mode, also show plain-text output for categories that
+        // don't already embed output in their content lines.
         if let Some(output) = &self.output {
-            if diff::is_unified_diff(output) {
-                // Render unified diff with colors, gutter, and line numbers.
-                let diff_lines = diff::diff_to_lines(output);
-                for dl in diff_lines {
-                    // Indent diff lines inside the tool box.
-                    let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
-                    spans.extend(dl.spans);
-                    lines.push(Line::from(spans));
-                }
-            } else {
-                // Plain text output — truncate to a reasonable display length.
-                let truncated = if output.chars().count() > 60 {
-                    let s: String = output.chars().take(60).collect();
-                    format!("{s}…")
+            let category = tool_category(&self.tool_name);
+            let already_shows_output =
+                matches!(category, ToolCategory::FileWrite | ToolCategory::Search);
+            if !already_shows_output {
+                if diff::is_unified_diff(output) {
+                    // Render unified diff with colors, gutter, and line numbers.
+                    let diff_lines = diff::diff_to_lines(output);
+                    for dl in diff_lines {
+                        let mut spans =
+                            vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                        spans.extend(dl.spans);
+                        lines.push(Line::from(spans));
+                    }
                 } else {
-                    output.clone()
-                };
-                let output_line = Line::from(vec![
-                    Span::styled("  │ output: ", Style::default().fg(UI_DIM)),
-                    Span::styled(truncated, Style::default().fg(UI_DIM)),
-                    Span::styled(" │", Style::default().fg(UI_DIM)),
-                ]);
-                lines.push(output_line);
+                    // Plain text output — truncate to a reasonable display length.
+                    let truncated = if output.chars().count() > 60 {
+                        let s: String = output.chars().take(60).collect();
+                        format!("{s}…")
+                    } else {
+                        output.clone()
+                    };
+                    let output_line = Line::from(vec![
+                        Span::styled("  │ output: ", Style::default().fg(UI_DIM)),
+                        Span::styled(truncated, Style::default().fg(UI_DIM)),
+                        Span::styled(" │", Style::default().fg(UI_DIM)),
+                    ]);
+                    lines.push(output_line);
+                }
             }
         }
 
@@ -309,9 +461,10 @@ impl ToolCell {
 
         let fill_width = self.tool_name.len() + 2; // match top border
         let bottom_fill = "─".repeat(fill_width);
-        let bottom = Line::from(vec![
-            Span::styled(format!("  └{}┘", bottom_fill), Style::default().fg(UI_DIM)),
-        ]);
+        let bottom = Line::from(vec![Span::styled(
+            format!("  └{}┘", bottom_fill),
+            Style::default().fg(UI_DIM),
+        )]);
 
         lines.push(status_line);
         lines.push(bottom);
@@ -567,15 +720,16 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
-    fn grouped_mode_shows_diff_when_output_is_diff() {
-        let cell = make_cell(true)
+    fn grouped_mode_shows_diff_for_file_write() {
+        // FileWrite tools render inline diffs in grouped mode.
+        let cell = ToolCell::new("patch_file", "call_1", r#"path: "src/main.rs""#, true, Duration::from_millis(300))
             .with_display_mode(ToolDisplayMode::Grouped)
             .with_output(SAMPLE_DIFF);
         let lines = cell.to_scrollback_lines(80);
-        // Grouped with diff: top + args + diff lines + status + bottom > 4
+        // Grouped with diff: top + path + diff lines + status + bottom > 4
         assert!(
             lines.len() > 4,
-            "grouped with diff should have more than 4 lines, got {}",
+            "grouped FileWrite with diff should have more than 4 lines, got {}",
             lines.len()
         );
     }
@@ -586,7 +740,7 @@ diff --git a/src/main.rs b/src/main.rs
             .with_display_mode(ToolDisplayMode::Grouped)
             .with_output("wrote 42 bytes to foo.txt");
         let lines = cell.to_scrollback_lines(80);
-        // Plain output should not expand — grouped mode ignores non-diff output
+        // Plain output should not expand — grouped mode uses per-category content only
         assert_eq!(lines.len(), 4, "grouped with plain output should be 4 lines");
     }
 
@@ -600,5 +754,245 @@ diff --git a/src/main.rs b/src/main.rs
         assert_eq!(lines.len(), 5, "verbose with plain output should be 5 lines");
         let output_line: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(output_line.contains("output:"), "should have output: label");
+    }
+
+    // ── Per-tool category dispatch tests ─────────────────────────────────
+
+    #[test]
+    fn shell_tool_shows_dollar_prompt() {
+        let cell =
+            ToolCell::new("shell_exec", "call_1", "ls -la", true, Duration::from_millis(100))
+                .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("$ "), "shell tool should show $ prompt");
+        assert!(all_text.contains("ls -la"), "shell tool should show command");
+    }
+
+    #[test]
+    fn read_file_shows_path() {
+        let cell = ToolCell::new(
+            "read_file",
+            "call_1",
+            r#"path: "src/main.rs""#,
+            true,
+            Duration::from_millis(50),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("src/main.rs"),
+            "read_file should show path"
+        );
+    }
+
+    #[test]
+    fn search_tool_shows_pattern_and_count() {
+        let cell = ToolCell::new(
+            "grep",
+            "call_1",
+            r#"pattern: "TODO""#,
+            true,
+            Duration::from_millis(50),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped)
+        .with_output("file1.rs:10: TODO fix\nfile2.rs:20: TODO cleanup\nfile3.rs:5: TODO");
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("TODO"), "search should show pattern");
+        assert!(
+            all_text.contains("3 results"),
+            "search should show result count"
+        );
+    }
+
+    #[test]
+    fn web_tool_shows_url() {
+        let cell = ToolCell::new(
+            "web_fetch",
+            "call_1",
+            "https://example.com",
+            true,
+            Duration::from_millis(200),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("https://example.com"),
+            "web tool should show URL"
+        );
+    }
+
+    #[test]
+    fn default_tool_shows_args() {
+        let cell = ToolCell::new(
+            "custom_tool",
+            "call_1",
+            "arg1: val1",
+            true,
+            Duration::from_millis(50),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("args:"),
+            "default tool should show args label"
+        );
+    }
+
+    #[test]
+    fn extract_path_quoted() {
+        assert_eq!(extract_path(r#"path: "src/main.rs""#), "src/main.rs");
+    }
+
+    #[test]
+    fn extract_path_unquoted() {
+        assert_eq!(extract_path("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn extract_path_strip_prefix() {
+        assert_eq!(extract_path("path: src/lib.rs"), "src/lib.rs");
+    }
+
+    #[test]
+    fn extract_pattern_quoted() {
+        assert_eq!(extract_pattern(r#"pattern: "TODO""#), "TODO");
+    }
+
+    #[test]
+    fn extract_pattern_unquoted() {
+        assert_eq!(extract_pattern("TODO"), "TODO");
+    }
+
+    #[test]
+    fn count_results_counts_lines() {
+        assert_eq!(count_results("a\nb\nc"), 3);
+        assert_eq!(count_results(""), 0);
+        assert_eq!(count_results("single"), 1);
+    }
+
+    #[test]
+    fn file_write_grouped_shows_path() {
+        let cell = ToolCell::new(
+            "write_file",
+            "call_1",
+            r#"path: "out.txt""#,
+            true,
+            Duration::from_millis(20),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("out.txt"),
+            "write_file should show path: {all_text:?}"
+        );
+    }
+
+    #[test]
+    fn git_tool_is_file_write_category() {
+        let cell = ToolCell::new(
+            "git_commit",
+            "call_1",
+            "commit -m fix",
+            true,
+            Duration::from_millis(100),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        // git_ tools are FileWrite category — should show path-style underlined content
+        // (not the Default "args:" label)
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !all_text.contains("args:"),
+            "git_ tool should not use default args: label"
+        );
+    }
+
+    #[test]
+    fn browser_tool_is_web_category() {
+        let cell = ToolCell::new(
+            "browser_navigate",
+            "call_1",
+            "https://rust-lang.org",
+            true,
+            Duration::from_millis(500),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_text.contains("https://rust-lang.org"),
+            "browser_ tool should show URL"
+        );
+        assert!(
+            !all_text.contains("args:"),
+            "browser_ tool should not use default args: label"
+        );
+    }
+
+    #[test]
+    fn verbose_search_skips_duplicate_output() {
+        // Search tools already embed result count in content lines, so verbose
+        // mode should NOT also show a separate "output:" line.
+        let cell = ToolCell::new(
+            "grep",
+            "call_1",
+            r#"pattern: "fn""#,
+            true,
+            Duration::from_millis(30),
+        )
+        .with_display_mode(ToolDisplayMode::Verbose)
+        .with_output("main.rs:1: fn main()\nlib.rs:5: fn helper()");
+        let lines = cell.to_scrollback_lines(80);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !all_text.contains("output:"),
+            "search in verbose mode should not duplicate output: {all_text:?}"
+        );
+        assert!(
+            all_text.contains("2 results"),
+            "search should show result count"
+        );
     }
 }
