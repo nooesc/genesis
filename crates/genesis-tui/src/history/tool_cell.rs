@@ -211,7 +211,8 @@ impl ToolCell {
             return;
         }
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = ratatui::widgets::Paragraph::new(lines);
+        let paragraph = ratatui::widgets::Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(area, buf);
     }
 

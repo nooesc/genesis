@@ -26,13 +26,15 @@ impl UserCell {
     /// Render the cell into the given buffer area.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = ratatui::widgets::Paragraph::new(lines);
+        let paragraph = ratatui::widgets::Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(area, buf);
     }
 
     /// Return the number of rows this cell occupies at the given terminal width.
     pub fn height(&self, width: u16) -> u16 {
-        self.to_scrollback_lines(width).len() as u16
+        let usable_width = width.max(1);
+        wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1)
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.
@@ -81,6 +83,22 @@ pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
 
     lines.push(current);
     lines
+}
+
+/// Count the total rows these lines would occupy when wrapped at `wrap_width`.
+fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
+    let width = wrap_width.max(1) as usize;
+    let mut rows: usize = 0;
+    for line in lines {
+        let line_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        let wrapped = if line_width == 0 {
+            1
+        } else {
+            (line_width.saturating_sub(1) / width) + 1
+        };
+        rows = rows.saturating_add(wrapped);
+    }
+    rows as u16
 }
 
 #[cfg(test)]
