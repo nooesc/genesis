@@ -3233,6 +3233,16 @@ pub struct StoredMemory {
     pub created_at: String,
 }
 
+/// A memory search result with its combined score.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScoredMemory {
+    pub memory: StoredMemory,
+    /// Combined score from hybrid search (higher is better).
+    pub score: f64,
+    /// Source of the match: "fts", "vector", or "hybrid".
+    pub source: String,
+}
+
 /// Memory persistence layer.
 pub struct MemoryStore {
     database_path: PathBuf,
@@ -3331,6 +3341,101 @@ impl MemoryStore {
         collect_rows(rows, &self.database_path)
     }
 
+    /// Vector similarity search across stored memory embeddings.
+    pub fn vector_search(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        if limit == 0 || query_embedding.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let connection = open(&self.database_path)?;
+        let Some(expected_dimensions) =
+            detect_uniform_embedding_dimensions(&connection, &self.database_path)?
+        else {
+            return Ok(Vec::new());
+        };
+
+        if expected_dimensions != query_embedding.len() {
+            return Err(StorageError::EmbeddingDimensionMismatch {
+                path: self.database_path.clone(),
+                expected: expected_dimensions,
+                actual: query_embedding.len(),
+            });
+        }
+
+        let memory_vec_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'memory_vec'
+                )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?
+            != 0;
+
+        if !memory_vec_exists {
+            return Ok(Vec::new());
+        }
+
+        let query_blob = embedding_to_blob(query_embedding);
+        let mut stmt = connection
+            .prepare(
+                "SELECT m.id, m.session_id, m.kind, m.content, m.created_at, distance
+                 FROM memory_vec mv
+                 JOIN memories m ON m.rowid = mv.memory_rowid
+                 WHERE embedding MATCH ?1 AND k = ?2
+                 ORDER BY distance",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![query_blob, limit as i64], |row| {
+                let distance: f64 = row.get(5)?;
+                Ok(ScoredMemory {
+                    memory: StoredMemory {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        content: row.get(3)?,
+                        created_at: row.get(4)?,
+                    },
+                    score: 1.0 / (1.0 + distance),
+                    source: "vector".to_owned(),
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        collect_rows(rows, &self.database_path)
+    }
+
+    /// Hybrid search combining FTS results with vector similarity via reciprocal rank fusion.
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let fts_results = self.search(query, limit * 2)?;
+        let vector_results = self.vector_search(query_embedding, limit * 2)?;
+        Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
+    }
+
     /// Create and index a new memory entry.
     pub fn create(
         &self,
@@ -3401,6 +3506,54 @@ fn memory_unique_suffix() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn reciprocal_rank_fusion(
+    fts_results: &[StoredMemory],
+    vector_results: &[ScoredMemory],
+    limit: usize,
+) -> Vec<ScoredMemory> {
+    const K: f64 = 60.0;
+
+    let mut scores: std::collections::HashMap<String, (f64, Option<StoredMemory>)> =
+        std::collections::HashMap::new();
+
+    for (rank, memory) in fts_results.iter().enumerate() {
+        let entry = scores.entry(memory.id.clone()).or_insert((0.0, None));
+        entry.0 += 1.0 / (K + rank as f64);
+        if entry.1.is_none() {
+            entry.1 = Some(memory.clone());
+        }
+    }
+
+    for (rank, scored) in vector_results.iter().enumerate() {
+        let entry = scores
+            .entry(scored.memory.id.clone())
+            .or_insert((0.0, None));
+        entry.0 += 1.0 / (K + rank as f64);
+        if entry.1.is_none() {
+            entry.1 = Some(scored.memory.clone());
+        }
+    }
+
+    let mut merged: Vec<ScoredMemory> = scores
+        .into_iter()
+        .filter_map(|(_, (score, memory))| {
+            memory.map(|memory| ScoredMemory {
+                memory,
+                score,
+                source: "hybrid".to_owned(),
+            })
+        })
+        .collect();
+
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(limit);
+    merged
 }
 
 /// Embedding persistence layer for vector/semantic memory search.
@@ -6809,7 +6962,7 @@ mod tests {
 
 #[cfg(test)]
 mod memory_store_tests {
-    use super::{bootstrap, MemoryStore, SessionStore};
+    use super::{bootstrap, EmbeddingStore, MemoryStore, SessionStore};
     use tempfile::tempdir;
 
     fn setup(dir: &std::path::Path) -> std::path::PathBuf {
@@ -6857,6 +7010,85 @@ mod memory_store_tests {
 
         let memory = store.get("nonexistent").unwrap();
         assert!(memory.is_none());
+    }
+
+    fn seed_hybrid_search_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("hybrid.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )
+        .unwrap();
+
+        let rows = [
+            (
+                "mem-hybrid-best",
+                "fact",
+                "genesis memory handbook",
+                [1.0_f32, 0.0, 0.0, 0.0],
+            ),
+            (
+                "mem-fts-only",
+                "fact",
+                "genesis memory archive",
+                [0.0_f32, 1.0, 0.0, 0.0],
+            ),
+            (
+                "mem-vector-only",
+                "fact",
+                "semantic retrieval note",
+                [0.95_f32, 0.05, 0.0, 0.0],
+            ),
+        ];
+
+        for (id, kind, content, _) in rows {
+            conn.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', ?2, ?3, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, kind, content],
+            )
+            .unwrap();
+            let rowid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
+                rusqlite::params![rowid, kind, content],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings
+            .store("mem-hybrid-best", &[1.0, 0.0, 0.0, 0.0], "local-384")
+            .unwrap();
+        embeddings
+            .store("mem-fts-only", &[0.0, 1.0, 0.0, 0.0], "local-384")
+            .unwrap();
+        embeddings
+            .store("mem-vector-only", &[0.95, 0.05, 0.0, 0.0], "local-384")
+            .unwrap();
+
+        db_path
+    }
+
+    #[test]
+    fn hybrid_search_prefers_multi_signal_matches() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = seed_hybrid_search_fixture(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let results = store
+            .hybrid_search("genesis memory", &[1.0, 0.0, 0.0, 0.0], 3)
+            .unwrap();
+
+        assert_eq!(results[0].memory.id, "mem-hybrid-best");
+        assert_eq!(results[0].source, "hybrid");
     }
 }
 

@@ -3,11 +3,11 @@
 //! Provides:
 //! - `EmbeddingProvider` for OpenAI-compatible `/v1/embeddings` APIs
 //! - `cosine_similarity` for comparing embedding vectors
-//! - `hybrid_search` combining FTS5 keyword results with vector similarity
-//!   via reciprocal rank fusion (RRF)
+//! - `hybrid_search` delegating keyword/vector/hybrid memory retrieval
+//!   through `genesis-storage`
 
 use genesis_config::EmbeddingConfig;
-use genesis_storage::{EmbeddingStore, MemoryStore, StoredMemory};
+use genesis_storage::{EmbeddingStore, MemoryStore, ScoredMemory};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -364,16 +364,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / denom
 }
 
-/// A memory search result with its combined score.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScoredMemory {
-    pub memory: StoredMemory,
-    /// Combined score from hybrid search (higher is better).
-    pub score: f64,
-    /// Source of the match: "fts", "vector", or "hybrid".
-    pub source: String,
-}
-
 /// Search mode for memory queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
@@ -406,7 +396,7 @@ pub async fn hybrid_search(
     limit: usize,
     mode: SearchMode,
     memory_store: &MemoryStore,
-    embedding_store: &EmbeddingStore,
+    _embedding_store: &EmbeddingStore,
     provider: Option<&EmbeddingProvider>,
 ) -> Result<Vec<ScoredMemory>, EmbeddingError> {
     match mode {
@@ -424,116 +414,19 @@ pub async fn hybrid_search(
         }
         SearchMode::Vector => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
-            vector_search(query, limit, memory_store, embedding_store, provider).await
+            let query_embedding = provider.embed_one(query).await?;
+            memory_store
+                .vector_search(&query_embedding, limit)
+                .map_err(EmbeddingError::from)
         }
         SearchMode::Hybrid => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
-
-            // Run FTS5 and vector search, then merge with RRF
-            let fts_results = memory_store.search(query, limit * 2)?;
-            let vector_results =
-                vector_search(query, limit * 2, memory_store, embedding_store, provider).await?;
-
-            Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
+            let query_embedding = provider.embed_one(query).await?;
+            memory_store
+                .hybrid_search(query, &query_embedding, limit)
+                .map_err(EmbeddingError::from)
         }
     }
-}
-
-/// Vector-only search: embed the query, compare against all stored embeddings,
-/// then fetch memory details only for the top-ranked results.
-async fn vector_search(
-    query: &str,
-    limit: usize,
-    memory_store: &MemoryStore,
-    embedding_store: &EmbeddingStore,
-    provider: &EmbeddingProvider,
-) -> Result<Vec<ScoredMemory>, EmbeddingError> {
-    let query_embedding = provider.embed_one(query).await?;
-    let all_embeddings = embedding_store.all_embeddings()?;
-
-    if all_embeddings.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Score all embeddings by cosine similarity (only needs IDs + vectors)
-    let mut scored: Vec<(String, f32)> = all_embeddings
-        .iter()
-        .map(|(id, emb)| (id.clone(), cosine_similarity(&query_embedding, emb)))
-        .collect();
-
-    // Sort by similarity descending and keep only top results
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
-
-    // Fetch memory details only for the top-ranked results
-    let mut results = Vec::with_capacity(scored.len());
-    for (id, sim) in scored {
-        if let Some(memory) = memory_store.get(&id)? {
-            results.push(ScoredMemory {
-                memory,
-                score: sim as f64,
-                source: "vector".to_owned(),
-            });
-        }
-    }
-
-    Ok(results)
-}
-
-/// Merge FTS5 and vector search results using Reciprocal Rank Fusion.
-///
-/// For each document appearing in either result list, compute:
-///   score = sum(1 / (k + rank_in_list_i)) for each list containing it.
-/// Sort by descending score, return top `limit`.
-fn reciprocal_rank_fusion(
-    fts_results: &[StoredMemory],
-    vector_results: &[ScoredMemory],
-    limit: usize,
-) -> Vec<ScoredMemory> {
-    use std::collections::HashMap;
-
-    const K: f64 = 60.0;
-
-    let mut scores: HashMap<String, (f64, Option<StoredMemory>)> = HashMap::new();
-
-    // Add FTS5 results with their rank-based scores
-    for (rank, memory) in fts_results.iter().enumerate() {
-        let entry = scores.entry(memory.id.clone()).or_insert((0.0, None));
-        entry.0 += 1.0 / (K + rank as f64);
-        if entry.1.is_none() {
-            entry.1 = Some(memory.clone());
-        }
-    }
-
-    // Add vector results with their rank-based scores
-    for (rank, scored) in vector_results.iter().enumerate() {
-        let entry = scores
-            .entry(scored.memory.id.clone())
-            .or_insert((0.0, None));
-        entry.0 += 1.0 / (K + rank as f64);
-        if entry.1.is_none() {
-            entry.1 = Some(scored.memory.clone());
-        }
-    }
-
-    let mut merged: Vec<ScoredMemory> = scores
-        .into_iter()
-        .filter_map(|(_, (score, memory))| {
-            memory.map(|m| ScoredMemory {
-                memory: m,
-                score,
-                source: "hybrid".to_owned(),
-            })
-        })
-        .collect();
-
-    merged.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    merged.truncate(limit);
-    merged
 }
 
 /// Embed a memory and store its embedding.
@@ -643,77 +536,6 @@ mod tests {
             SearchMode::from_str_opt(Some("unknown")),
             SearchMode::Keyword
         );
-    }
-
-    #[test]
-    fn reciprocal_rank_fusion_merges_results() {
-        let fts = vec![
-            StoredMemory {
-                id: "m1".to_owned(),
-                session_id: None,
-                kind: "fact".to_owned(),
-                content: "Rust is great".to_owned(),
-                created_at: "2024-01-01".to_owned(),
-            },
-            StoredMemory {
-                id: "m2".to_owned(),
-                session_id: None,
-                kind: "fact".to_owned(),
-                content: "Python is popular".to_owned(),
-                created_at: "2024-01-02".to_owned(),
-            },
-        ];
-
-        let vector = vec![
-            ScoredMemory {
-                memory: StoredMemory {
-                    id: "m2".to_owned(),
-                    session_id: None,
-                    kind: "fact".to_owned(),
-                    content: "Python is popular".to_owned(),
-                    created_at: "2024-01-02".to_owned(),
-                },
-                score: 0.95,
-                source: "vector".to_owned(),
-            },
-            ScoredMemory {
-                memory: StoredMemory {
-                    id: "m3".to_owned(),
-                    session_id: None,
-                    kind: "fact".to_owned(),
-                    content: "Go is fast".to_owned(),
-                    created_at: "2024-01-03".to_owned(),
-                },
-                score: 0.8,
-                source: "vector".to_owned(),
-            },
-        ];
-
-        let results = reciprocal_rank_fusion(&fts, &vector, 10);
-
-        assert_eq!(results.len(), 3);
-        // m2 appears in both lists, so it should have the highest RRF score
-        assert_eq!(
-            results[0].memory.id, "m2",
-            "m2 should rank first (in both lists)"
-        );
-        assert_eq!(results[0].source, "hybrid");
-    }
-
-    #[test]
-    fn reciprocal_rank_fusion_respects_limit() {
-        let fts: Vec<StoredMemory> = (0..10)
-            .map(|i| StoredMemory {
-                id: format!("m{i}"),
-                session_id: None,
-                kind: "fact".to_owned(),
-                content: format!("memory {i}"),
-                created_at: "2024-01-01".to_owned(),
-            })
-            .collect();
-
-        let results = reciprocal_rank_fusion(&fts, &[], 3);
-        assert_eq!(results.len(), 3);
     }
 
     #[test]
