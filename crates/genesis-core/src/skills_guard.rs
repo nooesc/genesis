@@ -28,6 +28,17 @@ pub enum TrustLevel {
     Community,
 }
 
+impl std::fmt::Display for TrustLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Builtin => "builtin",
+            Self::Trusted => "trusted",
+            Self::Community => "community",
+        };
+        f.write_str(label)
+    }
+}
+
 /// Overall security verdict for a skill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verdict {
@@ -39,6 +50,17 @@ pub enum Verdict {
     Dangerous,
 }
 
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Safe => "safe",
+            Self::Caution => "caution",
+            Self::Dangerous => "dangerous",
+        };
+        f.write_str(label)
+    }
+}
+
 /// Severity of an individual finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -46,6 +68,18 @@ pub enum Severity {
     Medium,
     High,
     Critical,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        };
+        f.write_str(label)
+    }
 }
 
 /// Threat category for a finding.

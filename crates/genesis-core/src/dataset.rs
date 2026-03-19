@@ -306,4 +306,223 @@ mod tests {
         let manifest = build_manifest("outcomes", "test", dir.path(), false).expect("should build");
         assert_eq!(manifest.statistics.outcome_counts["success"], 1);
     }
+
+    /// Write a trajectory with a specific outcome variant.
+    /// Delegates step-building to the same logic as `write_test_trajectory`
+    /// and keeps tags consistent (includes model in tags).
+    fn write_test_trajectory_with_outcome(
+        dir: &Path,
+        id: &str,
+        model: &str,
+        steps: usize,
+        outcome: serde_json::Value,
+    ) {
+        let step_list: Vec<_> = (0..steps)
+            .map(|i| {
+                serde_json::json!({
+                    "step_index": i,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "action_type": if i == 0 { "user_message" } else { "assistant_message" },
+                    "content": format!("step {i}")
+                })
+            })
+            .collect();
+
+        let traj = serde_json::json!({
+            "session_id": id,
+            "model": model,
+            "system_prompt_hash": "h",
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:01:00Z",
+            "steps": step_list,
+            "outcome": outcome,
+            "tags": ["test", model]
+        });
+
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_string(&traj).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn build_manifest_recursive_scans_subdirectories() {
+        let dir = tempdir().expect("tempdir");
+        write_test_trajectory(dir.path(), "top", "gpt-4", 3);
+
+        let sub1 = dir.path().join("sub1");
+        std::fs::create_dir(&sub1).unwrap();
+        write_test_trajectory(&sub1, "nested1", "gpt-4", 4);
+
+        let sub2 = dir.path().join("sub1").join("sub2");
+        std::fs::create_dir(&sub2).unwrap();
+        write_test_trajectory(&sub2, "nested2", "claude", 5);
+
+        let manifest = build_manifest("recursive", "test", dir.path(), true).expect("should build");
+
+        assert_eq!(manifest.file_count, 3);
+        assert_eq!(manifest.total_steps, 12); // 3 + 4 + 5
+        assert!(manifest.models.contains(&"gpt-4".to_owned()));
+        assert!(manifest.models.contains(&"claude".to_owned()));
+    }
+
+    #[test]
+    fn build_manifest_non_recursive_skips_subdirectories() {
+        let dir = tempdir().expect("tempdir");
+        write_test_trajectory(dir.path(), "top", "gpt-4", 3);
+
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        write_test_trajectory(&sub, "nested", "claude", 4);
+
+        let manifest =
+            build_manifest("non-recursive", "test", dir.path(), false).expect("should build");
+
+        assert_eq!(manifest.file_count, 1);
+        assert_eq!(manifest.total_steps, 3);
+        assert!(manifest.models.contains(&"gpt-4".to_owned()));
+        assert!(!manifest.models.contains(&"claude".to_owned()));
+    }
+
+    #[test]
+    fn build_manifest_handles_malformed_json_gracefully() {
+        let dir = tempdir().expect("tempdir");
+        // Write a file with invalid JSON
+        std::fs::write(dir.path().join("bad.json"), "this is not valid json!!!").unwrap();
+
+        let result = build_manifest("bad", "test", dir.path(), false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match &err {
+            DatasetError::Parse(msg) => {
+                assert!(
+                    msg.contains("bad.json"),
+                    "error should mention the file name"
+                );
+            }
+            other => panic!("expected DatasetError::Parse, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn build_manifest_single_step_trajectory() {
+        let dir = tempdir().expect("tempdir");
+        write_test_trajectory(dir.path(), "single", "gpt-4", 1);
+
+        let manifest =
+            build_manifest("single-step", "test", dir.path(), false).expect("should build");
+
+        assert_eq!(manifest.file_count, 1);
+        assert_eq!(manifest.total_steps, 1);
+        assert_eq!(manifest.statistics.min_steps, 1);
+        assert_eq!(manifest.statistics.max_steps, 1);
+        assert!((manifest.statistics.avg_steps_per_trajectory - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn save_and_load_manifest_preserves_all_fields() {
+        let dir = tempdir().expect("tempdir");
+        write_test_trajectory(dir.path(), "s1", "gpt-4", 3);
+        write_test_trajectory(dir.path(), "s2", "claude", 5);
+
+        let mut manifest =
+            build_manifest("full-fields", "all fields test", dir.path(), false).expect("build");
+
+        // Populate provenance fields that build_manifest leaves empty by default
+        manifest.provenance.filters_applied =
+            vec!["quality > 0.5".to_owned(), "no-empty".to_owned()];
+        manifest.provenance.quality_threshold = Some(0.5);
+        manifest.provenance.toolset = Some("code-assistant".to_owned());
+
+        save_manifest(&manifest, dir.path()).expect("save");
+        let loaded = load_manifest(dir.path()).expect("load");
+
+        // Core fields
+        assert_eq!(loaded.name, "full-fields");
+        assert_eq!(loaded.description, "all fields test");
+        assert_eq!(loaded.version, "1.0");
+        assert_eq!(loaded.created_at, manifest.created_at);
+        assert_eq!(loaded.updated_at, manifest.updated_at);
+        assert_eq!(loaded.file_count, 2);
+        assert_eq!(loaded.total_steps, 8);
+
+        // Models and tags
+        assert_eq!(loaded.models, manifest.models);
+        assert_eq!(loaded.tags, manifest.tags);
+
+        // Statistics
+        assert_eq!(loaded.statistics.min_steps, 3);
+        assert_eq!(loaded.statistics.max_steps, 5);
+        assert_eq!(
+            loaded.statistics.outcome_counts,
+            manifest.statistics.outcome_counts
+        );
+        assert_eq!(loaded.statistics.tag_counts, manifest.statistics.tag_counts);
+        assert_eq!(
+            loaded.statistics.model_counts,
+            manifest.statistics.model_counts
+        );
+        assert_eq!(
+            loaded.statistics.avg_quality_score,
+            manifest.statistics.avg_quality_score
+        );
+
+        // Provenance
+        assert_eq!(loaded.provenance.source, manifest.provenance.source);
+        assert_eq!(
+            loaded.provenance.filters_applied,
+            vec!["quality > 0.5", "no-empty"]
+        );
+        assert_eq!(loaded.provenance.quality_threshold, Some(0.5));
+        assert_eq!(loaded.provenance.toolset, Some("code-assistant".to_owned()));
+    }
+
+    #[test]
+    fn build_manifest_with_multiple_outcomes_tracks_distribution() {
+        let dir = tempdir().expect("tempdir");
+
+        // 2 successes
+        write_test_trajectory_with_outcome(
+            dir.path(),
+            "ok1",
+            "gpt-4",
+            3,
+            serde_json::json!({"type": "success"}),
+        );
+        write_test_trajectory_with_outcome(
+            dir.path(),
+            "ok2",
+            "gpt-4",
+            4,
+            serde_json::json!({"type": "success"}),
+        );
+
+        // 1 failure
+        write_test_trajectory_with_outcome(
+            dir.path(),
+            "fail1",
+            "gpt-4",
+            2,
+            serde_json::json!({"type": "failure", "reason": "tool error"}),
+        );
+
+        // 1 abandoned
+        write_test_trajectory_with_outcome(
+            dir.path(),
+            "abn1",
+            "gpt-4",
+            2,
+            serde_json::json!({"type": "abandoned"}),
+        );
+
+        let manifest =
+            build_manifest("outcomes-dist", "test", dir.path(), false).expect("should build");
+
+        assert_eq!(manifest.file_count, 4);
+        assert_eq!(manifest.statistics.outcome_counts["success"], 2);
+        assert_eq!(manifest.statistics.outcome_counts["failure"], 1);
+        assert_eq!(manifest.statistics.outcome_counts["abandoned"], 1);
+        assert_eq!(manifest.statistics.outcome_counts.len(), 3);
+    }
 }
