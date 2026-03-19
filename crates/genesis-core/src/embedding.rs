@@ -370,6 +370,8 @@ pub enum SearchMode {
     /// FTS5 keyword search only (default, always available).
     #[default]
     Keyword,
+    /// Graph search: keyword primaries plus linked memories with decay-aware ranking.
+    Graph,
     /// Vector similarity search only (requires embeddings).
     Vector,
     /// Hybrid: combine FTS5 and vector results via reciprocal rank fusion.
@@ -379,6 +381,7 @@ pub enum SearchMode {
 impl SearchMode {
     pub fn from_str_opt(s: Option<&str>) -> Self {
         match s {
+            Some("graph") => Self::Graph,
             Some("vector") => Self::Vector,
             Some("hybrid") => Self::Hybrid,
             _ => Self::Keyword,
@@ -411,6 +414,7 @@ pub async fn hybrid_search(
                 })
                 .collect())
         }
+        SearchMode::Graph => memory_store.graph_search(query, limit).map_err(EmbeddingError::from),
         SearchMode::Vector => {
             let provider = provider.ok_or(EmbeddingError::NotConfigured)?;
             let query_embedding = provider.embed_one(query).await?;
@@ -530,6 +534,7 @@ mod tests {
             SearchMode::Keyword
         );
         assert_eq!(SearchMode::from_str_opt(Some("vector")), SearchMode::Vector);
+        assert_eq!(SearchMode::from_str_opt(Some("graph")), SearchMode::Graph);
         assert_eq!(SearchMode::from_str_opt(Some("hybrid")), SearchMode::Hybrid);
         assert_eq!(
             SearchMode::from_str_opt(Some("unknown")),

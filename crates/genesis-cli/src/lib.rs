@@ -625,6 +625,13 @@ pub enum MemoryCommand {
         query: String,
         #[arg(long, default_value = "10", help = "Maximum results to return")]
         limit: usize,
+        #[arg(
+            long,
+            default_value = "keyword",
+            value_parser = ["keyword", "graph", "hybrid"],
+            help = "Search mode"
+        )]
+        mode: String,
     },
     #[command(about = "Delete a memory by ID")]
     Delete {
@@ -1784,8 +1791,47 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_memory_list(&memories))
                     }
                 }
-                MemoryCommand::Search { query, limit } => {
-                    let memories = store.search(&query, limit)?;
+                MemoryCommand::Search { query, limit, mode } => {
+                    let mode =
+                        genesis_core::embedding::SearchMode::from_str_opt(Some(mode.as_str()));
+                    let memories = match mode {
+                        genesis_core::embedding::SearchMode::Keyword => store.search(&query, limit)?,
+                        genesis_core::embedding::SearchMode::Graph => store
+                            .graph_search(&query, limit)?
+                            .into_iter()
+                            .map(|item| item.memory)
+                            .collect(),
+                        genesis_core::embedding::SearchMode::Hybrid => {
+                            let config = loaded.config.embedding.as_ref().ok_or_else(|| {
+                                CliError::Other(
+                                    "memory search mode 'hybrid' requires an [embedding] configuration"
+                                        .to_owned(),
+                                )
+                            })?;
+                            let provider =
+                                genesis_core::embedding::EmbeddingProvider::from_config(config)
+                                    .map_err(|error| {
+                                        CliError::Other(format!(
+                                            "embedding provider error: {error}"
+                                        ))
+                                    })?;
+                            genesis_core::embedding::hybrid_search(
+                                &query,
+                                limit,
+                                mode,
+                                &store,
+                                Some(&provider),
+                            )
+                            .await
+                            .map_err(|error| {
+                                CliError::Other(format!("memory search failed: {error}"))
+                            })?
+                            .into_iter()
+                            .map(|item| item.memory)
+                            .collect()
+                        }
+                        genesis_core::embedding::SearchMode::Vector => unreachable!(),
+                    };
                     if cli.json {
                         Ok(serde_json::to_string_pretty(&memories)?)
                     } else if memories.is_empty() {
@@ -4619,9 +4665,33 @@ trusted = true
         let cli = Cli::try_parse_from(["genesis", "memory", "search", "rust programming"])
             .expect("memory search should parse");
         match cli.command {
-            Command::Memory(MemoryCommand::Search { query, limit }) => {
+            Command::Memory(MemoryCommand::Search { query, limit, mode }) => {
                 assert_eq!(query, "rust programming");
                 assert_eq!(limit, 10);
+                assert_eq!(mode, "keyword");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_memory_search_command_with_graph_mode() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "memory",
+            "search",
+            "rust programming",
+            "--mode",
+            "graph",
+            "--limit",
+            "3",
+        ])
+        .expect("memory search should parse");
+        match cli.command {
+            Command::Memory(MemoryCommand::Search { query, limit, mode }) => {
+                assert_eq!(query, "rust programming");
+                assert_eq!(limit, 3);
+                assert_eq!(mode, "graph");
             }
             other => panic!("unexpected command: {other:?}"),
         }

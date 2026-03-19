@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -505,8 +506,27 @@ pub enum StorageError {
     },
     #[error("database at {path} has an unrecognized memory_vec schema: {sql}")]
     InvalidVectorIndexSchema { path: PathBuf, sql: String },
+    #[error("invalid timestamp: {0}")]
+    InvalidTimestamp(String),
     #[error("unknown import status in database: {0}")]
     UnknownImportStatus(String),
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, StorageError> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Ok(parsed.with_timezone(&Utc));
+    }
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Ok(parsed.and_utc());
+    }
+    Err(StorageError::InvalidTimestamp(value.to_owned()))
+}
+
+fn decayed_importance(importance: f32, accessed_at: &str, now: &str) -> Result<f32, StorageError> {
+    let accessed_at = parse_timestamp(accessed_at)?;
+    let now = parse_timestamp(now)?;
+    let days = ((now - accessed_at).num_seconds().max(0) as f32) / 86_400.0;
+    Ok(importance * 0.99_f32.powf(days))
 }
 
 /// Collect mapped rows into a Vec, converting any SQLite error into a StorageError.
@@ -3608,6 +3628,45 @@ impl MemoryStore {
         Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
     }
 
+    pub fn graph_search(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let primary = self.search(query, limit)?;
+        let now = Utc::now().to_rfc3339();
+        let mut seen = std::collections::HashSet::new();
+        let mut expanded = Vec::new();
+
+        for (rank, memory) in primary.iter().enumerate() {
+            let base_score = 1.0 / (60.0 + rank as f64);
+            if seen.insert(memory.id.clone()) {
+                expanded.push(self.score_graph_memory(memory, base_score, &now)?);
+            }
+
+            for (link_rank, linked) in self.linked_memories(&memory.id)?.into_iter().enumerate() {
+                if seen.insert(linked.id.clone()) {
+                    let link_score = base_score * (0.5 / (link_rank as f64 + 1.0));
+                    expanded.push(self.score_graph_memory(&linked, link_score, &now)?);
+                }
+            }
+        }
+
+        expanded.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        expanded.truncate(limit);
+        self.bump_access_metrics(
+            &expanded
+                .iter()
+                .map(|item| item.memory.id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(expanded)
+    }
+
     pub fn create_note(&self, note: NewMemoryNote) -> Result<StoredMemory, StorageError> {
         let mut connection = open(&self.database_path)?;
         exec_migration(
@@ -3737,6 +3796,92 @@ impl MemoryStore {
                 source,
             })?;
         collect_rows(rows, &self.database_path)
+    }
+
+    fn linked_memories(&self, id: &str) -> Result<Vec<StoredMemory>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT m.id, m.session_id, m.kind, m.content, m.created_at
+                 FROM memory_links ml
+                 JOIN memories m ON m.id = ml.target_id
+                 WHERE ml.source_id = ?1
+                 ORDER BY m.created_at ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![id], Self::row_to_memory)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        collect_rows(rows, &self.database_path)
+    }
+
+    fn graph_attributes(&self, id: &str) -> Result<(f32, String), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row(
+                "SELECT importance, accessed_at FROM memories WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get::<_, f32>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
+    fn score_graph_memory(
+        &self,
+        memory: &StoredMemory,
+        base_score: f64,
+        now: &str,
+    ) -> Result<ScoredMemory, StorageError> {
+        let (importance, accessed_at) = self.graph_attributes(&memory.id)?;
+        let score = base_score * decayed_importance(importance, &accessed_at, now)? as f64;
+        Ok(ScoredMemory {
+            memory: memory.clone(),
+            score,
+            source: "graph".to_owned(),
+        })
+    }
+
+    fn bump_access_metrics(&self, memory_ids: &[String]) -> Result<(), StorageError> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut connection = open(&self.database_path)?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        for memory_id in memory_ids {
+            tx.execute(
+                "UPDATE memories
+                 SET accessed_at = CURRENT_TIMESTAMP,
+                     access_count = access_count + 1
+                 WHERE id = ?1",
+                params![memory_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        }
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        Ok(())
     }
 
     /// Delete a memory by ID.
@@ -7413,6 +7558,66 @@ mod memory_store_tests {
         let b_links = store.links_for("note-b").unwrap();
         assert_eq!(a_links, vec!["note-b".to_owned()]);
         assert_eq!(b_links, vec!["note-a".to_owned()]);
+    }
+
+    #[test]
+    fn importance_decays_with_time_since_access() {
+        let original = 1.0_f32;
+        let decayed = super::decayed_importance(
+            original,
+            "2026-03-01T00:00:00Z",
+            "2026-03-11T00:00:00Z",
+        )
+        .expect("timestamps should parse");
+        assert!(decayed < original);
+    }
+
+    fn seed_linked_memory_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+        let db_path = dir.join("linked.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "linked-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust ownership keeps Genesis safe".to_owned(),
+                keywords: vec!["rust".to_owned(), "ownership".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .unwrap();
+
+        store
+            .create_note(NewMemoryNote {
+                id: "primary-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis memory architecture".to_owned(),
+                keywords: vec!["genesis".to_owned(), "memory".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["linked-note".to_owned()],
+                importance: 1.0,
+            })
+            .unwrap();
+
+        db_path
+    }
+
+    #[test]
+    fn recall_returns_linked_notes_with_primary_result() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = seed_linked_memory_fixture(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        let results = store.graph_search("Genesis", 5).unwrap();
+        let ids: Vec<String> = results.into_iter().map(|item| item.memory.id).collect();
+        assert!(ids.contains(&"primary-note".to_owned()));
+        assert!(ids.contains(&"linked-note".to_owned()));
     }
 
     fn seed_hybrid_search_fixture(dir: &std::path::Path) -> std::path::PathBuf {
