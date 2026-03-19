@@ -2570,7 +2570,10 @@ fn check_tool_policy(
     let args: std::collections::BTreeMap<String, String> = serde_json::from_str::<
         std::collections::BTreeMap<String, serde_json::Value>,
     >(&tc.function.arguments)
-    .unwrap_or_default()
+    .unwrap_or_else(|e| {
+        warn!(tool = %tc.function.name, error = %e, "failed to parse tool arguments for policy check");
+        std::collections::BTreeMap::new()
+    })
     .into_iter()
     .map(|(k, v)| {
         let s = match v {

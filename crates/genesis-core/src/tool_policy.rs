@@ -180,10 +180,10 @@ impl ToolPolicy {
             }
         }
 
-        // If no known key (command/cmd) matched but allow patterns exist,
-        // check ALL argument values against allow/deny patterns to prevent
-        // bypassing the policy via unrecognized argument keys.
-        if !cmd_checked && !rule.allow_patterns.is_empty() && !arguments.is_empty() {
+        // If no known key (command/cmd) matched, check ALL argument values
+        // against deny patterns. This runs regardless of whether allow patterns
+        // exist — a deny-only rule must still block matching values.
+        if !cmd_checked && !arguments.is_empty() {
             for val in arguments.values() {
                 for pattern in &rule.deny_patterns {
                     if pattern.matches(val) {
@@ -193,6 +193,11 @@ impl ToolPolicy {
                     }
                 }
             }
+        }
+
+        // If allow patterns exist but no known key matched, every argument
+        // value must be checked against the allow list.
+        if !cmd_checked && !rule.allow_patterns.is_empty() && !arguments.is_empty() {
             let any_allowed = arguments.values().any(|val| {
                 rule.allow_patterns.iter().any(|p| p.matches(val))
             });
@@ -217,7 +222,7 @@ fn compile_patterns(raw: &[String]) -> Result<Vec<Pattern>, String> {
         .collect()
 }
 
-fn expand_home(path: &str) -> String {
+pub(crate) fn expand_home(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             return format!("{}{}", home.display(), &path[1..]);
@@ -470,6 +475,35 @@ mod tests {
             PolicyDecision::Deny(_) => {}
             PolicyDecision::Allow => panic!("deny_all should block everything"),
         }
+    }
+
+    #[test]
+    fn deny_only_rule_blocks_non_standard_argument() {
+        // A rule with ONLY deny patterns (no allow patterns) must still block
+        // matching values via non-standard argument keys.
+        let policy = ToolPolicy::from_json(
+            r#"{
+            "rules": [{"tool": "custom_exec", "deny": ["evil_*"]}],
+            "default": "allow"
+        }"#,
+        )
+        .unwrap();
+
+        // Should be denied — matches the deny pattern.
+        let mut deny_args = BTreeMap::new();
+        deny_args.insert("input".to_string(), "evil_payload".to_string());
+        match policy.evaluate("custom_exec", &deny_args) {
+            PolicyDecision::Deny(reason) => assert!(reason.contains("deny pattern")),
+            PolicyDecision::Allow => panic!("deny-only rule should block matching value"),
+        }
+
+        // Should be allowed — no deny match and no allow patterns to enforce.
+        let mut safe_args = BTreeMap::new();
+        safe_args.insert("input".to_string(), "safe_value".to_string());
+        assert_eq!(
+            policy.evaluate("custom_exec", &safe_args),
+            PolicyDecision::Allow
+        );
     }
 
     #[test]
