@@ -611,7 +611,8 @@ impl AgentLoop {
             return None;
         }
 
-        let tier = crate::routing::classify(user_message, tool_calls_made, turns_used, had_failure);
+        let default = crate::routing::Tier::from_str_or_mid(&routing.default_tier);
+        let tier = crate::routing::classify(user_message, tool_calls_made, turns_used, had_failure, default);
         let selected = crate::routing::model_for_tier(
             tier,
             routing.cheap_model.as_deref(),
@@ -957,7 +958,12 @@ impl AgentLoop {
             let cache_key = if self.response_cache.is_some()
                 && self.config.cache.as_ref().is_some_and(|c| c.enabled)
             {
-                Some(self.compute_cache_key(self.active_client().model(), &tool_defs))
+                let model_for_cache = if request.model.is_empty() {
+                    self.active_client().model()
+                } else {
+                    &request.model
+                };
+                Some(self.compute_cache_key(model_for_cache, &tool_defs))
             } else {
                 None
             };

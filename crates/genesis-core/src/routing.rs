@@ -69,6 +69,7 @@ pub fn classify(
     tool_calls_so_far: usize,
     turns_used: usize,
     had_failure: bool,
+    default_tier: Tier,
 ) -> Tier {
     let signals = extract_signals(latest_message, tool_calls_so_far, turns_used, had_failure);
 
@@ -79,14 +80,23 @@ pub fn classify(
 
     // Complex reasoning signals → Top (checked early so context-heavy
     // conversations are not short-circuited by a brief follow-up message)
-    if signals.has_reasoning_keywords && signals.message_length > 200 {
+    if signals.code_block_count >= 3 {
         return Tier::Top;
     }
-    if signals.code_block_count >= 3 {
+    if signals.has_reasoning_keywords && signals.message_length > 200 {
         return Tier::Top;
     }
     if signals.tool_calls_so_far >= 5 && signals.turns_used >= 3 {
         return Tier::Top;
+    }
+
+    // Code editing or moderate complexity → Mid (checked before greetings
+    // so that file paths and code blocks are not masked by greeting words)
+    if signals.code_block_count > 0 || signals.has_file_paths {
+        return Tier::Mid;
+    }
+    if signals.message_length >= 200 {
+        return Tier::Mid;
     }
 
     // Greetings and very short messages → Cheap
@@ -97,16 +107,8 @@ pub fn classify(
         return Tier::Cheap;
     }
 
-    // Code editing or moderate complexity → Mid
-    if signals.code_block_count > 0 || signals.has_file_paths {
-        return Tier::Mid;
-    }
-    if signals.message_length >= 200 {
-        return Tier::Mid;
-    }
-
-    // Default: Mid (safest for general tasks)
-    Tier::Mid
+    // Default: use the configured default tier
+    default_tier
 }
 
 fn extract_signals(
@@ -199,55 +201,71 @@ mod tests {
 
     #[test]
     fn greeting_routes_to_cheap() {
-        assert_eq!(classify("hello", 0, 0, false), Tier::Cheap);
-        assert_eq!(classify("hi", 0, 0, false), Tier::Cheap);
-        assert_eq!(classify("thanks", 0, 0, false), Tier::Cheap);
+        assert_eq!(classify("hello", 0, 0, false, Tier::Mid), Tier::Cheap);
+        assert_eq!(classify("hi", 0, 0, false, Tier::Mid), Tier::Cheap);
+        assert_eq!(classify("thanks", 0, 0, false, Tier::Mid), Tier::Cheap);
     }
 
     #[test]
     fn short_message_routes_to_cheap() {
-        assert_eq!(classify("what is 2+2?", 0, 0, false), Tier::Cheap);
-        assert_eq!(classify("list files", 0, 0, false), Tier::Cheap);
+        assert_eq!(classify("what is 2+2?", 0, 0, false, Tier::Mid), Tier::Cheap);
+        assert_eq!(classify("list files", 0, 0, false, Tier::Mid), Tier::Cheap);
     }
 
     #[test]
     fn code_editing_routes_to_mid() {
         let msg = "Please fix the bug in src/main.rs where the parser fails";
-        assert_eq!(classify(msg, 0, 0, false), Tier::Mid);
+        assert_eq!(classify(msg, 0, 0, false, Tier::Mid), Tier::Mid);
     }
 
     #[test]
     fn code_blocks_route_to_mid() {
         let msg = "Update this function:\n```rust\nfn foo() {}\n```\nto return a Result";
-        assert_eq!(classify(msg, 0, 0, false), Tier::Mid);
+        assert_eq!(classify(msg, 0, 0, false, Tier::Mid), Tier::Mid);
     }
 
     #[test]
     fn many_code_blocks_route_to_top() {
         let msg = "Compare these implementations:\n```\nfn a() {}\n```\nvs\n```\nfn b() {}\n```\nvs\n```\nfn c() {}\n```\nWhich is best?";
-        assert_eq!(classify(msg, 0, 0, false), Tier::Top);
+        assert_eq!(classify(msg, 0, 0, false, Tier::Mid), Tier::Top);
     }
 
     #[test]
     fn reasoning_keywords_with_long_message_route_to_top() {
         let msg = "I need you to analyze the architecture of this system and compare the trade-offs between using an event-sourced approach versus a traditional CRUD pattern. Consider the implications for scalability, maintainability, and testing. Please also evaluate the performance characteristics.";
-        assert_eq!(classify(msg, 0, 0, false), Tier::Top);
+        assert_eq!(classify(msg, 0, 0, false, Tier::Mid), Tier::Top);
     }
 
     #[test]
     fn escalation_on_failure() {
-        assert_eq!(classify("try again", 3, 2, true), Tier::Top);
+        assert_eq!(classify("try again", 3, 2, true, Tier::Mid), Tier::Top);
     }
 
     #[test]
     fn many_tool_calls_routes_to_top() {
-        assert_eq!(classify("continue", 6, 4, false), Tier::Top);
+        assert_eq!(classify("continue", 6, 4, false, Tier::Mid), Tier::Top);
     }
 
     #[test]
     fn long_message_without_keywords_routes_to_mid() {
         let msg = "a ".repeat(120); // 240 chars, no keywords
-        assert_eq!(classify(&msg, 0, 0, false), Tier::Mid);
+        assert_eq!(classify(&msg, 0, 0, false, Tier::Mid), Tier::Mid);
+    }
+
+    #[test]
+    fn greeting_with_file_path_routes_to_mid() {
+        assert_eq!(classify("yes check src/main.rs", 0, 0, false, Tier::Mid), Tier::Mid);
+        assert_eq!(classify("ok fix the bug in crates/core/lib.rs", 0, 0, false, Tier::Mid), Tier::Mid);
+    }
+
+    #[test]
+    fn default_tier_is_used_for_ambiguous() {
+        // A message that doesn't match any specific rule uses the configured default.
+        // Must be >= 50 chars, < 200 chars, no code blocks, no file paths, no
+        // reasoning keywords, and not a greeting to fall through to default.
+        let msg = "I would like you to help me write a short poem about the sunset over the ocean";
+        assert_eq!(classify(msg, 0, 0, false, Tier::Cheap), Tier::Cheap);
+        assert_eq!(classify(msg, 0, 0, false, Tier::Top), Tier::Top);
     }
 
     #[test]
