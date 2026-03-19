@@ -16,8 +16,8 @@ permissions:
 jobs:
   checks:
     name: Rust checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: [self-hosted, linux, arm64]
+    timeout-minutes: 30
     outputs:
       fmt: ${{ steps.fmt.outcome }}
       clippy: ${{ steps.clippy.outcome }}
@@ -37,8 +37,9 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - name: Sweep stamp
+        run: cargo sweep --stamp
+        continue-on-error: true
 
       - name: cargo fmt
         id: fmt
@@ -50,10 +51,10 @@ jobs:
         continue-on-error: true
         run: cargo clippy --workspace -- -D warnings
 
-      - name: cargo test
+      - name: cargo nextest
         id: test
         continue-on-error: true
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked
 
       - name: Gather repository stats
         id: stats
@@ -168,7 +169,7 @@ jobs:
               '| --- | --- |',
               `| cargo fmt --all -- --check | ${formatStatus(fmt)} |`,
               `| cargo clippy --workspace -- -D warnings | ${formatStatus(clippy)} |`,
-              `| cargo test --workspace --locked | ${formatStatus(test)} |`,
+              `| cargo nextest run --workspace --locked | ${formatStatus(test)} |`,
             ];
             const statsRows = [
               '| Metric | Value |',
