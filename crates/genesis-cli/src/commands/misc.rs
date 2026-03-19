@@ -1168,7 +1168,7 @@ pub(crate) fn run_context(command: ContextCommand) -> Result<String, CliError> {
     }
 }
 
-pub(crate) fn run_model(
+pub(crate) async fn run_model(
     config_path: Option<PathBuf>,
     command: ModelCommand,
     json: bool,
@@ -1276,6 +1276,119 @@ pub(crate) fn run_model(
                     config_file.display()
                 ))
             }
+        }
+        ModelCommand::Browse {
+            query,
+            tools,
+            vision,
+            reasoning,
+            sort,
+            limit,
+            json: json_output,
+        } => {
+            let loaded = load(config_path.as_deref())?;
+            let cache_dir = loaded.paths.data_dir.join("cache");
+            let _ = std::fs::create_dir_all(&cache_dir);
+
+            // Resolve API key for OpenRouter.
+            let api_key = std::env::var("OPENROUTER_API_KEY").ok();
+
+            // Fetch models.
+            let mut models = genesis_provider::openrouter_models::fetch_models(
+                api_key.as_deref(),
+                &cache_dir,
+            )
+            .await
+            .map_err(|e| CliError::Other(format!("Failed to fetch models: {e}")))?;
+
+            // Filter by query.
+            if let Some(ref q) = query {
+                let q_lower = q.to_lowercase();
+                models.retain(|m| {
+                    m.id.to_lowercase().contains(&q_lower)
+                        || m.name.to_lowercase().contains(&q_lower)
+                });
+            }
+
+            // Filter by capabilities.
+            if tools {
+                models.retain(|m| m.supports_tools());
+            }
+            if vision {
+                models.retain(|m| m.supports_vision());
+            }
+            if reasoning {
+                models.retain(|m| m.supports_reasoning());
+            }
+
+            // Sort.
+            match sort.as_str() {
+                "cheapest" | "price" => {
+                    models.sort_by(|a, b| {
+                        let pa = a.pricing.prompt.parse::<f64>().unwrap_or(f64::MAX);
+                        let pb = b.pricing.prompt.parse::<f64>().unwrap_or(f64::MAX);
+                        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                }
+                "context" | "largest" => {
+                    models.sort_by(|a, b| b.context_length.cmp(&a.context_length));
+                }
+                _ => {
+                    // Default: newest first.
+                    models.sort_by(|a, b| b.created.cmp(&a.created));
+                }
+            }
+
+            // Limit.
+            models.truncate(limit);
+
+            if json_output {
+                let output = serde_json::to_string_pretty(&models)?;
+                return Ok(output);
+            }
+
+            // Human-readable output.
+            if models.is_empty() {
+                return Ok("No models found matching your criteria.".to_owned());
+            }
+
+            let mut lines = Vec::new();
+            lines.push(format!("Found {} models:\n", models.len()));
+
+            for m in &models {
+                let mut badges = String::new();
+                if m.supports_tools() {
+                    badges.push_str(" [T]");
+                }
+                if m.supports_vision() {
+                    badges.push_str(" [V]");
+                }
+                if m.supports_reasoning() {
+                    badges.push_str(" [R]");
+                }
+
+                lines.push(format!(
+                    "  {:<45} {:>12}  {:>6}{}",
+                    if m.id.len() > 45 {
+                        let truncated: String = m.id.chars().take(44).collect();
+                        format!("{truncated}…")
+                    } else {
+                        m.id.clone()
+                    },
+                    m.price_display(),
+                    m.context_display(),
+                    badges,
+                ));
+            }
+
+            lines.push(String::new());
+            lines.push("Badges: [T] tools  [V] vision  [R] reasoning".to_owned());
+            lines.push(format!(
+                "Sort: {}  |  Use: genesis model set <id>",
+                sort
+            ));
+
+            Ok(lines.join("\n"))
         }
     }
 }
