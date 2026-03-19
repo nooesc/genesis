@@ -197,9 +197,15 @@ pub struct AppState {
     pub plugin_runtime_overrides: genesis_core::execution::PluginRuntimeOverrides,
     /// Shared embedding provider cached on first use to avoid rebuilding per request.
     embedding_provider_cache: OnceLock<Arc<genesis_core::embedding::EmbeddingProvider>>,
+    /// Serializes first-time provider initialization on toolchains without `OnceLock::get_or_try_init`.
+    embedding_provider_init: Mutex<()>,
 }
 
-fn get_or_try_init_arc<T, E, F>(cache: &OnceLock<Arc<T>>, init: F) -> Result<Arc<T>, E>
+fn get_or_try_init_arc<T, E, F>(
+    cache: &OnceLock<Arc<T>>,
+    init_lock: &Mutex<()>,
+    init: F,
+) -> Result<Arc<T>, E>
 where
     F: FnOnce() -> Result<T, E>,
 {
@@ -207,9 +213,14 @@ where
         return Ok(Arc::clone(value));
     }
 
+    let _guard = init_lock.lock().expect("embedding provider init lock poisoned");
+    if let Some(value) = cache.get() {
+        return Ok(Arc::clone(value));
+    }
+
     let value = Arc::new(init()?);
     let _ = cache.set(Arc::clone(&value));
-    Ok(cache.get().cloned().unwrap_or(value))
+    Ok(value)
 }
 
 impl AppState {
@@ -252,6 +263,7 @@ impl AppState {
             agent_bus: genesis_core::agent_bus::AgentBus::with_persistence(&bus_db_path),
             plugin_runtime_overrides,
             embedding_provider_cache: OnceLock::new(),
+            embedding_provider_init: Mutex::new(()),
         }
     }
 
@@ -271,12 +283,7 @@ impl AppState {
             return Ok(None);
         };
 
-        let provider = self.embedding_provider_cache.get();
-        if let Some(provider) = provider {
-            return Ok(Some(Arc::clone(provider)));
-        }
-
-        get_or_try_init_arc(&self.embedding_provider_cache, || {
+        get_or_try_init_arc(&self.embedding_provider_cache, &self.embedding_provider_init, || {
             build_embedding_provider(config)
         })
         .map(Some)
@@ -1766,7 +1773,7 @@ fn embedding_provider_error(
     {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            "local embedding backend selected; Task 1 only wires backend selection and feature plumbing. Runtime local embeddings land in the follow-up fastembed task.".to_owned(),
+            "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it.".to_owned(),
         );
     }
 
@@ -1798,7 +1805,7 @@ fn embedding_runtime_error(
             return (
                 StatusCode::NOT_IMPLEMENTED,
                 format!(
-                    "local embedding backend selected for {context}; runtime local embeddings land in the follow-up fastembed task"
+                    "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it"
                 ),
             );
         }
@@ -4972,9 +4979,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let cache = OnceLock::new();
+        let init_lock = Mutex::new(());
         let attempts = AtomicUsize::new(0);
 
-        let first = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+        let first = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Err("transient failure")
         });
@@ -4982,7 +4990,7 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
         assert!(cache.get().is_none());
 
-        let second = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+        let second = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(42)
         })
@@ -4990,13 +4998,47 @@ mod tests {
         assert_eq!(*second, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
 
-        let third = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+        let third = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(7)
         })
         .expect("cached init should succeed");
         assert_eq!(*third, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn get_or_try_init_arc_serializes_concurrent_initializers() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let cache = Arc::new(OnceLock::new());
+        let init_lock = Arc::new(Mutex::new(()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let init_lock = Arc::clone(&init_lock);
+            let attempts = Arc::clone(&attempts);
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
+                    attempts.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    Ok(42)
+                })
+                .expect("init should succeed")
+            }));
+        }
+
+        for handle in threads {
+            assert_eq!(*handle.join().expect("thread should join"), 42);
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 
     #[test]
