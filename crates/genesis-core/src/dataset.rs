@@ -308,6 +308,8 @@ mod tests {
     }
 
     /// Write a trajectory with a specific outcome variant.
+    /// Delegates step-building to the same logic as `write_test_trajectory`
+    /// and keeps tags consistent (includes model in tags).
     fn write_test_trajectory_with_outcome(
         dir: &Path,
         id: &str,
@@ -315,15 +317,16 @@ mod tests {
         steps: usize,
         outcome: serde_json::Value,
     ) {
-        let mut step_list = Vec::new();
-        for i in 0..steps {
-            step_list.push(serde_json::json!({
-                "step_index": i,
-                "timestamp": "2026-01-01T00:00:00Z",
-                "action_type": if i == 0 { "user_message" } else { "assistant_message" },
-                "content": format!("step {i}")
-            }));
-        }
+        let step_list: Vec<_> = (0..steps)
+            .map(|i| {
+                serde_json::json!({
+                    "step_index": i,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "action_type": if i == 0 { "user_message" } else { "assistant_message" },
+                    "content": format!("step {i}")
+                })
+            })
+            .collect();
 
         let traj = serde_json::json!({
             "session_id": id,
@@ -333,7 +336,7 @@ mod tests {
             "completed_at": "2026-01-01T00:01:00Z",
             "steps": step_list,
             "outcome": outcome,
-            "tags": ["test"]
+            "tags": ["test", model]
         });
 
         std::fs::write(
