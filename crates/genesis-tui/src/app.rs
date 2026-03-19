@@ -346,7 +346,7 @@ impl App {
                     (matches!(h.handle_key(key, visible_rows), HelpAction::Close), None)
                 }
                 ActiveOverlay::Models(m) => {
-                    match m.handle_key(key) {
+                    match m.handle_key(key, visible_rows) {
                         ModelPickerAction::Close => (true, None),
                         ModelPickerAction::Select(id) => (true, Some(id)),
                         ModelPickerAction::None => (false, None),
