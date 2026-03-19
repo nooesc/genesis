@@ -59,7 +59,7 @@ function ToolCard({ tool }: { tool: ToolInfo }) {
   const isBuiltin = tool.source === 'builtin'
 
   return (
-    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-colors hover:border-border/50">
+    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-all duration-200 hover:border-border/50 hover:-translate-y-px hover:shadow-[0_2px_8px_rgba(0,0,0,0.25)]">
       {/* Header: icon + name + source badge */}
       <div className="mb-1 flex items-start gap-2">
         <WrenchIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/30" />

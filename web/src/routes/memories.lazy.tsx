@@ -22,7 +22,7 @@ function MemoryCard({ memory, onDelete }: { memory: Memory; onDelete: () => void
   const isLong = memory.content.length > 200
 
   return (
-    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-colors hover:border-border/50">
+    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-all duration-200 hover:border-border/50 hover:-translate-y-px hover:shadow-[0_2px_8px_rgba(0,0,0,0.25)]">
       {/* Header: source + time + actions */}
       <div className="mb-2 flex items-center gap-2">
         {memory.source && (

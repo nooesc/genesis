@@ -64,9 +64,9 @@ function ScheduleCard({
   togglePending: boolean
 }) {
   return (
-    <div className={`group rounded-md border p-3 transition-colors ${
+    <div className={`group rounded-md border p-3 transition-all duration-200 ${
       schedule.enabled
-        ? 'border-border/40 bg-card/30'
+        ? 'border-border/40 bg-card/30 hover:border-border/50 hover:-translate-y-px hover:shadow-[0_2px_8px_rgba(0,0,0,0.25)]'
         : 'border-border/20 bg-card/10 opacity-60'
     }`}>
       {/* Header: ID + status + actions */}

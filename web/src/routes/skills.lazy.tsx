@@ -43,7 +43,7 @@ function SkillCard({
   const hasContent = skill.content && skill.content.length > 0
 
   return (
-    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-colors hover:border-border/50">
+    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-all duration-200 hover:border-border/50 hover:-translate-y-px hover:shadow-[0_2px_8px_rgba(0,0,0,0.25)]">
       {/* Header: name + tags + actions */}
       <div className="mb-1.5 flex items-start gap-2">
         <Brain className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/30" />
