@@ -117,8 +117,9 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 6, 4));
         let fill = Style::default().bg(ratatui::style::Color::Blue);
         draw_box(Rect::new(0, 0, 6, 4), &mut buf, Style::default(), Some(fill));
-        // Interior should have fill style
+        // Interior should have fill style applied
         let interior = buf.cell((2, 1)).unwrap();
         assert_eq!(interior.symbol(), " ");
+        assert_eq!(interior.bg, ratatui::style::Color::Blue);
     }
 }
