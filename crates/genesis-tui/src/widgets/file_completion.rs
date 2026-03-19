@@ -166,6 +166,10 @@ impl FileCompletion {
             return;
         }
 
+        // Shadow behind popup.
+        let popup_rect = Rect::new(popup_x, popup_y, popup_width, popup_height);
+        crate::render::render_shadow(popup_rect, buf);
+
         let border_style = Style::default().fg(BORDER_FG);
 
         // Top border with title.

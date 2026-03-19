@@ -16,6 +16,7 @@ use genesis_core::execution::{
     SessionExecutionError, SessionExecutionService, SessionTurnInput, SessionTurnOutcome,
 };
 use genesis_types::DeliveryPlatform;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -483,8 +484,10 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame
             app::ActiveOverlay::Help(h) => h.render(area, buf),
             app::ActiveOverlay::Models(m) => m.render(area, buf),
         }
+        let _ = crossterm::execute!(term.backend_mut(), BeginSynchronizedUpdate);
         let _ = term.draw_diff();
         term.swap_buffers();
+        let _ = crossterm::execute!(term.backend_mut(), EndSynchronizedUpdate);
         let _ = term.flush();
         return;
     }
@@ -694,8 +697,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame
     app.effects.process(frame_dt, buf, area);
 
     // Write only changed cells to the terminal, then swap buffers.
+    // Synchronized update prevents screen tearing on fast redraws.
+    let _ = crossterm::execute!(term.backend_mut(), BeginSynchronizedUpdate);
     let _ = term.draw_diff();
     term.swap_buffers();
+    let _ = crossterm::execute!(term.backend_mut(), EndSynchronizedUpdate);
     let _ = term.flush();
 }
 
