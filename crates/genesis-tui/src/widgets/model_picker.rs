@@ -81,6 +81,15 @@ impl CapabilityFilter {
 }
 
 /// Format a model's age from its creation timestamp.
+/// Returns true if the model was created within the last 7 days.
+fn is_new_model(created: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(created) < 7 * 86400
+}
+
 fn format_age(created: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -279,7 +288,9 @@ impl ModelPicker {
         }
 
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
-        self.scroll = self.scroll.min(self.selected);
+        // Reset scroll to top when results change — prevents hidden items
+        // at the top after a sort/filter toggle.
+        self.scroll = 0;
     }
 
     /// Render the picker overlay.
@@ -454,7 +465,7 @@ impl ModelPicker {
 
             // Age indicator.
             let age = format_age(model.created);
-            let age_style = if age == "new!" {
+            let age_style = if is_new_model(model.created) {
                 Style::default().fg(NEW_COLOR).bg(badge_bg)
             } else {
                 Style::default().fg(DIM).bg(badge_bg)
