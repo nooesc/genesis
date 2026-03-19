@@ -1,0 +1,5 @@
+---
+source: crates/genesis-tui/src/widgets/status_bar.rs
+expression: spans_text
+---
+◆ [Act] gpt-4o · 42%   streaming 256 tok   ⎇ main

@@ -1245,4 +1245,81 @@ diff --git a/src/main.rs b/src/main.rs
             "search should show result count"
         );
     }
+
+    // ── Snapshot tests ────────────────────────────────────────────────
+
+    /// Render a buffer to a string for snapshot testing.
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let area = buf.area();
+        let mut output = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.cell((x, y)).unwrap();
+                output.push_str(cell.symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    #[test]
+    fn snapshot_grouped_shell_tool() {
+        let cell =
+            ToolCell::new("shell_exec", "call_1", "ls -la", true, Duration::from_millis(1200))
+                .with_display_mode(ToolDisplayMode::Grouped);
+        let area = Rect::new(0, 0, 50, 10);
+        let mut buf = Buffer::empty(area);
+        cell.render(area, &mut buf);
+        insta::assert_snapshot!(buffer_to_string(&buf));
+    }
+
+    #[test]
+    fn snapshot_summary_tool() {
+        let cell = ToolCell::new(
+            "read_file",
+            "call_1",
+            r#"path: "src/main.rs""#,
+            true,
+            Duration::from_millis(50),
+        )
+        .with_display_mode(ToolDisplayMode::Summary);
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        cell.render(area, &mut buf);
+        insta::assert_snapshot!(buffer_to_string(&buf));
+    }
+
+    #[test]
+    fn snapshot_grouped_failed_tool() {
+        let cell = ToolCell::new(
+            "shell_exec",
+            "call_1",
+            "rm -rf /tmp/test",
+            false,
+            Duration::from_millis(500),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped)
+        .with_output("permission denied");
+        let area = Rect::new(0, 0, 50, 10);
+        let mut buf = Buffer::empty(area);
+        cell.render(area, &mut buf);
+        insta::assert_snapshot!(buffer_to_string(&buf));
+    }
+
+    #[test]
+    fn snapshot_verbose_tool_with_output() {
+        let cell = ToolCell::new(
+            "shell_exec",
+            "call_1",
+            "echo hello",
+            true,
+            Duration::from_millis(100),
+        )
+        .with_display_mode(ToolDisplayMode::Verbose)
+        .with_output("hello");
+        let area = Rect::new(0, 0, 50, 10);
+        let mut buf = Buffer::empty(area);
+        cell.render(area, &mut buf);
+        insta::assert_snapshot!(buffer_to_string(&buf));
+    }
 }

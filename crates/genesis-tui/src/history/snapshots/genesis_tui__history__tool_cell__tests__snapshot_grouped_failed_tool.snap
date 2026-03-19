@@ -1,0 +1,9 @@
+---
+source: crates/genesis-tui/src/history/tool_cell.rs
+expression: buffer_to_string(&buf)
+---
+  ┌─ shell_exec ─┐                                
+  │ $ rm -rf /tmp/test                            
+  │ 0.5s FAIL │                                   
+  │ permission denied │                           
+  └────────────┘

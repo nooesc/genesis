@@ -27,3 +27,4 @@ tachyonfx.workspace = true
 tui-big-text.workspace = true
 
 [dev-dependencies]
+insta.workspace = true

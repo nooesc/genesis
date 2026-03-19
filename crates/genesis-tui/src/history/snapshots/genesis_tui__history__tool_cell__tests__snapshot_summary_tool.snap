@@ -1,0 +1,5 @@
+---
+source: crates/genesis-tui/src/history/tool_cell.rs
+expression: buffer_to_string(&buf)
+---
+  [read_file] 0.1s ok

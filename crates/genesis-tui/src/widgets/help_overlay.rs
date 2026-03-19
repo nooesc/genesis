@@ -346,4 +346,29 @@ mod tests {
         assert!(text.contains("Ctrl+C"), "should list Ctrl+C");
         assert!(text.contains("/help"), "should list /help command");
     }
+
+    // ── Snapshot tests ────────────────────────────────────────────────
+
+    /// Render a buffer to a string for snapshot testing.
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let area = buf.area();
+        let mut output = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = buf.cell((x, y)).unwrap();
+                output.push_str(cell.symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    #[test]
+    fn snapshot_help_overlay() {
+        let overlay = HelpOverlay::new();
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        insta::assert_snapshot!(buffer_to_string(&buf));
+    }
 }
