@@ -39,14 +39,15 @@ function describeCron(expr: string): string {
   if (min.startsWith('*/') && hour === '*') {
     return `Every ${min.slice(2)} min`
   }
-  if (min !== '*' && hour !== '*' && dom === '*' && mon === '*' && dow === '*') {
-    return `Daily at ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`
-  }
   if (hour.startsWith('*/')) {
     return `Every ${hour.slice(2)} hr`
   }
+  if (min !== '*' && hour !== '*' && !hour.includes('/') && dom === '*' && mon === '*' && dow === '*') {
+    return `Daily at ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`
+  }
   if (dom === '*' && mon === '*' && dow !== '*') {
-    return `Weekdays at ${hour}:${min.padStart(2, '0')}`
+    const label = dow === '1-5' ? 'Weekdays' : `DOW(${dow})`
+    return `${label} at ${hour.padStart(2, '0')}:${min.padStart(2, '0')}`
   }
   return expr
 }
@@ -90,7 +91,7 @@ function ScheduleCard({
         </button>
         <button
           onClick={onDelete}
-          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-all hover:text-destructive group-hover:opacity-100"
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-all hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
           title="Delete"
         >
           <Trash2Icon className="h-3 w-3" />
@@ -296,7 +297,7 @@ function SchedulesPage() {
                 )
               }}
               onDelete={() => setDeleteTarget(schedule)}
-              togglePending={toggleSchedule.isPending}
+              togglePending={toggleSchedule.isPending && toggleSchedule.variables?.id === schedule.id}
             />
           ))}
         </div>
