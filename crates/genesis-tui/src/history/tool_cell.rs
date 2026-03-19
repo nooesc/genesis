@@ -531,6 +531,34 @@ impl ToolCell {
     }
 }
 
+/// Render a collapsed tool group as a single styled [`Line`].
+///
+/// Format: `  ▸ N tool calls (Xs, all ok)` or `  ▸ N tool calls (Xs, M failed)`
+pub fn tool_group_summary_line(cells: &[&ToolCell]) -> Line<'static> {
+    let count = cells.len();
+    let total_dur: Duration = cells.iter().map(|c| c.duration).sum();
+    let dur_str = format!("{:.1}s", total_dur.as_secs_f64());
+    let fail_count = cells.iter().filter(|c| !c.success).count();
+
+    let (status, status_color) = if fail_count == 0 {
+        ("all ok".to_owned(), COLOR_OK)
+    } else {
+        (format!("{fail_count} failed"), COLOR_FAIL)
+    };
+
+    Line::from(vec![
+        Span::styled("  ", Style::default().fg(UI_DIM)),
+        Span::styled("▸ ", Style::default().fg(Color::Rgb(180, 167, 214))),
+        Span::styled(
+            format!("{count} tool calls"),
+            Style::default().fg(Color::Rgb(168, 168, 168)),
+        ),
+        Span::styled(format!(" ({dur_str}, "), Style::default().fg(UI_DIM)),
+        Span::styled(status, Style::default().fg(status_color)),
+        Span::styled(")", Style::default().fg(UI_DIM)),
+    ])
+}
+
 fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
     let width = wrap_width.max(1) as usize;
     let mut rows: usize = 0;
@@ -1142,6 +1170,46 @@ diff --git a/src/main.rs b/src/main.rs
         assert!(
             !all_text.contains("args:"),
             "browser_ tool should not use default args: label"
+        );
+    }
+
+    // ── Tool group summary tests ──────────────────────────────────────────
+
+    #[test]
+    fn tool_group_summary_all_ok() {
+        let c1 = ToolCell::new("shell", "c1", "ls", true, Duration::from_millis(500));
+        let c2 = ToolCell::new("read_file", "c2", "f.rs", true, Duration::from_millis(300));
+        let c3 = ToolCell::new("grep", "c3", "pat", true, Duration::from_millis(200));
+
+        let line = tool_group_summary_line(&[&c1, &c2, &c3]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("3 tool calls"), "should show count: {text:?}");
+        assert!(text.contains("1.0s"), "should show total duration: {text:?}");
+        assert!(text.contains("all ok"), "should show all ok: {text:?}");
+    }
+
+    #[test]
+    fn tool_group_summary_with_failures() {
+        let c1 = ToolCell::new("shell", "c1", "ls", true, Duration::from_millis(400));
+        let c2 = ToolCell::new("shell", "c2", "rm x", false, Duration::from_millis(100));
+        let c3 = ToolCell::new("shell", "c3", "cat y", false, Duration::from_millis(200));
+
+        let line = tool_group_summary_line(&[&c1, &c2, &c3]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("3 tool calls"), "should show count: {text:?}");
+        assert!(text.contains("0.7s"), "should show total duration: {text:?}");
+        assert!(text.contains("2 failed"), "should show failure count: {text:?}");
+
+        // Verify that the failure count span uses COLOR_FAIL.
+        let fail_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("failed"))
+            .unwrap();
+        assert_eq!(
+            fail_span.style.fg,
+            Some(COLOR_FAIL),
+            "failure text should use COLOR_FAIL"
         );
     }
 
