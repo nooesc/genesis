@@ -45,6 +45,8 @@ const CODE_BG: Color = Color::Rgb(50, 50, 50);
 const CODE_FG: Color = Color::Rgb(200, 200, 200);
 /// Link URL colour.
 const LINK_COLOR: Color = Color::Rgb(100, 149, 237); // cornflower blue
+/// Subtle background for odd-numbered table data rows (zebra striping).
+const TABLE_STRIPE_BG: Color = Color::Rgb(35, 35, 40);
 
 // ── Lazy-loaded syntect state ─────────────────────────────────────────────────
 
@@ -496,7 +498,7 @@ impl MarkdownWriter {
 
         // Render header row (first row).
         if let Some(header) = self.table_rows.first() {
-            let line = self.render_table_row(header, &col_widths, true);
+            let line = self.render_table_row(header, &col_widths, true, false);
             self.lines.push(line);
 
             // Separator line — constructed without byte-slicing to avoid
@@ -525,9 +527,10 @@ impl MarkdownWriter {
             self.lines.push(Line::from(Span::styled(sep, Style::default().fg(DIM))));
         }
 
-        // Render data rows.
-        for row in self.table_rows.iter().skip(1) {
-            let line = self.render_table_row(row, &col_widths, false);
+        // Render data rows with zebra striping on odd rows.
+        for (i, row) in self.table_rows.iter().skip(1).enumerate() {
+            let stripe = i % 2 == 1;
+            let line = self.render_table_row(row, &col_widths, false, stripe);
             self.lines.push(line);
         }
     }
@@ -537,6 +540,7 @@ impl MarkdownWriter {
         row: &[Vec<Span<'static>>],
         col_widths: &[usize],
         is_header: bool,
+        stripe: bool,
     ) -> Line<'static> {
         use unicode_width::UnicodeWidthStr;
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -566,6 +570,9 @@ impl MarkdownWriter {
                 let mut style = s.style;
                 if is_header {
                     style = style.add_modifier(Modifier::BOLD);
+                }
+                if stripe {
+                    style = style.bg(TABLE_STRIPE_BG);
                 }
                 spans.push(Span::styled(s.content.clone(), style));
             }
@@ -1000,6 +1007,37 @@ mod tests {
             s.style.add_modifier.contains(Modifier::BOLD) && !s.content.trim().is_empty()
         });
         assert!(has_bold, "table header row should have bold spans: {:?}", header_line);
+    }
+
+    #[test]
+    fn table_odd_data_rows_have_stripe_background() {
+        // pulldown-cmark 0.13 emits header cells inside TableHead without a
+        // TableRow wrapper, so header cells are not captured into table_rows.
+        // The first TableRow (data row "A|B") becomes table_rows[0] and is
+        // rendered as the visual header.  Remaining rows are data:
+        //   table_rows[1] (C|D) → data index 0 → no stripe
+        //   table_rows[2] (E|F) → data index 1 → stripe
+        let md = "| H1 | H2 |\n|---|---|\n| A | B |\n| C | D |\n| E | F |";
+        let lines = markdown_to_lines(md);
+        // line 0 = header, line 1 = separator, line 2 = data row 0, line 3 = data row 1
+        assert!(lines.len() >= 4, "should have header + sep + 2 data rows, got {}", lines.len());
+        let striped_line = &lines[3]; // data index 1 (odd) → striped
+        let has_stripe = striped_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(has_stripe, "odd data row should have TABLE_STRIPE_BG: {:?}", striped_line);
+        // Verify the even data row does NOT have the stripe.
+        let even_line = &lines[2]; // data index 0 (even) → no stripe
+        let has_no_stripe = !even_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(has_no_stripe, "even data row should NOT have TABLE_STRIPE_BG: {:?}", even_line);
+    }
+
+    #[test]
+    fn table_header_row_has_no_stripe_background() {
+        let md = "| H1 | H2 |\n|---|---|\n| A | B |\n| C | D |";
+        let lines = markdown_to_lines(md);
+        assert!(!lines.is_empty());
+        let header_line = &lines[0];
+        let has_stripe = header_line.spans.iter().any(|s| s.style.bg == Some(TABLE_STRIPE_BG));
+        assert!(!has_stripe, "header row should NOT have TABLE_STRIPE_BG: {:?}", header_line);
     }
 
     // ── NEW: Links ───────────────────────────────────────────────────────
