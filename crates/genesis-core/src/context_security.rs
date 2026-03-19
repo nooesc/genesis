@@ -24,7 +24,10 @@ pub struct Threat {
 /// Result of scanning a context file.
 #[derive(Debug, Clone)]
 pub struct ScanResult {
-    /// Path of the scanned file (if from disk).
+    /// Path or label of the scanned source.
+    ///
+    /// Currently only read in tests; retained as part of the public scan API
+    /// for logging and diagnostics in future callers.
     #[allow(dead_code)]
     pub source: String,
     /// Detected threats.
@@ -38,7 +41,7 @@ impl ScanResult {
     }
 
     /// Returns true if any threats were found.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn has_threats(&self) -> bool {
         !self.threats.is_empty()
     }
@@ -64,7 +67,7 @@ pub fn scan_context_file(path: &Path, content: &str) -> ScanResult {
 }
 
 /// Scan raw text (not from a file) for injection threats.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn scan_text(label: &str, content: &str) -> ScanResult {
     let source = label.to_owned();
     let mut threats = Vec::new();
@@ -355,7 +358,7 @@ fn scan_tool_abuse(lower: &str, threats: &mut Vec<Threat>) {
 }
 
 /// Known context file names that should be scanned.
-#[allow(dead_code)]
+#[cfg(test)]
 pub const CONTEXT_FILE_NAMES: &[&str] = &[
     "AGENTS.md",
     ".cursorrules",
@@ -370,7 +373,7 @@ pub const CONTEXT_FILE_NAMES: &[&str] = &[
 ];
 
 /// Check if a filename is a known context file that should be scanned.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn is_context_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
