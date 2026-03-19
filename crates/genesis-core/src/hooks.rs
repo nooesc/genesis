@@ -227,7 +227,7 @@ mod tests {
     fn run_hooks_timeout_kills_long_running_process() {
         let runner = HookRunner::new(vec![HookConfig {
             event: HookEvent::PreToolCall,
-            command: "sleep 1".to_owned(),
+            command: "sleep 5".to_owned(),
             timeout_ms: 10,
             enabled: true,
         }]);
@@ -239,7 +239,7 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_ne!(results[0].exit_code, 0);
-        assert!(results[0].duration_ms < 1000);
+        assert!(results[0].duration_ms < 2000);
     }
 
     #[test]
