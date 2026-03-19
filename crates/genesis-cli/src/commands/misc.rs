@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use genesis_config::{load, set_plugin_disabled_in_file, LoadedConfig};
 use genesis_core::prompt::load_context_file;
-use genesis_lua::{DiscoveredPlugin, LuaRuntimeError, PluginKind};
 use genesis_lua::discovery::{discover_plugins_best_effort, DiscoveryReport};
+use genesis_lua::{DiscoveredPlugin, LuaRuntimeError, PluginKind};
 use genesis_storage::{PairingStore, ScheduleStore, SessionStore, SkillStore, UserModelStore};
 use genesis_types::DeliveryPlatform;
 
@@ -424,7 +424,12 @@ pub(crate) fn run_plugins(
         PluginsCommand::Info { name } => render_plugin_info(&entries, &errors, &name, json),
         PluginsCommand::Disable { name } => {
             let entry = entries.iter().find(|entry| entry.name == name);
-            let already_disabled = loaded.config.plugins.disabled.iter().any(|item| item == &name);
+            let already_disabled = loaded
+                .config
+                .plugins
+                .disabled
+                .iter()
+                .any(|item| item == &name);
             if entry.is_none() && !already_disabled {
                 return Err(CliError::Other(unknown_plugin_message(&entries, &name)));
             }
@@ -446,7 +451,12 @@ pub(crate) fn run_plugins(
         }
         PluginsCommand::Enable { name } => {
             let entry = entries.iter().find(|entry| entry.name == name);
-            let already_disabled = loaded.config.plugins.disabled.iter().any(|item| item == &name);
+            let already_disabled = loaded
+                .config
+                .plugins
+                .disabled
+                .iter()
+                .any(|item| item == &name);
             if entry.is_none() && !already_disabled {
                 return Err(CliError::Other(unknown_plugin_message(&entries, &name)));
             }
@@ -487,13 +497,8 @@ fn collect_plugin_entries(
         }
     };
 
-    let disabled: std::collections::BTreeSet<_> = loaded
-        .config
-        .plugins
-        .disabled
-        .iter()
-        .cloned()
-        .collect();
+    let disabled: std::collections::BTreeSet<_> =
+        loaded.config.plugins.disabled.iter().cloned().collect();
     let DiscoveryReport { plugins, errors } = report;
     let mut entries: Vec<PluginCommandEntry> = plugins
         .into_iter()
@@ -552,6 +557,18 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::SingleFile => "single_file",
         PluginKind::Package => "package",
+        PluginKind::Bundled => "bundled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plugin_kind_name;
+    use genesis_lua::PluginKind;
+
+    #[test]
+    fn plugin_kind_name_reports_bundled_plugins() {
+        assert_eq!(plugin_kind_name(PluginKind::Bundled), "bundled");
     }
 }
 
@@ -635,14 +652,8 @@ fn render_plugin_info(
     if let Some(entrypoint) = &entry.entrypoint {
         lines.push(format!("Entrypoint: {entrypoint}"));
     }
-    lines.push(format!(
-        "Allowed tools: {}",
-        join_or_none(&entry.tools)
-    ));
-    lines.push(format!(
-        "Allowed hooks: {}",
-        join_or_none(&entry.hooks)
-    ));
+    lines.push(format!("Allowed tools: {}", join_or_none(&entry.tools)));
+    lines.push(format!("Allowed hooks: {}", join_or_none(&entry.hooks)));
     if !errors.is_empty() {
         lines.push(String::new());
         lines.push("Discovery warnings:".to_owned());
