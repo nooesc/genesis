@@ -10,25 +10,26 @@ export function ShortcutHelp({ open, onClose }: ShortcutHelpProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-md"
       onClick={onClose}
       role="dialog"
       aria-label="Keyboard shortcuts"
     >
       <div
-        className="w-full max-w-md rounded-lg border border-border/40 bg-[#0d0d0d] p-5 shadow-2xl"
+        className="page-enter w-full max-w-sm rounded-xl border border-border/30 bg-[#0b0b0b] p-6 shadow-2xl shadow-black/50"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-mono text-xs font-semibold uppercase tracking-widest text-foreground/80">
+        {/* Header with gradient line */}
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="bg-gradient-to-r from-foreground to-muted-foreground bg-clip-text font-mono text-[11px] font-bold uppercase tracking-[0.15em] text-transparent">
             Keyboard Shortcuts
           </h2>
-          <span className="font-mono text-[9px] text-muted-foreground/40">
-            Press ? to toggle
-          </span>
+          <kbd className="flex items-center gap-0.5 rounded border border-border/30 bg-muted/10 px-1.5 py-0.5 font-mono text-[8px] text-muted-foreground/40">
+            ? to toggle
+          </kbd>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-5">
           {/* Navigation */}
           <Section title="Navigation">
             {navRoutes.filter(r => r.shortcut).map(r => (
@@ -39,7 +40,7 @@ export function ShortcutHelp({ open, onClose }: ShortcutHelpProps) {
           {/* Actions */}
           <Section title="Actions">
             <Row keys={['⌘', 'K']} label="Command palette" />
-            <Row keys={['K']} label="Command palette (no modifier)" />
+            <Row keys={['K']} label="Quick command (no modifier)" />
             <Row keys={['/']} label="Focus search" />
             <Row keys={['?']} label="This help" />
             <Row keys={['Esc']} label="Close overlay" />
@@ -53,23 +54,26 @@ export function ShortcutHelp({ open, onClose }: ShortcutHelpProps) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <h3 className="mb-2 font-mono text-[9px] uppercase tracking-widest text-muted-foreground/40">
-        {title}
-      </h3>
-      <div className="space-y-1">{children}</div>
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
+          {title}
+        </h3>
+        <div className="section-divider h-px flex-1 opacity-15" />
+      </div>
+      <div className="space-y-0.5">{children}</div>
     </div>
   )
 }
 
 function Row({ keys, label }: { keys: string[]; label: string }) {
   return (
-    <div className="flex items-center justify-between py-0.5">
-      <span className="font-mono text-[11px] text-foreground/60">{label}</span>
+    <div className="flex items-center justify-between rounded px-1.5 py-1 transition-colors hover:bg-muted/10">
+      <span className="font-mono text-[10px] text-foreground/50">{label}</span>
       <div className="flex items-center gap-0.5">
         {keys.map((key, i) => (
           <kbd
             key={i}
-            className="flex h-5 min-w-[20px] items-center justify-center rounded border border-border/40 bg-muted/30 px-1.5 font-mono text-[9px] text-foreground/50"
+            className="flex h-5 min-w-[18px] items-center justify-center rounded border border-border/30 bg-muted/20 px-1.5 font-mono text-[8px] text-foreground/40"
           >
             {key}
           </kbd>
