@@ -45,10 +45,19 @@ export function useSession(id: string) {
   })
 }
 
+interface MessagesResponse {
+  session_id: string
+  messages: StoredMessage[]
+  count: number
+}
+
 export function useMessages(sessionId: string) {
   return useQuery({
     queryKey: ['sessions', sessionId, 'messages'],
-    queryFn: () => api.get<StoredMessage[]>(`/sessions/${sessionId}/messages`),
+    queryFn: async () => {
+      const res = await api.get<MessagesResponse>(`/sessions/${sessionId}/messages`)
+      return res.messages
+    },
     enabled: Boolean(sessionId),
   })
 }
