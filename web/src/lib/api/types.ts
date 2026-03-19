@@ -131,6 +131,31 @@ export interface AuditEntry {
   created_at: string
 }
 
+export interface ApprovedUser {
+  platform: string
+  user_id: string
+  user_name: string
+  approved_at: string
+}
+
+export interface PendingPairing {
+  platform: string
+  code: string
+  user_id: string
+  user_name: string
+  created_at: string
+}
+
+export interface ApprovedListResponse {
+  approved: ApprovedUser[]
+  count: number
+}
+
+export interface PendingListResponse {
+  pending: PendingPairing[]
+  count: number
+}
+
 export interface ToolParameter {
   type: string
   description?: string
