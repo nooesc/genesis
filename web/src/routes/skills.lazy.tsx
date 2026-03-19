@@ -1,11 +1,9 @@
 import * as React from 'react'
 import { createLazyFileRoute } from '@tanstack/react-router'
-import { type ColumnDef } from '@tanstack/react-table'
-import { MoreHorizontalIcon, PlusIcon, TagIcon } from 'lucide-react'
+import { PlusIcon, TagIcon, Trash2Icon, ChevronDown, ChevronRight, Brain } from 'lucide-react'
 import { toast } from 'sonner'
 import { useSkills } from '@/lib/api/queries/skills'
 import { useCreateSkill, useDeleteSkill } from '@/lib/api/mutations/skills'
-import { DataTable } from '@/components/shared/data-table'
 import { EmptyState } from '@/components/shared/empty-state'
 import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Badge } from '@/components/ui/badge'
@@ -34,12 +32,74 @@ export const Route = createLazyFileRoute('/skills')({
   component: SkillsPage,
 })
 
-interface NewSkillDialogProps {
-  open: boolean
-  onClose: () => void
+function SkillCard({
+  skill,
+  onDelete,
+}: {
+  skill: Skill
+  onDelete: () => void
+}) {
+  const [expanded, setExpanded] = React.useState(false)
+  const hasContent = skill.content && skill.content.length > 0
+
+  return (
+    <div className="group rounded-md border border-border/30 bg-card/30 p-3 transition-colors hover:border-border/50">
+      {/* Header: name + tags + actions */}
+      <div className="mb-1.5 flex items-start gap-2">
+        <Brain className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/30" />
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[11px] font-medium text-foreground/80">{skill.name}</div>
+          {skill.description && (
+            <div className="mt-0.5 font-mono text-[10px] leading-relaxed text-muted-foreground/50">
+              {skill.description}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={onDelete}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/30 opacity-0 transition-all hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100"
+          title="Delete"
+        >
+          <Trash2Icon className="h-3 w-3" />
+        </button>
+      </div>
+
+      {/* Tags */}
+      {skill.tags.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1">
+          {skill.tags.map((tag) => (
+            <Badge key={tag} variant="outline" className="font-mono text-[8px] uppercase">
+              {tag}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {/* Expandable content */}
+      {hasContent && (
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className="flex items-center gap-1 font-mono text-[9px] text-muted-foreground/40 transition-colors hover:text-muted-foreground"
+        >
+          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          {expanded ? 'hide content' : 'show content'}
+        </button>
+      )}
+      {expanded && hasContent && (
+        <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted/20 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-foreground/50">
+          {skill.content}
+        </pre>
+      )}
+
+      {/* Footer: timestamp */}
+      <div className="mt-2 font-mono text-[8px] text-muted-foreground/30">
+        Updated {formatRelativeTime(skill.updated_at)}
+      </div>
+    </div>
+  )
 }
 
-function NewSkillDialog({ open, onClose }: NewSkillDialogProps) {
+function NewSkillDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const createSkill = useCreateSkill()
   const [name, setName] = React.useState('')
   const [description, setDescription] = React.useState('')
@@ -54,19 +114,12 @@ function NewSkillDialog({ open, onClose }: NewSkillDialogProps) {
         name: name.trim(),
         description: description.trim(),
         content: content.trim(),
-        tags: tags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean),
+        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
       },
       {
         onSuccess: () => {
           toast.success(`Skill "${name}" created`)
-          setName('')
-          setDescription('')
-          setContent('')
-          setTags('')
-          onClose()
+          handleClose()
         },
         onError: (err) => {
           toast.error(`Failed to create: ${err.message}`)
@@ -92,46 +145,22 @@ function NewSkillDialog({ open, onClose }: NewSkillDialogProps) {
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
             <Label className="font-mono text-xs">Name</Label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="skill-name"
-              className="font-mono text-xs"
-              required
-            />
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="skill-name" className="font-mono text-xs" required />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label className="font-mono text-xs">Description</Label>
-            <Input
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Brief description"
-              className="font-mono text-xs"
-            />
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Brief description" className="font-mono text-xs" />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label className="font-mono text-xs">Content</Label>
-            <Textarea
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder="Skill content / instructions..."
-              className="font-mono text-xs"
-              rows={5}
-            />
+            <Textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Skill content..." className="font-mono text-xs" rows={5} />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label className="font-mono text-xs">Tags (comma-separated)</Label>
-            <Input
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="tag1, tag2, tag3"
-              className="font-mono text-xs"
-            />
+            <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="tag1, tag2" className="font-mono text-xs" />
           </div>
           <DialogFooter className="-mx-0 -mb-0 border-0 bg-transparent p-0 pt-1">
-            <Button type="button" variant="outline" size="sm" onClick={handleClose}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={handleClose}>Cancel</Button>
             <Button type="submit" size="sm" disabled={createSkill.isPending || !name.trim()}>
               {createSkill.isPending ? 'Creating...' : 'Create'}
             </Button>
@@ -153,17 +182,14 @@ function SkillsPage() {
   const allTags = React.useMemo(() => {
     const tagSet = new Set<string>()
     for (const skill of skills ?? []) {
-      for (const tag of skill.tags) {
-        tagSet.add(tag)
-      }
+      for (const tag of skill.tags) tagSet.add(tag)
     }
     return Array.from(tagSet).sort()
   }, [skills])
 
   const filtered = React.useMemo(() => {
     return (skills ?? []).filter((skill) => {
-      const matchesSearch =
-        !search ||
+      const matchesSearch = !search ||
         skill.name.toLowerCase().includes(search.toLowerCase()) ||
         skill.description.toLowerCase().includes(search.toLowerCase())
       const matchesTag = !tagFilter || skill.tags.includes(tagFilter)
@@ -171,88 +197,31 @@ function SkillsPage() {
     })
   }, [skills, search, tagFilter])
 
-  const columns: ColumnDef<Skill, unknown>[] = React.useMemo(
-    () => [
-      {
-        accessorKey: 'name',
-        header: 'Name',
-        cell: ({ row }) => (
-          <span className="font-mono text-xs font-medium">{row.original.name}</span>
-        ),
-      },
-      {
-        accessorKey: 'tags',
-        header: 'Tags',
-        cell: ({ row }) => (
-          <div className="flex flex-wrap gap-1">
-            {row.original.tags.length > 0 ? (
-              row.original.tags.map((tag) => (
-                <Badge key={tag} variant="outline" className="font-mono text-[10px]">
-                  {tag}
-                </Badge>
-              ))
-            ) : (
-              <span className="text-muted-foreground">—</span>
-            )}
-          </div>
-        ),
-      },
-      {
-        id: 'updated_at',
-        header: 'Last Updated',
-        accessorKey: 'updated_at',
-        cell: ({ row }) => (
-          <span className="font-mono text-xs text-muted-foreground">
-            {formatRelativeTime(row.original.updated_at)}
-          </span>
-        ),
-      },
-      {
-        id: 'actions',
-        header: '',
-        cell: ({ row }) => (
-          <div className="flex justify-end">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon-sm">
-                  <MoreHorizontalIcon className="size-4" />
-                  <span className="sr-only">Actions</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => setDeleteTarget(row.original)}
-                >
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        ),
-      },
-    ],
-    [],
-  )
-
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-          Skills
-        </h1>
+        <div className="flex items-center gap-3">
+          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
+            Skills
+          </h1>
+          {!isLoading && (
+            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
+              {filtered.length}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           <Input
-            placeholder="Search skills..."
+            placeholder="Search..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-48 font-mono text-xs"
+            className="w-48 font-mono text-[11px]"
           />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="font-mono text-xs gap-1.5">
+              <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2 font-mono text-[10px]">
                 <TagIcon className="size-3" />
-                {tagFilter ?? 'All tags'}
+                {tagFilter ?? 'All'}
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -266,26 +235,34 @@ function SkillsPage() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button size="sm" className="font-mono text-xs gap-1.5" onClick={() => setNewOpen(true)}>
+          <Button size="sm" className="h-7 gap-1.5 px-2 font-mono text-[10px]" onClick={() => setNewOpen(true)}>
             <PlusIcon className="size-3" />
-            New Skill
+            New
           </Button>
         </div>
       </div>
 
       {isLoading ? (
-        <div className="flex flex-col gap-2">
+        <div className="card-stagger grid grid-cols-1 gap-2 lg:grid-cols-2">
           {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 w-full rounded" />
+            <Skeleton key={i} className="h-24 w-full rounded-md" />
           ))}
         </div>
       ) : filtered.length === 0 ? (
         <EmptyState
           title="No skills found"
-          description={search || tagFilter ? 'Try adjusting your filters.' : 'Create your first skill to get started.'}
+          description={search || tagFilter ? 'Try adjusting your filters.' : 'Create your first skill.'}
         />
       ) : (
-        <DataTable columns={columns} data={filtered} />
+        <div className="card-stagger grid grid-cols-1 gap-2 lg:grid-cols-2">
+          {filtered.map((skill) => (
+            <SkillCard
+              key={skill.name}
+              skill={skill}
+              onDelete={() => setDeleteTarget(skill)}
+            />
+          ))}
+        </div>
       )}
 
       <NewSkillDialog open={newOpen} onClose={() => setNewOpen(false)} />
