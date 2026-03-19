@@ -584,6 +584,7 @@ impl<'a> SessionExecutionService<'a> {
                     }
                 }),
                 response_format: self.response_format.clone(),
+                core_tools: self.loaded.config.runtime.core_tools.clone(),
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -1830,6 +1831,7 @@ mod tests {
                     cache: None,
                     tool_filter: None,
                     guardrails: None,
+                    core_tools: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

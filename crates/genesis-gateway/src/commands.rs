@@ -416,6 +416,7 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                core_tools: None,
             },
             gateway: None,
             toolsets: std::collections::HashMap::new(),
