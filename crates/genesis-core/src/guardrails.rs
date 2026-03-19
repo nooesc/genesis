@@ -539,7 +539,7 @@ mod tests {
         let config = pii_config();
         let result = check_output(&config, "Call me at 555-123-4567");
         assert!(result.passed);
-        assert!(result.violations.len() >= 1);
+        assert!(!result.violations.is_empty());
         assert!(result.content.contains("[phone_number_REDACTED]"));
     }
 

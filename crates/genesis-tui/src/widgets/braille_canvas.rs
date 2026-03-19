@@ -346,7 +346,7 @@ mod tests {
         if let Pattern::Particles { points } = &pat {
             let (x, _, _, _) = points[0];
             assert!(
-                x >= 0.0 && x <= 1.0,
+                (0.0..=1.0).contains(&x),
                 "particle should wrap around: got x={x}"
             );
         }

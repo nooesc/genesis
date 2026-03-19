@@ -1253,9 +1253,7 @@ mod tests {
     #[test]
     fn backoff_delay_caps_at_max() {
         let d10 = backoff_delay(10);
-        assert!(
-            d10.as_millis() <= MAX_DELAY.as_millis() as u128 + MAX_DELAY.as_millis() as u128 / 4
-        );
+        assert!(d10.as_millis() <= MAX_DELAY.as_millis() + MAX_DELAY.as_millis() / 4);
     }
 
     #[test]
