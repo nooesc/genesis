@@ -16,8 +16,8 @@ export function useTools() {
     queryFn: async () => {
       const res = await api.get<ToolsResponse>('/tools')
       // Merge builtin and MCP tools, tagging each with source
-      const builtin = res.builtin_tools.map((t) => ({ ...t, source: t.source ?? 'builtin' }))
-      const mcp = res.mcp_tools.map((t) => ({ ...t, source: t.source ?? 'mcp' }))
+      const builtin = (res.builtin_tools ?? []).map((t) => ({ ...t, source: 'builtin' as const }))
+      const mcp = (res.mcp_tools ?? []).map((t) => ({ ...t, source: t.source || 'mcp' }))
       return [...builtin, ...mcp] as ToolInfo[]
     },
   })
