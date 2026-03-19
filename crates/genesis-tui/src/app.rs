@@ -78,6 +78,8 @@ pub struct App {
     pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
     /// Queue of pending approval requests (processed one at a time).
     pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
+    /// Tools that the user chose to always approve for this session.
+    pub always_approved_tools: std::collections::HashSet<String>,
     /// Post-render visual effects (tachyonfx).
     pub effects: crate::effects::GenesisEffects,
     /// Lissajous pattern shown below messages when idle.
@@ -320,8 +322,15 @@ impl App {
             use crate::widgets::approval_overlay::ApprovalAction;
             let action = approval.handle_key(key);
             match action {
-                ApprovalAction::Approve | ApprovalAction::Deny => {
-                    let approved = matches!(action, ApprovalAction::Approve);
+                ApprovalAction::Approve | ApprovalAction::Deny | ApprovalAction::AlwaysApprove => {
+                    let approved = matches!(
+                        action,
+                        ApprovalAction::Approve | ApprovalAction::AlwaysApprove
+                    );
+                    if matches!(action, ApprovalAction::AlwaysApprove) {
+                        self.always_approved_tools
+                            .insert(approval.tool_name().to_owned());
+                    }
                     if let Some(tx) = self.approval_response.take() {
                         let _ = tx.send(approved);
                     }
@@ -549,8 +558,14 @@ impl App {
     }
 
     /// Pop the next queued approval request and show it, if any.
+    /// Auto-approves queued requests for always-approved tools.
     fn pop_next_approval(&mut self) {
-        if let Some(req) = self.approval_queue.pop_front() {
+        while let Some(req) = self.approval_queue.pop_front() {
+            if self.always_approved_tools.contains(&req.tool_name) {
+                // Auto-approve without showing the overlay.
+                let _ = req.response_tx.send(true);
+                continue;
+            }
             self.approval = Some(
                 crate::widgets::approval_overlay::ApprovalOverlay::new(
                     req.tool_name,
@@ -558,6 +573,7 @@ impl App {
                 ),
             );
             self.approval_response = Some(req.response_tx);
+            return;
         }
     }
 
@@ -625,6 +641,7 @@ mod tests {
             approval: None,
             approval_response: None,
             approval_queue: std::collections::VecDeque::new(),
+            always_approved_tools: std::collections::HashSet::new(),
             effects: crate::effects::GenesisEffects::new(false, false, Default::default()),
             idle_pattern: Pattern::Lissajous {
                 t: 0.0,

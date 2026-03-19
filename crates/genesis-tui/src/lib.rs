@@ -223,6 +223,7 @@ pub async fn run_tui(
         approval: None,
         approval_response: None,
         approval_queue: std::collections::VecDeque::new(),
+        always_approved_tools: std::collections::HashSet::new(),
         effects: crate::effects::GenesisEffects::new(animations_enabled, no_color, config.tui.effects.clone()),
         idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
             t: 0.0,
@@ -339,7 +340,10 @@ pub async fn run_tui(
             // ── Tool approval requests ───────────────────────────────
             approval = approval_rx.recv() => {
                 if let Some(req) = approval {
-                    if app.approval.is_some() {
+                    // Auto-approve if the user previously chose "always approve" for this tool.
+                    if app.always_approved_tools.contains(&req.tool_name) {
+                        let _ = req.response_tx.send(true);
+                    } else if app.approval.is_some() {
                         // Already showing an approval — queue this one.
                         app.approval_queue.push_back(req);
                     } else {
