@@ -47,6 +47,10 @@ const CODE_FG: Color = Color::Rgb(200, 200, 200);
 const LINK_COLOR: Color = Color::Rgb(100, 149, 237); // cornflower blue
 /// Subtle background for odd-numbered table data rows (zebra striping).
 const TABLE_STRIPE_BG: Color = Color::Rgb(35, 35, 40);
+/// Blockquote depth-2 prefix colour (slightly brighter than DIM).
+const BLOCKQUOTE_DEPTH2: Color = Color::Rgb(128, 128, 128);
+/// Blockquote depth-3+ prefix colour (brighter still).
+const BLOCKQUOTE_DEPTH3: Color = Color::Rgb(148, 148, 148);
 
 // ── Lazy-loaded syntect state ─────────────────────────────────────────────────
 
@@ -62,6 +66,26 @@ fn get_theme() -> &'static Theme {
         let ts = ThemeSet::load_defaults();
         ts.themes["base16-ocean.dark"].clone()
     })
+}
+
+// ── Blockquote prefix helper ─────────────────────────────────────────────────
+
+/// Build per-depth blockquote prefix spans with varying characters and colours.
+///
+/// - Depth 1: `│ ` in DIM
+/// - Depth 2: `┃ ` in slightly brighter grey
+/// - Depth 3+: `║ ` in even brighter grey
+fn blockquote_prefix(depth: usize) -> Vec<Span<'static>> {
+    (0..depth)
+        .map(|i| {
+            let (ch, color) = match i {
+                0 => ("│ ", DIM),
+                1 => ("┃ ", BLOCKQUOTE_DEPTH2),
+                _ => ("║ ", BLOCKQUOTE_DEPTH3),
+            };
+            Span::styled(ch.to_string(), Style::default().fg(color))
+        })
+        .collect()
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -170,8 +194,9 @@ impl MarkdownWriter {
 
         // Add blockquote prefix if needed.
         if self.blockquote_depth > 0 {
-            let prefix = "│ ".repeat(self.blockquote_depth);
-            spans.insert(0, Span::styled(prefix, Style::default().fg(DIM)));
+            let mut prefix = blockquote_prefix(self.blockquote_depth);
+            prefix.append(&mut spans);
+            spans = prefix;
         }
 
         if spans.is_empty() {
@@ -258,12 +283,8 @@ impl MarkdownWriter {
                     let highlighted = highlight_code(&code, &lang);
                     // Add blockquote prefix to code lines if needed.
                     if self.blockquote_depth > 0 {
-                        let prefix = "│ ".repeat(self.blockquote_depth);
                         for mut line in highlighted {
-                            let mut spans = vec![Span::styled(
-                                prefix.clone(),
-                                Style::default().fg(DIM),
-                            )];
+                            let mut spans = blockquote_prefix(self.blockquote_depth);
                             spans.append(&mut line.spans);
                             self.lines.push(Line::from(spans));
                         }
@@ -461,8 +482,7 @@ impl MarkdownWriter {
 
         // Blockquote prefix if needed.
         if self.blockquote_depth > 0 {
-            let bq = "│ ".repeat(self.blockquote_depth);
-            spans.push(Span::styled(bq, Style::default().fg(DIM)));
+            spans.extend(blockquote_prefix(self.blockquote_depth));
         }
 
         spans.push(Span::styled("─[ ", Style::default().fg(DIM)));
@@ -975,11 +995,42 @@ mod tests {
     fn nested_blockquote() {
         let lines = markdown_to_lines("> > nested");
         let text = all_text(&lines);
-        // Should have two │ prefixes for double nesting.
-        assert!(
-            text.matches("│").count() >= 2,
-            "nested blockquote should have multiple │: {text}"
-        );
+        // Depth 1 uses │, depth 2 uses ┃.
+        assert!(text.contains("│"), "depth-1 prefix should use │: {text}");
+        assert!(text.contains("┃"), "depth-2 prefix should use ┃: {text}");
+    }
+
+    #[test]
+    fn blockquote_depth1_uses_thin_bar() {
+        let lines = markdown_to_lines("> hello");
+        let prefix_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('│'))
+            .expect("depth-1 should have │ prefix");
+        assert_eq!(prefix_span.style.fg, Some(DIM));
+    }
+
+    #[test]
+    fn blockquote_depth2_uses_thick_bar() {
+        let lines = markdown_to_lines("> > hello");
+        let prefix_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('┃'))
+            .expect("depth-2 should have ┃ prefix");
+        assert_eq!(prefix_span.style.fg, Some(BLOCKQUOTE_DEPTH2));
+    }
+
+    #[test]
+    fn blockquote_depth3_uses_double_bar() {
+        let lines = markdown_to_lines("> > > hello");
+        let prefix_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('║'))
+            .expect("depth-3 should have ║ prefix");
+        assert_eq!(prefix_span.style.fg, Some(BLOCKQUOTE_DEPTH3));
     }
 
     // ── NEW: Tables ──────────────────────────────────────────────────────
