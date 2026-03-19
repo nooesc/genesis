@@ -46,7 +46,7 @@ mod tests {
     }
 
     #[test]
-    fn build_client_preserves_timeout() {
+    fn build_client_succeeds_with_various_timeouts() {
         // Build clients with various timeout values to ensure none panic.
         for secs in [1, 5, 30, 120] {
             let _client = build_blocking_client(Duration::from_secs(secs), |b| b);

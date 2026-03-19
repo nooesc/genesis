@@ -132,6 +132,15 @@ impl WebhookDispatcher {
 
         let event_str = payload.event.as_str();
 
+        // Serialize once — the payload is identical for all endpoints.
+        let body = match serde_json::to_string(&payload) {
+            Ok(body) => body,
+            Err(e) => {
+                warn!(error = %e, "failed to serialize webhook payload, skipping all endpoints");
+                return;
+            }
+        };
+
         for config in &self.configs {
             // Filter by event type if the webhook has a filter
             if !config.events.is_empty() && !config.events.iter().any(|e| e == event_str) {
@@ -143,13 +152,7 @@ impl WebhookDispatcher {
             let secret = config.secret.clone();
             let max_retries = config.max_retries;
             let backoff_ms = config.retry_backoff_ms;
-            let body = match serde_json::to_string(&payload) {
-                Ok(body) => body,
-                Err(e) => {
-                    warn!(error = %e, url = %config.url, "failed to serialize webhook payload, skipping");
-                    continue;
-                }
-            };
+            let body = body.clone();
             let dead_letters = Arc::clone(&self.dead_letters);
             let metrics = Arc::clone(&self.metrics);
             let event_type = event_str.to_owned();

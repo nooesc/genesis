@@ -3223,7 +3223,9 @@ async fn openai_streaming_response(
             Ok(json) => json,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize SSE event");
-                serde_json::json!({"error": "serialization failed"}).to_string()
+                // Return a minimal OpenAI-compatible error chunk so clients
+                // can still parse it.
+                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
         let _ = tx.send(Ok(Event::default().data(initial_data)));
@@ -3259,7 +3261,9 @@ async fn openai_streaming_response(
                             Ok(json) => json,
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to serialize SSE event");
-                                serde_json::json!({"error": "serialization failed"}).to_string()
+                                // Return a minimal OpenAI-compatible error chunk so clients
+                // can still parse it.
+                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                             }
                         };
                         let _ = tx_for_event.send(Ok(Event::default().data(chunk_data)));
@@ -3284,7 +3288,9 @@ async fn openai_streaming_response(
             Ok(json) => json,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize SSE event");
-                serde_json::json!({"error": "serialization failed"}).to_string()
+                // Return a minimal OpenAI-compatible error chunk so clients
+                // can still parse it.
+                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
         let _ = tx.send(Ok(Event::default().data(finish_data)));
@@ -3307,7 +3313,9 @@ async fn openai_streaming_response(
                 Ok(json) => json,
                 Err(e) => {
                     tracing::error!(error = %e, "failed to serialize SSE event");
-                    serde_json::json!({"error": "serialization failed"}).to_string()
+                    // Return a minimal OpenAI-compatible error chunk so clients
+                // can still parse it.
+                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                 }
             };
             let _ = tx.send(Ok(Event::default().data(usage_data)));
