@@ -4,7 +4,7 @@
 //! pricing, context length, capabilities, and creation timestamps. Results
 //! are cached locally with a configurable TTL.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 
 /// Default cache TTL: 1 hour.
@@ -14,7 +14,7 @@ const CACHE_TTL: Duration = Duration::from_secs(3600);
 const API_BASE: &str = "https://openrouter.ai/api/v1";
 
 /// A model from the OpenRouter catalog.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenRouterModel {
     /// Model ID (e.g. "openai/gpt-4.1").
     pub id: String,
@@ -80,7 +80,7 @@ impl OpenRouterModel {
 }
 
 /// Token pricing.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelPricing {
     /// Price per input token as a string (e.g. "0.0000002").
     #[serde(default)]
@@ -103,7 +103,7 @@ impl ModelPricing {
 }
 
 /// Model architecture metadata.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelArchitecture {
     /// Input modalities (e.g. ["text", "image"]).
     #[serde(default)]

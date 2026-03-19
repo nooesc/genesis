@@ -692,6 +692,30 @@ pub enum ModelCommand {
         #[arg(long, help = "Environment variable holding the API key")]
         api_key_env: Option<String>,
     },
+    /// Browse available models from OpenRouter with search and filters.
+    Browse {
+        /// Filter by search query (matches ID and name).
+        #[arg(short, long)]
+        query: Option<String>,
+        /// Filter to models supporting tools.
+        #[arg(long)]
+        tools: bool,
+        /// Filter to models supporting vision.
+        #[arg(long)]
+        vision: bool,
+        /// Filter to models supporting reasoning.
+        #[arg(long)]
+        reasoning: bool,
+        /// Sort by: newest, cheapest, context (default: newest).
+        #[arg(short, long, default_value = "newest")]
+        sort: String,
+        /// Maximum number of models to display.
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1681,7 +1705,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Model(model_command) => {
-            commands::misc::run_model(cli.config, model_command, cli.json)
+            commands::misc::run_model(cli.config, model_command, cli.json).await
         }
         Command::Serve { host, port } => {
             commands::serve::run_serve(cli.config, &host, port, runtime_overrides).await
@@ -6926,6 +6950,78 @@ trusted = true
                 assert!(!remove_data);
                 assert!(remove_config);
                 assert!(!force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_browse_parses() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "model",
+            "browse",
+            "--tools",
+            "--sort",
+            "cheapest",
+            "-n",
+            "5",
+        ])
+        .expect("model browse should parse");
+
+        match cli.command {
+            Command::Model(ModelCommand::Browse {
+                query,
+                tools,
+                vision,
+                reasoning,
+                sort,
+                limit,
+                json,
+            }) => {
+                assert!(query.is_none());
+                assert!(tools);
+                assert!(!vision);
+                assert!(!reasoning);
+                assert_eq!(sort, "cheapest");
+                assert_eq!(limit, 5);
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_browse_parses_with_query() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "model",
+            "browse",
+            "--query",
+            "gpt",
+            "--vision",
+            "--reasoning",
+            "--json",
+        ])
+        .expect("model browse with query should parse");
+
+        match cli.command {
+            Command::Model(ModelCommand::Browse {
+                query,
+                tools,
+                vision,
+                reasoning,
+                sort,
+                limit,
+                json,
+            }) => {
+                assert_eq!(query.as_deref(), Some("gpt"));
+                assert!(!tools);
+                assert!(vision);
+                assert!(reasoning);
+                assert_eq!(sort, "newest");
+                assert_eq!(limit, 20);
+                assert!(json);
             }
             other => panic!("unexpected command: {other:?}"),
         }
