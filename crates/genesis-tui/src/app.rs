@@ -88,6 +88,8 @@ pub struct App {
     pub file_completion: FileCompletion,
     /// Current agent operating mode (Act / Plan).
     pub agent_mode: AgentMode,
+    /// Tool execution approval mode (Auto / Smart / Manual).
+    pub approval_mode: genesis_config::ApprovalMode,
 }
 
 impl App {
@@ -281,6 +283,14 @@ impl App {
                 }
                 "/plan" => {
                     self.agent_mode = self.agent_mode.toggle();
+                    self.frame_requester.schedule_frame();
+                }
+                "/approve" => {
+                    self.approval_mode = match self.approval_mode {
+                        genesis_config::ApprovalMode::Auto => genesis_config::ApprovalMode::Smart,
+                        genesis_config::ApprovalMode::Smart => genesis_config::ApprovalMode::Manual,
+                        genesis_config::ApprovalMode::Manual => genesis_config::ApprovalMode::Auto,
+                    };
                     self.frame_requester.schedule_frame();
                 }
                 _ => {}
@@ -699,6 +709,7 @@ mod tests {
             },
             file_completion: FileCompletion::new(),
             agent_mode: AgentMode::default(),
+            approval_mode: genesis_config::ApprovalMode::default(),
         };
         (app, submission_rx, app_rx)
     }
@@ -920,6 +931,18 @@ mod tests {
         assert_eq!(app.agent_mode, AgentMode::Plan);
         app.handle_app_event(AppEvent::SlashCommand("/plan".into()));
         assert_eq!(app.agent_mode, AgentMode::Act);
+    }
+
+    #[tokio::test]
+    async fn slash_approve_cycles_approval_mode() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        assert_eq!(app.approval_mode, genesis_config::ApprovalMode::Auto);
+        app.handle_app_event(AppEvent::SlashCommand("/approve".into()));
+        assert_eq!(app.approval_mode, genesis_config::ApprovalMode::Smart);
+        app.handle_app_event(AppEvent::SlashCommand("/approve".into()));
+        assert_eq!(app.approval_mode, genesis_config::ApprovalMode::Manual);
+        app.handle_app_event(AppEvent::SlashCommand("/approve".into()));
+        assert_eq!(app.approval_mode, genesis_config::ApprovalMode::Auto);
     }
 
     #[tokio::test]

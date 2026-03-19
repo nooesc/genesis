@@ -12,6 +12,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
+/// Returns `true` if the tool is read-only (safe to auto-approve in Smart mode).
+///
+/// Read-only tools inspect state but never modify files, run commands, or
+/// change external state.
+pub fn is_read_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_dir"
+            | "glob"
+            | "tree"
+            | "search"
+            | "grep"
+            | "find_tools"
+            | "session_info"
+            | "echo"
+            | "think"
+            | "clarify"
+            | "memory_search"
+            | "skill_search"
+            | "web_search"
+    )
+}
+
 /// Directories that are typically noise and should be skipped by file traversal tools.
 pub const NOISE_DIRS: &[&str] = &[
     ".git",
@@ -100,6 +124,10 @@ pub struct ToolContext {
     /// spawning CLI processes directly.
     #[serde(skip)]
     pub sandbox_manager: Option<Arc<dyn SandboxExecutor>>,
+    /// Approval mode for tool execution. Determines which tools need explicit
+    /// user approval before running.
+    #[serde(default)]
+    pub approval_mode: genesis_config::ApprovalMode,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -115,6 +143,7 @@ impl std::fmt::Debug for ToolContext {
                 "sandbox_manager",
                 &self.sandbox_manager.as_ref().map(|_| ".."),
             )
+            .field("approval_mode", &self.approval_mode)
             .finish()
     }
 }
@@ -127,6 +156,7 @@ impl PartialEq for ToolContext {
             && self.allow_destructive_tools == other.allow_destructive_tools
             && self.terminal_backend == other.terminal_backend
             && self.default_working_dir == other.default_working_dir
+            && self.approval_mode == other.approval_mode
         // sandbox_manager intentionally excluded from equality comparison
     }
 }
@@ -451,30 +481,67 @@ impl ToolRegistry {
         arguments: &BTreeMap<String, String>,
         context: &ToolContext,
     ) -> Result<(), ToolError> {
-        match approval {
-            ApprovalPolicy::Never => Ok(()),
-            ApprovalPolicy::Destructive if context.allow_destructive_tools => Ok(()),
-            ApprovalPolicy::Destructive => Err(ToolError::ApprovalDenied {
-                tool: tool_name.to_owned(),
-                reason: "destructive tools are disabled in the current runtime".to_owned(),
-            }),
-            ApprovalPolicy::Always => {
-                if let Some(handler) = &self.approval_handler {
-                    if handler.request_approval(tool_name, arguments) {
-                        Ok(())
-                    } else {
-                        Err(ToolError::ApprovalDenied {
-                            tool: tool_name.to_owned(),
-                            reason: "user denied approval".to_owned(),
-                        })
-                    }
-                } else {
-                    Err(ToolError::ApprovalDenied {
+        match context.approval_mode {
+            genesis_config::ApprovalMode::Auto => {
+                // Original behaviour: only check per-tool approval policy.
+                match approval {
+                    ApprovalPolicy::Never => Ok(()),
+                    ApprovalPolicy::Destructive if context.allow_destructive_tools => Ok(()),
+                    ApprovalPolicy::Destructive => Err(ToolError::ApprovalDenied {
                         tool: tool_name.to_owned(),
-                        reason: "no approval handler configured".to_owned(),
-                    })
+                        reason: "destructive tools are disabled in the current runtime"
+                            .to_owned(),
+                    }),
+                    ApprovalPolicy::Always => {
+                        self.request_or_deny(tool_name, arguments)
+                    }
                 }
             }
+            genesis_config::ApprovalMode::Smart => {
+                // Auto-approve read-only tools; everything else needs approval.
+                if is_read_only_tool(tool_name) {
+                    return Ok(());
+                }
+                // Still enforce destructive gate when destructive tools are
+                // globally disabled (regardless of Smart mode).
+                if matches!(approval, ApprovalPolicy::Destructive)
+                    && !context.allow_destructive_tools
+                {
+                    return Err(ToolError::ApprovalDenied {
+                        tool: tool_name.to_owned(),
+                        reason: "destructive tools are disabled in the current runtime"
+                            .to_owned(),
+                    });
+                }
+                self.request_or_deny(tool_name, arguments)
+            }
+            genesis_config::ApprovalMode::Manual => {
+                // Every tool call needs explicit approval.
+                self.request_or_deny(tool_name, arguments)
+            }
+        }
+    }
+
+    /// Ask the approval handler for permission, or deny if none is configured.
+    fn request_or_deny(
+        &self,
+        tool_name: &str,
+        arguments: &BTreeMap<String, String>,
+    ) -> Result<(), ToolError> {
+        if let Some(handler) = &self.approval_handler {
+            if handler.request_approval(tool_name, arguments) {
+                Ok(())
+            } else {
+                Err(ToolError::ApprovalDenied {
+                    tool: tool_name.to_owned(),
+                    reason: "user denied approval".to_owned(),
+                })
+            }
+        } else {
+            Err(ToolError::ApprovalDenied {
+                tool: tool_name.to_owned(),
+                reason: "no approval handler configured".to_owned(),
+            })
         }
     }
 }
@@ -1800,6 +1867,7 @@ pub mod test_utils {
             terminal_backend: None,
             default_working_dir: None,
             sandbox_manager: None,
+            approval_mode: genesis_config::ApprovalMode::default(),
         }
     }
 
@@ -2285,5 +2353,155 @@ mod tests {
         let results = registry.search_tools("find_tools");
         assert!(!results.is_empty());
         assert_eq!(results[0].name, "find_tools");
+    }
+
+    #[test]
+    fn is_read_only_tool_classifies_correctly() {
+        use super::is_read_only_tool;
+
+        assert!(is_read_only_tool("read_file"));
+        assert!(is_read_only_tool("glob"));
+        assert!(is_read_only_tool("search"));
+        assert!(is_read_only_tool("think"));
+        assert!(is_read_only_tool("clarify"));
+        assert!(is_read_only_tool("memory_search"));
+        assert!(is_read_only_tool("web_search"));
+        assert!(!is_read_only_tool("shell_exec"));
+        assert!(!is_read_only_tool("write_file"));
+        assert!(!is_read_only_tool("patch_file"));
+        assert!(!is_read_only_tool("memory_store"));
+    }
+
+    #[test]
+    fn smart_mode_auto_approves_read_only_tool() {
+        use super::ApprovalHandler;
+        use std::sync::Arc;
+
+        // Handler that always denies — should never be reached for read-only tools.
+        struct AlwaysDeny;
+        impl ApprovalHandler for AlwaysDeny {
+            fn request_approval(&self, _: &str, _: &BTreeMap<String, String>) -> bool {
+                false
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.set_approval_handler(Arc::new(AlwaysDeny));
+        registry.register(
+            ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "reads a file".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            DangerousTool,
+        );
+
+        let mut ctx = sample_context();
+        ctx.approval_mode = genesis_config::ApprovalMode::Smart;
+
+        // read_file is read-only → auto-approved even with a denying handler.
+        let result = registry.execute(
+            &ToolCall {
+                name: "read_file".to_owned(),
+                arguments: BTreeMap::new(),
+            },
+            &ctx,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn smart_mode_requires_approval_for_non_read_only_tool() {
+        use super::ApprovalHandler;
+        use std::sync::Arc;
+
+        struct AlwaysDeny;
+        impl ApprovalHandler for AlwaysDeny {
+            fn request_approval(&self, _: &str, _: &BTreeMap<String, String>) -> bool {
+                false
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.set_approval_handler(Arc::new(AlwaysDeny));
+        registry.register(
+            ToolDefinition {
+                name: "shell_exec".to_owned(),
+                description: "executes a shell command".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            DangerousTool,
+        );
+
+        let mut ctx = sample_context();
+        ctx.approval_mode = genesis_config::ApprovalMode::Smart;
+
+        // shell_exec is NOT read-only → denied by the handler.
+        let error = registry
+            .execute(
+                &ToolCall {
+                    name: "shell_exec".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &ctx,
+            )
+            .expect_err("non-read-only tool should need approval in Smart mode");
+
+        assert_eq!(
+            error,
+            ToolError::ApprovalDenied {
+                tool: "shell_exec".to_owned(),
+                reason: "user denied approval".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn manual_mode_requires_approval_for_all_tools() {
+        use super::ApprovalHandler;
+        use std::sync::Arc;
+
+        struct AlwaysDeny;
+        impl ApprovalHandler for AlwaysDeny {
+            fn request_approval(&self, _: &str, _: &BTreeMap<String, String>) -> bool {
+                false
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.set_approval_handler(Arc::new(AlwaysDeny));
+        registry.register(
+            ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "reads a file".to_owned(),
+                parameters: None,
+            },
+            ApprovalPolicy::Never,
+            DangerousTool,
+        );
+
+        let mut ctx = sample_context();
+        ctx.approval_mode = genesis_config::ApprovalMode::Manual;
+
+        // Even read-only tools are denied in Manual mode when handler denies.
+        let error = registry
+            .execute(
+                &ToolCall {
+                    name: "read_file".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &ctx,
+            )
+            .expect_err("all tools need approval in Manual mode");
+
+        assert_eq!(
+            error,
+            ToolError::ApprovalDenied {
+                tool: "read_file".to_owned(),
+                reason: "user denied approval".to_owned(),
+            }
+        );
     }
 }

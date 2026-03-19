@@ -2250,6 +2250,7 @@ tools = [{tools_list}]
                     core_tools: None,
                     batch: None,
                     tool_policy_path: None,
+                    approval_mode: genesis_config::ApprovalMode::default(),
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

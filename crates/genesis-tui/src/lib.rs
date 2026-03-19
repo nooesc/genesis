@@ -234,6 +234,7 @@ pub async fn run_tui(
         },
         file_completion: crate::widgets::file_completion::FileCompletion::new(),
         agent_mode: crate::events::AgentMode::default(),
+        approval_mode: config.runtime.approval_mode,
     };
 
     // Schedule an initial frame so the UI renders immediately.

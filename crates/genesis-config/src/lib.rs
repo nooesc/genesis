@@ -281,6 +281,19 @@ pub struct StorageConfig {
     pub database_path: PathBuf,
 }
 
+/// Approval mode for tool execution.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// No approval needed — full autonomy (current default behavior).
+    #[default]
+    Auto,
+    /// Auto-approve read-only tools, require approval for writes/shell/delete.
+    Smart,
+    /// Require approval for every tool call.
+    Manual,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub max_concurrency: usize,
@@ -346,6 +359,10 @@ pub struct RuntimeConfig {
     /// When set, tool calls are checked against allow/deny rules before execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_policy_path: Option<String>,
+    /// Approval mode for tool execution. Controls which tools need user
+    /// approval before running. Default: auto (no approval needed).
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 
 /// Batch API routing configuration.
@@ -923,6 +940,8 @@ struct FileRuntimeConfig {
     batch: Option<BatchApiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_policy_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_mode: Option<ApprovalMode>,
 }
 
 #[derive(Debug, Error)]
@@ -1010,6 +1029,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             core_tools: None,
             batch: None,
             tool_policy_path: None,
+            approval_mode: ApprovalMode::default(),
         },
         plugins: PluginsConfig::default(),
         gateway: None,
@@ -1175,6 +1195,9 @@ pub fn load_from_map(
         core_tools: rt.and_then(|r| r.core_tools.clone()),
         batch: rt.and_then(|r| r.batch.clone()),
         tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
+        approval_mode: rt
+            .and_then(|r| r.approval_mode)
+            .unwrap_or_default(),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -2279,5 +2302,35 @@ routing:
         assert_eq!(routing.cheap_model.as_deref(), Some("haiku-4.5"));
         assert_eq!(routing.top_model.as_deref(), Some("opus-4.6"));
         assert_eq!(routing.default_tier, "cheap");
+    }
+
+    #[test]
+    fn approval_mode_from_yaml() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+runtime:
+  approval_mode: smart
+"#,
+        )
+        .expect("write should succeed");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(
+            loaded.config.runtime.approval_mode,
+            super::ApprovalMode::Smart
+        );
+    }
+
+    #[test]
+    fn approval_mode_defaults_to_auto() {
+        let config = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert_eq!(
+            config.config.runtime.approval_mode,
+            super::ApprovalMode::Auto
+        );
     }
 }

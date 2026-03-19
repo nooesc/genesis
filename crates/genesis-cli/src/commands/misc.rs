@@ -110,6 +110,7 @@ pub(crate) async fn run_mcp(
                 terminal_backend: None,
                 default_working_dir: None,
                 sandbox_manager: None,
+                approval_mode: genesis_config::ApprovalMode::default(),
             };
 
             let backend = std::sync::Arc::new(RegistryMcpBackend { registry, context });

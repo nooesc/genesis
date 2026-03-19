@@ -358,6 +358,7 @@ mod tests {
             terminal_backend: None,
             default_working_dir: None,
             sandbox_manager: None,
+            approval_mode: genesis_config::ApprovalMode::default(),
         };
 
         // Will fail on DB open but validates argument handling
