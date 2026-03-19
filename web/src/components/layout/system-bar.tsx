@@ -83,8 +83,8 @@ export function SystemBar() {
       {/* Right: Latest event + status + clock */}
       <div className="flex items-center gap-3">
         {latestEvent && (
-          <span className="max-w-[180px] truncate font-mono text-[8px] text-muted-foreground/20" title={`${latestEvent.action} — ${formatRelativeTime(latestEvent.created_at)}`}>
-            {latestEvent.action}
+          <span className="max-w-[180px] truncate font-mono text-[8px] text-muted-foreground/20" title={`${latestEvent.event_type} — ${formatRelativeTime(latestEvent.created_at)}`}>
+            {latestEvent.event_type}
           </span>
         )}
         <span className={`font-mono text-[9px] font-medium tracking-wider ${

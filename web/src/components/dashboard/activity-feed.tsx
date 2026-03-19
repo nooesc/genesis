@@ -26,8 +26,8 @@ function getActionColor(action: string): string {
 }
 
 function ActivityItem({ entry }: { entry: AuditEntry }) {
-  const Icon = getActionIcon(entry.action)
-  const color = getActionColor(entry.action)
+  const Icon = getActionIcon(entry.event_type)
+  const color = getActionColor(entry.event_type)
 
   return (
     <div className="group flex items-start gap-2.5 py-1.5">
@@ -36,7 +36,7 @@ function ActivityItem({ entry }: { entry: AuditEntry }) {
       </div>
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate font-mono text-[11px] text-foreground/80">
-          {entry.action}
+          {entry.event_type}
         </span>
         {entry.details && (
           <span className="truncate font-mono text-[10px] text-muted-foreground/50">
