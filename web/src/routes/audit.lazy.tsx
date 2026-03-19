@@ -100,7 +100,7 @@ function AuditRow({ entry, isLast }: { entry: AuditEntry; isLast: boolean }) {
 }
 
 function AuditPage() {
-  const { data: entries, isLoading } = useAuditLog({ limit: 200 })
+  const { data: entries, isLoading } = useAuditLog({ limit: 200 }, { refetchInterval: 15_000 })
   const [search, setSearch] = React.useState('')
   const [categoryFilter, setCategoryFilter] = React.useState<ActionCategory | null>(null)
 

@@ -20,6 +20,7 @@ export function useSkills() {
       const res = await api.get<SkillsResponse>('/skills')
       return res.skills
     },
+    refetchInterval: 60_000,
   })
 }
 
