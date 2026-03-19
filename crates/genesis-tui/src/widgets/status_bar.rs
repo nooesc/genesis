@@ -413,12 +413,12 @@ impl StatusBarWidget {
         ));
 
         // Mode indicator (Act / Plan).
-        let (mode_label, mode_color) = match self.agent_mode {
-            AgentMode::Act => ("Act", Color::Rgb(135, 175, 95)),    // Green
-            AgentMode::Plan => ("Plan", Color::Rgb(180, 167, 214)), // Lavender
+        let mode_color = match self.agent_mode {
+            AgentMode::Act => Color::Rgb(135, 175, 95),    // Green
+            AgentMode::Plan => Color::Rgb(180, 167, 214),  // Lavender
         };
         spans.push(Span::styled(
-            format!("[{mode_label}] "),
+            format!("[{}] ", self.agent_mode.label()),
             Style::default()
                 .fg(mode_color)
                 .bg(bg)

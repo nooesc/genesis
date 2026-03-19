@@ -513,8 +513,12 @@ impl App {
             return;
         }
 
-        // Tab toggles Plan/Act mode when no overlay or popup is active.
-        if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+        // Tab toggles Plan/Act mode when no overlay/popup is active
+        // and the input field is empty (avoids accidental mode switch mid-typing).
+        if key.code == KeyCode::Tab
+            && key.modifiers == KeyModifiers::NONE
+            && self.chat.input.text().is_empty()
+        {
             self.agent_mode = self.agent_mode.toggle();
             self.frame_requester.schedule_frame();
             return;
