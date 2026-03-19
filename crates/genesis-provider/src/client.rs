@@ -109,11 +109,7 @@ impl ChatClient {
         };
 
         // Store API key for backends that need it in the URL (Gemini)
-        let api_key = if is_gemini {
-            Some(provider.api_key.clone())
-        } else {
-            None
-        };
+        let api_key = is_gemini.then(|| provider.api_key.clone());
 
         Ok(Self {
             http,
@@ -133,11 +129,11 @@ impl ChatClient {
         backend: &str,
     ) -> Result<serde_json::Value, ProviderError> {
         let mut body = serde_json::to_value(&*request)?;
-        if let Some(extra) = request.extra_body.take() {
-            if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
+        if let Some(serde_json::Value::Object(extra_obj)) = request.extra_body.take() {
+            if let Some(body_obj) = body.as_object_mut() {
                 body_obj.remove("extra_body");
                 for (key, value) in extra_obj {
-                    body_obj.insert(key.clone(), value.clone());
+                    body_obj.insert(key, value);
                 }
             }
         }
