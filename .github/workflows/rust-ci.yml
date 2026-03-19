@@ -26,6 +26,13 @@ jobs:
       test_loc: ${{ steps.stats.outputs.test_loc }}
       test_cases: ${{ steps.stats.outputs.test_cases }}
       crate_count: ${{ steps.stats.outputs.crate_count }}
+      dep_count: ${{ steps.stats.outputs.dep_count }}
+      unsafe_count: ${{ steps.stats.outputs.unsafe_count }}
+      todo_count: ${{ steps.stats.outputs.todo_count }}
+      pr_diff: ${{ steps.stats.outputs.pr_diff }}
+      test_passed: ${{ steps.stats.outputs.test_passed }}
+      test_failed: ${{ steps.stats.outputs.test_failed }}
+      test_skipped: ${{ steps.stats.outputs.test_skipped }}
       overall: ${{ steps.result.outputs.overall }}
     steps:
       - name: Checkout
@@ -54,7 +61,10 @@ jobs:
       - name: cargo nextest
         id: test
         continue-on-error: true
-        run: cargo nextest run --workspace --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --locked 2>&1 | tee nextest-output.txt
 
       - name: Gather repository stats
         id: stats
@@ -114,11 +124,62 @@ jobs:
             crate_count="n/a"
           fi
 
+          # Dependency count from Cargo.lock
+          dep_count=$(grep -c '^\[\[package\]\]' Cargo.lock 2>/dev/null || echo "n/a")
+
+          # Unsafe block count
+          if command -v rg >/dev/null 2>&1; then
+            unsafe_count=$(rg -c 'unsafe ' -g '*.rs' --no-filename apps crates 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          else
+            unsafe_count="n/a"
+          fi
+
+          # TODO/FIXME count
+          if command -v rg >/dev/null 2>&1; then
+            todo_count=$(rg -c 'TODO|FIXME' -g '*.rs' --no-filename apps crates 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          else
+            todo_count="n/a"
+          fi
+
+          # PR diff stats (only for pull requests)
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            git fetch --depth=1 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+            pr_diff=$(git diff --shortstat "origin/$GITHUB_BASE_REF"...HEAD 2>/dev/null | tr -s ' ' | sed 's/^ //' || echo "n/a")
+          else
+            pr_diff="n/a"
+          fi
+
+          # Parse nextest results from output
+          test_passed=0
+          test_failed=0
+          test_skipped=0
+          if [[ -f nextest-output.txt ]]; then
+            summary=$(grep -oE '[0-9]+ tests? run: [0-9]+ passed' nextest-output.txt | tail -1 || true)
+            if [[ -n "$summary" ]]; then
+              test_passed=$(echo "$summary" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+            fi
+            failed=$(grep -oE '[0-9]+ failed' nextest-output.txt | tail -1 || true)
+            if [[ -n "$failed" ]]; then
+              test_failed=$(echo "$failed" | grep -oE '[0-9]+')
+            fi
+            skipped=$(grep -oE '[0-9]+ skipped' nextest-output.txt | tail -1 || true)
+            if [[ -n "$skipped" ]]; then
+              test_skipped=$(echo "$skipped" | grep -oE '[0-9]+')
+            fi
+          fi
+
           echo "total_loc=${total_loc}" >> "$GITHUB_OUTPUT"
           echo "test_loc=${test_loc}" >> "$GITHUB_OUTPUT"
           echo "test_cases=${test_cases}" >> "$GITHUB_OUTPUT"
           echo "crate_count=${crate_count}" >> "$GITHUB_OUTPUT"
-          rm -f "$rs_files"
+          echo "dep_count=${dep_count}" >> "$GITHUB_OUTPUT"
+          echo "unsafe_count=${unsafe_count}" >> "$GITHUB_OUTPUT"
+          echo "todo_count=${todo_count}" >> "$GITHUB_OUTPUT"
+          echo "pr_diff=${pr_diff}" >> "$GITHUB_OUTPUT"
+          echo "test_passed=${test_passed}" >> "$GITHUB_OUTPUT"
+          echo "test_failed=${test_failed}" >> "$GITHUB_OUTPUT"
+          echo "test_skipped=${test_skipped}" >> "$GITHUB_OUTPUT"
+          rm -f "$rs_files" nextest-output.txt
 
       - name: Mark overall result
         id: result
@@ -187,29 +248,56 @@ jobs:
             const testLoc = Number('${{ needs.checks.outputs.test_loc }}') || 0;
             const testCases = '${{ needs.checks.outputs.test_cases }}' || 'n/a';
             const crateCount = '${{ needs.checks.outputs.crate_count }}' || 'n/a';
+            const depCount = '${{ needs.checks.outputs.dep_count }}' || 'n/a';
+            const unsafeCount = '${{ needs.checks.outputs.unsafe_count }}' || 'n/a';
+            const todoCount = '${{ needs.checks.outputs.todo_count }}' || 'n/a';
+            const prDiff = '${{ needs.checks.outputs.pr_diff }}' || 'n/a';
+            const testPassed = Number('${{ needs.checks.outputs.test_passed }}') || 0;
+            const testFailed = Number('${{ needs.checks.outputs.test_failed }}') || 0;
+            const testSkipped = Number('${{ needs.checks.outputs.test_skipped }}') || 0;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const prNumber = context.payload.pull_request.number;
 
             const prodLoc = totalLoc - testLoc;
             const testPct = totalLoc > 0 ? ((testLoc / totalLoc) * 100).toFixed(1) : '0.0';
-            const fmt = (n) => n.toLocaleString('en-US');
+            const n = (v) => Number(v).toLocaleString('en-US');
+            const testTotal = testPassed + testFailed + testSkipped;
+            const testResult = testTotal > 0
+              ? `**${n(testPassed)}** passed` + (testFailed > 0 ? `, **${n(testFailed)}** failed` : '') + (testSkipped > 0 ? `, **${n(testSkipped)}** skipped` : '')
+              : 'n/a';
 
-            const body = [
+            const lines = [
               marker,
               '## Codebase Snapshot',
               '',
+              '### Lines of Code',
               `| | Lines | % |`,
               `| --- | ---: | ---: |`,
-              `| Production | **${fmt(prodLoc)}** | ${(100 - Number(testPct)).toFixed(1)}% |`,
-              `| Tests | **${fmt(testLoc)}** | ${testPct}% |`,
-              `| **Total** | **${fmt(totalLoc)}** | |`,
+              `| Production | **${n(prodLoc)}** | ${(100 - Number(testPct)).toFixed(1)}% |`,
+              `| Tests | **${n(testLoc)}** | ${testPct}% |`,
+              `| **Total** | **${n(totalLoc)}** | |`,
               '',
-              `| Metric | |`,
+              '### Test Results',
+              `| | |`,
               `| --- | ---: |`,
-              `| Test cases | **${testCases}** |`,
+              `| Results | ${testResult} |`,
+              `| Test cases (attrs) | **${testCases}** |`,
+              '',
+              '### Project',
+              `| | |`,
+              `| --- | ---: |`,
               `| Workspace crates | **${crateCount}** |`,
-            ].join('\n');
+              `| Dependencies | **${depCount}** |`,
+              `| \`unsafe\` usage | **${unsafeCount}** |`,
+              `| \`TODO\`/\`FIXME\` | **${todoCount}** |`,
+            ];
+
+            if (prDiff && prDiff !== 'n/a') {
+              lines.push('', '### This PR', `\`${prDiff}\``);
+            }
+
+            const body = lines.join('\n');
 
             const { data: comments } = await github.rest.issues.listComments({
               owner, repo, issue_number: prNumber, per_page: 100,
