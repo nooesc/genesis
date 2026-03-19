@@ -1711,6 +1711,62 @@ fn default_memory_search_limit() -> usize {
     10
 }
 
+fn build_embedding_provider(
+    config: &genesis_config::EmbeddingConfig,
+) -> Result<genesis_core::embedding::EmbeddingProvider, (StatusCode, String)> {
+    genesis_core::embedding::EmbeddingProvider::from_config(config)
+        .map_err(|error| embedding_provider_error(config, error))
+}
+
+fn embedding_provider_error(
+    config: &genesis_config::EmbeddingConfig,
+    error: genesis_core::embedding::EmbeddingError,
+) -> (StatusCode, String) {
+    if config.is_local_backend()
+        && matches!(
+            error,
+            genesis_core::embedding::EmbeddingError::NotConfigured
+        )
+    {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "local embedding backend selected; Task 1 only wires backend selection and feature plumbing. Runtime local embeddings land in the follow-up fastembed task.".to_owned(),
+        );
+    }
+
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("embedding provider error: {error}"),
+    )
+}
+
+fn embedding_runtime_error(
+    provider: Option<&genesis_core::embedding::EmbeddingProvider>,
+    context: &str,
+    error: genesis_core::embedding::EmbeddingError,
+) -> (StatusCode, String) {
+    if let Some(provider) = provider {
+        if provider.backend() == "local"
+            && matches!(
+                error,
+                genesis_core::embedding::EmbeddingError::NotConfigured
+            )
+        {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                format!(
+                    "local embedding backend selected for {context}; runtime local embeddings land in the follow-up fastembed task"
+                ),
+            );
+        }
+    }
+
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{context} error: {error}"),
+    )
+}
+
 async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
@@ -1738,17 +1794,7 @@ async fn search_memories_handler(
     // Build embedding provider if configured and needed
     let provider = if mode != genesis_core::embedding::SearchMode::Keyword {
         match &state.loaded.config.embedding {
-            Some(config) => {
-                let p = genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(
-                    |e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("embedding provider error: {e}"),
-                        )
-                    },
-                )?;
-                Some(p)
-            }
+            Some(config) => Some(build_embedding_provider(config)?),
             None => None,
         }
     } else {
@@ -1764,12 +1810,7 @@ async fn search_memories_handler(
         provider.as_ref(),
     )
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("search error: {e}"),
-        )
-    })?;
+    .map_err(|error| embedding_runtime_error(provider.as_ref(), "search", error))?;
 
     let count = results.len();
     let mode_str = match mode {
@@ -1821,13 +1862,7 @@ async fn embed_memories_handler(
         )
     })?;
 
-    let provider =
-        genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("embedding provider error: {e}"),
-            )
-        })?;
+    let provider = build_embedding_provider(config)?;
 
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
@@ -1856,6 +1891,15 @@ async fn embed_memories_handler(
         {
             Ok(()) => embedded += 1,
             Err(e) => {
+                if provider.backend() == "local"
+                    && matches!(e, genesis_core::embedding::EmbeddingError::NotConfigured)
+                {
+                    return Err(embedding_runtime_error(
+                        Some(&provider),
+                        "bulk embedding",
+                        e,
+                    ));
+                }
                 tracing::warn!(memory_id = %memory.id, error = %e, "failed to embed memory");
                 errors += 1;
             }
@@ -1882,13 +1926,7 @@ async fn embed_single_memory_handler(
         )
     })?;
 
-    let provider =
-        genesis_core::embedding::EmbeddingProvider::from_config(config).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("embedding provider error: {e}"),
-            )
-        })?;
+    let provider = build_embedding_provider(config)?;
 
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
@@ -1908,12 +1946,7 @@ async fn embed_single_memory_handler(
         provider.model(),
     )
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("embedding error: {e}"),
-        )
-    })?;
+    .map_err(|error| embedding_runtime_error(Some(&provider), "embedding", error))?;
 
     Ok(Json(serde_json::json!({
         "embedded": true,

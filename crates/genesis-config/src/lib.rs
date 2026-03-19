@@ -633,7 +633,7 @@ pub enum TerminalConfig {
 /// Embedding provider configuration for vector/semantic memory search.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingConfig {
-    /// Provider backend for embeddings (e.g. "openai", "openrouter").
+    /// Provider backend for embeddings (e.g. "local", "openai", "openrouter").
     #[serde(default = "default_embedding_backend")]
     pub backend: String,
     /// Embedding model name (e.g. "text-embedding-3-small").
@@ -668,6 +668,13 @@ impl Default for EmbeddingConfig {
             api_key_env: None,
             dimensions: None,
         }
+    }
+}
+
+impl EmbeddingConfig {
+    /// Whether this config selects the local embedding backend scaffold.
+    pub fn is_local_backend(&self) -> bool {
+        self.backend.trim().eq_ignore_ascii_case("local")
     }
 }
 

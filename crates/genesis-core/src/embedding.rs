@@ -53,7 +53,7 @@ struct EmbeddingData {
 /// OpenAI-compatible embedding provider.
 /// Works with any API that implements the `/v1/embeddings` endpoint
 /// (OpenAI, OpenRouter, Azure OpenAI, local vLLM, etc.).
-pub struct EmbeddingProvider {
+pub struct RemoteEmbeddingProvider {
     http: reqwest::Client,
     endpoint: String,
     backend: String,
@@ -61,11 +61,11 @@ pub struct EmbeddingProvider {
     dimensions: Option<usize>,
 }
 
-impl EmbeddingProvider {
-    /// Create a new provider from an `EmbeddingConfig`.
+impl RemoteEmbeddingProvider {
+    /// Create a new remote provider from an `EmbeddingConfig`.
     /// Resolves the API key from the environment using the same strategy
     /// as the main provider (explicit env var name, then standard fallbacks).
-    pub fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
+    fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
         let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
         let resolved = genesis_provider::resolve(
             &config.backend,
@@ -104,54 +104,106 @@ impl EmbeddingProvider {
             dimensions: config.dimensions,
         })
     }
+}
+
+/// Local embedding provider scaffold.
+///
+/// Task 1 only needs backend selection and feature plumbing. The fastembed
+/// implementation lands in the next task.
+#[derive(Debug, Clone)]
+pub struct LocalEmbeddingProvider {
+    model: String,
+}
+
+impl LocalEmbeddingProvider {
+    fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
+        Ok(Self {
+            model: config.model.clone(),
+        })
+    }
+}
+
+/// Public embedding provider facade.
+pub enum EmbeddingProvider {
+    Remote(RemoteEmbeddingProvider),
+    Local(LocalEmbeddingProvider),
+}
+
+impl EmbeddingProvider {
+    /// Create a provider from an `EmbeddingConfig`.
+    pub fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
+        if config.is_local_backend() {
+            Ok(Self::Local(LocalEmbeddingProvider::from_config(config)?))
+        } else {
+            Ok(Self::Remote(RemoteEmbeddingProvider::from_config(config)?))
+        }
+    }
 
     /// The backend name this provider is configured for.
     pub fn backend(&self) -> &str {
-        &self.backend
+        match self {
+            Self::Remote(provider) => &provider.backend,
+            Self::Local(_) => "local",
+        }
     }
 
     /// The model name this provider is configured for.
     pub fn model(&self) -> &str {
-        &self.model
+        match self {
+            Self::Remote(provider) => &provider.model,
+            Self::Local(provider) => &provider.model,
+        }
     }
 
     /// Generate embeddings for a batch of texts.
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        let request = EmbeddingRequest {
-            model: self.model.clone(),
-            input: texts.to_vec(),
-            dimensions: self.dimensions,
-        };
+        match self {
+            Self::Remote(provider) => {
+                let request = EmbeddingRequest {
+                    model: provider.model.clone(),
+                    input: texts.to_vec(),
+                    dimensions: provider.dimensions,
+                };
 
-        let response = self.http.post(&self.endpoint).json(&request).send().await?;
+                let response = provider
+                    .http
+                    .post(&provider.endpoint)
+                    .json(&request)
+                    .send()
+                    .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|e| e.to_string());
-            return Err(EmbeddingError::ApiError {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        let response: EmbeddingResponse = response.json().await?;
-        if response.data.is_empty() {
-            return Err(EmbeddingError::EmptyResponse);
-        }
-
-        // Validate returned vector dimensions when configured
-        if let Some(expected) = self.dimensions {
-            for item in &response.data {
-                if item.embedding.len() != expected {
-                    return Err(EmbeddingError::DimensionMismatch {
-                        expected,
-                        actual: item.embedding.len(),
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().await.unwrap_or_else(|e| e.to_string());
+                    return Err(EmbeddingError::ApiError {
+                        status: status.as_u16(),
+                        body,
                     });
                 }
+
+                let response: EmbeddingResponse = response.json().await?;
+                if response.data.is_empty() {
+                    return Err(EmbeddingError::EmptyResponse);
+                }
+
+                if let Some(expected) = provider.dimensions {
+                    for item in &response.data {
+                        if item.embedding.len() != expected {
+                            return Err(EmbeddingError::DimensionMismatch {
+                                expected,
+                                actual: item.embedding.len(),
+                            });
+                        }
+                    }
+                }
+
+                Ok(response.data.into_iter().map(|d| d.embedding).collect())
+            }
+            Self::Local(_provider) => {
+                let _ = texts;
+                Err(EmbeddingError::NotConfigured)
             }
         }
-
-        Ok(response.data.into_iter().map(|d| d.embedding).collect())
     }
 
     /// Generate a single embedding.
@@ -626,6 +678,7 @@ mod tests {
         };
 
         let provider = EmbeddingProvider::from_config(&config).expect("provider should build");
+        assert!(matches!(provider, EmbeddingProvider::Local(_)));
         assert_eq!(provider.backend(), "local");
         assert_eq!(provider.model(), "sentence-transformers/all-MiniLM-L6-v2");
     }
