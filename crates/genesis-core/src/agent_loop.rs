@@ -20,6 +20,8 @@ use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
+use genesis_lua::hooks::{PostHookOutcome, PreHookOutcome};
+use genesis_lua::LuaRuntime;
 
 const DEFAULT_MAX_TURNS: usize = 20;
 
@@ -89,6 +91,54 @@ fn summarize_args(args_json: &str) -> String {
     }
     let truncated: String = raw.chars().take(37).collect();
     format!("{truncated}...")
+}
+
+fn message_image_count(message: &ChatMessage) -> usize {
+    match message.content.as_ref() {
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            .count(),
+        _ => 0,
+    }
+}
+
+fn set_message_text(message: &mut ChatMessage, text: String) {
+    match message.content.as_mut() {
+        Some(MessageContent::Text(current)) => *current = text,
+        Some(MessageContent::Parts(parts)) => {
+            if let Some(ContentPart::Text { text: current }) = parts
+                .iter_mut()
+                .find(|part| matches!(part, ContentPart::Text { .. }))
+            {
+                *current = text;
+            } else {
+                parts.insert(0, ContentPart::Text { text });
+            }
+        }
+        None => {
+            message.content = Some(MessageContent::Text(text));
+        }
+    }
+}
+
+fn suppress_message_text(message: &mut ChatMessage) -> bool {
+    if message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|tool_calls| !tool_calls.is_empty())
+    {
+        message.content = None;
+        return true;
+    }
+
+    match message.content.as_mut() {
+        Some(MessageContent::Parts(parts)) => {
+            parts.retain(|part| !matches!(part, ContentPart::Text { .. }));
+            !parts.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Result of a complete agent turn (user message → final assistant response).
@@ -334,6 +384,7 @@ pub struct AgentLoop {
     hooks: Arc<dyn AgentHooks>,
     hook_runner: HookRunner,
     hook_results: Vec<HookResult>,
+    lua_runtime: Option<Arc<LuaRuntime>>,
     cost: SessionCost,
     trajectory: TrajectoryRecorder,
     /// Last reported prompt token count from the API. Used for token-aware
@@ -420,6 +471,7 @@ impl AgentLoop {
             hooks: Arc::new(NoopHooks),
             hook_runner,
             hook_results: Vec::new(),
+            lua_runtime: None,
             cost,
             trajectory,
             last_prompt_tokens: 0,
@@ -441,8 +493,7 @@ impl AgentLoop {
             Some(core) if !core.is_empty() => core,
             Some(_) => {
                 // Empty list = use defaults
-                let defaults: HashSet<&str> =
-                    DEFAULT_CORE_TOOLS.iter().copied().collect();
+                let defaults: HashSet<&str> = DEFAULT_CORE_TOOLS.iter().copied().collect();
                 return all_defs
                     .into_iter()
                     .filter(|t| {
@@ -537,6 +588,11 @@ impl AgentLoop {
         self.hooks = hooks;
     }
 
+    /// Attach the session-scoped Lua runtime used for hook middleware.
+    pub fn set_lua_runtime(&mut self, runtime: Arc<LuaRuntime>) {
+        self.lua_runtime = Some(runtime);
+    }
+
     /// Access recorded shell hook executions for inspection/testing.
     pub fn hook_results(&self) -> &[HookResult] {
         &self.hook_results
@@ -616,7 +672,13 @@ impl AgentLoop {
         }
 
         let default = crate::routing::Tier::from_str_or_mid(&routing.default_tier);
-        let tier = crate::routing::classify(user_message, tool_calls_made, turns_used, had_failure, default);
+        let tier = crate::routing::classify(
+            user_message,
+            tool_calls_made,
+            turns_used,
+            had_failure,
+            default,
+        );
         let selected = crate::routing::model_for_tier(
             tier,
             routing.cheap_model.as_deref(),
@@ -778,18 +840,50 @@ impl AgentLoop {
             "agent.turn.start"
         );
         let hook_session = self.session_id_str().to_owned();
-        self.fire_shell_hooks(
-            HookEvent::PreTurn,
-            serde_json::json!({
-                "session_id": hook_session,
-                "user_message": user_message,
-                "image_count": images.len(),
-            }),
-        );
+        let lua_pre_turn = self.run_lua_pre_turn(user_message);
+        let user_message = match lua_pre_turn {
+            PreHookOutcome::Allow(message) => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": message,
+                        "image_count": images.len(),
+                    }),
+                );
+                message
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": user_message,
+                        "image_count": images.len(),
+                        "lua_vetoed": true,
+                        "lua_reason": reason.as_deref(),
+                    }),
+                );
+                let result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by Lua hook: {}",
+                        reason.unwrap_or_else(|| "request rejected".to_owned())
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                return Ok(self.finalize_turn(&hook_session, result, false));
+            }
+        };
 
         // Run input guardrails if configured
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
-            let result = cg.check_input(user_message);
+            let result = cg.check_input(&user_message);
             if !result.passed {
                 let agent_result = AgentResult {
                     response: format!(
@@ -804,25 +898,28 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &agent_result),
-                );
-                self.hooks.on_turn_end(&hook_session, &agent_result);
-                return Ok(agent_result);
+                return Ok(self.finalize_turn(&hook_session, agent_result, false));
             }
             result.content
         } else {
             user_message.to_owned()
         };
 
-        self.trajectory.record_user_message(&user_message);
-
-        if images.is_empty() {
-            self.messages.push(ChatMessage::user(&user_message));
+        let user_message = if images.is_empty() {
+            self.push_message_with_lua_hooks(&hook_session, ChatMessage::user(&user_message))
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default()
         } else {
-            self.messages
-                .push(ChatMessage::user_with_images(user_message.clone(), images));
+            self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::user_with_images(user_message.clone(), images),
+            )
+            .and_then(|message| message.content_text().map(str::to_owned))
+            .unwrap_or_default()
+        };
+
+        if !user_message.is_empty() {
+            self.trajectory.record_user_message(&user_message);
         }
 
         // Fire turn-start hook
@@ -864,12 +961,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             turns_used += 1;
@@ -893,12 +985,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             // Check iteration budget (lifetime cap across all user turns)
@@ -922,12 +1009,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, false));
                 }
             }
             self.iterations_used += 1;
@@ -1026,7 +1108,7 @@ impl AgentLoop {
                 let result = match self.complete_with_failover(request).await {
                     Ok(result) => result,
                     Err(err) => {
-                        return Err(self.report_error(&hook_session, "llm_request", err.into()))
+                        return Err(self.report_error(&hook_session, "llm_request", err.into()));
                     }
                 };
                 info!(
@@ -1114,10 +1196,6 @@ impl AgentLoop {
             if let Some(tool_calls) = &assistant_msg.tool_calls {
                 if !tool_calls.is_empty() {
                     // Record assistant message with tool calls
-                    if let Some(text) = assistant_msg.content_text() {
-                        self.trajectory.record_assistant_message(text);
-                    }
-
                     // Append the assistant message (with tool_calls) to history,
                     // preserving provider_metadata (e.g. reasoning blobs) for multi-turn continuity.
                     let mut msg = ChatMessage::assistant_with_tool_calls(
@@ -1125,50 +1203,65 @@ impl AgentLoop {
                         tool_calls.clone(),
                     );
                     msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                    self.messages.push(msg);
+                    if let Some(message) = self.push_message_with_lua_hooks(&hook_session, msg) {
+                        if let Some(text) = message.content_text() {
+                            if !text.is_empty() {
+                                self.trajectory.record_assistant_message(text);
+                            }
+                        }
+                    }
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
-
-                    // Record each tool call and fire hooks
-                    for tc in tool_calls {
-                        self.trajectory
-                            .record_tool_call(&tc.function.name, &tc.function.arguments);
-                        self.hooks
-                            .on_tool_call_start(&hook_session, &tc.function.name);
-                        self.fire_shell_hooks(
-                            HookEvent::PreToolCall,
-                            serde_json::json!({
-                                "session_id": hook_session,
-                                "tool_name": tc.function.name,
-                                "tool_call_id": tc.id,
-                                "arguments": tc.function.arguments,
-                            }),
-                        );
-                    }
-
+                    let (effective_tool_calls, veto_reasons) =
+                        self.prepare_tool_calls(&hook_session, tool_calls, false);
+                    let executable_tool_calls: Vec<ToolCallEntry> = effective_tool_calls
+                        .iter()
+                        .zip(veto_reasons.iter())
+                        .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                        .collect();
                     let tool_start = Instant::now();
-                    let results = match execute_tool_calls_parallel(
-                        &self.tools,
-                        &self.subagent_spawner,
-                        tool_calls,
-                        self.config.max_concurrency,
-                        self.config.tool_timeout_secs,
-                        self.config.tool_policy.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(results) => results,
-                        Err(err) => {
-                            return Err(self.report_error(&hook_session, "tool_execution", err))
+                    let executed_results = if executable_tool_calls.is_empty() {
+                        Vec::new()
+                    } else {
+                        match execute_tool_calls_parallel(
+                            &self.tools,
+                            &self.subagent_spawner,
+                            &executable_tool_calls,
+                            self.config.max_concurrency,
+                            self.config.tool_timeout_secs,
+                            self.config.tool_policy.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(results) => results,
+                            Err(err) => {
+                                return Err(self.report_error(
+                                    &hook_session,
+                                    "tool_execution",
+                                    err,
+                                ));
+                            }
                         }
                     };
                     let tool_elapsed_ms = tool_start.elapsed().as_millis() as u64;
 
+                    let mut executed_results = executed_results.into_iter();
                     let mut clarification = None;
-                    for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
-                        let result = sanitize::sanitize_credentials(&result);
-
+                    for (tc, veto_reason) in
+                        effective_tool_calls.iter().zip(veto_reasons.into_iter())
+                    {
+                        let lua_vetoed = veto_reason.is_some();
+                        let (mut result, requires_input) = match veto_reason {
+                            Some(reason) => (
+                                format!("Error: tool call blocked by Lua hook: {reason}"),
+                                false,
+                            ),
+                            None => executed_results
+                                .next()
+                                .expect("executed tool results should align with allowed calls"),
+                        };
+                        result = sanitize::sanitize_credentials(&result);
                         // When find_tools returns results and core set filtering is active,
                         // extract discovered tool names and add them to the active set.
                         if self.config.core_tools.is_some()
@@ -1187,14 +1280,12 @@ impl AgentLoop {
                             }
                         }
 
-                        self.trajectory
-                            .record_tool_result(&tc.function.name, &result);
-                        // Track consecutive failures per tool
                         let success = !result.starts_with("Error:");
                         if success && self.config.core_tools.is_some() {
                             // Auto-discover tools called outside the core set.
                             self.discover_tool(&tc.function.name);
                         }
+                        let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                         if !success {
                             let count = self
                                 .tool_failure_counts
@@ -1220,12 +1311,21 @@ impl AgentLoop {
                                 "result": result,
                                 "requires_input": requires_input,
                                 "duration_ms": tool_elapsed_ms,
+                                "lua_vetoed": lua_vetoed,
                             }),
                         );
+                        let result = self
+                            .push_message_with_lua_hooks(
+                                &hook_session,
+                                ChatMessage::tool_result(&tc.id, result),
+                            )
+                            .and_then(|message| message.content_text().map(str::to_owned))
+                            .unwrap_or_default();
+                        self.trajectory
+                            .record_tool_result(&tc.function.name, &result);
                         if requires_input {
                             clarification = Some(result.clone());
                         }
-                        self.messages.push(ChatMessage::tool_result(&tc.id, result));
                     }
 
                     // Inject stuck-loop nudge if any tool failed too many times
@@ -1244,12 +1344,7 @@ impl AgentLoop {
                             estimated_cost: Some(self.cost.total_cost),
                             pending_clarification: Some(question),
                         };
-                        self.fire_shell_hooks(
-                            HookEvent::PostTurn,
-                            self.turn_result_context(&hook_session, &result),
-                        );
-                        self.hooks.on_turn_end(&hook_session, &result);
-                        return Ok(result);
+                        return Ok(self.finalize_turn(&hook_session, result, false));
                     }
 
                     // Inject memory nudge if due.
@@ -1276,10 +1371,15 @@ impl AgentLoop {
                 }
             }
 
-            self.trajectory.record_assistant_message(&response_text);
             let mut msg = ChatMessage::assistant(&response_text);
             msg.provider_metadata = assistant_msg.provider_metadata.clone();
-            self.messages.push(msg);
+            let response_text = self
+                .push_message_with_lua_hooks(&hook_session, msg)
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default();
+            if !response_text.is_empty() {
+                self.trajectory.record_assistant_message(&response_text);
+            }
 
             self.save_trajectory();
             let result = AgentResult {
@@ -1295,16 +1395,7 @@ impl AgentLoop {
                 estimated_cost: Some(self.cost.total_cost),
                 pending_clarification: None,
             };
-            self.fire_shell_hooks(
-                HookEvent::PostTurn,
-                self.turn_result_context(&hook_session, &result),
-            );
-            self.fire_shell_hooks(
-                HookEvent::OnComplete,
-                self.turn_result_context(&hook_session, &result),
-            );
-            self.hooks.on_turn_end(&hook_session, &result);
-            return Ok(result);
+            return Ok(self.finalize_turn(&hook_session, result, true));
         }
     }
 
@@ -1331,19 +1422,52 @@ impl AgentLoop {
         F: FnMut(StreamEvent<'_>),
     {
         let hook_session = self.session_id_str().to_owned();
-        self.fire_shell_hooks(
-            HookEvent::PreTurn,
-            serde_json::json!({
-                "session_id": hook_session,
-                "user_message": user_message,
-                "image_count": images.len(),
-                "streaming": true,
-            }),
-        );
+        let lua_pre_turn = self.run_lua_pre_turn(user_message);
+        let user_message = match lua_pre_turn {
+            PreHookOutcome::Allow(message) => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": message,
+                        "image_count": images.len(),
+                        "streaming": true,
+                    }),
+                );
+                message
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::PreTurn,
+                    serde_json::json!({
+                        "session_id": hook_session,
+                        "user_message": user_message,
+                        "image_count": images.len(),
+                        "streaming": true,
+                        "lua_vetoed": true,
+                        "lua_reason": reason.as_deref(),
+                    }),
+                );
+                let result = AgentResult {
+                    response: format!(
+                        "Your input was blocked by Lua hook: {}",
+                        reason.unwrap_or_else(|| "request rejected".to_owned())
+                    ),
+                    turns_used: 0,
+                    tool_calls_made: 0,
+                    finished_naturally: true,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    estimated_cost: None,
+                    pending_clarification: None,
+                };
+                return Ok(self.finalize_turn(&hook_session, result, false));
+            }
+        };
 
         // Run input guardrails if configured (streaming path)
         let user_message = if let Some(ref cg) = self.compiled_guardrails {
-            let result = cg.check_input(user_message);
+            let result = cg.check_input(&user_message);
             if !result.passed {
                 let agent_result = AgentResult {
                     response: format!(
@@ -1358,25 +1482,28 @@ impl AgentLoop {
                     estimated_cost: None,
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &agent_result),
-                );
-                self.hooks.on_turn_end(&hook_session, &agent_result);
-                return Ok(agent_result);
+                return Ok(self.finalize_turn(&hook_session, agent_result, false));
             }
             result.content
         } else {
             user_message.to_owned()
         };
 
-        self.trajectory.record_user_message(&user_message);
-
-        if images.is_empty() {
-            self.messages.push(ChatMessage::user(&user_message));
+        let user_message = if images.is_empty() {
+            self.push_message_with_lua_hooks(&hook_session, ChatMessage::user(&user_message))
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default()
         } else {
-            self.messages
-                .push(ChatMessage::user_with_images(user_message.clone(), images));
+            self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::user_with_images(user_message.clone(), images),
+            )
+            .and_then(|message| message.content_text().map(str::to_owned))
+            .unwrap_or_default()
+        };
+
+        if !user_message.is_empty() {
+            self.trajectory.record_user_message(&user_message);
         }
 
         // Fire turn-start hook (streaming)
@@ -1416,12 +1543,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             turns_used += 1;
@@ -1447,12 +1569,7 @@ impl AgentLoop {
                     estimated_cost: Some(self.cost.total_cost),
                     pending_clarification: None,
                 };
-                self.fire_shell_hooks(
-                    HookEvent::PostTurn,
-                    self.turn_result_context(&hook_session, &result),
-                );
-                self.hooks.on_turn_end(&hook_session, &result);
-                return Ok(result);
+                return Ok(self.finalize_turn(&hook_session, result, false));
             }
 
             // Check iteration budget (lifetime cap across all user turns)
@@ -1478,12 +1595,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, false));
                 }
             }
             self.iterations_used += 1;
@@ -1533,7 +1645,7 @@ impl AgentLoop {
                                     &hook_session,
                                     "stream_chunk",
                                     err.into(),
-                                ))
+                                ));
                             }
                         };
                         let update = collect_stream_update(chunk);
@@ -1591,69 +1703,86 @@ impl AgentLoop {
                     }
 
                     if !streamed_tool_calls.is_empty() {
-                        // Record assistant message if present
-                        if !response_text.is_empty() {
-                            self.trajectory.record_assistant_message(&response_text);
+                        // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
+                        if let Some(message) = self.push_message_with_lua_hooks(
+                            &hook_session,
+                            ChatMessage::assistant_with_tool_calls(
+                                if response_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(MessageContent::Text(response_text.clone()))
+                                },
+                                streamed_tool_calls.clone(),
+                            ),
+                        ) {
+                            if let Some(text) = message.content_text() {
+                                if !text.is_empty() {
+                                    self.trajectory.record_assistant_message(text);
+                                }
+                            }
                         }
 
-                        // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
-                        self.messages.push(ChatMessage::assistant_with_tool_calls(
-                            if response_text.is_empty() {
-                                None
-                            } else {
-                                Some(MessageContent::Text(response_text.clone()))
-                            },
-                            streamed_tool_calls.clone(),
-                        ));
-
-                        // Emit start events and record tool calls.
+                        let (effective_tool_calls, veto_reasons) =
+                            self.prepare_tool_calls(&hook_session, &streamed_tool_calls, true);
+                        streamed_tool_calls = effective_tool_calls.clone();
+                        // Emit start events and execute tool calls.
+                        tool_calls_made += streamed_tool_calls.len();
                         for tc in &streamed_tool_calls {
                             on_event(StreamEvent::ToolCallStart {
                                 name: &tc.function.name,
                                 call_id: &tc.id,
                                 args_summary: summarize_args(&tc.function.arguments),
                             });
-                            self.trajectory
-                                .record_tool_call(&tc.function.name, &tc.function.arguments);
-                            self.fire_shell_hooks(
-                                HookEvent::PreToolCall,
-                                serde_json::json!({
-                                    "session_id": hook_session,
-                                    "tool_name": tc.function.name,
-                                    "tool_call_id": tc.id,
-                                    "arguments": tc.function.arguments,
-                                    "streaming": true,
-                                }),
-                            );
                         }
 
-                        // Execute tool calls in parallel.
-                        tool_calls_made += streamed_tool_calls.len();
+                        let executable_tool_calls: Vec<ToolCallEntry> = streamed_tool_calls
+                            .iter()
+                            .zip(veto_reasons.iter())
+                            .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                            .collect();
                         let tool_exec_start = Instant::now();
-                        let results = match execute_tool_calls_parallel(
-                            &self.tools,
-                            &self.subagent_spawner,
-                            &streamed_tool_calls,
-                            self.config.max_concurrency,
-                            self.config.tool_timeout_secs,
-                            self.config.tool_policy.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(results) => results,
-                            Err(err) => {
-                                return Err(self.report_error(&hook_session, "tool_execution", err))
+                        let executed_results = if executable_tool_calls.is_empty() {
+                            Vec::new()
+                        } else {
+                            match execute_tool_calls_parallel(
+                                &self.tools,
+                                &self.subagent_spawner,
+                                &executable_tool_calls,
+                                self.config.max_concurrency,
+                                self.config.tool_timeout_secs,
+                                self.config.tool_policy.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(results) => results,
+                                Err(err) => {
+                                    return Err(self.report_error(
+                                        &hook_session,
+                                        "tool_execution",
+                                        err,
+                                    ));
+                                }
                             }
                         };
                         let tool_exec_duration = tool_exec_start.elapsed();
 
                         let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
                         let mut clarification = None;
-                        for (tc, (result, requires_input)) in
-                            streamed_tool_calls.iter().zip(results)
+                        let mut executed_results = executed_results.into_iter();
+                        for (tc, veto_reason) in
+                            streamed_tool_calls.iter().zip(veto_reasons.into_iter())
                         {
-                            let result = sanitize::sanitize_credentials(&result);
-
+                            let lua_vetoed = veto_reason.is_some();
+                            let (mut result, requires_input) = match veto_reason {
+                                Some(reason) => (
+                                    format!("Error: tool call blocked by Lua hook: {reason}"),
+                                    false,
+                                ),
+                                None => executed_results.next().expect(
+                                    "executed tool results should align with allowed calls",
+                                ),
+                            };
+                            result = sanitize::sanitize_credentials(&result);
                             // Extract discovered tool names from find_tools results
                             // (only when core set filtering is active).
                             if self.config.core_tools.is_some()
@@ -1670,17 +1799,15 @@ impl AgentLoop {
                                     }
                                 }
                             }
-
                             let tool_success = !result.starts_with("Error:");
+                            let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
                                 call_id: &tc.id,
                                 duration_ms: tool_exec_duration_ms,
                                 success: tool_success,
                             });
-                            self.trajectory
-                                .record_tool_result(&tc.function.name, &result);
-                            if result.starts_with("Error:") {
+                            if !tool_success {
                                 let count = self
                                     .tool_failure_counts
                                     .entry(tc.function.name.clone())
@@ -1699,17 +1826,26 @@ impl AgentLoop {
                                     "session_id": hook_session,
                                     "tool_name": tc.function.name,
                                     "tool_call_id": tc.id,
-                                    "success": !result.starts_with("Error:"),
+                                    "success": tool_success,
                                     "result": result,
                                     "requires_input": requires_input,
                                     "streaming": true,
+                                    "lua_vetoed": lua_vetoed,
                                 }),
                             );
+                            let result = self
+                                .push_message_with_lua_hooks(
+                                    &hook_session,
+                                    ChatMessage::tool_result(&tc.id, result),
+                                )
+                                .and_then(|message| message.content_text().map(str::to_owned))
+                                .unwrap_or_default();
+                            self.trajectory
+                                .record_tool_result(&tc.function.name, &result);
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
                             }
-                            self.messages.push(ChatMessage::tool_result(&tc.id, result));
                         }
 
                         self.maybe_inject_stuck_nudge();
@@ -1726,21 +1862,23 @@ impl AgentLoop {
                                 estimated_cost: Some(self.cost.total_cost),
                                 pending_clarification: Some(question),
                             };
-                            self.fire_shell_hooks(
-                                HookEvent::PostTurn,
-                                self.turn_result_context(&hook_session, &result),
-                            );
-                            self.hooks.on_turn_end(&hook_session, &result);
-                            return Ok(result);
+                            return Ok(self.finalize_turn(&hook_session, result, false));
                         }
 
                         self.maybe_inject_memory_nudge(tool_calls_made);
                         continue;
                     }
 
-                    self.trajectory.record_assistant_message(&response_text);
-                    // TODO: propagate provider_metadata for streaming reasoning continuity
-                    self.messages.push(ChatMessage::assistant(&response_text));
+                    let response_text = self
+                        .push_message_with_lua_hooks(
+                            &hook_session,
+                            ChatMessage::assistant(&response_text),
+                        )
+                        .and_then(|message| message.content_text().map(str::to_owned))
+                        .unwrap_or_default();
+                    if !response_text.is_empty() {
+                        self.trajectory.record_assistant_message(&response_text);
+                    }
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1754,16 +1892,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.fire_shell_hooks(
-                        HookEvent::OnComplete,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, true));
                 }
                 Err(_) => {
                     warn!(
@@ -1778,7 +1907,7 @@ impl AgentLoop {
                                 &hook_session,
                                 "llm_request_fallback",
                                 err.into(),
-                            ))
+                            ));
                         }
                     };
 
@@ -1815,76 +1944,107 @@ impl AgentLoop {
 
                     if let Some(tool_calls) = &assistant_msg.tool_calls {
                         if !tool_calls.is_empty() {
-                            if let Some(text) = assistant_msg.content_text() {
-                                self.trajectory.record_assistant_message(text);
-                            }
+                            let (effective_tool_calls, veto_reasons) =
+                                self.prepare_tool_calls(&hook_session, tool_calls, false);
+                            let tool_calls = effective_tool_calls;
 
                             let mut msg = ChatMessage::assistant_with_tool_calls(
                                 assistant_msg.content.clone(),
                                 tool_calls.clone(),
                             );
                             msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                            self.messages.push(msg);
+                            if let Some(message) =
+                                self.push_message_with_lua_hooks(&hook_session, msg)
+                            {
+                                if let Some(text) = message.content_text() {
+                                    if !text.is_empty() {
+                                        self.trajectory.record_assistant_message(text);
+                                    }
+                                }
+                            }
 
-                            // Emit start events and record tool calls.
+                            // Emit start events.
                             for tc in tool_calls.iter() {
                                 on_event(StreamEvent::ToolCallStart {
                                     name: &tc.function.name,
                                     call_id: &tc.id,
                                     args_summary: summarize_args(&tc.function.arguments),
                                 });
-                                self.trajectory
-                                    .record_tool_call(&tc.function.name, &tc.function.arguments);
-                                self.fire_shell_hooks(
-                                    HookEvent::PreToolCall,
-                                    serde_json::json!({
-                                        "session_id": hook_session,
-                                        "tool_name": tc.function.name,
-                                        "tool_call_id": tc.id,
-                                        "arguments": tc.function.arguments,
-                                        "streaming": false,
-                                    }),
-                                );
                             }
 
                             // Execute tool calls in parallel.
                             tool_calls_made += tool_calls.len();
+                            let executable_tool_calls: Vec<ToolCallEntry> = tool_calls
+                                .iter()
+                                .zip(veto_reasons.iter())
+                                .filter_map(|(tc, veto)| veto.is_none().then(|| tc.clone()))
+                                .collect();
                             let tool_exec_start = Instant::now();
-                            let results = match execute_tool_calls_parallel(
-                                &self.tools,
-                                &self.subagent_spawner,
-                                tool_calls,
-                                self.config.max_concurrency,
-                                self.config.tool_timeout_secs,
-                                self.config.tool_policy.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(results) => results,
-                                Err(err) => {
-                                    return Err(self.report_error(
-                                        &hook_session,
-                                        "tool_execution",
-                                        err,
-                                    ))
+                            let executed_results = if executable_tool_calls.is_empty() {
+                                Vec::new()
+                            } else {
+                                match execute_tool_calls_parallel(
+                                    &self.tools,
+                                    &self.subagent_spawner,
+                                    &executable_tool_calls,
+                                    self.config.max_concurrency,
+                                    self.config.tool_timeout_secs,
+                                    self.config.tool_policy.as_ref(),
+                                )
+                                .await
+                                {
+                                    Ok(results) => results,
+                                    Err(err) => {
+                                        return Err(self.report_error(
+                                            &hook_session,
+                                            "tool_execution",
+                                            err,
+                                        ));
+                                    }
                                 }
                             };
                             let tool_exec_duration = tool_exec_start.elapsed();
                             let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
 
                             let mut clarification = None;
-                            for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
-                                let result = sanitize::sanitize_credentials(&result);
+                            let mut executed_results = executed_results.into_iter();
+                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter())
+                            {
+                                let lua_vetoed = veto_reason.is_some();
+                                let (mut result, requires_input) = match veto_reason {
+                                    Some(reason) => (
+                                        format!("Error: tool call blocked by Lua hook: {reason}"),
+                                        false,
+                                    ),
+                                    None => executed_results.next().expect(
+                                        "executed tool results should align with allowed calls",
+                                    ),
+                                };
+                                result = sanitize::sanitize_credentials(&result);
+                                if self.config.core_tools.is_some()
+                                    && tc.function.name == "find_tools"
+                                    && !result.starts_with("Error:")
+                                    && !result.starts_with("No tools")
+                                {
+                                    for line in result.lines() {
+                                        let trimmed = line.trim();
+                                        if let Some(rest) = trimmed.strip_prefix("**") {
+                                            if let Some(name_end) = rest.find("**") {
+                                                self.discover_tool(&rest[..name_end]);
+                                            }
+                                        }
+                                    }
+                                }
                                 let tool_success = !result.starts_with("Error:");
+                                let result =
+                                    self.run_lua_post_tool_call(&tc.function.name, &result);
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
                                     call_id: &tc.id,
                                     duration_ms: tool_exec_duration_ms,
                                     success: tool_success,
                                 });
-                                self.trajectory
-                                    .record_tool_result(&tc.function.name, &result);
-                                if result.starts_with("Error:") {
+                                if !tool_success {
                                     let count = self
                                         .tool_failure_counts
                                         .entry(tc.function.name.clone())
@@ -1899,19 +2059,28 @@ impl AgentLoop {
                                         "session_id": hook_session,
                                         "tool_name": tc.function.name,
                                         "tool_call_id": tc.id,
-                                        "success": !result.starts_with("Error:"),
+                                        "success": tool_success,
                                         "result": result,
                                         "requires_input": requires_input,
                                         "streaming": false,
+                                        "lua_vetoed": lua_vetoed,
                                     }),
                                 );
+                                let result = self
+                                    .push_message_with_lua_hooks(
+                                        &hook_session,
+                                        ChatMessage::tool_result(&tc.id, result),
+                                    )
+                                    .and_then(|message| message.content_text().map(str::to_owned))
+                                    .unwrap_or_default();
+                                self.trajectory
+                                    .record_tool_result(&tc.function.name, &result);
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded {
                                         question: &result,
                                     });
                                     clarification = Some(result.clone());
                                 }
-                                self.messages.push(ChatMessage::tool_result(&tc.id, result));
                             }
 
                             self.maybe_inject_stuck_nudge();
@@ -1928,12 +2097,7 @@ impl AgentLoop {
                                     estimated_cost: Some(self.cost.total_cost),
                                     pending_clarification: Some(question),
                                 };
-                                self.fire_shell_hooks(
-                                    HookEvent::PostTurn,
-                                    self.turn_result_context(&hook_session, &result),
-                                );
-                                self.hooks.on_turn_end(&hook_session, &result);
-                                return Ok(result);
+                                return Ok(self.finalize_turn(&hook_session, result, false));
                             }
 
                             self.maybe_inject_memory_nudge(tool_calls_made);
@@ -1956,10 +2120,15 @@ impl AgentLoop {
                         }
                     }
 
-                    self.trajectory.record_assistant_message(&response_text);
                     let mut msg = ChatMessage::assistant(&response_text);
                     msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                    self.messages.push(msg);
+                    let response_text = self
+                        .push_message_with_lua_hooks(&hook_session, msg)
+                        .and_then(|message| message.content_text().map(str::to_owned))
+                        .unwrap_or_default();
+                    if !response_text.is_empty() {
+                        self.trajectory.record_assistant_message(&response_text);
+                    }
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1976,16 +2145,7 @@ impl AgentLoop {
                         estimated_cost: Some(self.cost.total_cost),
                         pending_clarification: None,
                     };
-                    self.fire_shell_hooks(
-                        HookEvent::PostTurn,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.fire_shell_hooks(
-                        HookEvent::OnComplete,
-                        self.turn_result_context(&hook_session, &result),
-                    );
-                    self.hooks.on_turn_end(&hook_session, &result);
-                    return Ok(result);
+                    return Ok(self.finalize_turn(&hook_session, result, true));
                 }
             }
         }
@@ -2000,7 +2160,9 @@ impl AgentLoop {
                     tool_calls_made,
                     interval, "injecting memory consolidation nudge"
                 );
-                self.messages.push(ChatMessage::system(MEMORY_NUDGE));
+                let hook_session = self.session_id_str().to_owned();
+                let _ = self
+                    .push_message_with_lua_hooks(&hook_session, ChatMessage::system(MEMORY_NUDGE));
             }
         }
     }
@@ -2014,8 +2176,11 @@ impl AgentLoop {
                 threshold = SKILL_CREATION_THRESHOLD,
                 "injecting skill creation nudge"
             );
-            self.messages
-                .push(ChatMessage::system(SKILL_CREATION_NUDGE));
+            let hook_session = self.session_id_str().to_owned();
+            let _ = self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::system(SKILL_CREATION_NUDGE),
+            );
         }
     }
 
@@ -2053,7 +2218,7 @@ impl AgentLoop {
              (2) modifying the arguments, (3) breaking the task into smaller steps, or \
              (4) asking the user for clarification."
         );
-        self.messages.push(ChatMessage::system(&nudge));
+        let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
@@ -2092,7 +2257,255 @@ impl AgentLoop {
         self.hook_results.extend(results);
     }
 
+    fn run_lua_on_message(
+        &self,
+        role: &str,
+        content: &str,
+        tool_call_count: usize,
+        image_count: usize,
+    ) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(content.to_owned());
+        };
+
+        match runtime.run_on_message(role, content, tool_call_count, image_count) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, role = %role, "lua on_message hook failed");
+                PreHookOutcome::Allow(content.to_owned())
+            }
+        }
+    }
+
+    fn run_lua_pre_turn(&self, user_message: &str) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(user_message.to_owned());
+        };
+
+        match runtime.run_pre_turn(user_message) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, "lua pre-turn hook failed");
+                PreHookOutcome::Allow(user_message.to_owned())
+            }
+        }
+    }
+
+    fn run_lua_pre_tool_call(&self, tool_name: &str, arguments: &str) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(arguments.to_owned());
+        };
+
+        match runtime.run_pre_tool_call(tool_name, arguments) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "lua pre-tool-call hook failed");
+                PreHookOutcome::Allow(arguments.to_owned())
+            }
+        }
+    }
+
+    fn run_lua_post_tool_call(&self, tool_name: &str, output: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return output.to_owned();
+        };
+
+        match runtime.run_post_tool_call(tool_name, output) {
+            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "lua post-tool-call hook failed");
+                output.to_owned()
+            }
+        }
+    }
+
+    fn run_lua_post_turn(&self, response: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return response.to_owned();
+        };
+
+        match runtime.run_post_turn(response) {
+            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
+            Err(error) => {
+                warn!(error = %error, "lua post-turn hook failed");
+                response.to_owned()
+            }
+        }
+    }
+
+    fn run_lua_personality_transform(&self, response: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return response.to_owned();
+        };
+
+        runtime.transform_personality_response(response)
+    }
+
+    fn record_lua_completed_turn(&self, result: &AgentResult) {
+        if let Some(runtime) = &self.lua_runtime {
+            runtime.record_completed_turn(
+                result
+                    .total_input_tokens
+                    .saturating_add(result.total_output_tokens),
+            );
+        }
+    }
+
+    fn run_lua_on_error(&self, stage: &str, error: &AgentError) {
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(lua_error) = runtime.run_on_error(stage, &error.to_string()) {
+                warn!(error = %lua_error, stage = %stage, "lua on_error hook failed");
+            }
+        }
+    }
+
+    fn run_lua_on_complete(&self) {
+        if let Some(runtime) = &self.lua_runtime {
+            if let Err(error) = runtime.run_on_complete() {
+                warn!(error = %error, "lua on_complete hook failed");
+            }
+        }
+    }
+
+    fn push_message_with_lua_hooks(
+        &mut self,
+        session_id: &str,
+        mut message: ChatMessage,
+    ) -> Option<ChatMessage> {
+        let Some(original_content) = message.content_text().map(str::to_owned) else {
+            self.messages.push(message.clone());
+            return Some(message);
+        };
+        let tool_call_count = message.tool_calls.as_ref().map_or(0, Vec::len);
+        let image_count = message_image_count(&message);
+
+        match self.run_lua_on_message(
+            &message.role,
+            &original_content,
+            tool_call_count,
+            image_count,
+        ) {
+            PreHookOutcome::Allow(rewritten) => {
+                set_message_text(&mut message, rewritten.clone());
+                self.fire_shell_hooks(
+                    HookEvent::OnMessage,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "role": &message.role,
+                        "content": rewritten,
+                        "tool_call_count": tool_call_count,
+                        "image_count": image_count,
+                        "lua_vetoed": false,
+                    }),
+                );
+                self.messages.push(message.clone());
+                Some(message)
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::OnMessage,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "role": &message.role,
+                        "content": original_content,
+                        "tool_call_count": tool_call_count,
+                        "image_count": image_count,
+                        "lua_vetoed": true,
+                        "lua_reason": reason,
+                    }),
+                );
+
+                if suppress_message_text(&mut message) {
+                    self.messages.push(message.clone());
+                    Some(message)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn finalize_turn(
+        &mut self,
+        session_id: &str,
+        mut result: AgentResult,
+        fire_complete: bool,
+    ) -> AgentResult {
+        self.record_lua_completed_turn(&result);
+        result.response = self.run_lua_post_turn(&result.response);
+        result.response = self.run_lua_personality_transform(&result.response);
+        self.fire_shell_hooks(
+            HookEvent::PostTurn,
+            self.turn_result_context(session_id, &result),
+        );
+        if fire_complete {
+            self.run_lua_on_complete();
+            self.fire_shell_hooks(
+                HookEvent::OnComplete,
+                self.turn_result_context(session_id, &result),
+            );
+        }
+        self.hooks.on_turn_end(session_id, &result);
+        result
+    }
+
+    fn prepare_tool_calls(
+        &mut self,
+        hook_session: &str,
+        tool_calls: &[ToolCallEntry],
+        streaming: bool,
+    ) -> (Vec<ToolCallEntry>, Vec<Option<String>>) {
+        let mut effective_calls = Vec::with_capacity(tool_calls.len());
+        let mut veto_reasons = Vec::with_capacity(tool_calls.len());
+
+        for tc in tool_calls {
+            self.trajectory
+                .record_tool_call(&tc.function.name, &tc.function.arguments);
+            self.hooks
+                .on_tool_call_start(hook_session, &tc.function.name);
+
+            match self.run_lua_pre_tool_call(&tc.function.name, &tc.function.arguments) {
+                PreHookOutcome::Allow(arguments) => {
+                    let mut effective = tc.clone();
+                    effective.function.arguments = arguments;
+                    self.fire_shell_hooks(
+                        HookEvent::PreToolCall,
+                        serde_json::json!({
+                            "session_id": hook_session,
+                            "tool_name": &effective.function.name,
+                            "tool_call_id": &effective.id,
+                            "arguments": &effective.function.arguments,
+                            "lua_vetoed": false,
+                            "streaming": streaming,
+                        }),
+                    );
+                    effective_calls.push(effective);
+                    veto_reasons.push(None);
+                }
+                PreHookOutcome::Veto { reason } => {
+                    self.fire_shell_hooks(
+                        HookEvent::PreToolCall,
+                        serde_json::json!({
+                            "session_id": hook_session,
+                            "tool_name": &tc.function.name,
+                            "tool_call_id": &tc.id,
+                            "arguments": &tc.function.arguments,
+                            "lua_vetoed": true,
+                            "lua_reason": reason,
+                            "streaming": streaming,
+                        }),
+                    );
+                    effective_calls.push(tc.clone());
+                    veto_reasons.push(reason);
+                }
+            }
+        }
+
+        (effective_calls, veto_reasons)
+    }
+
     fn report_error(&mut self, session_id: &str, stage: &str, error: AgentError) -> AgentError {
+        self.run_lua_on_error(stage, &error);
         self.fire_shell_hooks(
             HookEvent::OnError,
             serde_json::json!({
@@ -2567,9 +2980,9 @@ fn check_tool_policy(
     policy: &crate::tool_policy::ToolPolicy,
     tc: &ToolCallEntry,
 ) -> Option<String> {
-    let parse_result = serde_json::from_str::<
-        std::collections::BTreeMap<String, serde_json::Value>,
-    >(&tc.function.arguments);
+    let parse_result = serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(
+        &tc.function.arguments,
+    );
     let raw_map = match parse_result {
         Ok(m) => m,
         Err(e) => {
@@ -2820,7 +3233,11 @@ fn format_blocked_reasons(result: &crate::guardrails::GuardrailResult) -> String
 mod tests {
     use super::*;
     use crate::hooks::HookConfig;
+    use genesis_lua::{LuaRuntime, LuaRuntimeConfig, LuaSessionContext};
+    use std::collections::BTreeMap;
+    use std::fs;
     use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
 
     fn test_agent() -> AgentLoop {
         let provider = genesis_provider::ResolvedProvider {
@@ -2859,6 +3276,113 @@ mod tests {
             HookRunner::default(),
             Vec::new(),
         )
+    }
+
+    fn test_lua_runtime(script: &str) -> Arc<LuaRuntime> {
+        test_lua_runtime_with_personality(script, None)
+    }
+
+    fn test_lua_runtime_with_personality(
+        script: &str,
+        personality: Option<&str>,
+    ) -> Arc<LuaRuntime> {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        write_test_package_plugin_with_permissions(
+            dir.path(),
+            "hooks",
+            script,
+            &[
+                "PreTurn",
+                "PostTurn",
+                "PreToolCall",
+                "PostToolCall",
+                "OnMessage",
+                "OnError",
+                "OnComplete",
+                "OnPluginLoad",
+            ],
+            &[],
+        )
+        .expect("lua package plugin should write");
+
+        let runtime = LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "session-hooks".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: personality.map(str::to_owned),
+                },
+                disabled_plugins: Vec::new(),
+                plugin_verbose: None,
+                config_values: BTreeMap::new(),
+            })
+            .build()
+            .expect("lua runtime should build");
+        Arc::new(runtime)
+    }
+
+    fn write_test_package_plugin_with_permissions(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        source: &str,
+        hooks: &[&str],
+        tools: &[&str],
+    ) -> std::io::Result<()> {
+        let package_dir = plugin_dir.join(name);
+        fs::create_dir_all(&package_dir)?;
+        fs::write(package_dir.join("init.lua"), source)?;
+
+        let hooks_list = hooks
+            .iter()
+            .map(|hook| format!("\"{hook}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_list = tools
+            .iter()
+            .map(|tool| format!("\"{tool}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+
+[permissions]
+hooks = [{hooks_list}]
+tools = [{tools_list}]
+"#
+        );
+        fs::write(package_dir.join("plugin.toml"), manifest)
+    }
+
+    fn start_mock_server_with_capture(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buffer = [0u8; 8192];
+                let read = stream.read(&mut buffer).expect("read request");
+                captured_clone
+                    .lock()
+                    .expect("capture mutex")
+                    .push(String::from_utf8_lossy(&buffer[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+                stream.flush().expect("flush");
+            }
+        });
+        (format!("http://{addr}/v1"), captured)
     }
 
     fn test_agent_with_endpoint(base_url: String, hooks: Vec<HookConfig>) -> AgentLoop {
@@ -3243,10 +3767,16 @@ mod tests {
             },
         ];
 
-        let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
-                .await
-                .expect("parallel execution should succeed");
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await
+        .expect("parallel execution should succeed");
 
         assert_eq!(results.len(), 2);
         assert!(
@@ -3271,10 +3801,16 @@ mod tests {
             },
         }];
 
-        let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
-                .await
-                .expect("single-item parallel should succeed");
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await
+        .expect("single-item parallel should succeed");
 
         assert_eq!(results.len(), 1);
         assert!(results[0].0.contains("solo"));
@@ -3302,9 +3838,15 @@ mod tests {
             },
         ];
 
-        let result =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
-                .await;
+        let result = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await;
 
         // ToolNotFound is now recoverable, so the parallel execution should succeed
         let results = result.expect("should recover from ToolNotFound");
@@ -3856,6 +4398,589 @@ mod tests {
         assert!(error_hook.stdout.contains("\"stage\":\"llm_request\""));
     }
 
+    #[tokio::test]
+    async fn lua_pre_turn_rewrite_updates_request_and_shell_context() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![response]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::PreTurn,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "rewritten: " .. ctx.user_message
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains("rewritten: hello"),
+            "request body should contain the rewritten user message: {request}"
+        );
+
+        let pre_turn = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreTurn)
+            .expect("pre-turn shell hook");
+        assert!(
+            pre_turn.stdout.contains("rewritten: hello"),
+            "shell hook should see the Lua-rewritten message: {}",
+            pre_turn.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_message_hook_rewrites_user_and_assistant_messages() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![response]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::OnMessage,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("OnMessage", function(ctx)
+    if ctx.role == "user" then
+        return "rewritten user: " .. ctx.content
+    end
+    if ctx.role == "assistant" then
+        return ctx.content .. " [lua]"
+    end
+    return ctx.content
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done [lua]");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains("rewritten user: hello"),
+            "request body should contain the rewritten user message: {request}"
+        );
+
+        let hook_outputs: Vec<&str> = agent
+            .hook_results()
+            .iter()
+            .filter(|result| result.event == HookEvent::OnMessage)
+            .map(|result| result.stdout.as_str())
+            .collect();
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""role":"user""#)
+                    && stdout.contains("rewritten user: hello")),
+            "shell on_message hook should see the rewritten user message: {hook_outputs:?}"
+        );
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""role":"assistant""#)
+                    && stdout.contains("done [lua]")),
+            "shell on_message hook should see the rewritten assistant message: {hook_outputs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_message_hook_can_strip_tool_call_text_without_breaking_protocol() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "tool chatter",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::OnMessage,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("OnMessage", function(ctx)
+    if ctx.role == "assistant" and ctx.tool_call_count > 0 then
+        return false, "hide tool chatter"
+    end
+    return ctx.content
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains(r#""tool_calls":[{"#),
+            "tool-call protocol should stay intact: {request}"
+        );
+        assert!(
+            !request.contains("tool chatter"),
+            "vetoed tool-call chatter should be stripped from follow-up history: {request}"
+        );
+
+        let hook_outputs: Vec<&str> = agent
+            .hook_results()
+            .iter()
+            .filter(|result| result.event == HookEvent::OnMessage)
+            .map(|result| result.stdout.as_str())
+            .collect();
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""lua_vetoed":true"#)),
+            "shell on_message hook should reflect the Lua veto: {hook_outputs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_personality_transform_response_rewrites_final_output() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![response]);
+        let mut agent = test_agent_with_endpoint(endpoint, Vec::new());
+        let runtime = test_lua_runtime_with_personality(
+            r#"
+genesis.register_personality({
+    name = "pirate",
+    description = "A pirate lua personality",
+    system_prompt = "Speak like a pirate.",
+    transform_response = function(response)
+        return response .. " Arrr!"
+    end,
+})
+"#,
+            Some("pirate"),
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done Arrr!");
+    }
+
+    #[tokio::test]
+    async fn lua_tool_hooks_rewrite_veto_and_update_session_state() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreToolCall", function(ctx)
+    return '{"message":"rewritten"}'
+end)
+
+genesis.on("PostToolCall", function(ctx)
+    return ctx.output .. " [lua]"
+end)
+
+genesis.on("PostTurn", function(_)
+    genesis.log(string.format("post_turn:%d:%d", genesis.session.turn_count, genesis.session.total_tokens))
+end)
+
+genesis.on("OnComplete", function(_)
+    genesis.log(string.format("complete:%d:%d", genesis.session.turn_count, genesis.session.total_tokens))
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime.clone());
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let pre = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreToolCall)
+            .expect("pre tool shell hook");
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool shell hook");
+
+        assert!(
+            pre.stdout
+                .contains(r#""arguments":"{\"message\":\"rewritten\"}""#),
+            "shell hook should see rewritten tool arguments: {}",
+            pre.stdout
+        );
+        assert!(
+            post.stdout.contains("[lua]"),
+            "shell hook should see Lua-rewritten tool output: {}",
+            post.stdout
+        );
+
+        let logs = runtime.logs();
+        assert!(
+            logs.iter().any(|line| line.contains("post_turn:1:30")),
+            "PostTurn should see updated session counters: {:?}",
+            logs
+        );
+        assert!(
+            logs.iter().any(|line| line.contains("complete:1:30")),
+            "OnComplete should see updated session counters: {:?}",
+            logs
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_pre_tool_call_veto_becomes_error_and_shell_context_is_preserved() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![
+                HookConfig {
+                    event: HookEvent::PreToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+                HookConfig {
+                    event: HookEvent::PostToolCall,
+                    command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                    timeout_ms: 1000,
+                    enabled: true,
+                },
+            ],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PreToolCall", function(_)
+    return false, "blocked"
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let pre = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PreToolCall)
+            .expect("pre tool shell hook");
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool shell hook");
+
+        assert!(
+            pre.stdout.contains(r#""lua_vetoed":true"#),
+            "shell hook should reflect the Lua veto: {}",
+            pre.stdout
+        );
+        assert!(
+            post.stdout.contains("blocked by Lua hook"),
+            "post tool shell hook should see the synthesized veto output: {}",
+            post.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_post_tool_call_rewrite_does_not_change_failure_accounting() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "does_not_exist",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::PostToolCall,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("PostToolCall", function(_)
+    return "rewritten"
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a missing tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+        assert_eq!(
+            agent.tool_failure_counts.get("does_not_exist"),
+            Some(&1),
+            "tool failure accounting should use the underlying tool outcome"
+        );
+
+        let post = agent
+            .hook_results()
+            .iter()
+            .find(|result| result.event == HookEvent::PostToolCall)
+            .expect("post tool hook");
+        assert!(
+            post.stdout.contains(r#""success":false"#),
+            "shell hook should preserve the underlying failure status: {}",
+            post.stdout
+        );
+        assert!(
+            post.stdout.contains("rewritten"),
+            "shell hook should still see the Lua-rewritten output: {}",
+            post.stdout
+        );
+    }
+
     // --- Iteration budget tests ---
 
     #[test]
@@ -4188,7 +5313,11 @@ mod tests {
             make_chat_tool("web_request"),
         ];
         let filtered = agent.filter_tool_defs(all.clone());
-        assert_eq!(filtered.len(), 3, "should return all tools when core_tools is None");
+        assert_eq!(
+            filtered.len(),
+            3,
+            "should return all tools when core_tools is None"
+        );
     }
 
     #[test]

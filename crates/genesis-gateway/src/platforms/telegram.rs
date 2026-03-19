@@ -17,7 +17,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use base64::Engine;
-use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_core::execution::SessionTurnInput;
 use genesis_storage::{SessionStore, StickerCacheStore};
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
@@ -632,7 +632,7 @@ pub async fn webhook_handler(
                 }
             };
 
-            let service = SessionExecutionService::new(&state.loaded);
+            let service = state.session_service();
 
             let result = service
                 .run_turn(SessionTurnInput {

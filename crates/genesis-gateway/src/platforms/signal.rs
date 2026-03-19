@@ -23,7 +23,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_core::execution::SessionTurnInput;
 use genesis_storage::SessionStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
@@ -471,7 +471,7 @@ async fn process_envelope(
             )
             .await;
 
-            let service = SessionExecutionService::new(&state.loaded);
+            let service = state.session_service();
 
             let result = service
                 .run_turn(SessionTurnInput {

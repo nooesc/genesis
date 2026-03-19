@@ -14,6 +14,7 @@ glob.workspace = true
 genesis-auth = { path = "../genesis-auth" }
 genesis-config = { path = "../genesis-config" }
 genesis-mcp = { path = "../genesis-mcp" }
+genesis-lua = { path = "../genesis-lua" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
 genesis-tools = { path = "../genesis-tools" }

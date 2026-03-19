@@ -5,6 +5,7 @@ members = [
   "crates/genesis-config",
   "crates/genesis-core",
   "crates/genesis-gateway",
+  "crates/genesis-lua",
   "crates/genesis-mcp",
   "crates/genesis-provider",
   "crates/genesis-storage",
@@ -71,6 +72,7 @@ tui-big-text = "0.8"
 insta = { version = "1", features = ["yaml"] }
 rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
+mlua = { version = "0.11.6", features = ["luau", "async", "send", "serialize", "vendored"] }
 notify = "8"
 opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }

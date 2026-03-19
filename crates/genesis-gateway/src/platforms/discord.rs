@@ -15,7 +15,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_core::execution::SessionTurnInput;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -257,7 +257,7 @@ pub async fn interactions_handler(
         // Spawn background task to process and follow up
         tokio::spawn(
             async move {
-                let service = SessionExecutionService::new(&state.loaded);
+                let service = state.session_service();
 
                 let result = service
                     .run_turn(SessionTurnInput {

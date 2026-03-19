@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use genesis_config::{load, LoadedConfig};
+use genesis_config::{load, set_plugin_disabled_in_file, LoadedConfig};
 use genesis_core::prompt::load_context_file;
-use genesis_storage::{
-    PairingStore, ScheduleStore, SessionStore, SkillStore, UserModelStore,
-};
+use genesis_lua::discovery::{discover_plugins_best_effort, DiscoveryReport};
+use genesis_lua::{DiscoveredPlugin, LuaRuntimeError, PluginKind};
+use genesis_storage::{PairingStore, ScheduleStore, SessionStore, SkillStore, UserModelStore};
 use genesis_types::DeliveryPlatform;
 
-use crate::{
-    CliError, ContextCommand, McpCommand, PairingCommand, PersonalityCommand,
-    ToolsetCommand, ModelCommand,
-};
 use crate::format::context_template;
+use crate::{
+    CliError, ContextCommand, McpCommand, ModelCommand, PairingCommand, PersonalityCommand,
+    PluginsCommand, ToolsetCommand,
+};
 
 pub(crate) struct RegistryMcpBackend {
     registry: genesis_tools::ToolRegistry,
@@ -27,18 +27,14 @@ impl genesis_mcp::McpToolBackend for RegistryMcpBackend {
             .map(|def| genesis_mcp::McpServerToolDef {
                 name: def.name,
                 description: Some(def.description),
-                input_schema: def.parameters.unwrap_or_else(|| {
-                    serde_json::json!({"type": "object", "properties": {}})
-                }),
+                input_schema: def
+                    .parameters
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
             })
             .collect()
     }
 
-    fn call_tool(
-        &self,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<String, String> {
+    fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
         // Convert JSON arguments to BTreeMap<String, String>
         let mut args = std::collections::BTreeMap::new();
         if let Some(obj) = arguments.as_object() {
@@ -92,11 +88,7 @@ pub(crate) async fn run_mcp(
                     "unknown"
                 };
 
-                let endpoint = cfg
-                    .command
-                    .as_deref()
-                    .or(cfg.url.as_deref())
-                    .unwrap_or("-");
+                let endpoint = cfg.command.as_deref().or(cfg.url.as_deref()).unwrap_or("-");
 
                 let timeout = cfg.timeout.unwrap_or(120);
                 let connect_timeout = cfg.connect_timeout.unwrap_or(60);
@@ -189,9 +181,15 @@ pub(crate) async fn run_pairing(
                 return Ok("No approved users.".to_owned());
             }
 
-            let mut lines = vec![format!("{:<12} {:<20} {:<20} {}", "PLATFORM", "USER_ID", "NAME", "APPROVED_AT")];
+            let mut lines = vec![format!(
+                "{:<12} {:<20} {:<20} {}",
+                "PLATFORM", "USER_ID", "NAME", "APPROVED_AT"
+            )];
             for u in &users {
-                lines.push(format!("{:<12} {:<20} {:<20} {}", u.platform, u.user_id, u.user_name, u.approved_at));
+                lines.push(format!(
+                    "{:<12} {:<20} {:<20} {}",
+                    u.platform, u.user_id, u.user_name, u.approved_at
+                ));
             }
             lines.push(format!("\n{} approved user(s)", users.len()));
             Ok(lines.join("\n"))
@@ -213,9 +211,15 @@ pub(crate) async fn run_pairing(
                 return Ok("No pending pairing requests.".to_owned());
             }
 
-            let mut lines = vec![format!("{:<12} {:<10} {:<20} {:<20} {}", "PLATFORM", "CODE", "USER_ID", "NAME", "CREATED_AT")];
+            let mut lines = vec![format!(
+                "{:<12} {:<10} {:<20} {:<20} {}",
+                "PLATFORM", "CODE", "USER_ID", "NAME", "CREATED_AT"
+            )];
             for p in &pending {
-                lines.push(format!("{:<12} {:<10} {:<20} {:<20} {}", p.platform, p.code, p.user_id, p.user_name, p.created_at));
+                lines.push(format!(
+                    "{:<12} {:<10} {:<20} {:<20} {}",
+                    p.platform, p.code, p.user_id, p.user_name, p.created_at
+                ));
             }
             lines.push(format!("\n{} pending request(s)", pending.len()));
             Ok(lines.join("\n"))
@@ -283,7 +287,10 @@ pub(crate) async fn run_pairing(
 
             match platform {
                 Some(p) => Ok(format!("Cleared {} pending code(s) for {}", cleared, p)),
-                None => Ok(format!("Cleared {} pending code(s) across all platforms", cleared)),
+                None => Ok(format!(
+                    "Cleared {} pending code(s) across all platforms",
+                    cleared
+                )),
             }
         }
     }
@@ -385,6 +392,315 @@ pub(crate) fn run_toolset(command: ToolsetCommand, json: bool) -> Result<String,
                 Ok(lines.join("\n"))
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PluginCommandEntry {
+    name: String,
+    status: String,
+    kind: String,
+    version: Option<String>,
+    description: Option<String>,
+    author: Option<String>,
+    root: Option<String>,
+    entrypoint: Option<String>,
+    trusted: bool,
+    tools: Vec<String>,
+    hooks: Vec<String>,
+    discovered: bool,
+}
+
+pub(crate) fn run_plugins(
+    config_path: Option<PathBuf>,
+    command: PluginsCommand,
+    json: bool,
+) -> Result<String, CliError> {
+    let loaded = load(config_path.as_deref())?;
+    let (entries, errors) = collect_plugin_entries(&loaded)?;
+
+    match command {
+        PluginsCommand::List => render_plugin_list(&entries, &errors, json),
+        PluginsCommand::Info { name } => render_plugin_info(&entries, &errors, &name, json),
+        PluginsCommand::Disable { name } => {
+            let entry = entries.iter().find(|entry| entry.name == name);
+            let already_disabled = loaded
+                .config
+                .plugins
+                .disabled
+                .iter()
+                .any(|item| item == &name);
+            if entry.is_none() && !already_disabled {
+                return Err(CliError::Other(unknown_plugin_message(&entries, &name)));
+            }
+            if !already_disabled {
+                set_plugin_disabled_in_file(&loaded.paths.config_path, &name, true)?;
+            }
+
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "plugin": name,
+                    "disabled": true,
+                    "changed": !already_disabled,
+                }))?)
+            } else if already_disabled {
+                Ok(format!("plugin `{name}` is already disabled"))
+            } else {
+                Ok(format!("disabled plugin `{name}` in config"))
+            }
+        }
+        PluginsCommand::Enable { name } => {
+            let entry = entries.iter().find(|entry| entry.name == name);
+            let already_disabled = loaded
+                .config
+                .plugins
+                .disabled
+                .iter()
+                .any(|item| item == &name);
+            if entry.is_none() && !already_disabled {
+                return Err(CliError::Other(unknown_plugin_message(&entries, &name)));
+            }
+            if already_disabled {
+                set_plugin_disabled_in_file(&loaded.paths.config_path, &name, false)?;
+            }
+
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "plugin": name,
+                    "disabled": false,
+                    "changed": already_disabled,
+                }))?)
+            } else if already_disabled {
+                Ok(format!("enabled plugin `{name}` in config"))
+            } else {
+                Ok(format!("plugin `{name}` is already enabled"))
+            }
+        }
+    }
+}
+
+fn collect_plugin_entries(
+    loaded: &LoadedConfig,
+) -> Result<(Vec<PluginCommandEntry>, Vec<String>), CliError> {
+    let report = match discover_plugins_best_effort(&loaded.paths.plugin_dir) {
+        Ok(report) => report,
+        Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            DiscoveryReport::default()
+        }
+        Err(error) => {
+            return Err(CliError::Other(format!(
+                "failed to inspect plugin directory {}: {error}",
+                loaded.paths.plugin_dir.display()
+            )))
+        }
+    };
+
+    let disabled: std::collections::BTreeSet<_> =
+        loaded.config.plugins.disabled.iter().cloned().collect();
+    let DiscoveryReport { plugins, errors } = report;
+    let mut entries: Vec<PluginCommandEntry> = plugins
+        .into_iter()
+        .map(|plugin| {
+            let is_disabled = disabled.contains(&plugin.name);
+            plugin_entry_from_discovery(plugin, is_disabled)
+        })
+        .collect();
+
+    for missing in disabled {
+        if entries.iter().any(|entry| entry.name == missing) {
+            continue;
+        }
+        entries.push(PluginCommandEntry {
+            name: missing,
+            status: "disabled".to_owned(),
+            kind: "missing".to_owned(),
+            version: None,
+            description: Some("disabled in config, plugin not found on disk".to_owned()),
+            author: None,
+            root: None,
+            entrypoint: None,
+            trusted: false,
+            tools: Vec::new(),
+            hooks: Vec::new(),
+            discovered: false,
+        });
+    }
+
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let errors: Vec<String> = errors
+        .into_iter()
+        .map(|error: LuaRuntimeError| error.to_string())
+        .collect();
+    Ok((entries, errors))
+}
+
+fn plugin_entry_from_discovery(plugin: DiscoveredPlugin, disabled: bool) -> PluginCommandEntry {
+    PluginCommandEntry {
+        name: plugin.name,
+        status: if disabled { "disabled" } else { "enabled" }.to_owned(),
+        kind: plugin_kind_name(plugin.kind).to_owned(),
+        version: Some(plugin.manifest.plugin.version),
+        description: plugin.manifest.plugin.description,
+        author: plugin.manifest.plugin.author,
+        root: Some(plugin.root.display().to_string()),
+        entrypoint: Some(plugin.entrypoint.display().to_string()),
+        trusted: plugin.manifest.permissions.trusted,
+        tools: plugin.manifest.permissions.tools,
+        hooks: plugin.manifest.permissions.hooks,
+        discovered: true,
+    }
+}
+
+fn plugin_kind_name(kind: PluginKind) -> &'static str {
+    match kind {
+        PluginKind::SingleFile => "single_file",
+        PluginKind::Package => "package",
+        PluginKind::Bundled => "bundled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plugin_kind_name;
+    use genesis_lua::PluginKind;
+
+    #[test]
+    fn plugin_kind_name_reports_bundled_plugins() {
+        assert_eq!(plugin_kind_name(PluginKind::Bundled), "bundled");
+    }
+}
+
+fn render_plugin_list(
+    entries: &[PluginCommandEntry],
+    errors: &[String],
+    json: bool,
+) -> Result<String, CliError> {
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "plugins": entries.iter().map(plugin_entry_json).collect::<Vec<_>>(),
+            "errors": errors,
+        }))?);
+    }
+
+    if entries.is_empty() && errors.is_empty() {
+        return Ok("no Lua plugins discovered".to_owned());
+    }
+
+    let mut lines = vec![format!(
+        "{:<18} {:<9} {:<12} {:<10} {}",
+        "NAME", "STATUS", "KIND", "VERSION", "DESCRIPTION"
+    )];
+    for entry in entries {
+        lines.push(format!(
+            "{:<18} {:<9} {:<12} {:<10} {}",
+            entry.name,
+            entry.status,
+            entry.kind,
+            entry.version.as_deref().unwrap_or("-"),
+            entry.description.as_deref().unwrap_or("-"),
+        ));
+    }
+    if !errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Discovery warnings:".to_owned());
+        for error in errors {
+            lines.push(format!("  - {error}"));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn render_plugin_info(
+    entries: &[PluginCommandEntry],
+    errors: &[String],
+    name: &str,
+    json: bool,
+) -> Result<String, CliError> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| CliError::Other(unknown_plugin_message(entries, name)))?;
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "plugin": plugin_entry_json(entry),
+            "errors": errors,
+        }))?);
+    }
+
+    let mut lines = vec![
+        format!("Plugin: {}", entry.name),
+        format!("Status: {}", entry.status),
+        format!("Kind: {}", entry.kind),
+    ];
+    if let Some(version) = &entry.version {
+        lines.push(format!("Version: {version}"));
+    }
+    if let Some(description) = &entry.description {
+        lines.push(format!("Description: {description}"));
+    }
+    if let Some(author) = &entry.author {
+        lines.push(format!("Author: {author}"));
+    }
+    lines.push(format!("Discovered: {}", entry.discovered));
+    lines.push(format!("Trusted: {}", entry.trusted));
+    if let Some(root) = &entry.root {
+        lines.push(format!("Root: {root}"));
+    }
+    if let Some(entrypoint) = &entry.entrypoint {
+        lines.push(format!("Entrypoint: {entrypoint}"));
+    }
+    lines.push(format!("Allowed tools: {}", join_or_none(&entry.tools)));
+    lines.push(format!("Allowed hooks: {}", join_or_none(&entry.hooks)));
+    if !errors.is_empty() {
+        lines.push(String::new());
+        lines.push("Discovery warnings:".to_owned());
+        for error in errors {
+            lines.push(format!("  - {error}"));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+fn plugin_entry_json(entry: &PluginCommandEntry) -> serde_json::Value {
+    serde_json::json!({
+        "name": entry.name,
+        "status": entry.status,
+        "kind": entry.kind,
+        "version": entry.version,
+        "description": entry.description,
+        "author": entry.author,
+        "root": entry.root,
+        "entrypoint": entry.entrypoint,
+        "trusted": entry.trusted,
+        "tools": entry.tools,
+        "hooks": entry.hooks,
+        "discovered": entry.discovered,
+    })
+}
+
+fn join_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_owned()
+    } else {
+        items.join(", ")
+    }
+}
+
+fn unknown_plugin_message(entries: &[PluginCommandEntry], name: &str) -> String {
+    let available = entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    if available.is_empty() {
+        format!("unknown plugin `{name}`; no plugins are currently discovered")
+    } else {
+        format!(
+            "unknown plugin `{name}`. Available: {}",
+            available.join(", ")
+        )
     }
 }
 
@@ -503,7 +819,11 @@ pub(crate) async fn run_benchmark(
                     let elapsed = start.elapsed();
                     latencies.push(elapsed);
 
-                    let tokens = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                    let tokens = response
+                        .usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(0);
                     eprintln!(
                         "  run {}: {:.0}ms ({tokens} tokens)",
                         i + 1,
@@ -542,7 +862,12 @@ pub(crate) async fn run_benchmark(
             let p50 = latencies[successful / 2];
             (min, max, avg, p50)
         } else {
-            (Duration::ZERO, Duration::ZERO, Duration::ZERO, Duration::ZERO)
+            (
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
         };
 
         results.push(serde_json::json!({
@@ -594,9 +919,7 @@ pub(crate) fn run_info(config_path: Option<PathBuf>, json: bool) -> Result<Strin
 
     let tool_count = genesis_core::default_tool_count();
 
-    let session_count = SessionStore::new(db_path)
-        .count_sessions()
-        .unwrap_or(0);
+    let session_count = SessionStore::new(db_path).count_sessions().unwrap_or(0);
 
     let skill_count = SkillStore::new(db_path)
         .list_all()
@@ -681,10 +1004,12 @@ pub(crate) fn run_context(command: ContextCommand) -> Result<String, CliError> {
     let current_dir = std::env::current_dir()?;
 
     match command {
-        ContextCommand::Show => Ok(match load_context_file(&current_dir, &genesis_config::ContextSecurityPolicy::Warn) {
-            Some(contents) => contents,
-            None => "no context file found in current directory".to_owned(),
-        }),
+        ContextCommand::Show => Ok(
+            match load_context_file(&current_dir, &genesis_config::ContextSecurityPolicy::Warn) {
+                Some(contents) => contents,
+                None => "no context file found in current directory".to_owned(),
+            },
+        ),
         ContextCommand::Init => {
             let context_dir = current_dir.join(".genesis");
             let context_path = context_dir.join("context.md");
@@ -720,7 +1045,9 @@ pub(crate) fn run_context(command: ContextCommand) -> Result<String, CliError> {
             if status.success() {
                 Ok(format!("context saved: {path_str}"))
             } else {
-                Err(CliError::Other(format!("{editor} exited with status {status}")))
+                Err(CliError::Other(format!(
+                    "{editor} exited with status {status}"
+                )))
             }
         }
     }
@@ -813,8 +1140,7 @@ pub(crate) fn run_model(
             api_key_env,
         } => {
             let loaded = load(config_path.as_deref())?;
-            let config_file = config_path
-                .unwrap_or_else(|| loaded.paths.config_path.clone());
+            let config_file = config_path.unwrap_or_else(|| loaded.paths.config_path.clone());
 
             genesis_config::update_provider_in_file(
                 &config_file,
@@ -859,16 +1185,16 @@ pub(crate) async fn verify_api_connectivity(loaded: &LoadedConfig) -> Result<u12
     request.max_tokens = Some(5);
 
     let start = std::time::Instant::now();
-    client
-        .complete(request)
-        .await
-        .map_err(|e| format!("{e}"))?;
+    client.complete(request).await.map_err(|e| format!("{e}"))?;
 
     Ok(start.elapsed().as_millis())
 }
 
 /// Rough cost estimate based on typical per-million-token pricing.
-pub(crate) fn estimate_token_cost(input_tokens: u32, output_tokens: u32) -> Option<(f64, &'static str)> {
+pub(crate) fn estimate_token_cost(
+    input_tokens: u32,
+    output_tokens: u32,
+) -> Option<(f64, &'static str)> {
     if input_tokens == 0 && output_tokens == 0 {
         return None;
     }
@@ -882,9 +1208,21 @@ pub(crate) fn estimate_token_cost(input_tokens: u32, output_tokens: u32) -> Opti
 pub(crate) fn known_models() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         // Anthropic
-        ("anthropic", "claude-opus-4-6", "Most capable, complex reasoning"),
-        ("anthropic", "claude-sonnet-4-6", "Balanced speed and capability"),
-        ("anthropic", "claude-haiku-4-5-20251001", "Fastest, lightweight tasks"),
+        (
+            "anthropic",
+            "claude-opus-4-6",
+            "Most capable, complex reasoning",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-4-6",
+            "Balanced speed and capability",
+        ),
+        (
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "Fastest, lightweight tasks",
+        ),
         // OpenAI
         ("openai", "gpt-4.1", "Flagship GPT model"),
         ("openai", "gpt-4.1-mini", "Fast and affordable"),
@@ -901,11 +1239,27 @@ pub(crate) fn known_models() -> Vec<(&'static str, &'static str, &'static str)> 
         ("google", "gemini-2.5-pro", "Best for complex tasks"),
         ("google", "gemini-2.5-flash", "Fast and versatile"),
         // OpenRouter (aggregator — any model)
-        ("openrouter", "anthropic/claude-sonnet-4-6", "Claude via OpenRouter"),
+        (
+            "openrouter",
+            "anthropic/claude-sonnet-4-6",
+            "Claude via OpenRouter",
+        ),
         ("openrouter", "openai/gpt-4.1", "GPT-4.1 via OpenRouter"),
-        ("openrouter", "google/gemini-2.5-pro", "Gemini via OpenRouter"),
-        ("openrouter", "deepseek/deepseek-r1", "DeepSeek R1 reasoning"),
-        ("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick"),
+        (
+            "openrouter",
+            "google/gemini-2.5-pro",
+            "Gemini via OpenRouter",
+        ),
+        (
+            "openrouter",
+            "deepseek/deepseek-r1",
+            "DeepSeek R1 reasoning",
+        ),
+        (
+            "openrouter",
+            "meta-llama/llama-4-maverick",
+            "Llama 4 Maverick",
+        ),
     ]
 }
 
@@ -950,7 +1304,6 @@ pub(crate) fn detect_codex_model() -> Option<String> {
     None
 }
 
-
 pub(crate) fn run_compress(
     input: String,
     output: Option<String>,
@@ -967,8 +1320,7 @@ pub(crate) fn run_compress(
         .map_err(|e| CliError::Other(format!("invalid trajectory JSON in {}: {e}", input)))?;
 
     let compressed = if training {
-        genesis_core::compress::TrajectoryCompressor::default()
-            .compress_for_training(&trajectory)
+        genesis_core::compress::TrajectoryCompressor::default().compress_for_training(&trajectory)
     } else {
         genesis_core::compress::compress(&trajectory, level)
     };
