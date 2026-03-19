@@ -562,15 +562,24 @@ impl<'a> SessionExecutionService<'a> {
             .runtime
             .tool_policy_path
             .as_ref()
-            .and_then(|path| {
-                match crate::tool_policy::ToolPolicy::load(std::path::Path::new(path)) {
+            .map(|path| {
+                let expanded = if path.starts_with("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        format!("{}{}", home.display(), &path[1..])
+                    } else {
+                        path.clone()
+                    }
+                } else {
+                    path.clone()
+                };
+                match crate::tool_policy::ToolPolicy::load(std::path::Path::new(&expanded)) {
                     Ok(policy) => {
-                        info!(path = path.as_str(), "loaded tool policy");
-                        Some(policy)
+                        info!(path = expanded.as_str(), "loaded tool policy");
+                        policy
                     }
                     Err(e) => {
-                        warn!(path = path.as_str(), error = %e, "failed to load tool policy");
-                        None
+                        warn!(path = expanded.as_str(), error = %e, "failed to load tool policy, using deny-all fallback");
+                        crate::tool_policy::ToolPolicy::deny_all()
                     }
                 }
             });

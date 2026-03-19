@@ -71,6 +71,15 @@ struct CompiledRule {
 }
 
 impl ToolPolicy {
+    /// Create a policy that denies all tool calls. Used as a fail-closed
+    /// fallback when a configured policy file cannot be loaded.
+    pub fn deny_all() -> Self {
+        Self {
+            rules: HashMap::new(),
+            default: DefaultPolicy::Deny,
+        }
+    }
+
     /// Load a policy from a JSON file.
     pub fn load(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
@@ -91,6 +100,9 @@ impl ToolPolicy {
                 allow_path_patterns: compile_patterns(&raw.allow_paths)?,
                 deny_path_patterns: compile_patterns(&raw.deny_paths)?,
             };
+            if rules.contains_key(&raw.tool) {
+                return Err(format!("duplicate rule for tool `{}`", raw.tool));
+            }
             rules.insert(raw.tool, compiled);
         }
 
@@ -145,6 +157,8 @@ impl ToolPolicy {
         }
 
         // Check command/argument-based rules (for tools like shell_exec).
+        let cmd_checked =
+            arguments.contains_key("command") || arguments.contains_key("cmd");
         if let Some(cmd) = arguments.get("command").or_else(|| arguments.get("cmd")) {
             // Deny patterns take priority.
             for pattern in &rule.deny_patterns {
@@ -166,18 +180,40 @@ impl ToolPolicy {
             }
         }
 
+        // If no known key (command/cmd) matched but allow patterns exist,
+        // check ALL argument values against allow/deny patterns to prevent
+        // bypassing the policy via unrecognized argument keys.
+        if !cmd_checked && !rule.allow_patterns.is_empty() && !arguments.is_empty() {
+            for val in arguments.values() {
+                for pattern in &rule.deny_patterns {
+                    if pattern.matches(val) {
+                        return PolicyDecision::Deny(format!(
+                            "tool `{tool_name}` denied: argument value matches deny pattern `{pattern}`"
+                        ));
+                    }
+                }
+            }
+            let any_allowed = arguments.values().any(|val| {
+                rule.allow_patterns.iter().any(|p| p.matches(val))
+            });
+            if !any_allowed {
+                return PolicyDecision::Deny(format!(
+                    "tool `{tool_name}` denied: no argument matches any allow pattern"
+                ));
+            }
+        }
+
         PolicyDecision::Allow
     }
 
-    /// Expand `${workspace}` in a pattern string.
-    pub fn expand_workspace(pattern: &str, workspace: &str) -> String {
-        pattern.replace("${workspace}", workspace)
-    }
 }
 
 fn compile_patterns(raw: &[String]) -> Result<Vec<Pattern>, String> {
     raw.iter()
-        .map(|s| Pattern::new(s).map_err(|e| format!("invalid glob pattern `{s}`: {e}")))
+        .map(|s| {
+            let expanded = expand_home(s);
+            Pattern::new(&expanded).map_err(|e| format!("invalid glob pattern `{s}`: {e}"))
+        })
         .collect()
 }
 
@@ -367,5 +403,101 @@ mod tests {
             policy.evaluate("anything", &BTreeMap::new()),
             PolicyDecision::Allow
         );
+    }
+
+    #[test]
+    fn tilde_patterns_match_expanded_paths() {
+        // Patterns with ~ should be expanded at compile time and match
+        // paths that are also tilde-expanded at evaluation time.
+        let home = dirs::home_dir().expect("home dir required for this test");
+        let home_str = home.display().to_string();
+        let policy = ToolPolicy::from_json(
+            r#"{
+            "rules": [{
+                "tool": "write_file",
+                "allow_paths": ["~/projects/**"],
+                "deny_paths": ["~/.ssh/**"]
+            }],
+            "default": "allow"
+        }"#,
+        )
+        .unwrap();
+
+        // Deny pattern: ~/.ssh/id_rsa should be denied (input uses expanded path).
+        let expanded_ssh = format!("{home_str}/.ssh/id_rsa");
+        match policy.evaluate("write_file", &args(&[("path", &expanded_ssh)])) {
+            PolicyDecision::Deny(reason) => assert!(reason.contains("deny pattern")),
+            PolicyDecision::Allow => panic!("should deny ~/.ssh path"),
+        }
+
+        // Allow pattern: ~/projects/foo.rs should be allowed (input uses ~).
+        assert_eq!(
+            policy.evaluate("write_file", &args(&[("path", "~/projects/foo.rs")])),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn duplicate_rules_produce_error() {
+        let result = ToolPolicy::from_json(
+            r#"{
+            "rules": [
+                {"tool": "shell_exec", "allow": ["*"], "deny": []},
+                {"tool": "shell_exec", "allow": ["git *"], "deny": []}
+            ],
+            "default": "allow"
+        }"#,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("duplicate rule for tool"));
+    }
+
+    #[test]
+    fn deny_all_blocks_everything() {
+        let policy = ToolPolicy::deny_all();
+        match policy.evaluate("shell_exec", &args(&[("command", "ls")])) {
+            PolicyDecision::Deny(reason) => {
+                assert!(reason.contains("not in the allow list"));
+                assert!(reason.contains("default policy: deny"));
+            }
+            PolicyDecision::Allow => panic!("deny_all should block everything"),
+        }
+        match policy.evaluate("read_file", &args(&[("path", "/tmp/test")])) {
+            PolicyDecision::Deny(_) => {}
+            PolicyDecision::Allow => panic!("deny_all should block everything"),
+        }
+        match policy.evaluate("any_tool", &BTreeMap::new()) {
+            PolicyDecision::Deny(_) => {}
+            PolicyDecision::Allow => panic!("deny_all should block everything"),
+        }
+    }
+
+    #[test]
+    fn allow_patterns_check_unrecognized_arg_keys() {
+        // If a tool uses non-standard argument keys (not "command"/"cmd"/"path"),
+        // allow patterns should still be checked against all argument values.
+        let policy = ToolPolicy::from_json(
+            r#"{
+            "rules": [{"tool": "custom_tool", "allow": ["safe_*"], "deny": ["evil_*"]}],
+            "default": "allow"
+        }"#,
+        )
+        .unwrap();
+
+        // "input" is not a recognized key, but its value should be checked.
+        assert_eq!(
+            policy.evaluate("custom_tool", &args(&[("input", "safe_value")])),
+            PolicyDecision::Allow
+        );
+        match policy.evaluate("custom_tool", &args(&[("input", "evil_value")])) {
+            PolicyDecision::Deny(reason) => assert!(reason.contains("deny pattern")),
+            PolicyDecision::Allow => panic!("should deny evil_ value"),
+        }
+        match policy.evaluate("custom_tool", &args(&[("input", "unknown_value")])) {
+            PolicyDecision::Deny(reason) => {
+                assert!(reason.contains("no argument matches any allow pattern"))
+            }
+            PolicyDecision::Allow => panic!("should deny unmatched value"),
+        }
     }
 }

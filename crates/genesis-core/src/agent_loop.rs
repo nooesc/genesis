@@ -2567,8 +2567,19 @@ fn check_tool_policy(
     policy: &crate::tool_policy::ToolPolicy,
     tc: &ToolCallEntry,
 ) -> Option<String> {
-    let args: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+    let args: std::collections::BTreeMap<String, String> = serde_json::from_str::<
+        std::collections::BTreeMap<String, serde_json::Value>,
+    >(&tc.function.arguments)
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(k, v)| {
+        let s = match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        (k, s)
+    })
+    .collect();
     let decision = policy.evaluate(&tc.function.name, &args);
     match decision {
         crate::tool_policy::PolicyDecision::Deny(reason) => {
