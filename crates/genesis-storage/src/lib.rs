@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 static SQLITE_VEC_REGISTERED: OnceLock<()> = OnceLock::new();
 
@@ -777,7 +777,20 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 kind TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                keywords_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                importance REAL NOT NULL DEFAULT 0.5,
+                accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                access_count INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS memory_links (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_id, target_id),
+                FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS schedules (
                 id TEXT PRIMARY KEY,
@@ -949,6 +962,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v8(&connection, database_path)?;
     migrate_to_v9(&connection, database_path)?;
     migrate_to_v10(&connection, database_path)?;
+    migrate_to_v11(&connection, database_path)?;
 
     connection
         .execute(
@@ -1127,6 +1141,58 @@ fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), St
 /// Migrate v9 → v10: create and backfill the sqlite-vec memory index when dimensions are uniform.
 fn migrate_to_v10(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
     rebuild_memory_vec_index(connection, database_path)
+}
+
+/// Migrate v10 → v11: add structured memory metadata columns and note-link edges.
+fn migrate_to_v11(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    if !column_exists(connection, "memories", "keywords_json") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN keywords_json TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+    if !column_exists(connection, "memories", "tags_json") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+    if !column_exists(connection, "memories", "importance") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;",
+        )?;
+    }
+    if !column_exists(connection, "memories", "accessed_at") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;",
+        )?;
+    }
+    if !column_exists(connection, "memories", "access_count") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS memory_links (
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_id, target_id),
+            FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
+        );",
+    )
 }
 
 pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {
@@ -3360,6 +3426,18 @@ pub struct ScoredMemory {
     pub source: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewMemoryNote {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub kind: String,
+    pub content: String,
+    pub keywords: Vec<String>,
+    pub tags: Vec<String>,
+    pub linked_ids: Vec<String>,
+    pub importance: f32,
+}
+
 /// Memory persistence layer.
 pub struct MemoryStore {
     database_path: PathBuf,
@@ -3530,14 +3608,8 @@ impl MemoryStore {
         Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
     }
 
-    /// Create and index a new memory entry.
-    pub fn create(
-        &self,
-        session_id: Option<&str>,
-        kind: &str,
-        content: &str,
-    ) -> Result<StoredMemory, StorageError> {
-        let connection = open(&self.database_path)?;
+    pub fn create_note(&self, note: NewMemoryNote) -> Result<StoredMemory, StorageError> {
+        let mut connection = open(&self.database_path)?;
         exec_migration(
             &connection,
             &self.database_path,
@@ -3546,40 +3618,125 @@ impl MemoryStore {
             );",
         )?;
 
-        let id = format!("memory-{}", memory_unique_suffix());
-        connection
-            .execute(
-                "INSERT INTO memories (id, session_id, kind, content, created_at)
-                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-                params![id, session_id, kind, content],
-            )
+        let tx = connection
+            .transaction()
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
 
-        let memory_row_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
-                params![memory_row_id, kind, content],
+        let note_id = note.id.clone();
+        let session_id = note.session_id.clone();
+        let kind = note.kind.clone();
+        let content = note.content.clone();
+        let linked_ids = note.linked_ids.clone();
+        let keywords_json =
+            serde_json::to_string(&note.keywords).expect("memory note keywords should serialize");
+        let tags_json =
+            serde_json::to_string(&note.tags).expect("memory note tags should serialize");
+
+        tx.execute(
+            "INSERT INTO memories (
+                id, session_id, kind, content, created_at, keywords_json, tags_json,
+                importance, accessed_at, access_count
+             ) VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, ?5, ?6, ?7, CURRENT_TIMESTAMP, 0)",
+            params![
+                &note_id,
+                session_id,
+                &kind,
+                &content,
+                keywords_json,
+                tags_json,
+                note.importance,
+            ],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        let memory_row_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
+            params![memory_row_id, &kind, &content],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        for linked_id in linked_ids
+            .iter()
+            .filter(|linked_id| linked_id.as_str() != note_id.as_str())
+        {
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_links (source_id, target_id) VALUES (?1, ?2)",
+                params![&note_id, linked_id],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
-
-        connection
-            .query_row(
-                "SELECT id, session_id, kind, content, created_at
-                 FROM memories WHERE id = ?1",
-                params![id],
-                Self::row_to_memory,
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_links (source_id, target_id) VALUES (?1, ?2)",
+                params![linked_id, &note_id],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })
+            })?;
+        }
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+
+        self.get(&note_id)?.ok_or_else(|| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source: rusqlite::Error::QueryReturnedNoRows,
+        })
+    }
+
+    /// Create and index a new memory entry.
+    pub fn create(
+        &self,
+        session_id: Option<&str>,
+        kind: &str,
+        content: &str,
+    ) -> Result<StoredMemory, StorageError> {
+        self.create_note(NewMemoryNote {
+            id: format!("memory-{}", memory_unique_suffix()),
+            session_id: session_id.map(str::to_owned),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            keywords: Vec::new(),
+            tags: Vec::new(),
+            linked_ids: Vec::new(),
+            importance: 0.5,
+        })
+    }
+
+    pub fn links_for(&self, id: &str) -> Result<Vec<String>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT target_id
+                 FROM memory_links
+                 WHERE source_id = ?1
+                 ORDER BY target_id ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(params![id], |row| row.get::<_, String>(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        collect_rows(rows, &self.database_path)
     }
 
     /// Delete a memory by ID.
@@ -7167,7 +7324,7 @@ mod tests {
 
 #[cfg(test)]
 mod memory_store_tests {
-    use super::{bootstrap, EmbeddingStore, MemoryStore, SessionStore};
+    use super::{bootstrap, EmbeddingStore, MemoryStore, NewMemoryNote, SessionStore};
     use tempfile::tempdir;
 
     fn setup(dir: &std::path::Path) -> std::path::PathBuf {
@@ -7215,6 +7372,47 @@ mod memory_store_tests {
 
         let memory = store.get("nonexistent").unwrap();
         assert!(memory.is_none());
+    }
+
+    #[test]
+    fn create_note_persists_bidirectional_links() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).unwrap();
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "note-b".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust powers Genesis".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.6,
+            })
+            .unwrap();
+
+        store
+            .create_note(NewMemoryNote {
+                id: "note-a".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis uses Rust".to_owned(),
+                keywords: vec!["genesis".to_owned(), "rust".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["note-b".to_owned()],
+                importance: 0.8,
+            })
+            .unwrap();
+
+        let a_links = store.links_for("note-a").unwrap();
+        let b_links = store.links_for("note-b").unwrap();
+        assert_eq!(a_links, vec!["note-b".to_owned()]);
+        assert_eq!(b_links, vec!["note-a".to_owned()]);
     }
 
     fn seed_hybrid_search_fixture(dir: &std::path::Path) -> std::path::PathBuf {

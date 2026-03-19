@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{params, Connection};
+use genesis_storage::{MemoryStore, NewMemoryNote};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -27,33 +26,22 @@ impl ToolHandler for MemoryStoreTool {
             })?;
 
         let database_path = context.db_path();
-        let connection = open_database(&call.name, &database_path)?;
-        ensure_memory_search_index(&call.name, &connection)?;
-
-        connection
-            .execute(
-                "INSERT INTO memories (id, session_id, kind, content, created_at)
-                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-                params![memory_id(context, key), context.session_id, key, value],
-            )
+        let store = MemoryStore::new(&database_path);
+        store
+            .create_note(NewMemoryNote {
+                id: memory_id(context, key),
+                session_id: Some(context.session_id.clone()),
+                kind: key.clone(),
+                content: value.clone(),
+                keywords: extract_keywords(key, value),
+                tags: Vec::new(),
+                linked_ids: Vec::new(),
+                importance: 0.5,
+            })
             .map_err(|error| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!(
-                    "failed to insert memory into `{}`: {error}",
-                    database_path.display()
-                ),
-            })?;
-
-        let memory_row_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
-                params![memory_row_id, key, value],
-            )
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!(
-                    "failed to index memory in `{}`: {error}",
+                    "failed to store memory into `{}`: {error}",
                     database_path.display()
                 ),
             })?;
@@ -96,49 +84,21 @@ impl ToolHandler for MemoryRecallTool {
             .unwrap_or(DEFAULT_RECALL_LIMIT);
 
         let database_path = context.db_path();
-        let connection = open_database(&call.name, &database_path)?;
-        ensure_memory_search_index(&call.name, &connection)?;
-
-        let mut statement = connection
-            .prepare(
-                "SELECT m.kind, m.content, m.created_at
-                 FROM memory_search ms
-                 JOIN memories m ON m.rowid = ms.memory_row_id
-                 WHERE memory_search MATCH ?1
-                 ORDER BY rank
-                 LIMIT ?2",
-            )
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to prepare recall query: {error}"),
-            })?;
-
-        let rows = statement
-            .query_map(params![query, limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to search memories: {error}"),
-            })?;
-
-        let memories =
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|error| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: format!("failed to collect memory search results: {error}"),
-                })?;
+        let store = MemoryStore::new(&database_path);
+        let memories = store.search(query, limit).map_err(|error| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!(
+                "failed to search memories in `{}`: {error}",
+                database_path.display()
+            ),
+        })?;
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
         } else {
             memories
                 .into_iter()
-                .map(|(kind, content, created_at)| format!("[{kind}] {content} ({created_at})"))
+                .map(|memory| format!("[{}] {} ({})", memory.kind, memory.content, memory.created_at))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -154,30 +114,23 @@ impl ToolHandler for MemoryRecallTool {
     }
 }
 
-fn open_database(tool_name: &str, database_path: &Path) -> Result<Connection, ToolError> {
-    Connection::open(database_path).map_err(|error| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: format!("failed to open `{}`: {error}", database_path.display()),
-    })
-}
-
-fn ensure_memory_search_index(tool_name: &str, connection: &Connection) -> Result<(), ToolError> {
-    connection
-        .execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
-                memory_row_id UNINDEXED,
-                kind,
-                content
-            );",
-        )
-        .map_err(|error| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: format!("failed to ensure memory search index: {error}"),
-        })
-}
-
 fn memory_id(context: &ToolContext, key: &str) -> String {
     format!("{}:{}:{}", context.session_id, key, unique_suffix())
+}
+
+fn extract_keywords(key: &str, value: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    key.split(|c: char| !c.is_ascii_alphanumeric())
+        .chain(value.split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            if token.is_empty() || !seen.insert(token.clone()) {
+                None
+            } else {
+                Some(token)
+            }
+        })
+        .collect()
 }
 
 fn unique_suffix() -> u128 {
@@ -220,6 +173,7 @@ mod tests {
         let dir = tempdir().expect("tempdir should exist");
         setup_db(dir.path());
         let tool = MemoryStoreTool;
+        let db_path = dir.path().join("genesis.db");
 
         let output = tool
             .run(
@@ -235,6 +189,31 @@ mod tests {
             .expect("memory should store");
 
         assert!(output.content.contains("favorite_language"));
+
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let row = conn
+            .query_row(
+                "SELECT kind, content, keywords_json, tags_json, importance
+                 FROM memories
+                 WHERE kind = 'favorite_language'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ))
+                },
+            )
+            .expect("structured memory should be stored");
+
+        assert_eq!(row.0, "favorite_language");
+        assert_eq!(row.1, "rust");
+        assert!(row.2.contains("favorite"));
+        assert_eq!(row.3, "[]");
+        assert_eq!(row.4, 0.5);
     }
 
     #[test]
