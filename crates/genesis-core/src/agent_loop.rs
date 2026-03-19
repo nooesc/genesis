@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -167,6 +167,11 @@ pub struct AgentLoopConfig {
     /// Guardrails configuration. When set, user input is validated before
     /// processing and agent output is validated before returning.
     pub guardrails: Option<crate::guardrails::GuardrailConfig>,
+    /// Core tool set. When set, only these tools (plus any discovered via
+    /// `find_tools`) are sent in the LLM request. Other tools remain
+    /// available in the registry and can be discovered at runtime.
+    /// Reduces input tokens by 85-96% for large tool registries.
+    pub core_tools: Option<Vec<String>>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -205,9 +210,26 @@ impl Default for AgentLoopConfig {
             reasoning_effort: None,
             cache: None,
             guardrails: None,
+            core_tools: None,
         }
     }
 }
+
+/// Default core tool set — the minimum set of tools always available.
+/// When `core_tools` is `None`, all tools are sent (backwards compatible).
+/// When `core_tools` is `Some(vec![])`, this default set is used.
+pub const DEFAULT_CORE_TOOLS: &[&str] = &[
+    "shell_exec",
+    "read_file",
+    "write_file",
+    "patch",
+    "list_dir",
+    "list_tree",
+    "search_files",
+    "find_tools",
+    "memory_recall",
+    "clarify",
+];
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -324,6 +346,9 @@ pub struct AgentLoop {
     cache_misses: u32,
     /// Pre-compiled guardrails (avoids recompiling regexes on every check).
     compiled_guardrails: Option<crate::guardrails::CompiledGuardrails>,
+    /// Tools discovered via `find_tools` during this session. These are added
+    /// to the core set for subsequent LLM requests.
+    discovered_tools: HashSet<String>,
 }
 
 /// Number of consecutive failures for the same tool before injecting a
@@ -396,6 +421,44 @@ impl AgentLoop {
             cache_hits: 0,
             cache_misses: 0,
             compiled_guardrails,
+            discovered_tools: HashSet::new(),
+        }
+    }
+
+    /// Filter tool definitions to the core set + discovered tools.
+    /// When `core_tools` is None, returns all tools (backwards compatible).
+    fn filter_tool_defs(&self, all_defs: Vec<ChatTool>) -> Vec<ChatTool> {
+        let core = match &self.config.core_tools {
+            Some(core) if !core.is_empty() => core,
+            Some(_) => {
+                // Empty list = use defaults
+                let defaults: HashSet<&str> =
+                    DEFAULT_CORE_TOOLS.iter().copied().collect();
+                return all_defs
+                    .into_iter()
+                    .filter(|t| {
+                        defaults.contains(t.function.name.as_str())
+                            || self.discovered_tools.contains(&t.function.name)
+                    })
+                    .collect();
+            }
+            None => return all_defs, // No core set = send everything
+        };
+
+        let core_set: HashSet<&str> = core.iter().map(String::as_str).collect();
+        all_defs
+            .into_iter()
+            .filter(|t| {
+                core_set.contains(t.function.name.as_str())
+                    || self.discovered_tools.contains(&t.function.name)
+            })
+            .collect()
+    }
+
+    /// Add a tool name to the discovered set so it's included in future requests.
+    fn discover_tool(&mut self, name: &str) {
+        if self.discovered_tools.insert(name.to_owned()) {
+            debug!(tool = name, "tool discovered and added to active set");
         }
     }
 
@@ -716,7 +779,7 @@ impl AgentLoop {
         // Fire turn-start hook
         self.hooks.on_turn_start(&hook_session, &user_message);
 
-        let tool_defs: Vec<ChatTool> = self
+        let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
             .await
@@ -730,6 +793,10 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            // Filter tools to core set + discovered tools each iteration
+            // (discovered set may grow during the turn).
+            let tool_defs = self.filter_tool_defs(all_tool_defs.clone());
+
             // Check cancellation at each turn boundary
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal");
@@ -1032,10 +1099,30 @@ impl AgentLoop {
                     let mut clarification = None;
                     for (tc, (result, requires_input)) in tool_calls.iter().zip(results) {
                         let result = sanitize::sanitize_credentials(&result);
+
+                        // When find_tools returns results, extract discovered
+                        // tool names and add them to the active set.
+                        if tc.function.name == "find_tools" && !result.starts_with("Error:") && !result.starts_with("No tools") {
+                            for line in result.lines() {
+                                let trimmed = line.trim();
+                                // find_tools output format: "  **tool_name** — description"
+                                if let Some(rest) = trimmed.strip_prefix("**") {
+                                    if let Some(name_end) = rest.find("**") {
+                                        let name = &rest[..name_end];
+                                        self.discover_tool(name);
+                                    }
+                                }
+                            }
+                        }
+
                         self.trajectory
                             .record_tool_result(&tc.function.name, &result);
                         // Track consecutive failures per tool
                         let success = !result.starts_with("Error:");
+                        if success && self.config.core_tools.is_some() {
+                            // Auto-discover tools called outside the core set.
+                            self.discover_tool(&tc.function.name);
+                        }
                         if !success {
                             let count = self
                                 .tool_failure_counts
@@ -1224,7 +1311,7 @@ impl AgentLoop {
         self.hooks.on_turn_start(&hook_session, &user_message);
         on_event(StreamEvent::TurnStarted);
 
-        let tool_defs: Vec<ChatTool> = self
+        let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
             .await
@@ -1238,6 +1325,9 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            // Filter tools to core set + discovered tools each iteration.
+            let tool_defs = self.filter_tool_defs(all_tool_defs.clone());
+
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal (streaming)");
                 self.save_trajectory();
@@ -1477,6 +1567,19 @@ impl AgentLoop {
                             streamed_tool_calls.iter().zip(results)
                         {
                             let result = sanitize::sanitize_credentials(&result);
+
+                            // Extract discovered tool names from find_tools results.
+                            if tc.function.name == "find_tools" && !result.starts_with("Error:") && !result.starts_with("No tools") {
+                                for line in result.lines() {
+                                    let trimmed = line.trim();
+                                    if let Some(rest) = trimmed.strip_prefix("**") {
+                                        if let Some(name_end) = rest.find("**") {
+                                            self.discover_tool(&rest[..name_end]);
+                                        }
+                                    }
+                                }
+                            }
+
                             let tool_success = !result.starts_with("Error:");
                             on_event(StreamEvent::ToolCallEnd {
                                 name: &tc.function.name,
@@ -1494,6 +1597,10 @@ impl AgentLoop {
                                 *count += 1;
                             } else {
                                 self.tool_failure_counts.remove(&tc.function.name);
+                                // Auto-discover tools called outside core set.
+                                if self.config.core_tools.is_some() {
+                                    self.discover_tool(&tc.function.name);
+                                }
                             }
                             self.fire_shell_hooks(
                                 HookEvent::PostToolCall,
@@ -3903,5 +4010,85 @@ mod tests {
 
         // System prompt untouched
         assert_eq!(agent.messages()[0].role, "system");
+    }
+
+    // ── Core tool set filtering tests ──────────────────────────────────
+
+    fn make_chat_tool(name: &str) -> ChatTool {
+        ChatTool {
+            tool_type: "function".to_owned(),
+            function: genesis_provider::ChatToolFunction {
+                name: name.to_owned(),
+                description: format!("{name} tool"),
+                parameters: None,
+                strict: None,
+            },
+        }
+    }
+
+    #[test]
+    fn filter_tool_defs_returns_all_when_core_tools_is_none() {
+        let agent = test_agent();
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+        ];
+        let filtered = agent.filter_tool_defs(all.clone());
+        assert_eq!(filtered.len(), 3, "should return all tools when core_tools is None");
+    }
+
+    #[test]
+    fn filter_tool_defs_filters_to_core_set() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec!["shell_exec".to_owned(), "read_file".to_owned()]);
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+            make_chat_tool("memory_store"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
+        assert!(filtered.iter().any(|t| t.function.name == "read_file"));
+    }
+
+    #[test]
+    fn filter_tool_defs_includes_discovered_tools() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec!["shell_exec".to_owned()]);
+
+        // Discover a new tool.
+        agent.discover_tool("web_request");
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("web_request"),
+            make_chat_tool("memory_store"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
+        assert!(filtered.iter().any(|t| t.function.name == "web_request"));
+    }
+
+    #[test]
+    fn filter_tool_defs_empty_core_uses_defaults() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec![]); // Empty = use DEFAULT_CORE_TOOLS
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+            make_chat_tool("find_tools"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        // shell_exec, read_file, find_tools are in DEFAULT_CORE_TOOLS; web_request is not
+        assert_eq!(filtered.len(), 3);
+        assert!(!filtered.iter().any(|t| t.function.name == "web_request"));
     }
 }

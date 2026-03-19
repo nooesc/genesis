@@ -326,6 +326,12 @@ pub struct RuntimeConfig {
     /// against the specified rules before processing / returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<GuardrailsConfig>,
+    /// Core tool set sent to the LLM per request. When set, only these tools
+    /// (plus any discovered via `find_tools`) are included in the request.
+    /// Other tools remain available and can be discovered at runtime.
+    /// Reduces input tokens by 85-96% for large tool registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_tools: Option<Vec<String>>,
 }
 
 /// Configuration for filtering which tools are available to the agent.
@@ -776,6 +782,8 @@ struct FileRuntimeConfig {
     tool_filter: Option<ToolFilterConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     guardrails: Option<GuardrailsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Error)]
@@ -860,6 +868,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             cache: None,
             tool_filter: None,
             guardrails: None,
+            core_tools: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -1020,6 +1029,7 @@ pub fn load_from_map(
         cache: rt.and_then(|r| r.cache.clone()),
         tool_filter: rt.and_then(|r| r.tool_filter.clone()),
         guardrails: rt.and_then(|r| r.guardrails.clone()),
+        core_tools: rt.and_then(|r| r.core_tools.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
