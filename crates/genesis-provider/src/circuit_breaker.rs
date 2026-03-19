@@ -86,7 +86,10 @@ impl CircuitBreaker {
     /// Returns `true` if the request can proceed, `false` if it should
     /// be rejected (circuit is Open and cooldown hasn't expired).
     pub fn allow_request(&self) -> bool {
-        let mut inner = self.inner.lock().expect("circuit breaker state lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("circuit breaker state lock poisoned");
         match inner.state {
             CircuitState::Closed => true,
             CircuitState::HalfOpen => {
@@ -119,7 +122,10 @@ impl CircuitBreaker {
 
     /// Record a successful request. Resets failure count and closes circuit.
     pub fn record_success(&self) {
-        let mut inner = self.inner.lock().expect("circuit breaker state lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("circuit breaker state lock poisoned");
         if inner.state == CircuitState::HalfOpen {
             tracing::info!("circuit breaker closing after successful probe");
         }
@@ -130,7 +136,10 @@ impl CircuitBreaker {
 
     /// Record a failed request. Increments failure count and may open circuit.
     pub fn record_failure(&self) {
-        let mut inner = self.inner.lock().expect("circuit breaker state lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("circuit breaker state lock poisoned");
         inner.consecutive_failures += 1;
 
         match inner.state {
@@ -162,17 +171,26 @@ impl CircuitBreaker {
 
     /// Current state of the circuit breaker.
     pub fn state(&self) -> CircuitState {
-        self.inner.lock().expect("circuit breaker state lock poisoned").state
+        self.inner
+            .lock()
+            .expect("circuit breaker state lock poisoned")
+            .state
     }
 
     /// Number of consecutive failures since the last success.
     pub fn consecutive_failures(&self) -> u32 {
-        self.inner.lock().expect("circuit breaker state lock poisoned").consecutive_failures
+        self.inner
+            .lock()
+            .expect("circuit breaker state lock poisoned")
+            .consecutive_failures
     }
 
     /// Total number of times the circuit has opened (lifetime counter).
     pub fn open_count(&self) -> u64 {
-        self.inner.lock().expect("circuit breaker state lock poisoned").open_count
+        self.inner
+            .lock()
+            .expect("circuit breaker state lock poisoned")
+            .open_count
     }
 }
 

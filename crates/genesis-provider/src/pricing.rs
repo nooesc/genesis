@@ -457,8 +457,8 @@ mod tests {
             ("grok-3", 3.0, 15.0),
         ];
         for &(model, expected_input, expected_output) in cases {
-            let pricing = lookup_pricing(model)
-                .unwrap_or_else(|| panic!("expected pricing for {model}"));
+            let pricing =
+                lookup_pricing(model).unwrap_or_else(|| panic!("expected pricing for {model}"));
             assert_eq!(
                 pricing.input_per_million, expected_input,
                 "input pricing mismatch for {model}"
@@ -476,12 +476,12 @@ mod tests {
         // match the longest matching prefix in the pricing table.
         let cases: &[(&str, f64)] = &[
             ("gpt-4.1-2025-04-14", 2.0),         // matches "gpt-4.1"
-            ("gpt-4o-2025-03-01", 2.50),          // matches "gpt-4o"
-            ("claude-opus-4-20260301", 15.0),      // matches "claude-opus-4"
-            ("gemini-2.5-pro-preview", 1.25),      // matches "gemini-2.5-pro"
-            ("deepseek-chat-0324", 0.27),          // matches "deepseek-chat"
-            ("grok-3-mini-fast", 0.30),            // matches "grok-3-mini"
-            ("llama-4-maverick-instruct", 0.20),   // matches "llama-4-maverick"
+            ("gpt-4o-2025-03-01", 2.50),         // matches "gpt-4o"
+            ("claude-opus-4-20260301", 15.0),    // matches "claude-opus-4"
+            ("gemini-2.5-pro-preview", 1.25),    // matches "gemini-2.5-pro"
+            ("deepseek-chat-0324", 0.27),        // matches "deepseek-chat"
+            ("grok-3-mini-fast", 0.30),          // matches "grok-3-mini"
+            ("llama-4-maverick-instruct", 0.20), // matches "llama-4-maverick"
         ];
         for &(model, expected_input) in cases {
             let pricing = lookup_pricing(model)
