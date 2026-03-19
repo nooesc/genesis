@@ -160,6 +160,25 @@
 
 /* === Visual Polish === */
 
+/* Skeleton shimmer — scanning light effect instead of plain pulse */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.03) 40%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.03) 60%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
 /* Page title gradient — subtle fade from foreground to muted */
 .title-gradient {
   background: linear-gradient(90deg, var(--foreground) 0%, var(--muted-foreground) 100%);
@@ -329,7 +348,8 @@ body::before {
   .page-enter,
   .dock-tooltip,
   .connector-flow,
-  .node-pulse-primary {
+  .node-pulse-primary,
+  .skeleton-shimmer {
     animation: none;
   }
 
