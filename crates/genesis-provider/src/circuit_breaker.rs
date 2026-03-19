@@ -422,10 +422,13 @@ mod tests {
 
     #[test]
     fn half_open_failure_resets_cooldown() {
-        let cb = CircuitBreaker::new(1, Duration::from_millis(10));
+        // Use a longer cooldown (500ms) so the immediate check after
+        // record_failure() can't race past the cooldown window even on
+        // a slow CI runner.
+        let cb = CircuitBreaker::new(1, Duration::from_millis(500));
         cb.record_failure(); // → Open (open_count = 1)
 
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(600));
         cb.allow_request(); // → HalfOpen
         cb.record_failure(); // → Open again (open_count = 2), fresh cooldown
 
@@ -434,7 +437,7 @@ mod tests {
         assert_eq!(cb.state(), CircuitState::Open);
 
         // Wait for the new cooldown.
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(600));
         assert!(cb.allow_request()); // → HalfOpen again
         assert_eq!(cb.state(), CircuitState::HalfOpen);
     }
