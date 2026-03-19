@@ -335,6 +335,18 @@ impl<'a> SessionExecutionService<'a> {
             self.loaded.config.plugins.enabled.to_string(),
         );
         config_values.insert(
+            "plugin_hook_timeout_ms".to_owned(),
+            self.loaded.config.plugins.hook_timeout_ms.to_string(),
+        );
+        config_values.insert(
+            "plugin_tool_timeout_ms".to_owned(),
+            self.loaded.config.plugins.tool_timeout_ms.to_string(),
+        );
+        config_values.insert(
+            "plugin_auto_disable_after".to_owned(),
+            self.loaded.config.plugins.auto_disable_after.to_string(),
+        );
+        config_values.insert(
             "data_dir".to_owned(),
             self.loaded.paths.data_dir.to_string_lossy().into_owned(),
         );
@@ -1206,6 +1218,18 @@ impl ExecutionSubagentSpawner {
         config_values.insert(
             "plugins_enabled".to_owned(),
             self.loaded.config.plugins.enabled.to_string(),
+        );
+        config_values.insert(
+            "plugin_hook_timeout_ms".to_owned(),
+            self.loaded.config.plugins.hook_timeout_ms.to_string(),
+        );
+        config_values.insert(
+            "plugin_tool_timeout_ms".to_owned(),
+            self.loaded.config.plugins.tool_timeout_ms.to_string(),
+        );
+        config_values.insert(
+            "plugin_auto_disable_after".to_owned(),
+            self.loaded.config.plugins.auto_disable_after.to_string(),
         );
         config_values.insert(
             "data_dir".to_owned(),

@@ -121,6 +121,26 @@ mod tests {
     }
 
     #[test]
+    fn runtime_sandboxes_unsafe_standard_libraries() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let io_missing = runtime
+            .eval_string("return io == nil")
+            .expect("io check should evaluate");
+        let debug_missing = runtime
+            .eval_string("return debug == nil")
+            .expect("debug check should evaluate");
+        let os_execute_missing = runtime
+            .eval_string("return os == nil or os.execute == nil")
+            .expect("os.execute check should evaluate");
+
+        assert_eq!(io_missing, json!(true));
+        assert_eq!(debug_missing, json!(true));
+        assert_eq!(os_execute_missing, json!(true));
+    }
+
+    #[test]
     fn runtime_registers_and_runs_pre_turn_hook() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(
@@ -224,6 +244,79 @@ end)
             runtime.logs().iter().any(|entry| entry.contains("boom")),
             "hook failure should be recorded in runtime logs: {:?}",
             runtime.logs()
+        );
+    }
+
+    #[test]
+    fn runtime_times_out_long_running_hooks() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("timeout.lua"),
+            r#"
+genesis.on("PreTurn", function(_)
+    while true do end
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(
+            dir.path(),
+            BTreeMap::from([("plugin_hook_timeout_ms".to_owned(), "5".to_owned())]),
+        )
+        .expect("runtime should build");
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("hook timeout should not crash runtime");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+        );
+        assert!(
+            runtime.logs().iter().any(|entry| entry.contains("timed out")),
+            "hook timeout should be logged: {:?}",
+            runtime.logs()
+        );
+    }
+
+    #[test]
+    fn runtime_auto_disables_plugin_after_repeated_hook_failures() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("broken.lua"),
+            r#"
+genesis.on("PreTurn", function(_)
+    error("boom")
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(
+            dir.path(),
+            BTreeMap::from([("plugin_auto_disable_after".to_owned(), "3".to_owned())]),
+        )
+        .expect("runtime should build");
+
+        for _ in 0..4 {
+            let outcome = runtime
+                .run_pre_turn("hello")
+                .expect("hook failures should not crash runtime");
+            assert_eq!(
+                outcome,
+                crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+            );
+        }
+
+        let logs = runtime.logs();
+        let boom_count = logs.iter().filter(|entry| entry.contains("boom")).count();
+        assert_eq!(boom_count, 3, "plugin should stop running after disable: {logs:?}");
+        assert!(
+            logs.iter()
+                .any(|entry| entry.contains("disabled for this session")),
+            "auto-disable should be logged: {logs:?}"
         );
     }
 
@@ -1029,8 +1122,17 @@ version = "0.1.0"
 
     fn test_runtime(
         plugin_dir: &std::path::Path,
-        config_values: BTreeMap<String, String>,
+        mut config_values: BTreeMap<String, String>,
     ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
+        config_values
+            .entry("plugin_hook_timeout_ms".to_owned())
+            .or_insert_with(|| "5000".to_owned());
+        config_values
+            .entry("plugin_tool_timeout_ms".to_owned())
+            .or_insert_with(|| "120000".to_owned());
+        config_values
+            .entry("plugin_auto_disable_after".to_owned())
+            .or_insert_with(|| "3".to_owned());
         crate::LuaRuntime::builder()
             .with_config(LuaRuntimeConfig {
                 plugin_dir: plugin_dir.to_path_buf(),

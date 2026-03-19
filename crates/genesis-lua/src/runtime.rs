@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use mlua::{Lua, LuaSerdeExt, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, Value, VmState};
 use thiserror::Error;
 
 use crate::{
@@ -17,6 +18,11 @@ use crate::{
     personality::{LuaPersonalityEntry, LuaPersonalityRegistry, LuaRegisteredPersonality},
     tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
+
+const DEFAULT_HOOK_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_AUTO_DISABLE_AFTER: u32 = 3;
+const DEFAULT_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LuaSessionContext {
@@ -46,6 +52,13 @@ pub struct LuaRuntime {
     personality_registry: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    execution_control: Arc<Mutex<PluginExecutionControl>>,
+    disabled_plugins: Arc<Mutex<HashSet<String>>>,
+    plugin_failures: Arc<Mutex<HashMap<String, u32>>>,
+    hook_timeout: Duration,
+    tool_timeout: Duration,
+    auto_disable_after: u32,
+    plugin_verbose: bool,
 }
 
 impl std::fmt::Debug for LuaRuntime {
@@ -61,6 +74,20 @@ impl std::fmt::Debug for LuaRuntime {
 #[derive(Debug, Clone, Default)]
 pub struct LuaRuntimeBuilder {
     config: LuaRuntimeConfig,
+}
+
+#[derive(Debug, Default)]
+struct PluginExecutionControl {
+    active: Option<ActivePluginExecution>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivePluginExecution {
+    plugin_name: String,
+    operation: String,
+    started_at: Instant,
+    deadline: Instant,
+    timeout_ms: u64,
 }
 
 #[derive(Debug, Error)]
@@ -120,6 +147,8 @@ pub enum LuaRuntimeError {
     InvalidLuaPersonalityDefinition { plugin_name: String, reason: String },
     #[error("lua personality registration is only available during plugin load")]
     PersonalityRegistrationUnavailable,
+    #[error("plugin `{plugin_name}` is disabled for this session")]
+    PluginDisabled { plugin_name: String },
     #[error("host tool bridge is not configured")]
     HostToolBridgeUnavailable,
     #[error("host tool bridge is unavailable outside plugin callbacks")]
@@ -157,9 +186,80 @@ impl LuaRuntimeBuilder {
     }
 }
 
+fn config_u64(values: &BTreeMap<String, String>, key: &str, default: u64) -> u64 {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn config_u32(values: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn config_usize(values: &BTreeMap<String, String>, key: &str, default: usize) -> usize {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn config_bool(values: &BTreeMap<String, String>, key: &str, default: bool) -> bool {
+    values
+        .get(key)
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(default)
+}
+
+fn strip_unsafe_globals(lua: &Lua) -> Result<(), LuaRuntimeError> {
+    let globals = lua.globals();
+    globals.set("io", Value::Nil)?;
+    globals.set("debug", Value::Nil)?;
+    if let Ok(os) = globals.get::<Table>("os") {
+        os.set("execute", Value::Nil)?;
+    }
+    Ok(())
+}
+
 impl LuaRuntime {
     fn new(config: LuaRuntimeConfig) -> Result<Self, LuaRuntimeError> {
         let lua = Lua::new();
+        let override_timeout_ms = std::env::var("GENESIS_PLUGIN_TIMEOUT")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let hook_timeout = Duration::from_millis(
+            override_timeout_ms.unwrap_or_else(|| {
+                config_u64(
+                    &config.config_values,
+                    "plugin_hook_timeout_ms",
+                    DEFAULT_HOOK_TIMEOUT_MS,
+                )
+            }),
+        );
+        let tool_timeout = Duration::from_millis(
+            override_timeout_ms.unwrap_or_else(|| {
+                config_u64(
+                    &config.config_values,
+                    "plugin_tool_timeout_ms",
+                    DEFAULT_TOOL_TIMEOUT_MS,
+                )
+            }),
+        );
+        let auto_disable_after = config_u32(
+            &config.config_values,
+            "plugin_auto_disable_after",
+            DEFAULT_AUTO_DISABLE_AFTER,
+        );
+        let plugin_verbose = config_bool(&config.config_values, "plugin_verbose", false);
+        let memory_limit_bytes = config_usize(
+            &config.config_values,
+            "plugin_memory_limit_bytes",
+            DEFAULT_MEMORY_LIMIT_BYTES,
+        );
+        lua.set_memory_limit(memory_limit_bytes)?;
         let logs = Arc::new(Mutex::new(Vec::new()));
         let session_state = Arc::new(Mutex::new(config.session.clone()));
         let hook_registry = Arc::new(Mutex::new(HookRegistry::default()));
@@ -167,6 +267,27 @@ impl LuaRuntime {
         let personality_registry = Arc::new(Mutex::new(LuaPersonalityRegistry::default()));
         let host_tool_executor = Arc::new(Mutex::new(None));
         let active_plugin = Arc::new(Mutex::new(Vec::new()));
+        let execution_control = Arc::new(Mutex::new(PluginExecutionControl::default()));
+        let disabled_plugins = Arc::new(Mutex::new(HashSet::new()));
+        let plugin_failures = Arc::new(Mutex::new(HashMap::new()));
+        let interrupt_control = Arc::clone(&execution_control);
+        lua.set_interrupt(move |_| {
+            let active = interrupt_control
+                .lock()
+                .expect("plugin execution control mutex should not be poisoned")
+                .active
+                .clone();
+            let Some(active) = active else {
+                return Ok(VmState::Continue);
+            };
+            if Instant::now() < active.deadline {
+                return Ok(VmState::Continue);
+            }
+            Err(mlua::Error::runtime(format!(
+                "plugin `{}` {} timed out after {}ms",
+                active.plugin_name, active.operation, active.timeout_ms
+            )))
+        });
         let genesis = install_genesis_api(
             &lua,
             &config,
@@ -180,6 +301,8 @@ impl LuaRuntime {
             None,
         )?;
         lua.globals().set("genesis", genesis)?;
+        strip_unsafe_globals(&lua)?;
+        lua.sandbox(true)?;
 
         let mut runtime = Self {
             lua,
@@ -192,6 +315,13 @@ impl LuaRuntime {
             personality_registry,
             host_tool_executor,
             active_plugin,
+            execution_control,
+            disabled_plugins,
+            plugin_failures,
+            hook_timeout,
+            tool_timeout,
+            auto_disable_after,
+            plugin_verbose,
         };
         runtime.load_plugins(&config)?;
         Ok(runtime)
@@ -231,6 +361,7 @@ impl LuaRuntime {
                 }
             };
             let (plugin_env, plugin_context) = self.plugin_environment(config, &plugin)?;
+            let _guard = self.begin_plugin_execution(&plugin.name, "load", self.hook_timeout);
             let load_result = self
                 .lua
                 .load(&source)
@@ -277,17 +408,25 @@ impl LuaRuntime {
     }
 
     pub fn registered_tools(&self) -> Vec<LuaRegisteredTool> {
+        let disabled = self.disabled_plugin_names();
         self.tool_registry
             .lock()
             .expect("tool registry mutex should not be poisoned")
             .registered_tools()
+            .into_iter()
+            .filter(|tool| !disabled.contains(&tool.plugin_name))
+            .collect()
     }
 
     pub fn registered_personalities(&self) -> Vec<LuaRegisteredPersonality> {
+        let disabled = self.disabled_plugin_names();
         self.personality_registry
             .lock()
             .expect("personality registry mutex should not be poisoned")
             .registered_personalities()
+            .into_iter()
+            .filter(|personality| !disabled.contains(&personality.plugin_name))
+            .collect()
     }
 
     pub fn personality_prompt(&self, name: &str) -> Option<String> {
@@ -296,6 +435,9 @@ impl LuaRuntime {
             .lock()
             .expect("personality registry mutex should not be poisoned")
             .personality_entry(name)?;
+        if self.plugin_disabled(&entry.metadata.plugin_name) {
+            return None;
+        }
 
         self.resolve_personality_prompt(entry)
     }
@@ -317,13 +459,26 @@ impl LuaRuntime {
                 .ok_or_else(|| LuaRuntimeError::UnknownLuaTool {
                     name: name.to_owned(),
                 })?;
+            if self.plugin_disabled(&tool.plugin_name) {
+                return Err(LuaRuntimeError::PluginDisabled {
+                    plugin_name: tool.plugin_name,
+                });
+            }
             PluginContext::for_execution(tool.plugin_name, tool.permissions)
         };
-        let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
-        self.tool_registry
+        let plugin_name = plugin_context.name.clone();
+        let _active_guard =
+            ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+        let _guard = self.begin_plugin_execution(&plugin_name, format!("tool `{name}`"), self.tool_timeout);
+        let result = self
+            .tool_registry
             .lock()
             .expect("tool registry mutex should not be poisoned")
-            .invoke(&self.lua, name, arguments)
+            .invoke(&self.lua, name, arguments);
+        if let Err(err) = &result {
+            self.record_plugin_failure(&plugin_name, &err.to_string());
+        }
+        result
     }
 
     pub fn set_host_tool_executor(&self, executor: Arc<dyn LuaHostToolExecutor>) {
@@ -490,10 +645,24 @@ impl LuaRuntime {
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
+            if callback
+                .plugin_context
+                .as_ref()
+                .is_some_and(|plugin| self.plugin_disabled(&plugin.name))
+            {
+                continue;
+            }
+            let plugin_name = callback
+                .plugin_context
+                .as_ref()
+                .map(|plugin| plugin.name.clone());
             let _guard = ActivePluginGuard::push(
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
+            let _execution_guard = plugin_name
+                .as_deref()
+                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
             match value {
@@ -504,10 +673,16 @@ impl LuaRuntime {
                     }
                     Err(err) => {
                         self.push_hook_error(event, err.to_string());
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.record_plugin_failure(plugin_name, &err.to_string());
+                        }
                     }
                 },
                 Err(err) => {
                     self.push_hook_error(event, err.to_string());
+                    if let Some(plugin_name) = plugin_name.as_deref() {
+                        self.record_plugin_failure(plugin_name, &err.to_string());
+                    }
                 }
             }
         }
@@ -526,19 +701,43 @@ impl LuaRuntime {
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
+            if callback
+                .plugin_context
+                .as_ref()
+                .is_some_and(|plugin| self.plugin_disabled(&plugin.name))
+            {
+                continue;
+            }
+            let plugin_name = callback
+                .plugin_context
+                .as_ref()
+                .map(|plugin| plugin.name.clone());
             let _guard = ActivePluginGuard::push(
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
+            let _execution_guard = plugin_name
+                .as_deref()
+                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
             match value {
                 Ok(values) => match parse_post_hook_result(values, current.clone()) {
                     Ok(PostHookOutcome::Keep(next)) => current = next,
                     Ok(PostHookOutcome::Rewrite(next)) => current = next,
-                    Err(err) => self.push_hook_error(event, err.to_string()),
+                    Err(err) => {
+                        self.push_hook_error(event, err.to_string());
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.record_plugin_failure(plugin_name, &err.to_string());
+                        }
+                    }
                 },
-                Err(err) => self.push_hook_error(event, err.to_string()),
+                Err(err) => {
+                    self.push_hook_error(event, err.to_string());
+                    if let Some(plugin_name) = plugin_name.as_deref() {
+                        self.record_plugin_failure(plugin_name, &err.to_string());
+                    }
+                }
             }
         }
         Ok(PostHookOutcome::Rewrite(current))
@@ -551,14 +750,31 @@ impl LuaRuntime {
             .expect("hook registry mutex should not be poisoned")
             .callbacks(event);
         for callback in callbacks {
+            if callback
+                .plugin_context
+                .as_ref()
+                .is_some_and(|plugin| self.plugin_disabled(&plugin.name))
+            {
+                continue;
+            }
+            let plugin_name = callback
+                .plugin_context
+                .as_ref()
+                .map(|plugin| plugin.name.clone());
             let _guard = ActivePluginGuard::push(
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
+            let _execution_guard = plugin_name
+                .as_deref()
+                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
             if let Err(err) = value {
                 self.push_hook_error(event, err.to_string());
+                if let Some(plugin_name) = plugin_name.as_deref() {
+                    self.record_plugin_failure(plugin_name, &err.to_string());
+                }
             }
         }
         Ok(())
@@ -598,6 +814,11 @@ impl LuaRuntime {
             entry.permissions.clone(),
         );
         let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+        let _execution_guard = self.begin_plugin_execution(
+            &entry.metadata.plugin_name,
+            format!("personality `{}`", entry.metadata.name),
+            self.hook_timeout,
+        );
 
         match build_prompt.call::<Value>(context) {
             Ok(Value::Nil) => fallback,
@@ -608,6 +829,7 @@ impl LuaRuntime {
                         &entry.metadata.plugin_name,
                         format!("build_prompt returned invalid utf-8: {error}"),
                     );
+                    self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
                     fallback
                 }
             },
@@ -626,6 +848,7 @@ impl LuaRuntime {
                     &entry.metadata.plugin_name,
                     format!("build_prompt failed: {error}"),
                 );
+                self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
                 fallback
             }
         }
@@ -652,11 +875,104 @@ impl LuaRuntime {
             .expect("log sink mutex should not be poisoned");
         logs.push(format!("[personality::{plugin_name}] {message}"));
     }
+
+    fn begin_plugin_execution(
+        &self,
+        plugin_name: &str,
+        operation: impl Into<String>,
+        timeout: Duration,
+    ) -> PluginExecutionGuard {
+        let operation = operation.into();
+        let started_at = Instant::now();
+        let timeout_ms = timeout.as_millis().min(u128::from(u64::MAX)) as u64;
+        let active = ActivePluginExecution {
+            plugin_name: plugin_name.to_owned(),
+            operation: operation.clone(),
+            started_at,
+            deadline: started_at + timeout,
+            timeout_ms,
+        };
+        let previous = self
+            .execution_control
+            .lock()
+            .expect("plugin execution control mutex should not be poisoned")
+            .active
+            .replace(active);
+        PluginExecutionGuard {
+            control: Arc::clone(&self.execution_control),
+            previous,
+            logs: Arc::clone(&self.logs),
+            plugin_name: plugin_name.to_owned(),
+            operation,
+            plugin_verbose: self.plugin_verbose,
+        }
+    }
+
+    fn plugin_disabled(&self, plugin_name: &str) -> bool {
+        self.disabled_plugins
+            .lock()
+            .expect("disabled plugins mutex should not be poisoned")
+            .contains(plugin_name)
+    }
+
+    fn disabled_plugin_names(&self) -> HashSet<String> {
+        self.disabled_plugins
+            .lock()
+            .expect("disabled plugins mutex should not be poisoned")
+            .clone()
+    }
+
+    fn record_plugin_failure(&self, plugin_name: &str, _message: &str) {
+        if self.auto_disable_after == 0 {
+            return;
+        }
+        if self.plugin_disabled(plugin_name) {
+            return;
+        }
+
+        let failures = {
+            let mut failures = self
+                .plugin_failures
+                .lock()
+                .expect("plugin failures mutex should not be poisoned");
+            let count = failures.entry(plugin_name.to_owned()).or_insert(0);
+            *count += 1;
+            *count
+        };
+
+        if failures < self.auto_disable_after {
+            return;
+        }
+
+        let newly_disabled = self
+            .disabled_plugins
+            .lock()
+            .expect("disabled plugins mutex should not be poisoned")
+            .insert(plugin_name.to_owned());
+        if newly_disabled {
+            let mut logs = self
+                .logs
+                .lock()
+                .expect("log sink mutex should not be poisoned");
+            logs.push(format!(
+                "[plugin::{plugin_name}] disabled for this session after {failures} failures"
+            ));
+        }
+    }
 }
 
 struct ActivePluginGuard {
     stack: Arc<Mutex<Vec<PluginContext>>>,
     pushed: bool,
+}
+
+struct PluginExecutionGuard {
+    control: Arc<Mutex<PluginExecutionControl>>,
+    previous: Option<ActivePluginExecution>,
+    logs: Arc<Mutex<Vec<String>>>,
+    plugin_name: String,
+    operation: String,
+    plugin_verbose: bool,
 }
 
 impl ActivePluginGuard {
@@ -680,7 +996,37 @@ impl Drop for ActivePluginGuard {
             self.stack
                 .lock()
                 .expect("active plugin mutex should not be poisoned")
-                .pop();
+            .pop();
+        }
+    }
+}
+
+impl Drop for PluginExecutionGuard {
+    fn drop(&mut self) {
+        let finished = Instant::now();
+        let previous = {
+            let mut control = self
+                .control
+                .lock()
+                .expect("plugin execution control mutex should not be poisoned");
+            let current = control.active.take();
+            control.active = self.previous.take();
+            current
+        };
+
+        if self.plugin_verbose {
+            if let Some(current) = previous {
+                let elapsed_ms = finished
+                    .saturating_duration_since(current.started_at)
+                    .as_millis();
+                self.logs
+                    .lock()
+                    .expect("log sink mutex should not be poisoned")
+                    .push(format!(
+                        "[plugin::{}] {} completed in {}ms",
+                        self.plugin_name, self.operation, elapsed_ms
+                    ));
+            }
         }
     }
 }
