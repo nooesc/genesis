@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useHealth } from '@/lib/api/queries/health'
+import { useHealth, useCacheStats, useWebhookStatus } from '@/lib/api/queries/health'
 import { useInsights } from '@/lib/api/queries/analytics'
 import { useSessions } from '@/lib/api/queries/sessions'
 import { HealthGauge } from '@/components/dashboard/health-gauge'
@@ -21,6 +21,8 @@ function DashboardPage() {
   const { data: health, isLoading: healthLoading } = useHealth()
   const { data: insights, isLoading: insightsLoading } = useInsights(7)
   const { data: sessions, isLoading: sessionsLoading } = useSessions({ limit: 10 })
+  const { data: cacheStats } = useCacheStats()
+  const { data: webhookStatus } = useWebhookStatus()
 
   // tokens_per_day is [date, input, output][] — extract totals for sparkline
   const tokensPerDayValues = insights
@@ -154,7 +156,56 @@ function DashboardPage() {
         </div>
       </div>
 
-      {/* Row 3: Activity feed + Platform breakdown + Recent sessions */}
+      {/* Row 3: Operations readouts */}
+      <SectionHeader title="Operations" />
+      <div className="card-stagger grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-3 py-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Cache
+          </span>
+          <span className="font-mono text-sm font-bold tabular-nums text-foreground/90">
+            {cacheStats?.entries ?? 0}
+          </span>
+          <span className="font-mono text-[8px] text-muted-foreground/30">
+            {cacheStats?.total_hits ?? 0} hits · {cacheStats?.enabled ? 'on' : 'off'}
+          </span>
+        </div>
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-3 py-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Webhooks
+          </span>
+          <span className="font-mono text-sm font-bold tabular-nums text-foreground/90">
+            {webhookStatus?.delivered ?? 0}
+          </span>
+          <span className="font-mono text-[8px] text-muted-foreground/30">
+            delivered · {webhookStatus?.retried ?? 0} retried
+          </span>
+        </div>
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-3 py-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Failures
+          </span>
+          <span className={`font-mono text-sm font-bold tabular-nums ${(webhookStatus?.failed ?? 0) > 0 ? 'text-destructive/80' : 'text-foreground/90'}`}>
+            {webhookStatus?.failed ?? 0}
+          </span>
+          <span className="font-mono text-[8px] text-muted-foreground/30">
+            {webhookStatus?.dead_letter_count ?? 0} dead letters
+          </span>
+        </div>
+        <div className="flex flex-col gap-1 rounded-md border border-border/20 bg-card/20 px-3 py-2">
+          <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/40">
+            Model
+          </span>
+          <span className="truncate font-mono text-sm font-bold text-foreground/90">
+            {health?.model ? health.model.split('/').pop() ?? health.model : '—'}
+          </span>
+          <span className="font-mono text-[8px] text-muted-foreground/30">
+            {health?.total_sessions ?? 0} total sessions
+          </span>
+        </div>
+      </div>
+
+      {/* Row 4: Activity feed + Platform breakdown + Recent sessions */}
       <SectionHeader title="Activity" />
       <div className="card-stagger grid grid-cols-1 gap-3 lg:grid-cols-3">
         <div className="rounded-md border border-border/20 bg-card/20 p-3">
