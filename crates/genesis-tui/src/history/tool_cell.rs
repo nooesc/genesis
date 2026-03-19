@@ -531,6 +531,74 @@ impl ToolCell {
     }
 }
 
+/// Render a collapsed tool group summary line.
+///
+/// Given a slice of [`ToolCell`] references representing a group of consecutive
+/// tool invocations, produces a single [`Line`] summarising the group:
+///
+/// ```text
+///   ▸ 3 tool calls (2.5s, all ok) ↓
+/// ```
+///
+/// Returns an empty vec if `cells` is empty.
+pub fn tool_group_summary_line(cells: &[&ToolCell]) -> Vec<Line<'static>> {
+    if cells.is_empty() {
+        return vec![];
+    }
+
+    let count = cells.len();
+    let total_duration: Duration = cells.iter().map(|c| c.duration).sum();
+    let all_ok = cells.iter().all(|c| c.success);
+
+    let duration_str = format!("{:.1}s", total_duration.as_secs_f64());
+
+    if !all_ok {
+        let fail_count = cells.iter().filter(|c| !c.success).count();
+        let s = format!("{fail_count} failed");
+        return vec![Line::from(vec![
+            Span::styled("  ", Style::default().fg(UI_DIM)),
+            Span::styled(
+                "\u{25b8} ",
+                Style::default().fg(Color::Rgb(180, 167, 214)),
+            ),
+            Span::styled(
+                format!("{count} tool calls"),
+                Style::default().fg(Color::Rgb(168, 168, 168)),
+            ),
+            Span::styled(format!(" ({duration_str}, "), Style::default().fg(UI_DIM)),
+            Span::styled(s, Style::default().fg(Color::Rgb(215, 95, 95))),
+            Span::styled(")", Style::default().fg(UI_DIM)),
+            Span::styled(" \u{2193}", Style::default().fg(UI_DIM)),
+        ])];
+    }
+
+    vec![Line::from(vec![
+        Span::styled("  ", Style::default().fg(UI_DIM)),
+        Span::styled(
+            "\u{25b8} ",
+            Style::default().fg(Color::Rgb(180, 167, 214)),
+        ),
+        Span::styled(
+            format!("{count} tool calls"),
+            Style::default().fg(Color::Rgb(168, 168, 168)),
+        ),
+        Span::styled(format!(" ({duration_str}, "), Style::default().fg(UI_DIM)),
+        Span::styled("all ok".to_owned(), Style::default().fg(COLOR_OK)),
+        Span::styled(")", Style::default().fg(UI_DIM)),
+        Span::styled(" \u{2193}", Style::default().fg(UI_DIM)),
+    ])]
+}
+
+/// Return the height (in rows) of a collapsed tool group summary for the
+/// given number of tool cells. Currently always 1 when `count > 0`.
+pub fn tool_group_summary_height(count: usize) -> u16 {
+    if count == 0 {
+        0
+    } else {
+        1
+    }
+}
+
 fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
     let width = wrap_width.max(1) as usize;
     let mut rows: usize = 0;
@@ -1171,6 +1239,62 @@ diff --git a/src/main.rs b/src/main.rs
         assert!(
             all_text.contains("2 results"),
             "search should show result count"
+        );
+    }
+
+    // ── Tool group summary tests ────────────────────────────────────────
+
+    #[test]
+    fn tool_group_summary_empty_returns_empty() {
+        let lines = tool_group_summary_line(&[]);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tool_group_summary_height_zero_for_empty() {
+        assert_eq!(tool_group_summary_height(0), 0);
+    }
+
+    #[test]
+    fn tool_group_summary_height_one_for_nonzero() {
+        assert_eq!(tool_group_summary_height(1), 1);
+        assert_eq!(tool_group_summary_height(5), 1);
+    }
+
+    #[test]
+    fn tool_group_summary_all_ok() {
+        let c1 = make_cell(true);
+        let c2 = ToolCell::new("read_file", "c2", "path.txt", true, Duration::from_millis(800));
+        let cells: Vec<&ToolCell> = vec![&c1, &c2];
+        let lines = tool_group_summary_line(&cells);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("2 tool calls"), "should show count: {text:?}");
+        assert!(text.contains("2.0s"), "should show total duration: {text:?}");
+        assert!(text.contains("all ok"), "should show all ok: {text:?}");
+    }
+
+    #[test]
+    fn tool_group_summary_with_failures() {
+        let c1 = make_cell(true);
+        let c2 = make_cell(false);
+        let c3 = make_cell(false);
+        let cells: Vec<&ToolCell> = vec![&c1, &c2, &c3];
+        let lines = tool_group_summary_line(&cells);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("3 tool calls"), "should show count: {text:?}");
+        assert!(
+            text.contains("2 failed"),
+            "should show failure count: {text:?}"
         );
     }
 }
