@@ -1,4 +1,5 @@
 pub mod api;
+mod bundled;
 pub mod discovery;
 pub mod hooks;
 pub mod manifest;
@@ -6,6 +7,7 @@ pub mod personality;
 pub mod runtime;
 pub mod tools;
 
+pub use bundled::{bundled_personalities, BundledPersonality};
 pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
 pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
 pub use personality::{LuaPersonalityRegistry, LuaRegisteredPersonality};
@@ -122,13 +124,14 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
-        assert_eq!(
-            runtime.logs(),
-            vec![
-                "loaded:observer:single_file".to_owned(),
-                "worker ready".to_owned(),
-                "loaded:worker:single_file".to_owned(),
-            ]
+        let logs = runtime.logs();
+        assert_eq!(logs[0], "loaded:observer:single_file");
+        assert_eq!(logs[1], "worker ready");
+        assert_eq!(logs[2], "loaded:worker:single_file");
+        assert!(
+            logs.iter()
+                .any(|entry| entry == "loaded:default:bundled"),
+            "bundled personalities should also emit plugin-load events: {logs:?}"
         );
     }
 
@@ -541,11 +544,13 @@ genesis.register_personality({
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         let personalities = runtime.registered_personalities();
 
-        assert_eq!(personalities.len(), 1);
-        assert_eq!(personalities[0].name, "pirate-lua");
-        assert_eq!(personalities[0].plugin_name, "pirate-pack");
+        let pirate = personalities
+            .iter()
+            .find(|entry| entry.name == "pirate-lua")
+            .expect("package personality should be registered");
+        assert_eq!(pirate.plugin_name, "pirate-pack");
         assert_eq!(
-            personalities[0].system_prompt.as_deref(),
+            pirate.system_prompt.as_deref(),
             Some("Speak like a pirate from lua.")
         );
     }
@@ -676,6 +681,44 @@ genesis.register_personality({
     }
 
     #[test]
+    fn runtime_loads_bundled_personality_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        let prompt = runtime
+            .personality_prompt("pirate")
+            .expect("bundled pirate personality should load");
+
+        assert_eq!(
+            prompt,
+            "Speak as a pirate. Use a rugged seafarer voice with occasional nautical phrasing."
+        );
+    }
+
+    #[test]
+    fn runtime_prefers_user_personality_over_bundled_default() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("pirate.lua"),
+            r#"
+genesis.register_personality({
+    name = "pirate",
+    description = "Override the bundled pirate personality",
+    system_prompt = "Speak like a user-provided lua pirate captain.",
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let prompt = runtime
+            .personality_prompt("pirate")
+            .expect("user personality should win");
+
+        assert_eq!(prompt, "Speak like a user-provided lua pirate captain.");
+    }
+
+    #[test]
     fn runtime_rolls_back_personalities_from_failed_plugins() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(
@@ -694,8 +737,11 @@ error("boom")
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
         assert!(
-            runtime.registered_personalities().is_empty(),
-            "failed plugins must not leave registered personalities behind"
+            runtime
+                .registered_personalities()
+                .iter()
+                .all(|entry| entry.name != "broken-lua"),
+            "failed plugins must not leave their registered personality behind"
         );
         assert!(
             runtime
@@ -729,7 +775,10 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         assert!(
-            runtime.registered_personalities().is_empty(),
+            runtime
+                .registered_personalities()
+                .iter()
+                .all(|entry| entry.name != "late-lua"),
             "plugin load should not eagerly register the late personality"
         );
 
@@ -742,7 +791,10 @@ end)
             crate::hooks::PreHookOutcome::Allow("hello".to_owned())
         );
         assert!(
-            runtime.registered_personalities().is_empty(),
+            runtime
+                .registered_personalities()
+                .iter()
+                .all(|entry| entry.name != "late-lua"),
             "personality registration should stay closed after plugin load"
         );
         assert!(

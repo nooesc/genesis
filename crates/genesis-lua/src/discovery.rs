@@ -18,6 +18,7 @@ pub struct DiscoveredPlugin {
 pub enum PluginKind {
     SingleFile,
     Package,
+    Bundled,
 }
 
 #[derive(Debug, Default)]

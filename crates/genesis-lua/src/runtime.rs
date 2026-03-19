@@ -10,7 +10,9 @@ use thiserror::Error;
 
 use crate::{
     api::{install_genesis_api, PluginContext},
+    bundled::BUNDLED_PERSONALITIES,
     discovery::{discover_plugins_best_effort, PluginKind},
+    manifest::PluginManifest,
     hooks::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
@@ -387,32 +389,10 @@ impl LuaRuntime {
                     continue;
                 }
             };
-            let (plugin_env, plugin_context) = self.plugin_environment(config, &plugin)?;
-            let _guard = self.begin_plugin_execution(&plugin.name, "load", self.hook_timeout);
-            let load_result = self
-                .lua
-                .load(&source)
-                .set_name(&plugin.name)
-                .set_environment(plugin_env)
-                .exec();
-            plugin_context.close_tool_registration();
-            if let Err(err) = load_result {
-                self.tool_registry
-                    .lock()
-                    .expect("tool registry mutex should not be poisoned")
-                    .remove_tools_owned_by(&plugin.name);
-                self.personality_registry
-                    .lock()
-                    .expect("personality registry mutex should not be poisoned")
-                    .remove_personalities_owned_by(&plugin.name);
-                self.plugin_errors
-                    .push(format!("plugin `{}` failed to load: {err}", plugin.name));
-                continue;
-            }
-            let plugin_name = plugin.name.clone();
-            self.plugin_names.push(plugin_name.clone());
-            let _ = self.run_on_plugin_load(&plugin_name, plugin.kind);
+            self.load_plugin_source(config, &plugin, &source, true);
         }
+
+        self.load_bundled_personalities(config, &configured_disabled)?;
         Ok(())
     }
 
@@ -647,6 +627,82 @@ impl LuaRuntime {
         context.set("plugin_name", plugin_name)?;
         context.set("plugin_kind", plugin_kind_name(plugin_kind))?;
         self.run_observe_hook(HookEvent::OnPluginLoad, context)
+    }
+
+    fn load_bundled_personalities(
+        &mut self,
+        config: &LuaRuntimeConfig,
+        configured_disabled: &HashSet<String>,
+    ) -> Result<(), LuaRuntimeError> {
+        for bundled in BUNDLED_PERSONALITIES {
+            if configured_disabled.contains(bundled.name) {
+                self.disabled_plugins
+                    .lock()
+                    .expect("disabled plugins mutex should not be poisoned")
+                    .insert(bundled.name.to_owned());
+                continue;
+            }
+            if self
+                .personality_registry
+                .lock()
+                .expect("personality registry mutex should not be poisoned")
+                .personality_entry(bundled.name)
+                .is_some()
+            {
+                continue;
+            }
+
+            let plugin = crate::DiscoveredPlugin {
+                name: bundled.name.to_owned(),
+                kind: PluginKind::Bundled,
+                root: PathBuf::new(),
+                entrypoint: PathBuf::new(),
+                manifest: PluginManifest::for_single_file(bundled.name),
+            };
+            self.load_plugin_source(config, &plugin, bundled.source, false);
+        }
+        Ok(())
+    }
+
+    fn load_plugin_source(
+        &mut self,
+        config: &LuaRuntimeConfig,
+        plugin: &crate::DiscoveredPlugin,
+        source: &str,
+        record_plugin_name: bool,
+    ) {
+        let (plugin_env, plugin_context) = match self.plugin_environment(config, plugin) {
+            Ok(value) => value,
+            Err(err) => {
+                self.plugin_errors.push(err.to_string());
+                return;
+            }
+        };
+        let _guard = self.begin_plugin_execution(&plugin.name, "load", self.hook_timeout);
+        let load_result = self
+            .lua
+            .load(source)
+            .set_name(&plugin.name)
+            .set_environment(plugin_env)
+            .exec();
+        plugin_context.close_tool_registration();
+        if let Err(err) = load_result {
+            self.tool_registry
+                .lock()
+                .expect("tool registry mutex should not be poisoned")
+                .remove_tools_owned_by(&plugin.name);
+            self.personality_registry
+                .lock()
+                .expect("personality registry mutex should not be poisoned")
+                .remove_personalities_owned_by(&plugin.name);
+            self.plugin_errors
+                .push(format!("plugin `{}` failed to load: {err}", plugin.name));
+            return;
+        }
+        if record_plugin_name {
+            self.plugin_names.push(plugin.name.clone());
+        }
+        let _ = self.run_on_plugin_load(&plugin.name, plugin.kind);
     }
 
     fn plugin_environment(
@@ -1164,6 +1220,7 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::SingleFile => "single_file",
         PluginKind::Package => "package",
+        PluginKind::Bundled => "bundled",
     }
 }
 
