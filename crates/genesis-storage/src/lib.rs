@@ -624,6 +624,22 @@ fn rebuild_memory_vec_index(conn: &Connection, database_path: &Path) -> Result<(
     Ok(())
 }
 
+fn memory_vec_table_exists(conn: &Connection, database_path: &Path) -> Result<bool, StorageError> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'memory_vec'
+        )",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|exists| exists != 0)
+    .map_err(|source| StorageError::Sqlite {
+        path: database_path.to_path_buf(),
+        source,
+    })
+}
+
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent).map_err(|source| StorageError::CreateDirectory {
@@ -3366,22 +3382,7 @@ impl MemoryStore {
             });
         }
 
-        let memory_vec_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM sqlite_master
-                    WHERE type = 'table' AND name = 'memory_vec'
-                )",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?
-            != 0;
-
-        if !memory_vec_exists {
+        if !memory_vec_table_exists(&connection, &self.database_path)? {
             return Ok(Vec::new());
         }
 
@@ -3490,13 +3491,49 @@ impl MemoryStore {
 
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
-        let rows = connection
+        let mut connection = open(&self.database_path)?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let memory_rowid: Option<i64> = tx
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let Some(memory_rowid) = memory_rowid else {
+            return Ok(false);
+        };
+
+        if memory_vec_table_exists(&tx, &self.database_path)? {
+            tx.execute(
+                "DELETE FROM memory_vec WHERE memory_rowid = ?1",
+                params![memory_rowid],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        }
+
+        let rows = tx
             .execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
         Ok(rows > 0)
     }
 }
@@ -3659,8 +3696,38 @@ impl EmbeddingStore {
 
     /// Delete an embedding by memory ID.
     pub fn delete(&self, memory_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
-        let rows = connection
+        let mut connection = open(&self.database_path)?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let memory_rowid: Option<i64> = tx
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = ?1",
+                params![memory_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        if let Some(memory_rowid) = memory_rowid {
+            if memory_vec_table_exists(&tx, &self.database_path)? {
+                tx.execute(
+                    "DELETE FROM memory_vec WHERE memory_rowid = ?1",
+                    params![memory_rowid],
+                )
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.database_path.clone(),
+                    source,
+                })?;
+            }
+        }
+
+        let rows = tx
             .execute(
                 "DELETE FROM memory_embeddings WHERE memory_id = ?1",
                 params![memory_id],
@@ -3669,6 +3736,10 @@ impl EmbeddingStore {
                 path: self.database_path.clone(),
                 source,
             })?;
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
         Ok(rows > 0)
     }
 
@@ -7092,6 +7163,34 @@ mod memory_store_tests {
     }
 
     #[test]
+    fn delete_removes_memory_from_vector_index() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = seed_hybrid_search_fixture(dir.path());
+        let store = MemoryStore::new(&db_path);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = 'mem-vector-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert!(store.delete("mem-vector-only").unwrap());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_vec WHERE memory_rowid = ?1",
+                rusqlite::params![rowid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     #[ignore = "benchmark harness for local performance checks"]
     fn hybrid_search_benchmark_10k_memories() {
         let dir = tempdir().expect("tempdir");
@@ -7272,6 +7371,22 @@ mod embedding_store_tests {
         assert!(store.delete("mem1").unwrap());
         assert!(!store.has_embedding("mem1").unwrap());
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_removes_vec_index_entry() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0, 0.0], "test").unwrap();
+        assert!(store.delete("mem1").unwrap());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_vec", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
