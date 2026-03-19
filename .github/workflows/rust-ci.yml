@@ -215,7 +215,7 @@ jobs:
             const overallIcon = overall === 'passed' ? '✅' : '❌';
             const body = [
               marker,
-              `## ${overallIcon} Rust CI — **${overall.toUpperCase()}**`,
+              `## ${overallIcon} Rust CI — **${(overall || 'unknown').toUpperCase()}**`,
               '',
               '| Check | Status |',
               '| --- | --- |',
@@ -244,23 +244,30 @@ jobs:
         with:
           script: |
             const marker = '<!-- rust-codebase-stats -->';
-            const totalLoc = Number('${{ needs.checks.outputs.total_loc }}') || 0;
-            const testLoc = Number('${{ needs.checks.outputs.test_loc }}') || 0;
+            const totalLocRaw = '${{ needs.checks.outputs.total_loc }}';
+            const testLocRaw = '${{ needs.checks.outputs.test_loc }}';
+            const hasStat = (v) => v !== '' && v !== 'n/a';
+            const totalLoc = hasStat(totalLocRaw) ? Number(totalLocRaw) : null;
+            const testLoc = hasStat(testLocRaw) ? Number(testLocRaw) : null;
             const testCases = '${{ needs.checks.outputs.test_cases }}' || 'n/a';
             const crateCount = '${{ needs.checks.outputs.crate_count }}' || 'n/a';
             const depCount = '${{ needs.checks.outputs.dep_count }}' || 'n/a';
             const unsafeCount = '${{ needs.checks.outputs.unsafe_count }}' || 'n/a';
             const todoCount = '${{ needs.checks.outputs.todo_count }}' || 'n/a';
             const prDiff = '${{ needs.checks.outputs.pr_diff }}' || 'n/a';
-            const testPassed = Number('${{ needs.checks.outputs.test_passed }}') || 0;
-            const testFailed = Number('${{ needs.checks.outputs.test_failed }}') || 0;
-            const testSkipped = Number('${{ needs.checks.outputs.test_skipped }}') || 0;
+            const testPassedRaw = '${{ needs.checks.outputs.test_passed }}';
+            const testFailedRaw = '${{ needs.checks.outputs.test_failed }}';
+            const testSkippedRaw = '${{ needs.checks.outputs.test_skipped }}';
+            const testPassed = hasStat(testPassedRaw) ? Number(testPassedRaw) : 0;
+            const testFailed = hasStat(testFailedRaw) ? Number(testFailedRaw) : 0;
+            const testSkipped = hasStat(testSkippedRaw) ? Number(testSkippedRaw) : 0;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const prNumber = context.payload.pull_request.number;
 
-            const prodLoc = totalLoc - testLoc;
-            const testPct = totalLoc > 0 ? ((testLoc / totalLoc) * 100).toFixed(1) : '0.0';
+            const hasLoc = totalLoc !== null && testLoc !== null;
+            const prodLoc = hasLoc ? totalLoc - testLoc : null;
+            const testPct = hasLoc && totalLoc > 0 ? ((testLoc / totalLoc) * 100).toFixed(1) : null;
             const n = (v) => Number(v).toLocaleString('en-US');
             const testTotal = testPassed + testFailed + testSkipped;
             const testResult = testTotal > 0
@@ -272,11 +279,20 @@ jobs:
               '## Codebase Snapshot',
               '',
               '### Lines of Code',
-              `| | Lines | % |`,
-              `| --- | ---: | ---: |`,
-              `| Production | **${n(prodLoc)}** | ${(100 - Number(testPct)).toFixed(1)}% |`,
-              `| Tests | **${n(testLoc)}** | ${testPct}% |`,
-              `| **Total** | **${n(totalLoc)}** | |`,
+            ];
+            if (hasLoc) {
+              const prodPct = totalLoc > 0 ? ((prodLoc / totalLoc) * 100).toFixed(1) : '0.0';
+              lines.push(
+                `| | Lines | % |`,
+                `| --- | ---: | ---: |`,
+                `| Production | **${n(prodLoc)}** | ${prodPct}% |`,
+                `| Tests | **${n(testLoc)}** | ${testPct}% |`,
+                `| **Total** | **${n(totalLoc)}** | |`,
+              );
+            } else {
+              lines.push('Stats collection failed — no LOC data available.');
+            }
+            lines.push(
               '',
               '### Test Results',
               `| | |`,
