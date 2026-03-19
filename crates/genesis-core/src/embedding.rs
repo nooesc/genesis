@@ -20,6 +20,9 @@ use std::path::PathBuf;
 #[cfg(feature = "local-embeddings")]
 use std::sync::Mutex;
 
+#[cfg(feature = "local-embeddings")]
+const LOCAL_EMBEDDING_DIMENSIONS: usize = 384;
+
 /// Errors from embedding operations.
 #[derive(Debug, Error)]
 pub enum EmbeddingError {
@@ -127,6 +130,7 @@ fn local_embedding_cache_dir() -> PathBuf {
 #[cfg(feature = "local-embeddings")]
 pub struct LocalEmbeddingProvider {
     model: String,
+    dimensions: usize,
     inner: Mutex<FastTextEmbedding>,
 }
 
@@ -156,6 +160,7 @@ impl LocalEmbeddingProvider {
 
             return Ok(Self {
                 model: config.model.clone(),
+                dimensions: LOCAL_EMBEDDING_DIMENSIONS,
                 inner: Mutex::new(inner),
             });
         }
@@ -249,12 +254,23 @@ impl EmbeddingProvider {
                     .inner
                     .lock()
                     .expect("embedding model lock poisoned");
-                inner
+                let embeddings = inner
                     .embed(texts, None)
                     .map_err(|e| EmbeddingError::ApiError {
                         status: 500,
                         body: e.to_string(),
-                    })
+                    })?;
+
+                for embedding in &embeddings {
+                    if embedding.len() != provider.dimensions {
+                        return Err(EmbeddingError::DimensionMismatch {
+                            expected: provider.dimensions,
+                            actual: embedding.len(),
+                        });
+                    }
+                }
+
+                Ok(embeddings)
             }
             #[cfg(not(feature = "local-embeddings"))]
             Self::Local(_provider) => {
@@ -759,6 +775,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 384);
         assert!(vectors[0].iter().any(|value| value.abs() > 0.0));
     }
 
