@@ -980,7 +980,8 @@ mod tests {
 
     #[test]
     fn provider_metadata_deserializes_when_present() {
-        let raw = r#"{"role": "assistant", "content": "hi", "provider_metadata": {"key": "value"}}"#;
+        let raw =
+            r#"{"role": "assistant", "content": "hi", "provider_metadata": {"key": "value"}}"#;
         let msg: ChatMessage = serde_json::from_str(raw).expect("should deserialize");
         assert!(msg.provider_metadata.is_some());
         assert_eq!(msg.provider_metadata.unwrap()["key"], "value");

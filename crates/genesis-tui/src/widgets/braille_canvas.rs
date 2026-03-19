@@ -13,8 +13,8 @@ use ratatui::{
     style::Color,
     symbols::Marker,
     widgets::{
-        Widget,
         canvas::{Canvas, Line as CanvasLine, Points},
+        Widget,
     },
 };
 
@@ -31,21 +31,13 @@ const DIM_GREY: Color = Color::Rgb(98, 98, 98);
 #[derive(Debug, Clone)]
 pub enum Pattern {
     /// A sine waveform with advancing phase.
-    Waveform {
-        phase: f64,
-        frequency: f64,
-    },
+    Waveform { phase: f64, frequency: f64 },
     /// A cloud of particles with position and velocity, gentle gravity, wrap-around.
     Particles {
         points: Vec<(f64, f64, f64, f64)>, // x, y, vx, vy
     },
     /// A Lissajous parametric curve: x = sin(a*t + delta), y = sin(b*t).
-    Lissajous {
-        t: f64,
-        a: f64,
-        b: f64,
-        delta: f64,
-    },
+    Lissajous { t: f64, a: f64, b: f64, delta: f64 },
     /// A static horizontal line at mid-height.
     Flatline,
 }
@@ -183,10 +175,7 @@ impl<'a> BrailleCanvas<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
-        let coords: Vec<(f64, f64)> = points
-            .iter()
-            .map(|(x, y, _, _)| (x * w, y * h))
-            .collect();
+        let coords: Vec<(f64, f64)> = points.iter().map(|(x, y, _, _)| (x * w, y * h)).collect();
 
         let canvas = Canvas::default()
             .marker(Marker::Braille)
@@ -322,10 +311,16 @@ mod tests {
         // The middle row should have non-space braille characters.
         let mid_row = 1u16;
         let has_braille = (0..10).any(|x| {
-            let sym = buf.cell((x, mid_row)).map(|c| c.symbol().to_string()).unwrap_or_default();
+            let sym = buf
+                .cell((x, mid_row))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
             sym != " "
         });
-        assert!(has_braille, "flatline should render some braille dots in the middle row");
+        assert!(
+            has_braille,
+            "flatline should render some braille dots in the middle row"
+        );
     }
 
     #[test]

@@ -31,7 +31,11 @@ fn to_ui_tool_mode(mode: genesis_config::ToolDisplayMode) -> ToolDisplayMode {
 pub(crate) struct CliApprovalHandler;
 
 impl genesis_tools::ApprovalHandler for CliApprovalHandler {
-    fn request_approval(&self, tool_name: &str, arguments: &std::collections::BTreeMap<String, String>) -> bool {
+    fn request_approval(
+        &self,
+        tool_name: &str,
+        arguments: &std::collections::BTreeMap<String, String>,
+    ) -> bool {
         eprintln!("\n[Tool approval required] {tool_name}");
         for (key, value) in arguments {
             let display = match value.char_indices().nth(100) {
@@ -238,9 +242,18 @@ pub(crate) async fn run_chat(
 
     // Process initial prompt if provided
     if let Some(initial) = initial_prompt {
-        println!("{}{}",  ui.you_prompt(), initial);
+        println!("{}{}", ui.you_prompt(), initial);
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, &initial, &model, images, ui, tool_mode).await?;
+        run_streaming_turn(
+            &service,
+            &session_id,
+            &initial,
+            &model,
+            images,
+            ui,
+            tool_mode,
+        )
+        .await?;
     }
 
     while let Some(input) = read_multiline_input(&mut rl, "you> ", "  .. ") {
@@ -274,7 +287,16 @@ pub(crate) async fn run_chat(
                         let to_remove = messages.len() - idx;
                         let _ = store.delete_last_n_messages(&session_id, to_remove);
                         println!("Retrying: {prompt_text}");
-                        run_streaming_turn(&service, &session_id, &prompt_text, &model, Vec::new(), ui, tool_mode).await?;
+                        run_streaming_turn(
+                            &service,
+                            &session_id,
+                            &prompt_text,
+                            &model,
+                            Vec::new(),
+                            ui,
+                            tool_mode,
+                        )
+                        .await?;
                     }
                 }
                 None => println!("No user message to retry."),
@@ -306,7 +328,10 @@ pub(crate) async fn run_chat(
                         let old_id = session_id.clone();
                         session_id = target_id.to_owned();
                         let msgs = store.load_messages(&session_id).unwrap_or_default();
-                        println!("Switched from {old_id} → {session_id} ({} messages)", msgs.len());
+                        println!(
+                            "Switched from {old_id} → {session_id} ({} messages)",
+                            msgs.len()
+                        );
                     }
                     Ok(None) => println!("Session '{target_id}' not found."),
                     Err(e) => println!("Error looking up session: {e}"),
@@ -342,7 +367,10 @@ pub(crate) async fn run_chat(
                 let templates = genesis_core::templates::list_templates();
                 println!("Available agent templates:");
                 for t in templates {
-                    println!("  {:12} - {} [personality: {}]", t.name, t.description, t.personality);
+                    println!(
+                        "  {:12} - {} [personality: {}]",
+                        t.name, t.description, t.personality
+                    );
                 }
                 println!("\nApply with: /template <name>");
             } else {
@@ -351,7 +379,10 @@ pub(crate) async fn run_chat(
                         let prompt = genesis_core::templates::format_template_prompt(t);
                         service.set_personality_override(t.personality.to_owned());
                         service.set_system_prompt_override(prompt);
-                        println!("Applied template '{}' (personality: {}).", t.name, t.personality);
+                        println!(
+                            "Applied template '{}' (personality: {}).",
+                            t.name, t.personality
+                        );
                         println!("Guidelines:");
                         for g in t.guidelines {
                             println!("  - {g}");
@@ -359,11 +390,10 @@ pub(crate) async fn run_chat(
                         println!("Takes effect on next turn.");
                     }
                     None => {
-                        let names: Vec<&str> =
-                            genesis_core::templates::list_templates()
-                                .iter()
-                                .map(|t| t.name)
-                                .collect();
+                        let names: Vec<&str> = genesis_core::templates::list_templates()
+                            .iter()
+                            .map(|t| t.name)
+                            .collect();
                         println!("Unknown template '{arg}'. Available: {}", names.join(", "));
                     }
                 }
@@ -402,9 +432,17 @@ pub(crate) async fn run_chat(
                             Ok(wf) => {
                                 let issues = genesis_core::workflow::validate_workflow(&wf);
                                 if issues.is_empty() {
-                                    println!("Workflow '{}' is valid ({} steps).", wf.name, wf.steps.len());
+                                    println!(
+                                        "Workflow '{}' is valid ({} steps).",
+                                        wf.name,
+                                        wf.steps.len()
+                                    );
                                 } else {
-                                    println!("Workflow '{}' has {} issue(s):", wf.name, issues.len());
+                                    println!(
+                                        "Workflow '{}' has {} issue(s):",
+                                        wf.name,
+                                        issues.len()
+                                    );
                                     for issue in &issues {
                                         println!("  - {issue}");
                                     }
@@ -426,8 +464,15 @@ pub(crate) async fn run_chat(
                                 println!("Workflow: {} — {}", wf.name, wf.description);
                                 for (i, step) in wf.steps.iter().enumerate() {
                                     let model_str = step.model.as_deref().unwrap_or("default");
-                                    let terminal_str = if step.terminal { " [terminal]" } else { "" };
-                                    println!("  Step {}: {} (model: {}){}", i + 1, step.name, model_str, terminal_str);
+                                    let terminal_str =
+                                        if step.terminal { " [terminal]" } else { "" };
+                                    println!(
+                                        "  Step {}: {} (model: {}){}",
+                                        i + 1,
+                                        step.name,
+                                        model_str,
+                                        terminal_str
+                                    );
                                     // Show truncated prompt
                                     let prompt_preview = if step.prompt.len() > 80 {
                                         format!("{}...", &step.prompt[..80])
@@ -459,13 +504,31 @@ pub(crate) async fn run_chat(
                                     }
                                     println!("Fix these before running.");
                                 } else {
-                                    println!("Running workflow '{}' ({} steps)...", wf.name, wf.steps.len());
+                                    println!(
+                                        "Running workflow '{}' ({} steps)...",
+                                        wf.name,
+                                        wf.steps.len()
+                                    );
                                     let wf_session_id = format!("{session_id}__wf__{}", wf.name);
-                                    match service.run_workflow(&wf, input_text, &wf_session_id).await {
+                                    match service
+                                        .run_workflow(&wf, input_text, &wf_session_id)
+                                        .await
+                                    {
                                         Ok(result) => {
-                                            println!("\nWorkflow '{}' complete!", result.workflow_name);
-                                            println!("Steps completed: {}/{}", result.steps_completed(), wf.steps.len());
-                                            println!("Total tokens: {} in / {} out", result.total_input_tokens, result.total_output_tokens);
+                                            println!(
+                                                "\nWorkflow '{}' complete!",
+                                                result.workflow_name
+                                            );
+                                            println!(
+                                                "Steps completed: {}/{}",
+                                                result.steps_completed(),
+                                                wf.steps.len()
+                                            );
+                                            println!(
+                                                "Total tokens: {} in / {} out",
+                                                result.total_input_tokens,
+                                                result.total_output_tokens
+                                            );
                                             for sr in &result.step_results {
                                                 println!("\n--- Step: {} ---", sr.step_name);
                                                 // Show first 500 chars of output
@@ -523,9 +586,17 @@ pub(crate) async fn run_chat(
                             Ok(suite) => {
                                 let issues = genesis_core::eval::validate_suite(&suite);
                                 if issues.is_empty() {
-                                    println!("Suite '{}' is valid ({} cases).", suite.name, suite.cases.len());
+                                    println!(
+                                        "Suite '{}' is valid ({} cases).",
+                                        suite.name,
+                                        suite.cases.len()
+                                    );
                                 } else {
-                                    println!("Suite '{}' has {} issue(s):", suite.name, issues.len());
+                                    println!(
+                                        "Suite '{}' has {} issue(s):",
+                                        suite.name,
+                                        issues.len()
+                                    );
                                     for issue in &issues {
                                         println!("  - {issue}");
                                     }
@@ -544,13 +615,24 @@ pub(crate) async fn run_chat(
                     match std::fs::read_to_string(file) {
                         Ok(yaml) => match genesis_core::eval::parse_suite(&yaml) {
                             Ok(suite) => {
-                                println!("Suite: {} v{} — {}", suite.name, suite.version, suite.description);
+                                println!(
+                                    "Suite: {} v{} — {}",
+                                    suite.name, suite.version, suite.description
+                                );
                                 println!("Cases: {}", suite.cases.len());
                                 for case in &suite.cases {
                                     let criteria_count = case.criteria.must_contain.len()
                                         + case.criteria.must_not_contain.len()
-                                        + if case.criteria.exact_match.is_some() { 1 } else { 0 }
-                                        + if case.criteria.regex_match.is_some() { 1 } else { 0 };
+                                        + if case.criteria.exact_match.is_some() {
+                                            1
+                                        } else {
+                                            0
+                                        }
+                                        + if case.criteria.regex_match.is_some() {
+                                            1
+                                        } else {
+                                            0
+                                        };
                                     println!(
                                         "  {} (difficulty: {}, {} criteria, tags: [{}])",
                                         case.id,
@@ -587,24 +669,47 @@ pub(crate) async fn run_chat(
                                     }
                                     println!("Fix these before running.");
                                 } else {
-                                    println!("Running eval suite '{}' ({} cases)...", suite.name, suite.cases.len());
+                                    println!(
+                                        "Running eval suite '{}' ({} cases)...",
+                                        suite.name,
+                                        suite.cases.len()
+                                    );
                                     match service.run_eval(&suite).await {
                                         Ok(report) => {
-                                            println!("\n=== Eval Report: {} v{} ===", report.suite_name, report.suite_version);
+                                            println!(
+                                                "\n=== Eval Report: {} v{} ===",
+                                                report.suite_name, report.suite_version
+                                            );
                                             println!("Model: {}", report.model);
                                             println!("Duration: {}ms", report.total_duration_ms);
                                             println!("Results: {} passed, {} failed, {} errored ({:.0}% pass rate)",
                                                 report.passed, report.failed, report.errored, report.pass_rate * 100.0);
                                             println!("Avg score: {:.2}", report.avg_score);
-                                            println!("Tokens: {} in / {} out\n", report.total_input_tokens, report.total_output_tokens);
+                                            println!(
+                                                "Tokens: {} in / {} out\n",
+                                                report.total_input_tokens,
+                                                report.total_output_tokens
+                                            );
 
                                             for r in &report.results {
-                                                let status = if r.passed { "PASS" } else if r.error.is_some() { "ERROR" } else { "FAIL" };
-                                                println!("[{status}] {} — score: {:.2}, {}ms, {} turns",
-                                                    r.case_id, r.score, r.duration_ms, r.turns_used);
+                                                let status = if r.passed {
+                                                    "PASS"
+                                                } else if r.error.is_some() {
+                                                    "ERROR"
+                                                } else {
+                                                    "FAIL"
+                                                };
+                                                println!(
+                                                    "[{status}] {} — score: {:.2}, {}ms, {} turns",
+                                                    r.case_id, r.score, r.duration_ms, r.turns_used
+                                                );
                                                 for check in &r.checks {
-                                                    let mark = if check.passed { "✓" } else { "✗" };
-                                                    println!("  {mark} {}: {}", check.criterion, check.detail);
+                                                    let mark =
+                                                        if check.passed { "✓" } else { "✗" };
+                                                    println!(
+                                                        "  {mark} {}: {}",
+                                                        check.criterion, check.detail
+                                                    );
                                                 }
                                                 if let Some(ref err) = r.error {
                                                     println!("  Error: {err}");
@@ -614,7 +719,12 @@ pub(crate) async fn run_chat(
                                             if !report.tag_results.is_empty() {
                                                 println!("\nBy tag:");
                                                 for (tag, tr) in &report.tag_results {
-                                                    println!("  {tag}: {}/{} passed ({:.0}%)", tr.passed, tr.total, tr.pass_rate * 100.0);
+                                                    println!(
+                                                        "  {tag}: {}/{} passed ({:.0}%)",
+                                                        tr.passed,
+                                                        tr.total,
+                                                        tr.pass_rate * 100.0
+                                                    );
                                                 }
                                             }
                                         }
@@ -647,15 +757,20 @@ pub(crate) async fn run_chat(
                 match genesis_core::personality::get_personality(arg) {
                     Some(p) => {
                         service.set_personality_override(p.name.to_owned());
-                        println!("Personality set to '{}'. Takes effect on next turn.", p.name);
+                        println!(
+                            "Personality set to '{}'. Takes effect on next turn.",
+                            p.name
+                        );
                     }
                     None => {
-                        let names: Vec<&str> =
-                            genesis_core::personality::list_personalities()
-                                .iter()
-                                .map(|p| p.name)
-                                .collect();
-                        println!("Unknown personality '{arg}'. Available: {}", names.join(", "));
+                        let names: Vec<&str> = genesis_core::personality::list_personalities()
+                            .iter()
+                            .map(|p| p.name)
+                            .collect();
+                        println!(
+                            "Unknown personality '{arg}'. Available: {}",
+                            names.join(", ")
+                        );
                     }
                 }
             }
@@ -716,7 +831,16 @@ pub(crate) async fn run_chat(
         }
 
         let images = std::mem::take(&mut pending_clipboard_images);
-        run_streaming_turn(&service, &session_id, trimmed, &model, images, ui, tool_mode).await?;
+        run_streaming_turn(
+            &service,
+            &session_id,
+            trimmed,
+            &model,
+            images,
+            ui,
+            tool_mode,
+        )
+        .await?;
     }
 
     // Save readline history for next session
@@ -742,7 +866,9 @@ pub(crate) async fn run_oneshot(
     // Support piping: `echo "prompt" | genesis run -`
     let prompt = if prompt == "-" {
         let mut buf = String::new();
-        io::stdin().read_line(&mut buf).map_err(|e| CliError::Other(format!("stdin read error: {e}")))?;
+        io::stdin()
+            .read_line(&mut buf)
+            .map_err(|e| CliError::Other(format!("stdin read error: {e}")))?;
         buf.trim().to_owned()
     } else {
         prompt.to_owned()
@@ -766,7 +892,16 @@ pub(crate) async fn run_oneshot(
 
     if stream && !json {
         // Streaming mode — print output as it arrives
-        run_streaming_turn(&service, &session_id, &prompt, &loaded.config.provider.model, images, ui, tool_mode).await?;
+        run_streaming_turn(
+            &service,
+            &session_id,
+            &prompt,
+            &loaded.config.provider.model,
+            images,
+            ui,
+            tool_mode,
+        )
+        .await?;
         return Ok(String::new());
     }
 
@@ -856,7 +991,10 @@ pub(crate) fn read_multiline_input(
     Some(buf)
 }
 
-pub(crate) fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>, prompt: &str) -> Option<String> {
+pub(crate) fn read_user_input(
+    rl: &mut rustyline::Editor<SlashCompleter, rustyline::history::DefaultHistory>,
+    prompt: &str,
+) -> Option<String> {
     match rl.readline(prompt) {
         Ok(line) => {
             if !line.trim().is_empty() {
@@ -864,9 +1002,9 @@ pub(crate) fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyli
             }
             Some(line)
         }
-        Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
-            None
-        }
+        Err(
+            rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof,
+        ) => None,
         Err(_) => None,
     }
 }
@@ -875,7 +1013,9 @@ pub(crate) fn read_user_input(rl: &mut rustyline::Editor<SlashCompleter, rustyli
 ///
 /// Supports:
 /// - URLs (http/https) — passed through directly
-pub(crate) fn resolve_image_inputs(inputs: &[String]) -> Result<Vec<genesis_provider::ImageUrl>, CliError> {
+pub(crate) fn resolve_image_inputs(
+    inputs: &[String],
+) -> Result<Vec<genesis_provider::ImageUrl>, CliError> {
     use base64::Engine;
 
     let mut images = Vec::new();
@@ -924,9 +1064,7 @@ pub(crate) fn extract_clipboard_as_image_url(
 
     let clip_dir = data_dir.join("clipboard");
     std::fs::create_dir_all(&clip_dir).map_err(|e| {
-        clipboard::ClipboardError::ExtractionFailed(format!(
-            "failed to create clipboard dir: {e}"
-        ))
+        clipboard::ClipboardError::ExtractionFailed(format!("failed to create clipboard dir: {e}"))
     })?;
 
     let timestamp = SystemTime::now()
@@ -991,7 +1129,6 @@ impl Drop for WorktreeGuard {
         }
     }
 }
-
 
 pub(crate) fn create_worktree() -> Result<WorktreeGuard, CliError> {
     // Verify we're in a git repo
@@ -1113,7 +1250,9 @@ pub(crate) async fn run_streaming_turn(
                     let _ = io::stdout().flush();
                 }
             }
-            StreamEvent::ToolCallStart { name, args_summary, .. } => {
+            StreamEvent::ToolCallStart {
+                name, args_summary, ..
+            } => {
                 if streamed.load(Ordering::Relaxed) {
                     println!();
                 }
@@ -1127,11 +1266,19 @@ pub(crate) async fn run_streaming_turn(
                 }
                 // For Off mode, show the legacy one-liner
                 if tool_mode == ToolDisplayMode::Off {
-                    println!("{}", ui.format_metadata(&format!("     [calling {name}...]")));
+                    println!(
+                        "{}",
+                        ui.format_metadata(&format!("     [calling {name}...]"))
+                    );
                 }
                 streamed.store(false, Ordering::Relaxed);
             }
-            StreamEvent::ToolCallEnd { name, duration_ms, success, .. } => {
+            StreamEvent::ToolCallEnd {
+                name,
+                duration_ms,
+                success,
+                ..
+            } => {
                 // Go back to Thinking while waiting for next LLM response
                 if let Ok(mut bar) = status_bar.lock() {
                     bar.set_state(BarState::Thinking);
@@ -1143,9 +1290,8 @@ pub(crate) async fn run_streaming_turn(
             StreamEvent::ClarificationNeeded { question } => {
                 println!("\n{}{question}", ui.eve_prompt());
             }
-            StreamEvent::TurnStarted
-            | StreamEvent::TokenUsage { .. }
-            | StreamEvent::Warning(_) => {}
+            StreamEvent::TurnStarted | StreamEvent::TokenUsage { .. } | StreamEvent::Warning(_) => {
+            }
         },
     );
 

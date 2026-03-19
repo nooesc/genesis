@@ -208,7 +208,10 @@ mod tests {
 
     #[test]
     fn short_message_routes_to_cheap() {
-        assert_eq!(classify("what is 2+2?", 0, 0, false, Tier::Mid), Tier::Cheap);
+        assert_eq!(
+            classify("what is 2+2?", 0, 0, false, Tier::Mid),
+            Tier::Cheap
+        );
         assert_eq!(classify("list files", 0, 0, false, Tier::Mid), Tier::Cheap);
     }
 
@@ -254,8 +257,20 @@ mod tests {
 
     #[test]
     fn greeting_with_file_path_routes_to_mid() {
-        assert_eq!(classify("yes check src/main.rs", 0, 0, false, Tier::Mid), Tier::Mid);
-        assert_eq!(classify("ok fix the bug in crates/core/lib.rs", 0, 0, false, Tier::Mid), Tier::Mid);
+        assert_eq!(
+            classify("yes check src/main.rs", 0, 0, false, Tier::Mid),
+            Tier::Mid
+        );
+        assert_eq!(
+            classify(
+                "ok fix the bug in crates/core/lib.rs",
+                0,
+                0,
+                false,
+                Tier::Mid
+            ),
+            Tier::Mid
+        );
     }
 
     #[test]

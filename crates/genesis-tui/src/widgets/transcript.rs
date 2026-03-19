@@ -158,10 +158,7 @@ impl TranscriptOverlay {
                 .add_modifier(Modifier::BOLD),
         );
         // Right-aligned position indicator.
-        let pos_span = Span::styled(
-            pos_text.clone(),
-            Style::default().fg(Color::DarkGray),
-        );
+        let pos_span = Span::styled(pos_text.clone(), Style::default().fg(Color::DarkGray));
 
         // Compute how much padding is needed between hint and position.
         let hint_len = hint.len() as u16;
@@ -283,8 +280,7 @@ mod tests {
     fn q_closes() {
         let cells = make_cells();
         let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
-        let action =
-            t.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), 24);
+        let action = t.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), 24);
         assert_eq!(action, TranscriptAction::Close);
     }
 
@@ -302,10 +298,7 @@ mod tests {
     fn ctrl_t_closes() {
         let cells = make_cells();
         let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
-        let action = t.handle_key(
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-            24,
-        );
+        let action = t.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL), 24);
         assert_eq!(action, TranscriptAction::Close);
     }
 
@@ -319,10 +312,7 @@ mod tests {
         let mut t = TranscriptOverlay::from_cells(&cells, 80, 24);
         t.scroll_to_top();
         let before = t.scroll_offset;
-        t.handle_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            24,
-        );
+        t.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL), 24);
         // half of 24 = 12
         assert_eq!(t.scroll_offset, before + 12);
     }

@@ -65,7 +65,11 @@ impl Renderable for &str {
             total = total.saturating_add(rows);
         }
         // Empty string = 1 row (blank line).
-        if total == 0 { 1 } else { total }
+        if total == 0 {
+            1
+        } else {
+            total
+        }
     }
 }
 
@@ -308,9 +312,9 @@ impl Renderable for FlexColumn {
 
     fn desired_height(&self, width: u16) -> u16 {
         // Desired height = sum of fixed items' heights + flex items' desired heights
-        self.items
-            .iter()
-            .fold(0u16, |acc, item| acc.saturating_add(item.child.desired_height(width)))
+        self.items.iter().fold(0u16, |acc, item| {
+            acc.saturating_add(item.child.desired_height(width))
+        })
     }
 }
 
@@ -385,9 +389,7 @@ mod tests {
 
     #[test]
     fn column_renders_top_to_bottom() {
-        let col = Column::new()
-            .push("A".to_owned())
-            .push("B".to_owned());
+        let col = Column::new().push("A".to_owned()).push("B".to_owned());
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
         col.render(Rect::new(0, 0, 10, 2), &mut buf);
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "A");

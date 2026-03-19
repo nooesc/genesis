@@ -248,8 +248,15 @@ impl ClarificationWidget {
             .collect();
         let q_height = (q_lines.len() as u16).min(inner.height);
         if q_height > 0 {
-            let q_area = Rect { x: inner.x, y: row, width: inner.width, height: q_height };
-            Paragraph::new(q_lines).wrap(Wrap { trim: false }).render(q_area, buf);
+            let q_area = Rect {
+                x: inner.x,
+                y: row,
+                width: inner.width,
+                height: q_height,
+            };
+            Paragraph::new(q_lines)
+                .wrap(Wrap { trim: false })
+                .render(q_area, buf);
             row += q_height;
         }
 
@@ -328,7 +335,9 @@ impl ClarificationWidget {
             // Write prefix.
             let mut x = inner.x;
             for ch in label.chars() {
-                if x >= inner.x + inner.width { break; }
+                if x >= inner.x + inner.width {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut((x, row)) {
                     cell.set_char(ch);
                     cell.set_style(style);
@@ -338,7 +347,9 @@ impl ClarificationWidget {
 
             // Write custom input text.
             for ch in self.custom_input.chars() {
-                if x >= inner.x + inner.width { break; }
+                if x >= inner.x + inner.width {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut((x, row)) {
                     cell.set_char(ch);
                     cell.set_style(input_style);
@@ -363,7 +374,9 @@ impl ClarificationWidget {
             let hint_style = Style::default().fg(HINT_FG).bg(opt_bg);
             let mut x = inner.x;
             for ch in hint.chars() {
-                if x >= inner.x + inner.width { break; }
+                if x >= inner.x + inner.width {
+                    break;
+                }
                 if let Some(cell) = buf.cell_mut((x, row)) {
                     cell.set_char(ch);
                     cell.set_style(hint_style);
@@ -414,7 +427,13 @@ fn draw_border(area: Rect, style: Style, title: &str, buf: &mut Buffer) {
     let title_chars: Vec<char> = title.chars().collect();
     while x < right {
         if x >= title_start && title_idx < title_chars.len() {
-            set_cell(buf, x, area.y, &title_chars[title_idx].to_string(), title_style);
+            set_cell(
+                buf,
+                x,
+                area.y,
+                &title_chars[title_idx].to_string(),
+                title_style,
+            );
             title_idx += 1;
         } else {
             set_cell(buf, x, area.y, "─", style);
@@ -449,8 +468,14 @@ mod tests {
 
     #[test]
     fn parse_option_valid() {
-        assert_eq!(try_parse_option("1. Charlotte, NC"), Some("Charlotte, NC".to_string()));
-        assert_eq!(try_parse_option("  2. Option B"), Some("Option B".to_string()));
+        assert_eq!(
+            try_parse_option("1. Charlotte, NC"),
+            Some("Charlotte, NC".to_string())
+        );
+        assert_eq!(
+            try_parse_option("  2. Option B"),
+            Some("Option B".to_string())
+        );
     }
 
     #[test]

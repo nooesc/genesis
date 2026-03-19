@@ -578,7 +578,7 @@ fn register_sqlite_vec() {
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
         >(
-            sqlite_vec::sqlite3_vec_init as *const (),
+            sqlite_vec::sqlite3_vec_init as *const ()
         )));
     });
 }
@@ -701,7 +701,7 @@ fn ensure_memory_vec_table(
 ) -> Result<(), StorageError> {
     match memory_vec_declared_dimensions(conn, database_path)? {
         Some(existing) if existing == dimensions => Ok(()),
-        Some(existing) if memory_embeddings_count(conn, database_path)? == 0 => {
+        Some(_existing) if memory_embeddings_count(conn, database_path)? == 0 => {
             conn.execute("DROP TABLE memory_vec", [])
                 .map_err(|source| StorageError::Sqlite {
                     path: database_path.to_path_buf(),

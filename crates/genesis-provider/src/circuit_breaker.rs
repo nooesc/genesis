@@ -152,9 +152,7 @@ impl CircuitBreaker {
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(Instant::now());
                 inner.open_count += 1;
-                tracing::warn!(
-                    "circuit breaker re-opened after failed probe"
-                );
+                tracing::warn!("circuit breaker re-opened after failed probe");
             }
             CircuitState::Open => {
                 // Already open — just count the failure.

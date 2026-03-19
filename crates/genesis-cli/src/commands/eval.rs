@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use genesis_core::replay::{load_and_report, ReplayEventCounts, ReplayReport};
 
-use crate::CliError;
 use crate::percentile;
 use crate::sha256_hex;
+use crate::CliError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AggregatedToolUsage {
@@ -99,7 +99,6 @@ pub(crate) struct EvalComparison {
     pub(crate) right_only_tags: Vec<String>,
 }
 
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn summarize_replay_reports(
     dir: &str,
@@ -149,13 +148,14 @@ pub(crate) fn summarize_replay_reports(
             *tag_counts.entry(tag.clone()).or_default() += 1;
         }
         for tool in &report.tool_usage {
-            let entry = tool_counts
-                .entry(tool.name.clone())
-                .or_insert_with(|| AggregatedToolUsage {
-                    name: tool.name.clone(),
-                    call_count: 0,
-                    result_count: 0,
-                });
+            let entry =
+                tool_counts
+                    .entry(tool.name.clone())
+                    .or_insert_with(|| AggregatedToolUsage {
+                        name: tool.name.clone(),
+                        call_count: 0,
+                        result_count: 0,
+                    });
             entry.call_count += tool.call_count;
             entry.result_count += tool.result_count;
         }
@@ -173,9 +173,7 @@ pub(crate) fn summarize_replay_reports(
                     *failure_reasons.entry(reason.clone()).or_default() += 1;
                 }
             }
-            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => {
-                abandoned_count += 1
-            }
+            Some(genesis_core::trajectory::TrajectoryOutcome::Abandoned) => abandoned_count += 1,
             None => missing_outcome_count += 1,
         }
     }
@@ -189,15 +187,11 @@ pub(crate) fn summarize_replay_reports(
             .then(left.name.cmp(&right.name))
     });
     let mut top_warning_messages = warning_counts.into_iter().collect::<Vec<_>>();
-    top_warning_messages.sort_by(|left, right| {
-        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
-    });
+    top_warning_messages.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     top_warning_messages.truncate(5);
 
     let mut top_failure_reasons = failure_reasons.into_iter().collect::<Vec<_>>();
-    top_failure_reasons.sort_by(|left, right| {
-        right.1.cmp(&left.1).then(left.0.cmp(&right.0))
-    });
+    top_failure_reasons.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
     top_failure_reasons.truncate(5);
 
     Ok(EvalSummary {
@@ -251,7 +245,11 @@ pub(crate) fn load_filtered_replay_reports(
             }
         }
         if let Some(tool_filter) = tool_filter {
-            if !report.tool_usage.iter().any(|tool| tool.name == tool_filter) {
+            if !report
+                .tool_usage
+                .iter()
+                .any(|tool| tool.name == tool_filter)
+            {
                 continue;
             }
         }
@@ -339,13 +337,14 @@ pub(crate) fn compute_eval_stats(
         *outcome_distribution.entry(outcome.to_owned()).or_default() += 1;
 
         for tool in &report.tool_usage {
-            let entry = tool_usage
-                .entry(tool.name.clone())
-                .or_insert_with(|| AggregatedToolUsage {
-                    name: tool.name.clone(),
-                    call_count: 0,
-                    result_count: 0,
-                });
+            let entry =
+                tool_usage
+                    .entry(tool.name.clone())
+                    .or_insert_with(|| AggregatedToolUsage {
+                        name: tool.name.clone(),
+                        call_count: 0,
+                        result_count: 0,
+                    });
             entry.call_count += tool.call_count;
             entry.result_count += tool.result_count;
         }
@@ -699,9 +698,18 @@ pub(crate) fn format_eval_stats(stats: &EvalStats) -> String {
         "tool filter:               {}\n",
         stats.tool_filter.as_deref().unwrap_or("<none>")
     ));
-    output.push_str(&format!("failures only:             {}\n", stats.failures_only));
-    output.push_str(&format!("total trajectories:        {}\n", stats.total_trajectories));
-    output.push_str(&format!("total turns:               {}\n", stats.total_turns));
+    output.push_str(&format!(
+        "failures only:             {}\n",
+        stats.failures_only
+    ));
+    output.push_str(&format!(
+        "total trajectories:        {}\n",
+        stats.total_trajectories
+    ));
+    output.push_str(&format!(
+        "total turns:               {}\n",
+        stats.total_turns
+    ));
     output.push_str(&format!(
         "avg turns / trajectory:    {:.2}\n",
         stats.average_turns_per_trajectory
@@ -925,10 +933,16 @@ pub(crate) fn run_eval_import_sharegpt(file: &str, output_dir: &str) -> Result<S
         imported += 1;
     }
 
-    Ok(format!("imported {imported} trajectories into {output_dir}"))
+    Ok(format!(
+        "imported {imported} trajectories into {output_dir}"
+    ))
 }
 
-pub(crate) fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> Result<String, CliError> {
+pub(crate) fn run_eval_merge(
+    sources: &[String],
+    output: &str,
+    dedup: bool,
+) -> Result<String, CliError> {
     std::fs::create_dir_all(output)
         .map_err(|e| CliError::Other(format!("failed to create {output}: {e}")))?;
 
@@ -942,12 +956,11 @@ pub(crate) fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> R
             return Err(CliError::Other(format!("{source} is not a directory")));
         }
 
-        for entry in std::fs::read_dir(&source_path).map_err(|e| {
-            CliError::Other(format!("failed to read directory {source}: {e}"))
-        })? {
-            let entry = entry.map_err(|e| {
-                CliError::Other(format!("failed to read entry in {source}: {e}"))
-            })?;
+        for entry in std::fs::read_dir(&source_path)
+            .map_err(|e| CliError::Other(format!("failed to read directory {source}: {e}")))?
+        {
+            let entry = entry
+                .map_err(|e| CliError::Other(format!("failed to read entry in {source}: {e}")))?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -959,8 +972,7 @@ pub(crate) fn run_eval_merge(sources: &[String], output: &str, dedup: bool) -> R
                 let raw = std::fs::read_to_string(&path).map_err(|e| {
                     CliError::Other(format!("failed to read {}: {e}", path.display()))
                 })?;
-                if let Ok(traj) =
-                    serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw)
+                if let Ok(traj) = serde_json::from_str::<genesis_core::trajectory::Trajectory>(&raw)
                 {
                     if !seen_ids.insert(traj.session_id.clone()) {
                         skipped += 1;
@@ -1033,9 +1045,10 @@ pub(crate) fn run_eval_import_chatml(file: &str, output_dir: &str) -> Result<Str
         imported += 1;
     }
 
-    Ok(format!("imported {imported} trajectories into {output_dir}"))
+    Ok(format!(
+        "imported {imported} trajectories into {output_dir}"
+    ))
 }
-
 
 pub(crate) enum EvalFileFormat {
     TrajectoryJson,
@@ -1043,7 +1056,11 @@ pub(crate) enum EvalFileFormat {
     SharegptJsonl,
 }
 
-pub(crate) fn run_eval_convert(input: &str, output: &str, format: &str) -> Result<String, CliError> {
+pub(crate) fn run_eval_convert(
+    input: &str,
+    output: &str,
+    format: &str,
+) -> Result<String, CliError> {
     let target = format.trim().to_ascii_lowercase();
     let input_format = detect_eval_input_format(input)?;
 
@@ -1056,8 +1073,7 @@ pub(crate) fn run_eval_convert(input: &str, output: &str, format: &str) -> Resul
             serde_json::to_string_pretty(&trajectory)?
         }
         (EvalFileFormat::TrajectoryJson, "chatml") => {
-            let compressed =
-                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            let compressed = load_training_compressed_trajectory(std::path::Path::new(input))?;
             serde_json::to_string(&serde_json::json!({
                 "session_id": compressed.session_id,
                 "model": compressed.model,
@@ -1067,8 +1083,7 @@ pub(crate) fn run_eval_convert(input: &str, output: &str, format: &str) -> Resul
             }))?
         }
         (EvalFileFormat::TrajectoryJson, "sharegpt") => {
-            let compressed =
-                load_training_compressed_trajectory(std::path::Path::new(input))?;
+            let compressed = load_training_compressed_trajectory(std::path::Path::new(input))?;
             serde_json::to_string(&serde_json::json!({
                 "session_id": compressed.session_id,
                 "model": compressed.model,
@@ -1155,16 +1170,14 @@ pub(crate) fn load_training_compressed_trajectory(
 ) -> Result<genesis_core::compress::CompressedTrajectory, CliError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
-        CliError::Other(format!(
-            "invalid trajectory JSON in {}: {e}",
-            path.display()
-        ))
-    })?;
-    Ok(
-        genesis_core::compress::TrajectoryCompressor::default()
-            .compress_for_training(&trajectory),
-    )
+    let trajectory: genesis_core::trajectory::Trajectory =
+        serde_json::from_str(&raw).map_err(|e| {
+            CliError::Other(format!(
+                "invalid trajectory JSON in {}: {e}",
+                path.display()
+            ))
+        })?;
+    Ok(genesis_core::compress::TrajectoryCompressor::default().compress_for_training(&trajectory))
 }
 
 pub(crate) fn trajectory_from_chatml_entry(
@@ -1174,7 +1187,9 @@ pub(crate) fn trajectory_from_chatml_entry(
     let chatml = entry
         .get("chatml")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| CliError::Other(format!("JSONL line {} missing 'chatml' field", index + 1)))?;
+        .ok_or_else(|| {
+            CliError::Other(format!("JSONL line {} missing 'chatml' field", index + 1))
+        })?;
 
     let session_id = entry
         .get("session_id")
@@ -1207,21 +1222,23 @@ pub(crate) fn trajectory_from_chatml_entry(
     let steps = messages
         .into_iter()
         .enumerate()
-        .map(|(step_index, (role, content))| genesis_core::trajectory::TrajectoryStep {
-            step_index,
-            timestamp: now.clone(),
-            action_type: match role.as_str() {
-                "system" => genesis_core::trajectory::ActionType::SystemMessage,
-                "user" => genesis_core::trajectory::ActionType::UserMessage,
-                "assistant" | "tool" => genesis_core::trajectory::ActionType::AssistantMessage,
-                _ => genesis_core::trajectory::ActionType::AssistantMessage,
+        .map(
+            |(step_index, (role, content))| genesis_core::trajectory::TrajectoryStep {
+                step_index,
+                timestamp: now.clone(),
+                action_type: match role.as_str() {
+                    "system" => genesis_core::trajectory::ActionType::SystemMessage,
+                    "user" => genesis_core::trajectory::ActionType::UserMessage,
+                    "assistant" | "tool" => genesis_core::trajectory::ActionType::AssistantMessage,
+                    _ => genesis_core::trajectory::ActionType::AssistantMessage,
+                },
+                content,
+                tool_name: None,
+                tool_arguments: None,
+                tool_result: None,
+                tokens: None,
             },
-            content,
-            tool_name: None,
-            tool_arguments: None,
-            tool_result: None,
-            tokens: None,
-        })
+        )
         .collect::<Vec<_>>();
 
     Ok(genesis_core::trajectory::Trajectory {
@@ -1339,7 +1356,9 @@ pub(crate) fn parse_chatml_blocks(chatml: &str) -> Result<Vec<(String, String)>,
     }
 
     if messages.is_empty() {
-        return Err(CliError::Other("invalid ChatML: no messages found".to_owned()));
+        return Err(CliError::Other(
+            "invalid ChatML: no messages found".to_owned(),
+        ));
     }
 
     Ok(messages)
@@ -1529,9 +1548,8 @@ pub(crate) fn run_eval_auto_tag(
             trajectory.tags.sort();
             trajectory.tags.dedup();
             let serialized = serde_json::to_string_pretty(&trajectory)?;
-            std::fs::write(&path, serialized).map_err(|e| {
-                CliError::Other(format!("failed to write {}: {e}", path.display()))
-            })?;
+            std::fs::write(&path, serialized)
+                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", path.display())))?;
         }
 
         updated.push((path.display().to_string(), additions));
@@ -1569,15 +1587,19 @@ pub(crate) fn run_eval_auto_tag(
     Ok(lines.join("\n"))
 }
 
-pub(crate) fn run_eval_tag_stats(dir: &str, recursive: bool, json: bool) -> Result<String, CliError> {
+pub(crate) fn run_eval_tag_stats(
+    dir: &str,
+    recursive: bool,
+    json: bool,
+) -> Result<String, CliError> {
     let files = collect_eval_files(PathBuf::from(dir), recursive)?;
     let mut counts = BTreeMap::<String, usize>::new();
 
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
-            .map_err(|e| {
+        let trajectory: genesis_core::trajectory::Trajectory =
+            serde_json::from_str(&raw).map_err(|e| {
                 CliError::Other(format!(
                     "invalid trajectory JSON in {}: {e}",
                     path.display()
@@ -1618,12 +1640,10 @@ pub(crate) fn run_eval_tag_stats(dir: &str, recursive: bool, json: bool) -> Resu
     Ok(lines.join("\n"))
 }
 
-
 pub(crate) struct DeduplicateGroup {
     pub(crate) key: String,
     pub(crate) files: Vec<String>,
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_eval_filter(
@@ -1649,9 +1669,8 @@ pub(crate) fn run_eval_filter(
 
     for path in files {
         total += 1;
-        let raw = std::fs::read_to_string(&path).map_err(|e| {
-            CliError::Other(format!("failed to read {}: {e}", path.display()))
-        })?;
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
         let traj: genesis_core::trajectory::Trajectory = match serde_json::from_str(&raw) {
             Ok(t) => t,
             Err(_) => continue,
@@ -1695,9 +1714,10 @@ pub(crate) fn run_eval_filter(
             }
         }
         if let Some(tool_name) = tool {
-            let has_tool = traj.steps.iter().any(|s| {
-                s.tool_name.as_deref() == Some(tool_name)
-            });
+            let has_tool = traj
+                .steps
+                .iter()
+                .any(|s| s.tool_name.as_deref() == Some(tool_name));
             if !has_tool {
                 continue;
             }
@@ -1778,16 +1798,14 @@ pub(crate) fn run_eval_split(
 
     for path in train_files {
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
-        std::fs::copy(path, std::path::Path::new(train_dir).join(&filename)).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        std::fs::copy(path, std::path::Path::new(train_dir).join(&filename))
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     for path in test_files {
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
-        std::fs::copy(path, std::path::Path::new(test_dir).join(&filename)).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        std::fs::copy(path, std::path::Path::new(test_dir).join(&filename))
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     Ok(format!(
@@ -1832,9 +1850,8 @@ pub(crate) fn run_eval_sample(
     for path in &files[..actual_count] {
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
         let dest = std::path::Path::new(output).join(&filename);
-        std::fs::copy(path, &dest).map_err(|e| {
-            CliError::Other(format!("failed to copy {}: {e}", path.display()))
-        })?;
+        std::fs::copy(path, &dest)
+            .map_err(|e| CliError::Other(format!("failed to copy {}: {e}", path.display())))?;
     }
 
     Ok(format!(
@@ -1904,7 +1921,6 @@ pub(crate) fn run_eval_manifest(
     Ok(lines.join("\n"))
 }
 
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_eval_pipeline(
     dir: &str,
@@ -1973,10 +1989,16 @@ pub(crate) fn run_eval_pipeline(
     }
 
     if validate {
-        log.push(format!("validate: {} valid, {invalid} invalid", trajectories.len()));
+        log.push(format!(
+            "validate: {} valid, {invalid} invalid",
+            trajectories.len()
+        ));
     }
     if auto_tag {
-        log.push(format!("auto-tag: applied to {} trajectories", trajectories.len()));
+        log.push(format!(
+            "auto-tag: applied to {} trajectories",
+            trajectories.len()
+        ));
     }
 
     // Step 3: Filter
@@ -2052,10 +2074,14 @@ pub(crate) fn run_eval_pipeline(
                     CliError::Other(format!("failed to write {}: {e}", dest.display()))
                 })?;
             }
-            log.push(format!("output: {} JSON files in {output}", trajectories.len()));
+            log.push(format!(
+                "output: {} JSON files in {output}",
+                trajectories.len()
+            ));
         }
         "chatml" | "sharegpt" => {
-            let output_file = std::path::Path::new(output).join(format!("dataset.{output_format}.jsonl"));
+            let output_file =
+                std::path::Path::new(output).join(format!("dataset.{output_format}.jsonl"));
             let mut lines = Vec::new();
             for (original_path, _) in &trajectories {
                 let compressed = load_training_compressed_trajectory(original_path)?;
@@ -2078,8 +2104,9 @@ pub(crate) fn run_eval_pipeline(
                 };
                 lines.push(serde_json::to_string(&data)?);
             }
-            std::fs::write(&output_file, lines.join("\n"))
-                .map_err(|e| CliError::Other(format!("failed to write {}: {e}", output_file.display())))?;
+            std::fs::write(&output_file, lines.join("\n")).map_err(|e| {
+                CliError::Other(format!("failed to write {}: {e}", output_file.display()))
+            })?;
             log.push(format!(
                 "output: {} records as {output_format} JSONL",
                 trajectories.len()
@@ -2149,11 +2176,7 @@ pub(crate) fn run_eval_validate(
                 if issues.is_empty() {
                     valid += 1;
                 } else {
-                    errors.push(format!(
-                        "{}: {}",
-                        path.display(),
-                        issues.join(", ")
-                    ));
+                    errors.push(format!("{}: {}", path.display(), issues.join(", ")));
                     invalid += 1;
                     if remove {
                         let _ = std::fs::remove_file(path);
@@ -2198,8 +2221,8 @@ pub(crate) fn run_eval_deduplicate(
     for path in files {
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| CliError::Other(format!("failed to read {}: {e}", path.display())))?;
-        let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw)
-            .map_err(|e| {
+        let trajectory: genesis_core::trajectory::Trajectory =
+            serde_json::from_str(&raw).map_err(|e| {
                 CliError::Other(format!(
                     "invalid trajectory JSON in {}: {e}",
                     path.display()

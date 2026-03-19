@@ -57,8 +57,8 @@ impl AgentCell {
     /// Render the cell into the given buffer area.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = ratatui::widgets::Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false });
+        let paragraph =
+            ratatui::widgets::Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(area, buf);
     }
 
@@ -186,7 +186,11 @@ mod tests {
         let lines = cell.to_scrollback_lines(80);
         // Heading + paragraph text (pulldown-cmark does not emit blank lines
         // between heading and following paragraph).
-        assert!(lines.len() >= 2, "should have at least heading + text, got {}", lines.len());
+        assert!(
+            lines.len() >= 2,
+            "should have at least heading + text, got {}",
+            lines.len()
+        );
 
         // First line: prefix + heading spans (bold + accent colour).
         assert_eq!(lines[0].spans[0].content, PREFIX);
@@ -197,7 +201,7 @@ mod tests {
         // Last line has bold and code spans (after the indent).
         let last = lines.last().unwrap();
         assert_eq!(last.spans[0].content, "     "); // indent = PREFIX width
-        // Find the bold span.
+                                                    // Find the bold span.
         let bold = last.spans.iter().find(|s| s.content == "bold");
         assert!(bold.is_some(), "expected bold span in last line");
         assert!(bold.unwrap().style.add_modifier.contains(Modifier::BOLD));

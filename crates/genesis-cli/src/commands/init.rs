@@ -5,12 +5,10 @@ use std::path::{Path, PathBuf};
 use genesis_config::load;
 use genesis_storage::bootstrap;
 
+use crate::commands::misc::{detect_codex_model, known_models};
 use crate::CliError;
-use crate::commands::misc::{known_models, detect_codex_model};
 
-pub(crate) async fn run_login(
-    config_path: Option<PathBuf>,
-) -> Result<String, CliError> {
+pub(crate) async fn run_login(config_path: Option<PathBuf>) -> Result<String, CliError> {
     use genesis_config::{update_provider_in_file, AppPaths};
 
     let auth_path = genesis_auth::default_auth_path()?;
@@ -23,7 +21,9 @@ pub(crate) async fn run_login(
             eprint!("  Use existing credentials? [Y/n]: ");
 
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+            std::io::stdin()
+                .read_line(&mut input)
+                .map_err(CliError::Io)?;
             let input = input.trim().to_lowercase();
 
             if input.is_empty() || input == "y" || input == "yes" {
@@ -49,11 +49,17 @@ pub(crate) async fn run_login(
         eprint!("  Import these credentials? [y/N]: ");
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).map_err(CliError::Io)?;
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(CliError::Io)?;
         let input = input.trim().to_lowercase();
 
         if input == "y" || input == "yes" {
-            genesis_auth::store::save_codex_tokens(&auth_path, cli_tokens, genesis_auth::store::CredentialSource::CodexMigration)?;
+            genesis_auth::store::save_codex_tokens(
+                &auth_path,
+                cli_tokens,
+                genesis_auth::store::CredentialSource::CodexMigration,
+            )?;
             update_provider_in_file(
                 &paths.config_path,
                 Some("openai-codex"),
@@ -141,7 +147,11 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
         ("openai", "OpenAI", "OPENAI_API_KEY"),
         ("anthropic", "Anthropic (Claude)", "ANTHROPIC_API_KEY"),
         ("google", "Google (Gemini)", "GEMINI_API_KEY"),
-        ("openrouter", "OpenRouter (200+ models)", "OPENROUTER_API_KEY"),
+        (
+            "openrouter",
+            "OpenRouter (200+ models)",
+            "OPENROUTER_API_KEY",
+        ),
         ("openai-codex", "Sign in with ChatGPT (OAuth)", ""),
         ("local", "Local / Self-hosted (vLLM, Ollama, etc.)", ""),
         ("compatible", "Custom OpenAI-compatible endpoint", ""),
@@ -184,7 +194,10 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
                 for (i, (_, model_id, desc)) in backend_models.iter().enumerate() {
                     eprintln!("    {}. {} — {}", i + 1, model_id, desc);
                 }
-                eprintln!("    {}. Enter a custom model name", backend_models.len() + 1);
+                eprintln!(
+                    "    {}. Enter a custom model name",
+                    backend_models.len() + 1
+                );
                 eprintln!();
                 let model_idx = prompt_choice("  Model", backend_models.len() + 1)?;
                 if model_idx < backend_models.len() {
@@ -236,7 +249,10 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
         for (i, (_, model_id, desc)) in backend_models.iter().enumerate() {
             eprintln!("    {}. {} — {}", i + 1, model_id, desc);
         }
-        eprintln!("    {}. Enter a custom model name", backend_models.len() + 1);
+        eprintln!(
+            "    {}. Enter a custom model name",
+            backend_models.len() + 1
+        );
         eprintln!();
 
         let model_idx = prompt_choice("  Model", backend_models.len() + 1)?;
@@ -260,10 +276,7 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
 
     // Step 4: API key
     let api_key_env = if !default_key_env.is_empty() {
-        eprintln!(
-            "  API key env var [default: {}]:",
-            default_key_env
-        );
+        eprintln!("  API key env var [default: {}]:", default_key_env);
         let input = prompt_line_or_default("  Env var", default_key_env)?;
         eprintln!();
 
@@ -271,10 +284,7 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
         if std::env::var(&input).is_ok() {
             eprintln!("  [ok] ${} is set", input);
         } else {
-            eprintln!(
-                "  [!!] ${} is NOT set — set it before chatting:",
-                input
-            );
+            eprintln!("  [!!] ${} is NOT set — set it before chatting:", input);
             eprintln!("       export {}=your-api-key-here", input);
         }
         eprintln!();
@@ -316,10 +326,7 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
         base_url.as_ref().map(|u| Some(u.as_str())),
         api_key_env.as_ref().map(|k| Some(k.as_str())),
     )?;
-    steps.push(format!(
-        "  [+] Provider: {} / {}",
-        backend, chosen_model
-    ));
+    steps.push(format!("  [+] Provider: {} / {}", backend, chosen_model));
 
     // Bootstrap storage
     std::fs::create_dir_all(&paths.data_dir).map_err(CliError::Io)?;
@@ -443,9 +450,7 @@ pub(crate) fn prompt_choice(label: &str, max: usize) -> Result<usize, CliError> 
         let _ = io::stderr().flush();
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(CliError::Io)?;
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
         match input.trim().parse::<usize>() {
             Ok(n) if n >= 1 && n <= max => return Ok(n - 1),
@@ -461,9 +466,7 @@ pub(crate) fn prompt_line(label: &str) -> Result<String, CliError> {
         let _ = io::stderr().flush();
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(CliError::Io)?;
+        io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
         let trimmed = input.trim().to_owned();
         if !trimmed.is_empty() {
@@ -479,9 +482,7 @@ pub(crate) fn prompt_line_or_default(label: &str, default: &str) -> Result<Strin
     let _ = io::stderr().flush();
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(CliError::Io)?;
+    io::stdin().read_line(&mut input).map_err(CliError::Io)?;
 
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -535,9 +536,7 @@ pub(crate) async fn run_update() -> Result<String, CliError> {
 
     if !build.status.success() {
         let build_err = String::from_utf8_lossy(&build.stderr);
-        return Err(CliError::Other(format!(
-            "cargo build failed:\n{build_err}"
-        )));
+        return Err(CliError::Other(format!("cargo build failed:\n{build_err}")));
     }
     steps.push("[ok] Build succeeded.".to_owned());
 
@@ -636,7 +635,10 @@ pub(crate) fn run_uninstall(
                 data_dir.display()
             ))
         })?;
-        results.push(format!("[ok] Removed data directory: {}", data_dir.display()));
+        results.push(format!(
+            "[ok] Removed data directory: {}",
+            data_dir.display()
+        ));
     }
 
     // Remove config directory (if requested)

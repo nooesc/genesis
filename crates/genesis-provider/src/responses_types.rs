@@ -199,10 +199,7 @@ pub(crate) fn from_responses_response(
 ) -> Result<ChatCompletionResponse, ProviderError> {
     let id = body["id"].as_str().unwrap_or_default().to_owned();
 
-    let output = body["output"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let output = body["output"].as_array().cloned().unwrap_or_default();
 
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCallEntry> = Vec::new();
@@ -460,13 +457,11 @@ pub(crate) fn parse_responses_sse_event(
             });
 
             // Determine finish_reason from the completed response.
-            let has_tool_calls = response["output"]
-                .as_array()
-                .is_some_and(|items| {
-                    items
-                        .iter()
-                        .any(|i| i["type"].as_str() == Some("function_call"))
-                });
+            let has_tool_calls = response["output"].as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|i| i["type"].as_str() == Some("function_call"))
+            });
 
             let finish_reason = if has_tool_calls {
                 Some("tool_calls".to_owned())
@@ -652,7 +647,10 @@ mod tests {
 
         let req = ChatCompletionRequest::new(
             "o3-pro",
-            vec![ChatMessage::user("What is the meaning of life?"), assistant_msg],
+            vec![
+                ChatMessage::user("What is the meaning of life?"),
+                assistant_msg,
+            ],
         );
 
         let body = to_responses_request(&req);
@@ -747,10 +745,7 @@ mod tests {
         });
 
         let resp = from_responses_response(&body).unwrap();
-        assert_eq!(
-            resp.choices[0].finish_reason.as_deref(),
-            Some("tool_calls")
-        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
 
         let tcs = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 2);
@@ -833,10 +828,7 @@ mod tests {
         });
 
         let resp = from_responses_response(&body).unwrap();
-        assert_eq!(
-            resp.choices[0].finish_reason.as_deref(),
-            Some("incomplete")
-        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("incomplete"));
     }
 
     #[test]
@@ -954,10 +946,9 @@ mod tests {
             "response": {"id": "resp_stream_004"}
         });
 
-        let chunk =
-            parse_responses_sse_event("response.function_call_arguments.delta", &data)
-                .unwrap()
-                .expect("should produce chunk");
+        let chunk = parse_responses_sse_event("response.function_call_arguments.delta", &data)
+            .unwrap()
+            .expect("should produce chunk");
 
         let tcs = chunk.choices[0].delta.tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 1);
@@ -1032,8 +1023,7 @@ mod tests {
     #[test]
     fn test_parse_sse_unknown_event_returns_none() {
         let data = json!({"something": "irrelevant"});
-        let result =
-            parse_responses_sse_event("response.some_unknown_event", &data).unwrap();
+        let result = parse_responses_sse_event("response.some_unknown_event", &data).unwrap();
         assert!(result.is_none());
     }
 
@@ -1046,8 +1036,7 @@ mod tests {
             }
         });
 
-        let result =
-            parse_responses_sse_event("response.output_item.added", &data).unwrap();
+        let result = parse_responses_sse_event("response.output_item.added", &data).unwrap();
         assert!(result.is_none());
     }
 
@@ -1060,9 +1049,7 @@ mod tests {
                 ChatMessage::user("search for cats and tell me about them"),
                 ChatMessage {
                     role: "assistant".to_owned(),
-                    content: Some(MessageContent::Text(
-                        "Let me search for that.".to_owned(),
-                    )),
+                    content: Some(MessageContent::Text("Let me search for that.".to_owned())),
                     thinking: None,
                     tool_calls: Some(vec![ToolCallEntry {
                         id: "call_x|fc_x".to_owned(),

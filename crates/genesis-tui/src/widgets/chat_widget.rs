@@ -7,6 +7,11 @@
 
 use std::collections::HashSet;
 
+use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
+use crate::history::cell::HistoryCell;
+use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
+use crate::history::user_cell::UserCell;
+use crate::widgets::input_widget::InputWidget;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -14,11 +19,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget as _, Wrap},
 };
-use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
-use crate::history::cell::HistoryCell;
-use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
-use crate::history::user_cell::UserCell;
-use crate::widgets::input_widget::InputWidget;
 
 /// A single in-flight tool call tracked during a streaming turn.
 pub struct ActiveToolCall {
@@ -120,12 +120,7 @@ impl ChatWidget {
     /// Record a tool call starting in the active cell.
     ///
     /// If no turn is active, this is a no-op.
-    pub fn tool_call_start(
-        &mut self,
-        call_id: String,
-        tool_name: String,
-        args_summary: String,
-    ) {
+    pub fn tool_call_start(&mut self, call_id: String, tool_name: String, args_summary: String) {
         if let Some(cell) = &mut self.active_cell {
             cell.tool_calls.push(ActiveToolCall {
                 call_id,
@@ -177,14 +172,8 @@ impl ChatWidget {
             let success = tc.success.unwrap_or(false);
             let duration = tc.duration.unwrap_or(std::time::Duration::ZERO);
             new_cells.push(HistoryCell::Tool(
-                ToolCell::new(
-                    tc.tool_name,
-                    tc.call_id,
-                    tc.args_summary,
-                    success,
-                    duration,
-                )
-                .with_display_mode(ToolDisplayMode::Grouped),
+                ToolCell::new(tc.tool_name, tc.call_id, tc.args_summary, success, duration)
+                    .with_display_mode(ToolDisplayMode::Grouped),
             ));
         }
 
@@ -281,7 +270,7 @@ impl ChatWidget {
                 }
                 prev_is_user = Some(cur_is_user);
                 total = total.saturating_add(1); // summary line = 1 row
-                // Skip to end of group.
+                                                 // Skip to end of group.
                 let count = tool_groups
                     .iter()
                     .find(|&&(s, _)| s == i)
@@ -316,20 +305,16 @@ impl ChatWidget {
                 // Reuse the active cell cache when possible to avoid redundant
                 // markdown re-parsing.
                 let h = if let Some(cache) = self.active_cell_cache.as_ref() {
-                    if cache.parsed_len == active.text_buffer.len()
-                        && cache.parsed_width == width
-                    {
+                    if cache.parsed_len == active.text_buffer.len() && cache.parsed_width == width {
                         wrapped_row_count(&cache.lines, width).max(1)
                     } else {
-                        let lines = crate::history::agent_cell::prefix_markdown_lines(
-                            &active.text_buffer,
-                        );
+                        let lines =
+                            crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
                         wrapped_row_count(&lines, width).max(1)
                     }
                 } else {
-                    let lines = crate::history::agent_cell::prefix_markdown_lines(
-                        &active.text_buffer,
-                    );
+                    let lines =
+                        crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
                     wrapped_row_count(&lines, width).max(1)
                 };
                 total = total.saturating_add(h);
@@ -388,9 +373,10 @@ impl ChatWidget {
 
         if let Some((text_len, width)) = active_text_info {
             // Re-parse markdown only when the buffer or width has changed.
-            let needs_reparse = self.active_cell_cache.as_ref().is_none_or(|c| {
-                c.parsed_len != text_len || c.parsed_width != width
-            });
+            let needs_reparse = self
+                .active_cell_cache
+                .as_ref()
+                .is_none_or(|c| c.parsed_len != text_len || c.parsed_width != width);
             if needs_reparse {
                 // Re-borrow text_buffer for the actual parse.
                 let text = self.active_cell.as_ref().unwrap().text_buffer.clone();
@@ -404,8 +390,8 @@ impl ChatWidget {
             let mut lines = self.active_cell_cache.as_ref().unwrap().lines.clone();
 
             // Append a block cursor to the last line to indicate streaming.
-            let cursor_style = Style::default()
-                .fg(crate::history::rgb(genesis_ui::colors::EVE_LAVENDER));
+            let cursor_style =
+                Style::default().fg(crate::history::rgb(genesis_ui::colors::EVE_LAVENDER));
             if let Some(last_line) = lines.last_mut() {
                 last_line.spans.push(Span::styled("\u{258D}", cursor_style));
             }
@@ -498,20 +484,18 @@ impl ChatWidget {
                     // reverse walk.
                     if i == group_start + count - 1 {
                         // Build summary line from all cells in this group.
-                        let tool_cells: Vec<&ToolCell> =
-                            (group_start..group_start + count)
-                                .filter_map(|idx| match &self.committed_cells[idx] {
-                                    HistoryCell::Tool(tc) => Some(tc),
-                                    _ => None,
-                                })
-                                .collect();
+                        let tool_cells: Vec<&ToolCell> = (group_start..group_start + count)
+                            .filter_map(|idx| match &self.committed_cells[idx] {
+                                HistoryCell::Tool(tc) => Some(tc),
+                                _ => None,
+                            })
+                            .collect();
                         let summary = tool_group_summary_line(&tool_cells);
                         let h: u16 = 1; // summary is always 1 row
 
                         // Tool cells are not User cells, so cur_is_user = false.
                         let cur_is_user = false;
-                        let needs_sep =
-                            prev_is_user.is_some_and(|prev| prev != cur_is_user);
+                        let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
                         let cost = h + if needs_sep { 1 } else { 0 };
                         if used + cost > remaining_rows {
                             break;
@@ -579,9 +563,9 @@ impl ChatWidget {
             // Active cell is always an agent response. If the last committed
             // cell (first in `entries` since entries is newest-first) is a
             // User cell, we need a separator.
-            entries.first().is_some_and(|e| {
-                matches!(e.visual, VisualEntry::Cell(HistoryCell::User(_)))
-            })
+            entries
+                .first()
+                .is_some_and(|e| matches!(e.visual, VisualEntry::Cell(HistoryCell::User(_))))
         } else {
             false
         };
@@ -593,8 +577,7 @@ impl ChatWidget {
         entries.reverse();
         let mut row_cursor = bottom_y.saturating_sub(used);
 
-        let sep_style =
-            Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+        let sep_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
 
         for entry in &entries {
             let cell_area = Rect {
@@ -631,8 +614,7 @@ impl ChatWidget {
                 " \u{2191} {} more \u{00b7} Ctrl+T for transcript",
                 skipped_message_count
             );
-            let dim_style =
-                Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+            let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
             let hint_line = Line::from(Span::styled(hint, dim_style));
             let hint_area = Rect {
                 x: area.x,
@@ -649,8 +631,7 @@ impl ChatWidget {
     /// `show_cursor` controls whether the input cursor is visible (used while
     /// an agent turn is running).
     pub fn render_input(&self, area: Rect, buf: &mut Buffer, is_turn_running: bool) {
-        self.input
-            .render_with_state(area, buf, !is_turn_running);
+        self.input.render_with_state(area, buf, !is_turn_running);
     }
 }
 
@@ -860,7 +841,10 @@ mod tests {
         let mut cw = ChatWidget::new();
         cw.add_user_message("hello".to_string());
         let h = cw.visible_content_height(80);
-        assert!(h >= 1, "should have at least 1 row for user message, got {h}");
+        assert!(
+            h >= 1,
+            "should have at least 1 row for user message, got {h}"
+        );
     }
 
     #[test]
@@ -874,7 +858,10 @@ mod tests {
 
         let h = cw.visible_content_height(80);
         // User(1) + separator(1) + Agent(1) = 3
-        assert_eq!(h, 3, "should include separator between user and agent, got {h}");
+        assert_eq!(
+            h, 3,
+            "should include separator between user and agent, got {h}"
+        );
     }
 
     #[test]
@@ -1028,10 +1015,7 @@ mod tests {
                     .map_or(false, |c| c.symbol() == "\u{258D}")
             })
         });
-        assert!(
-            has_cursor,
-            "should render block cursor during streaming"
-        );
+        assert!(has_cursor, "should render block cursor during streaming");
     }
 
     #[test]
@@ -1102,7 +1086,10 @@ mod tests {
         cw.complete_turn();
 
         let groups = cw.find_tool_groups();
-        assert!(groups.is_empty(), "single tool cell should not form a group");
+        assert!(
+            groups.is_empty(),
+            "single tool cell should not form a group"
+        );
     }
 
     #[test]

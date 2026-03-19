@@ -75,7 +75,10 @@ min_version = "0.1.0"
         let manifest: PluginManifest = toml::from_str(raw).expect("manifest should parse");
         assert_eq!(manifest.plugin.name, "my-plugin");
         assert_eq!(manifest.plugin.version, "0.1.0");
-        assert_eq!(manifest.plugin.description.as_deref(), Some("Does something useful"));
+        assert_eq!(
+            manifest.plugin.description.as_deref(),
+            Some("Does something useful")
+        );
         assert_eq!(manifest.plugin.author.as_deref(), Some("user"));
         assert_eq!(manifest.permissions.tools, vec!["read_file", "write_file"]);
         assert_eq!(

@@ -220,9 +220,9 @@ impl StatusBarWidget {
     /// idle ambient effects (border glow, breathing) get ticked.
     pub fn animation_interval(&self) -> Duration {
         match &self.state {
-            StatusState::Thinking | StatusState::ToolRunning { .. } | StatusState::Streaming { .. } => {
-                SHIMMER_INTERVAL
-            }
+            StatusState::Thinking
+            | StatusState::ToolRunning { .. }
+            | StatusState::Streaming { .. } => SHIMMER_INTERVAL,
             StatusState::Idle => {
                 if self.effects_enabled {
                     IDLE_EFFECTS_INTERVAL
@@ -300,9 +300,8 @@ impl StatusBarWidget {
         // Sparkline width: only show if we have data and enough room.
         let sparkline_w = if !self.token_history.is_empty() {
             // 2 cells padding + sparkline cells
-            (SPARKLINE_WIDTH + 2).min(
-                total.saturating_sub(left_w + center_w + right_w + heartbeat_w + 6),
-            )
+            (SPARKLINE_WIDTH + 2)
+                .min(total.saturating_sub(left_w + center_w + right_w + heartbeat_w + 6))
         } else {
             0
         };
@@ -333,15 +332,35 @@ impl StatusBarWidget {
             }
 
             // Draw center.
-            write_spans(&center, area.x + center_start as u16, row, area.x + area.width, buf);
+            write_spans(
+                &center,
+                area.x + center_start as u16,
+                row,
+                area.x + area.width,
+                buf,
+            );
 
             // Draw fill between center and heartbeat/sparkline/right.
             let center_end = area.x + center_start as u16 + center_w as u16 + 1;
-            fill_to_decorations(center_end, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
+            fill_to_decorations(
+                center_end,
+                area.x + right_start as u16,
+                sparkline_w + heartbeat_w,
+                row,
+                bg,
+                buf,
+            );
         } else {
             // No center — fill between left and heartbeat/sparkline/right.
             let fill_start = area.x + 1 + left_w as u16 + 1;
-            fill_to_decorations(fill_start, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
+            fill_to_decorations(
+                fill_start,
+                area.x + right_start as u16,
+                sparkline_w + heartbeat_w,
+                row,
+                bg,
+                buf,
+            );
         }
 
         // Draw heartbeat (braille canvas, 1-row inline).
@@ -363,7 +382,13 @@ impl StatusBarWidget {
         }
 
         // Draw right.
-        write_spans(&right, area.x + right_start as u16, row, area.x + area.width, buf);
+        write_spans(
+            &right,
+            area.x + right_start as u16,
+            row,
+            area.x + area.width,
+            buf,
+        );
     }
 
     /// Render a tiny bar sparkline inline into the status bar.
@@ -422,15 +447,12 @@ impl StatusBarWidget {
         let mut spans = Vec::with_capacity(4);
 
         // Diamond accent.
-        spans.push(Span::styled(
-            "◆ ",
-            Style::default().fg(ACCENT).bg(bg),
-        ));
+        spans.push(Span::styled("◆ ", Style::default().fg(ACCENT).bg(bg)));
 
         // Mode indicator (Act / Plan).
         let mode_color = match self.agent_mode {
-            AgentMode::Act => Color::Rgb(135, 175, 95),    // Green
-            AgentMode::Plan => Color::Rgb(180, 167, 214),  // Lavender
+            AgentMode::Act => Color::Rgb(135, 175, 95),   // Green
+            AgentMode::Plan => Color::Rgb(180, 167, 214), // Lavender
         };
         spans.push(Span::styled(
             format!("[{}] ", self.agent_mode.label()),
@@ -443,15 +465,15 @@ impl StatusBarWidget {
         // Model name.
         spans.push(Span::styled(
             self.model.clone(),
-            Style::default().fg(TEXT).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(TEXT)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
         ));
 
         // Context %.
         let ctx = format!(" · {}%", self.context_percent);
-        spans.push(Span::styled(
-            ctx,
-            Style::default().fg(DIM).bg(bg),
-        ));
+        spans.push(Span::styled(ctx, Style::default().fg(DIM).bg(bg)));
 
         spans
     }
@@ -469,7 +491,13 @@ impl StatusBarWidget {
                     Style::default().fg(DANCE_COLOR).bg(bg),
                 )];
                 let text = format!("thinking {elapsed}");
-                spans.extend(shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg));
+                spans.extend(shimmer_spans(
+                    &text,
+                    self.shimmer_phase,
+                    DIM_TEXT,
+                    SHIMMER_HIGHLIGHT,
+                    bg,
+                ));
                 spans
             }
 
@@ -492,20 +520,18 @@ impl StatusBarWidget {
         // Token counts (only when we have some).
         if self.tokens_in > 0 || self.tokens_out > 0 {
             spans.push(Span::styled(
-                format!("↑{} ↓{}", format_tokens(self.tokens_in), format_tokens(self.tokens_out)),
+                format!(
+                    "↑{} ↓{}",
+                    format_tokens(self.tokens_in),
+                    format_tokens(self.tokens_out)
+                ),
                 Style::default().fg(TOKEN_COLOR).bg(bg),
             ));
-            spans.push(Span::styled(
-                " · ",
-                Style::default().fg(SEP_COLOR).bg(bg),
-            ));
+            spans.push(Span::styled(" · ", Style::default().fg(SEP_COLOR).bg(bg)));
         }
 
         // Branch name with icon.
-        spans.push(Span::styled(
-            "⎇ ",
-            Style::default().fg(BRANCH_COLOR).bg(bg),
-        ));
+        spans.push(Span::styled("⎇ ", Style::default().fg(BRANCH_COLOR).bg(bg)));
         spans.push(Span::styled(
             self.right_info.clone().unwrap_or_default(),
             Style::default().fg(DIM).bg(bg),
@@ -528,9 +554,7 @@ impl StatusBarWidget {
             .output()
         {
             if output.status.success() {
-                let branch = String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .to_string();
+                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !branch.is_empty() {
                     return branch;
                 }

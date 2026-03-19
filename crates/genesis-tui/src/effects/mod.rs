@@ -167,8 +167,10 @@ impl GenesisEffects {
             return;
         }
         self.cancel_all();
-        self.manager
-            .add_unique_effect(EffectId::TransitionOut, transitions::welcome_dissolve_out(area));
+        self.manager.add_unique_effect(
+            EffectId::TransitionOut,
+            transitions::welcome_dissolve_out(area),
+        );
     }
 
     /// Start the chat screen coalesce-in effect after the terminal has been
@@ -209,8 +211,10 @@ impl GenesisEffects {
         if !self.enabled {
             return;
         }
-        self.manager
-            .add_unique_effect(EffectId::CompressionSweep, transitions::compression_sweep(area));
+        self.manager.add_unique_effect(
+            EffectId::CompressionSweep,
+            transitions::compression_sweep(area),
+        );
     }
 
     /// Launch the boot sequence animation across the four target areas.
@@ -422,7 +426,10 @@ mod tests {
         effects.process(std::time::Duration::from_millis(1), &mut buf, area);
 
         // TransitionOut (dissolve 300 ms) is still running.
-        assert!(effects.is_running(), "dissolve-out should be running after transition starts");
+        assert!(
+            effects.is_running(),
+            "dissolve-out should be running after transition starts"
+        );
     }
 
     #[test]
@@ -462,7 +469,10 @@ mod tests {
         let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.flash_error(area);
-        assert!(!effects.is_running(), "flash_error should be no-op when disabled");
+        assert!(
+            !effects.is_running(),
+            "flash_error should be no-op when disabled"
+        );
     }
 
     #[test]
@@ -478,7 +488,10 @@ mod tests {
         let mut effects = GenesisEffects::new(false, false, Default::default());
         let area = Rect::new(0, 0, 80, 24);
         effects.sweep_compression(area);
-        assert!(!effects.is_running(), "sweep_compression should be no-op when disabled");
+        assert!(
+            !effects.is_running(),
+            "sweep_compression should be no-op when disabled"
+        );
     }
 
     #[test]
@@ -498,7 +511,10 @@ mod tests {
         let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 80, 1);
         effects.on_status_change(&StatusState::Thinking, &StatusState::Idle, area);
-        assert!(effects.is_running(), "deactivate + idle effects should be running");
+        assert!(
+            effects.is_running(),
+            "deactivate + idle effects should be running"
+        );
     }
 
     #[test]

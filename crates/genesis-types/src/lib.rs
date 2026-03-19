@@ -93,14 +93,9 @@ pub struct ToolDefinition {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     /// A new session has been created.
-    SessionStarted {
-        session_id: String,
-    },
+    SessionStarted { session_id: String },
     /// The model to use for this session has been resolved.
-    ModelSelected {
-        provider: String,
-        model: String,
-    },
+    ModelSelected { provider: String, model: String },
     /// Session is fully planned and ready to execute (model, platform, and session known).
     SessionPlanned {
         session_id: String,
@@ -109,13 +104,9 @@ pub enum RuntimeEvent {
         model: String,
     },
     /// An incremental chunk of the LLM's streamed response.
-    TokenStream {
-        chunk: String,
-    },
+    TokenStream { chunk: String },
     /// The LLM has requested a tool call that is about to be executed.
-    ToolCallRequested {
-        tool_name: String,
-    },
+    ToolCallRequested { tool_name: String },
     /// A tool call has finished executing.
     ToolCallCompleted {
         tool_name: String,
@@ -123,9 +114,7 @@ pub enum RuntimeEvent {
         success: bool,
     },
     /// The scheduler has fired a cron job.
-    SchedulerTick {
-        job_id: String,
-    },
+    SchedulerTick { job_id: String },
     /// A message has been queued for delivery to an external platform.
     DeliveryQueued {
         platform: DeliveryPlatform,

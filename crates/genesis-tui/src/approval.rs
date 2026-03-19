@@ -34,11 +34,7 @@ impl TuiApprovalHandler {
 }
 
 impl genesis_tools::ApprovalHandler for TuiApprovalHandler {
-    fn request_approval(
-        &self,
-        tool_name: &str,
-        arguments: &BTreeMap<String, String>,
-    ) -> bool {
+    fn request_approval(&self, tool_name: &str, arguments: &BTreeMap<String, String>) -> bool {
         let (tx, rx) = std::sync::mpsc::channel();
         let request = ApprovalRequest {
             tool_name: tool_name.to_owned(),

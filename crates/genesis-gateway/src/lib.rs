@@ -213,7 +213,9 @@ where
         return Ok(Arc::clone(value));
     }
 
-    let _guard = init_lock.lock().expect("embedding provider init lock poisoned");
+    let _guard = init_lock
+        .lock()
+        .expect("embedding provider init lock poisoned");
     if let Some(value) = cache.get() {
         return Ok(Arc::clone(value));
     }
@@ -283,9 +285,11 @@ impl AppState {
             return Ok(None);
         };
 
-        get_or_try_init_arc(&self.embedding_provider_cache, &self.embedding_provider_init, || {
-            build_embedding_provider(config)
-        })
+        get_or_try_init_arc(
+            &self.embedding_provider_cache,
+            &self.embedding_provider_init,
+            || build_embedding_provider(config),
+        )
         .map(Some)
     }
 }
@@ -5164,8 +5168,8 @@ mod tests {
 
     #[test]
     fn get_or_try_init_arc_serializes_concurrent_initializers() {
-        use std::sync::Barrier;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
         use std::thread;
 
         let cache = Arc::new(OnceLock::new());

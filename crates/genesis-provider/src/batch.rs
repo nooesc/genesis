@@ -157,12 +157,12 @@ impl BatchClient {
         }
 
         // 5. Download and parse results
-        let output_file_id = status.output_file_id.ok_or_else(|| {
-            ProviderError::ApiError {
+        let output_file_id = status
+            .output_file_id
+            .ok_or_else(|| ProviderError::ApiError {
                 status: 500,
                 body: format!("batch {} completed but no output file", batch_id),
-            }
-        })?;
+            })?;
 
         let results = self.download_results(&output_file_id, total).await?;
         Ok(results)
@@ -188,8 +188,7 @@ impl BatchClient {
             .post(format!("{}/files", self.base_url))
             .multipart(form)
             .send()
-            .await
-?;
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -200,12 +199,11 @@ impl BatchClient {
             });
         }
 
-        let upload: FileUploadResponse = resp.json().await.map_err(|e| {
-            ProviderError::ApiError {
+        let upload: FileUploadResponse =
+            resp.json().await.map_err(|e| ProviderError::ApiError {
                 status: 500,
                 body: format!("failed to parse file upload response: {e}"),
-            }
-        })?;
+            })?;
         Ok(upload.id)
     }
 
@@ -221,8 +219,7 @@ impl BatchClient {
             .post(format!("{}/batches", self.base_url))
             .json(&body)
             .send()
-            .await
-?;
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -233,11 +230,9 @@ impl BatchClient {
             });
         }
 
-        let batch: BatchStatus = resp.json().await.map_err(|e| {
-            ProviderError::ApiError {
-                status: 500,
-                body: format!("failed to parse batch creation response: {e}"),
-            }
+        let batch: BatchStatus = resp.json().await.map_err(|e| ProviderError::ApiError {
+            status: 500,
+            body: format!("failed to parse batch creation response: {e}"),
         })?;
         Ok(batch.id)
     }
@@ -266,8 +261,7 @@ impl BatchClient {
                 .http
                 .get(format!("{}/batches/{}", self.base_url, batch_id))
                 .send()
-                .await
-    ?;
+                .await?;
 
             let status_code = resp.status();
             if !status_code.is_success() {
@@ -278,11 +272,9 @@ impl BatchClient {
                 });
             }
 
-            let batch: BatchStatus = resp.json().await.map_err(|e| {
-                ProviderError::ApiError {
-                    status: 500,
-                    body: format!("failed to parse batch status: {e}"),
-                }
+            let batch: BatchStatus = resp.json().await.map_err(|e| ProviderError::ApiError {
+                status: 500,
+                body: format!("failed to parse batch status: {e}"),
             })?;
 
             match batch.status.as_str() {
@@ -290,10 +282,7 @@ impl BatchClient {
                 "failed" | "expired" | "cancelled" => {
                     return Err(ProviderError::ApiError {
                         status: 500,
-                        body: format!(
-                            "batch {batch_id} terminated with status: {}",
-                            batch.status
-                        ),
+                        body: format!("batch {batch_id} terminated with status: {}", batch.status),
                     });
                 }
                 status => {
@@ -321,10 +310,12 @@ impl BatchClient {
     ) -> Result<Vec<Result<ChatCompletionResponse, ProviderError>>, ProviderError> {
         let resp = self
             .http
-            .get(format!("{}/files/{}/content", self.base_url, output_file_id))
+            .get(format!(
+                "{}/files/{}/content",
+                self.base_url, output_file_id
+            ))
             .send()
-            .await
-?;
+            .await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -335,11 +326,9 @@ impl BatchClient {
             });
         }
 
-        let content = resp.text().await.map_err(|e| {
-            ProviderError::ApiError {
-                status: 500,
-                body: format!("failed to read batch output: {e}"),
-            }
+        let content = resp.text().await.map_err(|e| ProviderError::ApiError {
+            status: 500,
+            body: format!("failed to read batch output: {e}"),
         })?;
 
         parse_batch_results(&content, expected_count)
@@ -388,12 +377,11 @@ pub fn parse_batch_results(
         if line.trim().is_empty() {
             continue;
         }
-        let result_line: BatchResultLine = serde_json::from_str(line).map_err(|e| {
-            ProviderError::ApiError {
+        let result_line: BatchResultLine =
+            serde_json::from_str(line).map_err(|e| ProviderError::ApiError {
                 status: 500,
                 body: format!("failed to parse batch result line: {e}"),
-            }
-        })?;
+            })?;
 
         // Extract index from custom_id "req-N"
         let index = match result_line

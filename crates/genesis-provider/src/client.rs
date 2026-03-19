@@ -448,7 +448,10 @@ impl ChatClient {
         use crate::responses_types;
 
         let body = responses_types::to_responses_request(&request);
-        let response = match self.send_with_retry(&self.endpoint, &body, &request.model).await {
+        let response = match self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await
+        {
             Err(ProviderError::ApiError { status: 401, .. }) => {
                 warn!("codex responses API returned 401, retrying with fresh credentials");
                 self.retry_with_fresh_codex_credentials(&body).await?
@@ -531,7 +534,9 @@ impl ChatClient {
             return self.complete_stream_responses(request, started_at).await;
         }
 
-        request.stream_options = Some(crate::api_types::StreamOptions { include_usage: true });
+        request.stream_options = Some(crate::api_types::StreamOptions {
+            include_usage: true,
+        });
 
         let body = Self::prepare_body(&mut request, &self.backend)?;
         let response = self
@@ -769,9 +774,14 @@ impl ChatClient {
         let mut body = responses_types::to_responses_request(&request);
         body["stream"] = serde_json::json!(true);
 
-        let response = match self.send_with_retry(&self.endpoint, &body, &request.model).await {
+        let response = match self
+            .send_with_retry(&self.endpoint, &body, &request.model)
+            .await
+        {
             Err(ProviderError::ApiError { status: 401, .. }) => {
-                warn!("codex responses API streaming returned 401, retrying with fresh credentials");
+                warn!(
+                    "codex responses API streaming returned 401, retrying with fresh credentials"
+                );
                 self.retry_with_fresh_codex_credentials(&body).await?
             }
             other => other?,
@@ -890,19 +900,16 @@ impl ChatClient {
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, ProviderError> {
         genesis_auth::codex::clear_credentials_cache().await;
-        let auth_path = genesis_auth::default_auth_path().map_err(|e| {
-            ProviderError::ApiError {
-                status: 401,
-                body: format!("auth path unavailable: {e}"),
-            }
+        let auth_path = genesis_auth::default_auth_path().map_err(|e| ProviderError::ApiError {
+            status: 401,
+            body: format!("auth path unavailable: {e}"),
         })?;
-        let creds =
-            genesis_auth::codex::resolve_credentials(&auth_path)
-                .await
-                .map_err(|e| ProviderError::ApiError {
-                    status: 401,
-                    body: format!("credential re-resolve failed: {e}"),
-                })?;
+        let creds = genesis_auth::codex::resolve_credentials(&auth_path)
+            .await
+            .map_err(|e| ProviderError::ApiError {
+                status: 401,
+                body: format!("credential re-resolve failed: {e}"),
+            })?;
         let auth_value = format!("Bearer {}", creds.api_key);
         let header = reqwest::header::HeaderValue::from_str(&auth_value).map_err(|_| {
             ProviderError::MissingApiKey {
@@ -922,10 +929,9 @@ impl ChatClient {
             Ok(response)
         } else {
             let status = response.status().as_u16();
-            let resp_body =
-                read_text_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES)
-                    .await
-                    .unwrap_or_else(|e| format!("unreadable: {e}"));
+            let resp_body = read_text_with_limit(response, MAX_NON_STREAMING_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|e| format!("unreadable: {e}"));
             Err(ProviderError::ApiError {
                 status,
                 body: resp_body,

@@ -147,7 +147,10 @@ impl ToolPolicy {
 
             // If allow patterns are specified, path must match at least one.
             if !rule.allow_path_patterns.is_empty() {
-                let allowed = rule.allow_path_patterns.iter().any(|p| p.matches(&expanded));
+                let allowed = rule
+                    .allow_path_patterns
+                    .iter()
+                    .any(|p| p.matches(&expanded));
                 if !allowed {
                     return PolicyDecision::Deny(format!(
                         "tool `{tool_name}` denied: path `{path_val}` does not match any allow pattern"
@@ -157,8 +160,7 @@ impl ToolPolicy {
         }
 
         // Check command/argument-based rules (for tools like shell_exec).
-        let cmd_checked =
-            arguments.contains_key("command") || arguments.contains_key("cmd");
+        let cmd_checked = arguments.contains_key("command") || arguments.contains_key("cmd");
         if let Some(cmd) = arguments.get("command").or_else(|| arguments.get("cmd")) {
             // Deny patterns take priority.
             for pattern in &rule.deny_patterns {
@@ -196,9 +198,9 @@ impl ToolPolicy {
         // If allow patterns exist but no known key matched, every argument
         // value must be checked against the allow list.
         if !cmd_checked && !rule.allow_patterns.is_empty() && !arguments.is_empty() {
-            let any_allowed = arguments.values().any(|val| {
-                rule.allow_patterns.iter().any(|p| p.matches(val))
-            });
+            let any_allowed = arguments
+                .values()
+                .any(|val| rule.allow_patterns.iter().any(|p| p.matches(val)));
             if !any_allowed {
                 return PolicyDecision::Deny(format!(
                     "tool `{tool_name}` denied: no argument matches any allow pattern"
@@ -208,7 +210,6 @@ impl ToolPolicy {
 
         PolicyDecision::Allow
     }
-
 }
 
 fn compile_patterns(raw: &[String]) -> Result<Vec<Pattern>, String> {

@@ -8,20 +8,20 @@ use owo_colors::Style;
 // ── Eve Palette (banner art only) ──────────────────────────────────────
 
 pub const EVE_LAVENDER: (u8, u8, u8) = (180, 167, 214); // #B4A7D6
-pub const EVE_PURPLE: (u8, u8, u8) = (123, 104, 174);   // #7B68AE
-pub const EVE_LILAC: (u8, u8, u8) = (213, 204, 230);    // #D5CCE6
-pub const EVE_DARK: (u8, u8, u8) = (45, 27, 78);        // #2D1B4E
-pub const EVE_AMBER: (u8, u8, u8) = (212, 165, 116);    // #D4A574
+pub const EVE_PURPLE: (u8, u8, u8) = (123, 104, 174); // #7B68AE
+pub const EVE_LILAC: (u8, u8, u8) = (213, 204, 230); // #D5CCE6
+pub const EVE_DARK: (u8, u8, u8) = (45, 27, 78); // #2D1B4E
+pub const EVE_AMBER: (u8, u8, u8) = (212, 165, 116); // #D4A574
 
 // ── UI Palette (everything else) ───────────────────────────────────────
 
-pub const UI_DIM: (u8, u8, u8) = (108, 108, 108);       // #6C6C6C
-pub const UI_TEXT: (u8, u8, u8) = (208, 208, 208);       // #D0D0D0
-pub const UI_MUTED: (u8, u8, u8) = (138, 138, 138);     // #8A8A8A
-pub const UI_ACCENT: (u8, u8, u8) = (180, 167, 214);    // #B4A7D6 (= EVE_LAVENDER)
-pub const UI_SUCCESS: (u8, u8, u8) = (135, 175, 95);    // #87AF5F
-pub const UI_ERROR: (u8, u8, u8) = (215, 95, 95);       // #D75F5F
-pub const UI_WARNING: (u8, u8, u8) = (215, 175, 95);    // #D7AF5F
+pub const UI_DIM: (u8, u8, u8) = (108, 108, 108); // #6C6C6C
+pub const UI_TEXT: (u8, u8, u8) = (208, 208, 208); // #D0D0D0
+pub const UI_MUTED: (u8, u8, u8) = (138, 138, 138); // #8A8A8A
+pub const UI_ACCENT: (u8, u8, u8) = (180, 167, 214); // #B4A7D6 (= EVE_LAVENDER)
+pub const UI_SUCCESS: (u8, u8, u8) = (135, 175, 95); // #87AF5F
+pub const UI_ERROR: (u8, u8, u8) = (215, 95, 95); // #D75F5F
+pub const UI_WARNING: (u8, u8, u8) = (215, 175, 95); // #D7AF5F
 
 // ── Style constructors ─────────────────────────────────────────────────
 

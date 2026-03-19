@@ -93,13 +93,12 @@ impl MarkdownRenderer {
         let mut result = String::new();
 
         // Header line
-        let dim = format!(
-            "\x1b[38;2;{};{};{}m",
-            UI_DIM.0, UI_DIM.1, UI_DIM.2
-        );
+        let dim = format!("\x1b[38;2;{};{};{}m", UI_DIM.0, UI_DIM.1, UI_DIM.2);
         let reset = "\x1b[0m";
         if !language.is_empty() {
-            result.push_str(&format!("{dim}  \u{256d}\u{2500} {language} \u{2500}{reset}\n"));
+            result.push_str(&format!(
+                "{dim}  \u{256d}\u{2500} {language} \u{2500}{reset}\n"
+            ));
         } else {
             result.push_str(&format!("{dim}  \u{256d}\u{2500}\u{2500}{reset}\n"));
         }
@@ -211,10 +210,7 @@ impl StreamMarkdown {
                 StreamState::Normal => {
                     if line.starts_with("```") {
                         // Opening code fence
-                        self.code_lang = line
-                            .trim_start_matches('`')
-                            .trim()
-                            .to_string();
+                        self.code_lang = line.trim_start_matches('`').trim().to_string();
                         self.code_buf.clear();
                         self.state = StreamState::InCodeFence;
                     } else if line.contains('|')
@@ -251,10 +247,11 @@ impl StreamMarkdown {
                 StreamState::InCodeFence => {
                     if line.starts_with("```") {
                         // Closing code fence — render the buffered code
-                        output.push_str(&self.renderer.render_code_block(
-                            &self.code_buf,
-                            &self.code_lang,
-                        ));
+                        output.push_str(
+                            &self
+                                .renderer
+                                .render_code_block(&self.code_buf, &self.code_lang),
+                        );
                         self.code_buf.clear();
                         self.code_lang.clear();
                         self.state = StreamState::Normal;
@@ -267,9 +264,7 @@ impl StreamMarkdown {
                 StreamState::InTable => {
                     if line.trim().is_empty() {
                         // End of table — render via termimad
-                        output.push_str(
-                            &self.renderer.render_block(&self.table_buf),
-                        );
+                        output.push_str(&self.renderer.render_block(&self.table_buf));
                         self.table_buf.clear();
                         self.state = StreamState::Normal;
                     } else {
@@ -476,7 +471,7 @@ mod tests {
         // A line with pipes but no separator row on the next line
         let o1 = stream.push("| this is just text with pipes |\n");
         assert_eq!(o1, ""); // pending — waiting for separator
-        // Next line is regular text, not a separator
+                            // Next line is regular text, not a separator
         let o2 = stream.push("some normal text\n");
         // Should flush the pending line as normal text, plus the current line
         assert!(o2.contains("| this is just text with pipes |"));

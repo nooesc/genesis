@@ -98,6 +98,9 @@ mod tests {
         };
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert!(output.content.contains("shell"));
-        assert_eq!(output.metadata.get("__find_tools").map(String::as_str), Some("true"));
+        assert_eq!(
+            output.metadata.get("__find_tools").map(String::as_str),
+            Some("true")
+        );
     }
 }

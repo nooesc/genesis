@@ -51,8 +51,8 @@ pub fn error_flash(area: Rect) -> Effect {
 pub fn compression_sweep(area: Rect) -> Effect {
     fx::sweep_in(
         Motion::LeftToRight,
-        10,  // gradient_length
-        0,   // randomness
+        10, // gradient_length
+        0,  // randomness
         super::ambient::BAR_BG,
         (400, Interpolation::SineInOut),
     )
@@ -92,7 +92,10 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         // 300 ms should be enough for the 300 ms dissolve.
         manager.process_effects(tachyonfx::Duration::from_millis(400), &mut buf, area);
-        assert!(!manager.is_running(), "dissolve should finish within 400 ms");
+        assert!(
+            !manager.is_running(),
+            "dissolve should finish within 400 ms"
+        );
     }
 
     #[test]
@@ -109,7 +112,10 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         // 100 ms sleep + 300 ms coalesce = 400 ms total.
         manager.process_effects(tachyonfx::Duration::from_millis(500), &mut buf, area);
-        assert!(!manager.is_running(), "coalesce should finish within 500 ms");
+        assert!(
+            !manager.is_running(),
+            "coalesce should finish within 500 ms"
+        );
     }
 
     #[test]
@@ -133,7 +139,10 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         // 50 ms dissolve + 100 ms coalesce = 150 ms total.
         manager.process_effects(tachyonfx::Duration::from_millis(200), &mut buf, area);
-        assert!(!manager.is_running(), "error flash should finish within 200 ms");
+        assert!(
+            !manager.is_running(),
+            "error flash should finish within 200 ms"
+        );
     }
 
     #[test]
@@ -157,6 +166,9 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         // 400 ms sweep.
         manager.process_effects(tachyonfx::Duration::from_millis(500), &mut buf, area);
-        assert!(!manager.is_running(), "compression sweep should finish within 500 ms");
+        assert!(
+            !manager.is_running(),
+            "compression sweep should finish within 500 ms"
+        );
     }
 }

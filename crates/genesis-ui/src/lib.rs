@@ -28,7 +28,10 @@ impl UiContext {
         } else {
             Styles::plain()
         };
-        Self { colors_enabled, styles }
+        Self {
+            colors_enabled,
+            styles,
+        }
     }
 
     pub fn styles(&self) -> &Styles {

@@ -44,10 +44,7 @@ pub(crate) async fn run_schedule_daemon(
 
             println!(
                 "fired {} -> session {} [{}]: {}",
-                schedule.id,
-                outcome.session_id,
-                schedule.destination,
-                outcome.result.response
+                schedule.id, outcome.session_id, schedule.destination, outcome.result.response
             );
         }
 
@@ -114,10 +111,18 @@ pub(crate) async fn run_serve(
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             let uptime = shutdown_state.started_at.elapsed().as_secs();
-            let requests = shutdown_state.requests_total.load(std::sync::atomic::Ordering::Relaxed);
-            let errors = shutdown_state.errors_total.load(std::sync::atomic::Ordering::Relaxed);
-            let input_tokens = shutdown_state.input_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
-            let output_tokens = shutdown_state.output_tokens_total.load(std::sync::atomic::Ordering::Relaxed);
+            let requests = shutdown_state
+                .requests_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let errors = shutdown_state
+                .errors_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let input_tokens = shutdown_state
+                .input_tokens_total
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let output_tokens = shutdown_state
+                .output_tokens_total
+                .load(std::sync::atomic::Ordering::Relaxed);
             println!("\nshutting down gateway...");
             println!(
                 "  uptime: {}s | requests: {} | errors: {} | tokens: {} in / {} out",

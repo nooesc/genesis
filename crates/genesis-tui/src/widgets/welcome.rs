@@ -229,25 +229,27 @@ impl WelcomeWidget {
         // ── Portrait + braille canvas + info side by side ──────────
         // Clone art lines up front to release the borrow on `self`.
         let art: Vec<Line<'static>> = self.current_full_art().to_vec();
-        let art_width = art
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
+        let art_width = art.iter().map(|l| line_visual_width(l)).max().unwrap_or(0) as u16;
         let art_height = art.len() as u16;
 
         // Decide if there's room for the braille canvas panel.
         let show_braille = area.width >= WIDE_BRAILLE_MIN_WIDTH;
-        let braille_cols = if show_braille { BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP } else { 0 };
+        let braille_cols = if show_braille {
+            BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP
+        } else {
+            0
+        };
 
         let art_col_width = art_width.min(
-            inner.width.saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
+            inner
+                .width
+                .saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
         );
         let braille_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
         let info_col_x = braille_col_x + braille_cols;
-        let info_col_width = inner.width.saturating_sub(
-            art_col_width + WIDE_LAYOUT_GAP + braille_cols,
-        );
+        let info_col_width = inner
+            .width
+            .saturating_sub(art_col_width + WIDE_LAYOUT_GAP + braille_cols);
 
         // Boot status lines
         let boot_status = BootStatusWidget::new(self.boot_status_info());
@@ -257,8 +259,7 @@ impl WelcomeWidget {
 
         // Total left-column content: art + gap + status
         let left_total = art_height + status_gap + status_height;
-        let left_start_y =
-            below_title_y + remaining_height.saturating_sub(left_total) / 2;
+        let left_start_y = below_title_y + remaining_height.saturating_sub(left_total) / 2;
 
         // Portrait area
         let art_render_height = art_height.min(remaining_height);
@@ -274,9 +275,8 @@ impl WelcomeWidget {
 
         // Boot status area (below portrait)
         let status_y = left_start_y + art_render_height + status_gap;
-        let status_render_height = status_height.min(
-            (below_title_y + remaining_height).saturating_sub(status_y),
-        );
+        let status_render_height =
+            status_height.min((below_title_y + remaining_height).saturating_sub(status_y));
         if status_render_height > 0 {
             let status_area = Rect {
                 x: inner.x,
@@ -304,8 +304,7 @@ impl WelcomeWidget {
         // Info panel (right column, vertically centered)
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
-        let info_y =
-            below_title_y + remaining_height.saturating_sub(info_height) / 2;
+        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
 
         let info_area = Rect {
             x: info_col_x,
@@ -413,7 +412,10 @@ impl WelcomeWidget {
         let blank = Line::from("");
         let session_line = Line::from(vec![
             Span::styled("session: ", Style::default().fg(dim)),
-            Span::styled(self.info.session_id.clone(), Style::default().fg(text_color)),
+            Span::styled(
+                self.info.session_id.clone(),
+                Style::default().fg(text_color),
+            ),
         ]);
         let backend_line = Line::from(vec![
             Span::styled("backend: ", Style::default().fg(dim)),
@@ -528,7 +530,14 @@ fn truncate_path(path: &str, max_len: usize) -> String {
         // Even the last segment alone is too long — fall back to a
         // character-boundary cut of the last segment.
         let last = segments.last().unwrap_or(&path);
-        let suffix_chars: String = last.chars().rev().take(budget).collect::<Vec<_>>().into_iter().rev().collect();
+        let suffix_chars: String = last
+            .chars()
+            .rev()
+            .take(budget)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         return format!("{ELLIPSIS_PREFIX}{suffix_chars}");
     }
 
@@ -556,7 +565,10 @@ fn parse_portrait_art(source: &[String], fallback: &[&str]) -> Vec<Line<'static>
 
 /// Parse ANSI-escaped half-block art strings into ratatui Lines.
 pub fn parse_ansi_art(ansi_lines: &[String]) -> Vec<Line<'static>> {
-    ansi_lines.iter().map(|line| parse_ansi_line(line)).collect()
+    ansi_lines
+        .iter()
+        .map(|line| parse_ansi_line(line))
+        .collect()
 }
 
 /// Parse a single ANSI-escaped line into a ratatui Line with colored Spans.
@@ -677,12 +689,20 @@ mod tests {
     fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
         buf.content
             .chunks(width as usize)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<Vec<_>>().join(""))
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
             .collect()
     }
 
     fn line_text(line: &Line<'_>) -> String {
-        line.spans.iter().map(|span| span.content.as_ref()).collect()
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     fn first_match_position(rows: &[String], needle: &str) -> Option<(usize, usize)> {
@@ -755,10 +775,7 @@ mod tests {
 
     #[test]
     fn parse_ansi_art_multiple_lines() {
-        let lines = vec![
-            "\x1b[38;2;1;2;3m▄\x1b[0m".to_string(),
-            "plain".to_string(),
-        ];
+        let lines = vec!["\x1b[38;2;1;2;3m▄\x1b[0m".to_string(), "plain".to_string()];
         let parsed = parse_ansi_art(&lines);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].spans[0].content, "▄");
@@ -776,7 +793,10 @@ mod tests {
         let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
 
         assert!(!rows.iter().any(|row| row.contains('+')));
-        assert!(portrait.1 < title.1, "portrait should render left of the title");
+        assert!(
+            portrait.1 < title.1,
+            "portrait should render left of the title"
+        );
     }
 
     #[test]
@@ -786,9 +806,13 @@ mod tests {
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait = first_match_position(&rows, "_.-._").expect("compact portrait should render");
+        let portrait =
+            first_match_position(&rows, "_.-._").expect("compact portrait should render");
         let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
-        assert!(portrait.0 < title.0, "compact portrait should render above the title");
+        assert!(
+            portrait.0 < title.0,
+            "compact portrait should render above the title"
+        );
     }
 
     #[test]
@@ -951,9 +975,10 @@ mod tests {
             .into_iter()
             .take(5) // Title occupies the top ~5 rows
             .collect();
-        let has_content = title_rows
-            .iter()
-            .any(|row| row.chars().any(|c| c != ' ' && c != '╭' && c != '╮' && c != '─'));
+        let has_content = title_rows.iter().any(|row| {
+            row.chars()
+                .any(|c| c != ' ' && c != '╭' && c != '╮' && c != '─')
+        });
         assert!(
             has_content,
             "big-text title area should have non-space content"

@@ -2,8 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use genesis_config::LoadedConfig;
 use genesis_storage::{
-    bootstrap, InsightsData, MemoryStore, SessionStore, SessionSummary, SkillStore,
-    StoredSchedule, UsageStats,
+    bootstrap, InsightsData, MemoryStore, SessionStore, SessionSummary, SkillStore, StoredSchedule,
+    UsageStats,
 };
 use genesis_ui::UiContext;
 
@@ -47,7 +47,10 @@ pub(crate) fn format_session_list(sessions: &[SessionSummary], ui: &UiContext) -
         lines.push(format!(
             "{}  {}",
             ui.format_accent(&session.id),
-            ui.format_metadata(&format!("{}  {}{title_info}{token_info}", session.platform, session.created_at))
+            ui.format_metadata(&format!(
+                "{}  {}{title_info}{token_info}",
+                session.platform, session.created_at
+            ))
         ));
     }
     lines.join("\n")
@@ -71,10 +74,7 @@ pub(crate) fn format_insights(data: &InsightsData, model: &str) -> String {
         0
     };
 
-    let mut lines = vec![format!(
-        "genesis insights (last {} days)",
-        data.period_days
-    )];
+    let mut lines = vec![format!("genesis insights (last {} days)", data.period_days)];
     lines.push(format!("  model:           {model}"));
     lines.push(format!("  sessions:        {}", data.sessions_count));
     lines.push(format!("  input tokens:    {}", data.total_input_tokens));
@@ -141,7 +141,10 @@ pub(crate) fn format_memory_list(memories: &[genesis_storage::StoredMemory]) -> 
         } else {
             m.content.clone()
         };
-        lines.push(format!("[{}] {} ({})", m.kind, content_preview, m.created_at));
+        lines.push(format!(
+            "[{}] {} ({})",
+            m.kind, content_preview, m.created_at
+        ));
     }
     lines.join("\n")
 }
@@ -163,7 +166,8 @@ pub(crate) fn build_status_text(loaded: &LoadedConfig, ui: &UiContext) -> String
     lines.push(format!(
         "{}  {} / {}",
         ui.format_metadata("  provider: "),
-        loaded.config.provider.backend, loaded.config.provider.model
+        loaded.config.provider.backend,
+        loaded.config.provider.model
     ));
 
     // Database
@@ -181,34 +185,56 @@ pub(crate) fn build_status_text(loaded: &LoadedConfig, ui: &UiContext) -> String
         let skill_store = genesis_storage::SkillStore::new(&loaded.config.storage.database_path);
         let schedule_store =
             genesis_storage::ScheduleStore::new(&loaded.config.storage.database_path);
-        let memory_store =
-            MemoryStore::new(&loaded.config.storage.database_path);
+        let memory_store = MemoryStore::new(&loaded.config.storage.database_path);
 
         if let Ok(stats) = session_store.usage_stats() {
-            lines.push(format!("{}  {}", ui.format_metadata("  sessions: "), stats.total_sessions));
+            lines.push(format!(
+                "{}  {}",
+                ui.format_metadata("  sessions: "),
+                stats.total_sessions
+            ));
             let total_tokens = stats.total_input_tokens + stats.total_output_tokens;
-            lines.push(format!("{}  {total_tokens} total", ui.format_metadata("  tokens:   ")));
+            lines.push(format!(
+                "{}  {total_tokens} total",
+                ui.format_metadata("  tokens:   ")
+            ));
         }
         if let Ok(skills) = skill_store.list_all() {
-            lines.push(format!("{}  {}", ui.format_metadata("  skills:   "), skills.len()));
+            lines.push(format!(
+                "{}  {}",
+                ui.format_metadata("  skills:   "),
+                skills.len()
+            ));
         }
         if let Ok(schedules) = schedule_store.list_all() {
-            lines.push(format!("{}  {}", ui.format_metadata("  schedules:"), schedules.len()));
+            lines.push(format!(
+                "{}  {}",
+                ui.format_metadata("  schedules:"),
+                schedules.len()
+            ));
         }
         if let Ok(memories) = memory_store.list(usize::MAX) {
-            lines.push(format!("{}  {}", ui.format_metadata("  memories: "), memories.len()));
+            lines.push(format!(
+                "{}  {}",
+                ui.format_metadata("  memories: "),
+                memories.len()
+            ));
         }
     }
 
     // MCP servers
     let mcp_count = loaded.config.mcp_servers.len();
-    lines.push(format!("{}  {mcp_count} server(s) configured", ui.format_metadata("  mcp:      ")));
+    lines.push(format!(
+        "{}  {mcp_count} server(s) configured",
+        ui.format_metadata("  mcp:      ")
+    ));
 
     // Runtime
     lines.push(format!(
         "{}  max_turns={}, destructive={}",
         ui.format_metadata("  runtime:  "),
-        loaded.config.runtime.max_turns, loaded.config.runtime.allow_destructive_tools
+        loaded.config.runtime.max_turns,
+        loaded.config.runtime.allow_destructive_tools
     ));
 
     lines.join("\n")
@@ -241,12 +267,18 @@ pub(crate) fn build_status_json(loaded: &LoadedConfig) -> serde_json::Value {
     data
 }
 
-pub(crate) fn format_session_messages(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+pub(crate) fn format_session_messages(
+    session_id: &str,
+    messages: &[genesis_storage::StoredMessage],
+) -> String {
     if messages.is_empty() {
         return format!("session {session_id}: no messages");
     }
 
-    let mut lines = vec![format!("session {session_id} ({} messages)", messages.len())];
+    let mut lines = vec![format!(
+        "session {session_id} ({} messages)",
+        messages.len()
+    )];
     for msg in messages {
         let content = msg.content.as_deref().unwrap_or("[no content]");
         let truncated = if content.len() > 200 {
@@ -259,7 +291,10 @@ pub(crate) fn format_session_messages(session_id: &str, messages: &[genesis_stor
     lines.join("\n")
 }
 
-pub(crate) fn export_session_markdown(session_id: &str, messages: &[genesis_storage::StoredMessage]) -> String {
+pub(crate) fn export_session_markdown(
+    session_id: &str,
+    messages: &[genesis_storage::StoredMessage],
+) -> String {
     let mut lines = vec![format!("# Session {session_id}\n")];
     for msg in messages {
         let role = match msg.role.as_str() {
@@ -319,27 +354,27 @@ pub(crate) fn run_session_import(
                 })
                 .collect()
         }
-        "jsonl" => {
-            contents
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| {
-                    let entry: serde_json::Value = serde_json::from_str(line)
-                        .map_err(|e| CliError::Other(format!("invalid JSONL line: {e}")))?;
-                    let role = entry
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CliError::Other("JSONL line missing 'role' field".to_owned()))?
-                        .to_owned();
-                    let content = entry
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CliError::Other("JSONL line missing 'content' field".to_owned()))?
-                        .to_owned();
-                    Ok((role, content))
-                })
-                .collect::<Result<Vec<_>, CliError>>()?
-        }
+        "jsonl" => contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line)
+                    .map_err(|e| CliError::Other(format!("invalid JSONL line: {e}")))?;
+                let role = entry
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CliError::Other("JSONL line missing 'role' field".to_owned()))?
+                    .to_owned();
+                let content = entry
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CliError::Other("JSONL line missing 'content' field".to_owned())
+                    })?
+                    .to_owned();
+                Ok((role, content))
+            })
+            .collect::<Result<Vec<_>, CliError>>()?,
         other => {
             return Err(CliError::Other(format!(
                 "unknown import format '{other}', expected 'sharegpt' or 'jsonl'"
@@ -356,7 +391,9 @@ pub(crate) fn run_session_import(
 
     store.import_session(&session_id, title, messages)?;
 
-    Ok(format!("Imported {count} messages into session {session_id}"))
+    Ok(format!(
+        "Imported {count} messages into session {session_id}"
+    ))
 }
 
 pub(crate) fn format_skill_list(skills: &[genesis_storage::StoredSkill]) -> String {
@@ -553,7 +590,11 @@ pub(crate) fn run_skills_hub(
             Ok(lines.join("\n"))
         }
 
-        HubCommand::Search { query, source, limit } => {
+        HubCommand::Search {
+            query,
+            source,
+            limit,
+        } => {
             let results = hub
                 .search(&query, source.as_deref(), limit)
                 .map_err(|e| CliError::Other(e.to_string()))?;
@@ -566,7 +607,11 @@ pub(crate) fn run_skills_hub(
                 return Ok(format!("no skills matching \"{query}\""));
             }
 
-            let mut lines = vec![format!("found {} skill(s) matching \"{}\"", results.len(), query)];
+            let mut lines = vec![format!(
+                "found {} skill(s) matching \"{}\"",
+                results.len(),
+                query
+            )];
             for m in &results {
                 let tags = if m.tags.is_empty() {
                     String::new()
@@ -613,10 +658,7 @@ pub(crate) fn run_skills_hub(
             lines.push(format!("  {}", report.summary()));
             for finding in &report.findings {
                 let file = finding.file.as_deref().unwrap_or("(unknown)");
-                let line = finding
-                    .line
-                    .map(|l| format!(":{l}"))
-                    .unwrap_or_default();
+                let line = finding.line.map(|l| format!(":{l}")).unwrap_or_default();
                 lines.push(format!(
                     "  [{:?}] {}{}: {} ({})",
                     finding.severity, file, line, finding.description, finding.category
@@ -656,9 +698,7 @@ pub(crate) fn run_skills_hub(
         }
 
         HubCommand::Audit => {
-            let results = hub
-                .audit()
-                .map_err(|e| CliError::Other(e.to_string()))?;
+            let results = hub.audit().map_err(|e| CliError::Other(e.to_string()))?;
 
             if json {
                 return Ok(serde_json::to_string_pretty(&results)?);
@@ -676,7 +716,9 @@ pub(crate) fn run_skills_hub(
                     r.name, r.verdict, r.finding_count, integrity
                 ));
                 if !r.integrity_ok {
-                    lines.push("    WARNING: content has been modified since installation".to_owned());
+                    lines.push(
+                        "    WARNING: content has been modified since installation".to_owned(),
+                    );
                 }
             }
             Ok(lines.join("\n"))
@@ -730,7 +772,8 @@ pub(crate) fn run_skills_hub(
                 let parts: Vec<&str> = repo.splitn(2, '/').collect();
                 if parts.len() != 2 {
                     return Err(CliError::Other(
-                        "repo must be in 'owner/repo' format (e.g. 'nooesc/genesis-skills')".to_owned(),
+                        "repo must be in 'owner/repo' format (e.g. 'nooesc/genesis-skills')"
+                            .to_owned(),
                     ));
                 }
 
@@ -858,7 +901,10 @@ pub(crate) fn status_marker(status: &genesis_core::CheckStatus, ui: &UiContext) 
     }
 }
 
-pub(crate) fn format_bootstrap_report(report: &genesis_core::DoctorReport, ui: &UiContext) -> String {
+pub(crate) fn format_bootstrap_report(
+    report: &genesis_core::DoctorReport,
+    ui: &UiContext,
+) -> String {
     let mut lines = vec![
         "genesis storage bootstrap".to_owned(),
         format!("database: {}", report.database_path),

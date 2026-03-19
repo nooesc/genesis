@@ -3,12 +3,12 @@
 use std::cell::Cell;
 use std::time::Duration;
 
+use crate::render::diff;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
-use crate::render::diff;
 
 use super::rgb;
 
@@ -38,25 +38,25 @@ const CAT_DEFAULT: Color = rgb(genesis_ui::colors::UI_TEXT);
 fn tool_color(name: &str) -> Color {
     match name {
         // Read-only tools
-        "read_file" | "glob" | "tree" | "list_dir" | "search" | "grep"
-        | "find_tools" | "session_info" | "echo" => CAT_READ,
+        "read_file" | "glob" | "tree" | "list_dir" | "search" | "grep" | "find_tools"
+        | "session_info" | "echo" => CAT_READ,
 
         // Write/modify tools
-        "write_file" | "patch_file" | "create_file" | "delete_file"
-        | "rename_file" | "move_file" => CAT_WRITE,
+        "write_file" | "patch_file" | "create_file" | "delete_file" | "rename_file"
+        | "move_file" => CAT_WRITE,
 
         // Shell/execution tools
-        "shell_exec" | "docker_exec" | "ssh_exec" | "process"
-        | "kill_process" | "code_execute" => CAT_SHELL,
+        "shell_exec" | "docker_exec" | "ssh_exec" | "process" | "kill_process" | "code_execute" => {
+            CAT_SHELL
+        }
 
         // Web/network tools
-        "web_search" | "web_fetch" | "browse" | "browser_navigate"
-        | "browser_click" | "browser_fill" => CAT_WEB,
+        "web_search" | "web_fetch" | "browse" | "browser_navigate" | "browser_click"
+        | "browser_fill" => CAT_WEB,
 
         // Agent/memory/skill tools
-        "memory_search" | "memory_store" | "skill_create" | "skill_search"
-        | "subagent_spawn" | "clarify" | "think" | "moa_consult"
-        | "reason_with_model" => CAT_AGENT,
+        "memory_search" | "memory_store" | "skill_create" | "skill_search" | "subagent_spawn"
+        | "clarify" | "think" | "moa_consult" | "reason_with_model" => CAT_AGENT,
 
         // Tools with common prefixes
         _ if name.starts_with("git_") => CAT_WRITE,
@@ -265,9 +265,7 @@ impl ToolCell {
                     Span::styled("  │ ", Style::default().fg(UI_DIM)),
                     Span::styled(
                         "$ ",
-                        Style::default()
-                            .fg(CAT_SHELL)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(CAT_SHELL).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(self.args_summary.clone(), Style::default().fg(CAT_SHELL)),
                 ]));
@@ -302,8 +300,7 @@ impl ToolCell {
                     if diff::is_unified_diff(output) {
                         let diff_lines = diff::diff_to_lines(output);
                         for dl in diff_lines {
-                            let mut spans =
-                                vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                            let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
                             spans.extend(dl.spans);
                             lines.push(Line::from(spans));
                         }
@@ -313,11 +310,7 @@ impl ToolCell {
             ToolCategory::Search => {
                 // Show search pattern in /…/ notation and result count.
                 let pattern = extract_pattern(&self.args_summary);
-                let count = self
-                    .output
-                    .as_ref()
-                    .map(|o| count_results(o))
-                    .unwrap_or(0);
+                let count = self.output.as_ref().map(|o| count_results(o)).unwrap_or(0);
                 let count_str = if count > 0 {
                     format!(" ({count} results)")
                 } else {
@@ -327,9 +320,7 @@ impl ToolCell {
                     Span::styled("  │ ", Style::default().fg(UI_DIM)),
                     Span::styled(
                         format!("/{pattern}/"),
-                        Style::default()
-                            .fg(CAT_READ)
-                            .add_modifier(Modifier::ITALIC),
+                        Style::default().fg(CAT_READ).add_modifier(Modifier::ITALIC),
                     ),
                     Span::styled(count_str, Style::default().fg(UI_DIM)),
                 ]));
@@ -445,9 +436,7 @@ impl ToolCell {
                     Span::styled("  │ ", Style::default().fg(UI_DIM)),
                     Span::styled(
                         reason,
-                        Style::default()
-                            .fg(COLOR_FAIL)
-                            .add_modifier(Modifier::DIM),
+                        Style::default().fg(COLOR_FAIL).add_modifier(Modifier::DIM),
                     ),
                     Span::styled(" │", Style::default().fg(UI_DIM)),
                 ]);
@@ -481,15 +470,13 @@ impl ToolCell {
             // FileWrite already renders diffs inline; Search shows result count.
             // Only skip verbose output when content_lines actually showed it.
             let already_shows_output = matches!(category, ToolCategory::Search)
-                || (matches!(category, ToolCategory::FileWrite)
-                    && diff::is_unified_diff(output));
+                || (matches!(category, ToolCategory::FileWrite) && diff::is_unified_diff(output));
             if !already_shows_output {
                 if diff::is_unified_diff(output) {
                     // Render unified diff with colors, gutter, and line numbers.
                     let diff_lines = diff::diff_to_lines(output);
                     for dl in diff_lines {
-                        let mut spans =
-                            vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
+                        let mut spans = vec![Span::styled("  │ ", Style::default().fg(UI_DIM))];
                         spans.extend(dl.spans);
                         lines.push(Line::from(spans));
                     }
@@ -537,9 +524,7 @@ impl ToolCell {
                     Span::styled("  │ ", Style::default().fg(UI_DIM)),
                     Span::styled(
                         reason,
-                        Style::default()
-                            .fg(COLOR_FAIL)
-                            .add_modifier(Modifier::DIM),
+                        Style::default().fg(COLOR_FAIL).add_modifier(Modifier::DIM),
                     ),
                     Span::styled(" │", Style::default().fg(UI_DIM)),
                 ]);
@@ -587,7 +572,13 @@ mod tests {
     use super::*;
 
     fn make_cell(success: bool) -> ToolCell {
-        ToolCell::new("shell", "call_1", "ls -la", success, Duration::from_millis(1200))
+        ToolCell::new(
+            "shell",
+            "call_1",
+            "ls -la",
+            success,
+            Duration::from_millis(1200),
+        )
     }
 
     // ── Legacy tests (kept for non-regression) ────────────────────────────
@@ -597,8 +588,18 @@ mod tests {
         // Default mode is Grouped (height 4), so test Summary explicitly.
         let cell = make_cell(true).with_display_mode(ToolDisplayMode::Summary);
         assert_eq!(cell.height(80), 1);
-        assert_eq!(make_cell(false).with_display_mode(ToolDisplayMode::Summary).height(80), 1);
-        assert_eq!(make_cell(true).with_display_mode(ToolDisplayMode::Summary).height(20), 1);
+        assert_eq!(
+            make_cell(false)
+                .with_display_mode(ToolDisplayMode::Summary)
+                .height(80),
+            1
+        );
+        assert_eq!(
+            make_cell(true)
+                .with_display_mode(ToolDisplayMode::Summary)
+                .height(20),
+            1
+        );
     }
 
     #[test]
@@ -657,9 +658,16 @@ mod tests {
         let fail_lines = make_cell(false)
             .with_display_mode(ToolDisplayMode::Summary)
             .to_scrollback_lines(80);
-        let ok_text: String = ok_lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        let fail_text: String =
-            fail_lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let ok_text: String = ok_lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        let fail_text: String = fail_lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_ne!(ok_text, fail_text);
     }
 
@@ -699,21 +707,39 @@ mod tests {
 
         // Top border contains the tool name.
         let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(top.contains("shell"), "top border should contain tool name: {top:?}");
-        assert!(top.contains("┌"), "top border should have box-drawing open: {top:?}");
+        assert!(
+            top.contains("shell"),
+            "top border should contain tool name: {top:?}"
+        );
+        assert!(
+            top.contains("┌"),
+            "top border should have box-drawing open: {top:?}"
+        );
 
         // Args line contains args_summary.
         let args: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(args.contains("ls -la"), "args line should contain args summary: {args:?}");
+        assert!(
+            args.contains("ls -la"),
+            "args line should contain args summary: {args:?}"
+        );
 
         // Status line contains duration and status.
         let status: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(status.contains("1.2s"), "status line should contain duration: {status:?}");
-        assert!(status.contains("ok"), "status line should contain status: {status:?}");
+        assert!(
+            status.contains("1.2s"),
+            "status line should contain duration: {status:?}"
+        );
+        assert!(
+            status.contains("ok"),
+            "status line should contain status: {status:?}"
+        );
 
         // Bottom border.
         let bottom: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(bottom.contains("└"), "bottom border should have box-drawing close: {bottom:?}");
+        assert!(
+            bottom.contains("└"),
+            "bottom border should have box-drawing close: {bottom:?}"
+        );
     }
 
     #[test]
@@ -785,7 +811,12 @@ mod tests {
             .with_output("permission denied");
         let lines = cell.to_scrollback_lines(80);
         // grouped + error context: top + args + status + error + bottom = 5
-        assert_eq!(lines.len(), 5, "grouped fail with output should be 5 lines, got {}", lines.len());
+        assert_eq!(
+            lines.len(),
+            5,
+            "grouped fail with output should be 5 lines, got {}",
+            lines.len()
+        );
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -802,7 +833,11 @@ mod tests {
         let cell = make_cell(false).with_display_mode(ToolDisplayMode::Grouped);
         let lines = cell.to_scrollback_lines(80);
         // No output → no extra line: top + args + status + bottom = 4
-        assert_eq!(lines.len(), 4, "grouped fail without output should be 4 lines");
+        assert_eq!(
+            lines.len(),
+            4,
+            "grouped fail without output should be 4 lines"
+        );
     }
 
     #[test]
@@ -932,9 +967,15 @@ diff --git a/src/main.rs b/src/main.rs
     #[test]
     fn grouped_mode_shows_diff_for_file_write() {
         // FileWrite tools render inline diffs in grouped mode.
-        let cell = ToolCell::new("patch_file", "call_1", r#"path: "src/main.rs""#, true, Duration::from_millis(300))
-            .with_display_mode(ToolDisplayMode::Grouped)
-            .with_output(SAMPLE_DIFF);
+        let cell = ToolCell::new(
+            "patch_file",
+            "call_1",
+            r#"path: "src/main.rs""#,
+            true,
+            Duration::from_millis(300),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped)
+        .with_output(SAMPLE_DIFF);
         let lines = cell.to_scrollback_lines(80);
         // Grouped with diff: top + path + diff lines + status + bottom > 4
         assert!(
@@ -951,7 +992,11 @@ diff --git a/src/main.rs b/src/main.rs
             .with_output("wrote 42 bytes to foo.txt");
         let lines = cell.to_scrollback_lines(80);
         // Plain output should not expand — grouped mode uses per-category content only
-        assert_eq!(lines.len(), 4, "grouped with plain output should be 4 lines");
+        assert_eq!(
+            lines.len(),
+            4,
+            "grouped with plain output should be 4 lines"
+        );
     }
 
     #[test]
@@ -961,7 +1006,11 @@ diff --git a/src/main.rs b/src/main.rs
             .with_output("wrote 42 bytes to foo.txt");
         let lines = cell.to_scrollback_lines(80);
         // Plain output: top + args + output + status + bottom = 5
-        assert_eq!(lines.len(), 5, "verbose with plain output should be 5 lines");
+        assert_eq!(
+            lines.len(),
+            5,
+            "verbose with plain output should be 5 lines"
+        );
         let output_line: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(output_line.contains("output:"), "should have output: label");
     }
@@ -970,9 +1019,14 @@ diff --git a/src/main.rs b/src/main.rs
 
     #[test]
     fn shell_tool_shows_dollar_prompt() {
-        let cell =
-            ToolCell::new("shell_exec", "call_1", "ls -la", true, Duration::from_millis(100))
-                .with_display_mode(ToolDisplayMode::Grouped);
+        let cell = ToolCell::new(
+            "shell_exec",
+            "call_1",
+            "ls -la",
+            true,
+            Duration::from_millis(100),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
         let lines = cell.to_scrollback_lines(80);
         let all_text: String = lines
             .iter()
@@ -980,7 +1034,10 @@ diff --git a/src/main.rs b/src/main.rs
             .map(|s| s.content.as_ref())
             .collect();
         assert!(all_text.contains("$ "), "shell tool should show $ prompt");
-        assert!(all_text.contains("ls -la"), "shell tool should show command");
+        assert!(
+            all_text.contains("ls -la"),
+            "shell tool should show command"
+        );
     }
 
     #[test]
@@ -1188,7 +1245,10 @@ diff --git a/src/main.rs b/src/main.rs
         let line = tool_group_summary_line(&[&c1, &c2, &c3]);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("3 tool calls"), "should show count: {text:?}");
-        assert!(text.contains("1.0s"), "should show total duration: {text:?}");
+        assert!(
+            text.contains("1.0s"),
+            "should show total duration: {text:?}"
+        );
         assert!(text.contains("all ok"), "should show all ok: {text:?}");
     }
 
@@ -1201,8 +1261,14 @@ diff --git a/src/main.rs b/src/main.rs
         let line = tool_group_summary_line(&[&c1, &c2, &c3]);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("3 tool calls"), "should show count: {text:?}");
-        assert!(text.contains("0.7s"), "should show total duration: {text:?}");
-        assert!(text.contains("2 failed"), "should show failure count: {text:?}");
+        assert!(
+            text.contains("0.7s"),
+            "should show total duration: {text:?}"
+        );
+        assert!(
+            text.contains("2 failed"),
+            "should show failure count: {text:?}"
+        );
 
         // Verify that the failure count span uses COLOR_FAIL.
         let fail_span = line
@@ -1264,9 +1330,14 @@ diff --git a/src/main.rs b/src/main.rs
 
     #[test]
     fn snapshot_grouped_shell_tool() {
-        let cell =
-            ToolCell::new("shell_exec", "call_1", "ls -la", true, Duration::from_millis(1200))
-                .with_display_mode(ToolDisplayMode::Grouped);
+        let cell = ToolCell::new(
+            "shell_exec",
+            "call_1",
+            "ls -la",
+            true,
+            Duration::from_millis(1200),
+        )
+        .with_display_mode(ToolDisplayMode::Grouped);
         let area = Rect::new(0, 0, 50, 10);
         let mut buf = Buffer::empty(area);
         cell.render(area, &mut buf);

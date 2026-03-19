@@ -39,15 +39,13 @@ pub(crate) async fn run_batch(
 
     let distribution = match &toolset {
         Some(name) => {
-            let dist = genesis_core::toolset::resolve_distribution(
-                name,
-                &loaded.config.toolsets,
-            )
-            .ok_or_else(|| {
-                let mut available: Vec<String> = genesis_core::toolset::builtin_distribution_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+            let dist = genesis_core::toolset::resolve_distribution(name, &loaded.config.toolsets)
+                .ok_or_else(|| {
+                let mut available: Vec<String> =
+                    genesis_core::toolset::builtin_distribution_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                 available.extend(loaded.config.toolsets.keys().cloned());
                 CliError::Other(format!(
                     "unknown toolset distribution '{name}'. Available: {}",
@@ -66,13 +64,22 @@ pub(crate) async fn run_batch(
 
     for (line_no, line) in std::io::BufRead::lines(reader).enumerate() {
         let line = line.map_err(|e| {
-            CliError::Other(format!("failed to read line {} from {}: {e}", line_no + 1, input))
+            CliError::Other(format!(
+                "failed to read line {} from {}: {e}",
+                line_no + 1,
+                input
+            ))
         })?;
         if line.trim().is_empty() {
             continue;
         }
         let item = parse_batch_input_line(&line).map_err(|e| {
-            CliError::Other(format!("invalid JSONL at {} line {}: {}", input, line_no + 1, e))
+            CliError::Other(format!(
+                "invalid JSONL at {} line {}: {}",
+                input,
+                line_no + 1,
+                e
+            ))
         })?;
         items.push(item);
     }
@@ -106,9 +113,10 @@ pub(crate) async fn run_batch(
             continue;
         }
 
-        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-            CliError::Other(format!("failed to acquire concurrency permit: {e}"))
-        })?;
+        let permit =
+            semaphore.clone().acquire_owned().await.map_err(|e| {
+                CliError::Other(format!("failed to acquire concurrency permit: {e}"))
+            })?;
         let loaded = loaded.clone();
         let output_dir = output.clone();
         let model_override = model_override.clone();
@@ -276,12 +284,13 @@ pub(crate) fn discard_low_quality_trajectory(
 
     let raw = std::fs::read_to_string(&output_path)
         .map_err(|e| CliError::Other(format!("failed to read {}: {e}", output_path.display())))?;
-    let trajectory: genesis_core::trajectory::Trajectory = serde_json::from_str(&raw).map_err(|e| {
-        CliError::Other(format!(
-            "invalid trajectory JSON in {}: {e}",
-            output_path.display()
-        ))
-    })?;
+    let trajectory: genesis_core::trajectory::Trajectory =
+        serde_json::from_str(&raw).map_err(|e| {
+            CliError::Other(format!(
+                "invalid trajectory JSON in {}: {e}",
+                output_path.display()
+            ))
+        })?;
     let quality = genesis_core::quality::score(&trajectory);
     if quality.overall < min_quality {
         std::fs::remove_file(&output_path).map_err(|e| {
@@ -332,8 +341,7 @@ pub(crate) fn apply_auto_tags(output_dir: &str, session_id: &str) -> Result<(), 
 }
 
 pub(crate) fn parse_batch_input_line(line: &str) -> Result<BatchInputLine, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
     let object = value
         .as_object()
         .ok_or_else(|| "expected JSON object".to_owned())?;

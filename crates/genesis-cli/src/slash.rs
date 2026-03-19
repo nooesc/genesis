@@ -2,8 +2,8 @@ use std::io::{self, Write};
 
 use genesis_storage::{MemoryStore, SessionStore};
 use rustyline::completion::{Completer, Pair};
-use rustyline::hint::Hinter;
 use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
 use crate::commands::misc::estimate_token_cost;
@@ -19,11 +19,36 @@ impl SlashCompleter {
     pub(crate) fn new() -> Self {
         Self {
             commands: vec![
-                "/help", "/history", "/export", "/tokens", "/session",
-                "/new", "/undo", "/retry", "/fork", "/resume", "/search",
-                "/memories", "/compress", "/tools", "/skills", "/model",
-                "/personality", "/system", "/cache", "/stats", "/tag",
-                "/title", "/tree", "/audit", "/analytics", "/template", "/workflow", "/bus", "/eval", "/clear",
+                "/help",
+                "/history",
+                "/export",
+                "/tokens",
+                "/session",
+                "/new",
+                "/undo",
+                "/retry",
+                "/fork",
+                "/resume",
+                "/search",
+                "/memories",
+                "/compress",
+                "/tools",
+                "/skills",
+                "/model",
+                "/personality",
+                "/system",
+                "/cache",
+                "/stats",
+                "/tag",
+                "/title",
+                "/tree",
+                "/audit",
+                "/analytics",
+                "/template",
+                "/workflow",
+                "/bus",
+                "/eval",
+                "/clear",
                 "/paste",
             ],
         }
@@ -75,7 +100,11 @@ impl Highlighter for SlashCompleter {}
 impl Validator for SlashCompleter {}
 impl rustyline::Helper for SlashCompleter {}
 
-pub(crate) fn handle_chat_command(input: &str, session_id: &str, store: &SessionStore) -> Option<String> {
+pub(crate) fn handle_chat_command(
+    input: &str,
+    session_id: &str,
+    store: &SessionStore,
+) -> Option<String> {
     let cmd = input.strip_prefix('/')?;
     let (name, _args) = cmd.split_once(' ').unwrap_or((cmd, ""));
 

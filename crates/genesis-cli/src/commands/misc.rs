@@ -681,15 +681,11 @@ fn render_plugin_info(
     let shadowed: Vec<&PluginCommandEntry> = matches
         .iter()
         .copied()
-        .filter(|candidate| {
-            !same_plugin_entry(candidate, entry) && candidate.status == "shadowed"
-        })
+        .filter(|candidate| !same_plugin_entry(candidate, entry) && candidate.status == "shadowed")
         .collect();
     let alternates: Vec<&PluginCommandEntry> = matches
         .into_iter()
-        .filter(|candidate| {
-            !same_plugin_entry(candidate, entry) && candidate.status != "shadowed"
-        })
+        .filter(|candidate| !same_plugin_entry(candidate, entry) && candidate.status != "shadowed")
         .collect();
 
     if json {
@@ -1294,12 +1290,10 @@ pub(crate) async fn run_model(
             let api_key = std::env::var("OPENROUTER_API_KEY").ok();
 
             // Fetch models.
-            let mut models = genesis_provider::openrouter_models::fetch_models(
-                api_key.as_deref(),
-                &cache_dir,
-            )
-            .await
-            .map_err(|e| CliError::Other(format!("Failed to fetch models: {e}")))?;
+            let mut models =
+                genesis_provider::openrouter_models::fetch_models(api_key.as_deref(), &cache_dir)
+                    .await
+                    .map_err(|e| CliError::Other(format!("Failed to fetch models: {e}")))?;
 
             // Filter by query.
             if let Some(ref q) = query {
@@ -1383,10 +1377,7 @@ pub(crate) async fn run_model(
 
             lines.push(String::new());
             lines.push("Badges: [T] tools  [V] vision  [R] reasoning".to_owned());
-            lines.push(format!(
-                "Sort: {}  |  Use: genesis model set <id>",
-                sort
-            ));
+            lines.push(format!("Sort: {}  |  Use: genesis model set <id>", sort));
 
             Ok(lines.join("\n"))
         }

@@ -300,7 +300,11 @@ mod tests {
         buf.on_tool_start("read_file", "src/main.rs");
         buf.on_tool_end("read_file", Duration::from_millis(100), true);
         buf.on_tool_start("shell_exec", "cargo test");
-        buf.on_tool_end("shell_exec", Duration::from_secs(3) + Duration::from_millis(200), false);
+        buf.on_tool_end(
+            "shell_exec",
+            Duration::from_secs(3) + Duration::from_millis(200),
+            false,
+        );
 
         let output = buf.flush(&ui_plain()).unwrap();
         assert!(output.contains("\u{250c} tools"));
@@ -354,7 +358,10 @@ mod tests {
 
     #[test]
     fn format_duration_seconds() {
-        assert_eq!(format_duration(Duration::from_secs(3) + Duration::from_millis(200)), "3.2s");
+        assert_eq!(
+            format_duration(Duration::from_secs(3) + Duration::from_millis(200)),
+            "3.2s"
+        );
     }
 
     #[test]

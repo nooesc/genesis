@@ -11,10 +11,8 @@ async fn main() {
     // writing to stdout would corrupt the ratatui viewport.
     let cli = Cli::parse();
 
-    let tui_active = matches!(
-        &cli.command,
-        Command::Chat { no_tui: false, .. }
-    ) && std::io::stdout().is_terminal();
+    let tui_active = matches!(&cli.command, Command::Chat { no_tui: false, .. })
+        && std::io::stdout().is_terminal();
 
     // Load config to check for telemetry settings.
     let telemetry_config = genesis_config::load(None)
@@ -66,8 +64,7 @@ fn init_tracing(
     tui_active: bool,
     #[allow(unused_variables)] telemetry_config: Option<&genesis_config::TelemetryConfig>,
 ) -> Option<OtelGuard> {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let use_json = std::env::var("GENESIS_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

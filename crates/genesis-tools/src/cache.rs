@@ -98,10 +98,7 @@ impl CacheInner {
     }
 
     /// Get a cached entry, evicting it if expired. Requires write access.
-    fn get_or_evict(
-        &mut self,
-        key: &CacheKey,
-    ) -> Option<(String, BTreeMap<String, String>)> {
+    fn get_or_evict(&mut self, key: &CacheKey) -> Option<(String, BTreeMap<String, String>)> {
         if let Some(entry) = self.entries.get(key) {
             if Instant::now() < entry.expires_at {
                 self.stats.hits += 1;
@@ -264,15 +261,13 @@ impl ToolCache {
         let debounce_window = Duration::from_millis(200);
         let prune_threshold = Duration::from_secs(10);
 
-        let watcher = notify::recommended_watcher(
-            move |result: Result<Event, notify::Error>| match result {
+        let watcher =
+            notify::recommended_watcher(move |result: Result<Event, notify::Error>| match result {
                 Ok(event) => {
                     // Only care about modification-like events.
                     use notify::EventKind;
                     match event.kind {
-                        EventKind::Create(_)
-                        | EventKind::Modify(_)
-                        | EventKind::Remove(_) => {}
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
                         _ => return,
                     }
 
@@ -313,8 +308,7 @@ impl ToolCache {
                 Err(e) => {
                     warn!(error = %e, "filesystem watcher error");
                 }
-            },
-        );
+            });
 
         match watcher {
             Ok(mut watcher) => {
@@ -427,10 +421,7 @@ pub fn extract_tracked_path(
             // Extract base directory from glob pattern.
             arguments.get("pattern").map(|pattern| {
                 // Take the longest non-glob prefix as the base dir.
-                let base = pattern
-                    .split(['*', '?', '['])
-                    .next()
-                    .unwrap_or(".");
+                let base = pattern.split(['*', '?', '[']).next().unwrap_or(".");
                 let path = Path::new(base);
                 if path.is_dir() {
                     path.to_path_buf()

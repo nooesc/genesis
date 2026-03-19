@@ -377,7 +377,11 @@ impl InputWidget {
             if cursor_in_this_line && self.cursor == line_byte_end && x < area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, row)) {
                     cell.set_symbol(" ");
-                    cell.set_style(if show_cursor { CURSOR_STYLE } else { TEXT_STYLE });
+                    cell.set_style(if show_cursor {
+                        CURSOR_STYLE
+                    } else {
+                        TEXT_STYLE
+                    });
                 }
             }
         }
