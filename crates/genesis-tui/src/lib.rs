@@ -630,49 +630,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame
                 if input_area.height >= 2 && input_area.width >= 2 {
                     // Input panel border.
                     let border_style = Style::default().fg(Color::Rgb(108, 108, 108));
-                    let right = input_area.x + input_area.width - 1;
-                    let bottom = input_area.y + input_area.height - 1;
-
-                    if let Some(cell) = buf.cell_mut((input_area.x, input_area.y)) {
-                        cell.set_symbol("┌");
-                        cell.set_style(border_style);
-                    }
-                    for col in (input_area.x + 1)..right {
-                        if let Some(cell) = buf.cell_mut((col, input_area.y)) {
-                            cell.set_symbol("─");
-                            cell.set_style(border_style);
-                        }
-                    }
-                    if let Some(cell) = buf.cell_mut((right, input_area.y)) {
-                        cell.set_symbol("┐");
-                        cell.set_style(border_style);
-                    }
-
-                    for row in (input_area.y + 1)..bottom {
-                        if let Some(cell) = buf.cell_mut((input_area.x, row)) {
-                            cell.set_symbol("│");
-                            cell.set_style(border_style);
-                        }
-                        if let Some(cell) = buf.cell_mut((right, row)) {
-                            cell.set_symbol("│");
-                            cell.set_style(border_style);
-                        }
-                    }
-
-                    if let Some(cell) = buf.cell_mut((input_area.x, bottom)) {
-                        cell.set_symbol("└");
-                        cell.set_style(border_style);
-                    }
-                    for col in (input_area.x + 1)..right {
-                        if let Some(cell) = buf.cell_mut((col, bottom)) {
-                            cell.set_symbol("─");
-                            cell.set_style(border_style);
-                        }
-                    }
-                    if let Some(cell) = buf.cell_mut((right, bottom)) {
-                        cell.set_symbol("┘");
-                        cell.set_style(border_style);
-                    }
+                    crate::render::draw_box(input_area, buf, border_style, None);
 
                     let inner = Rect {
                         x: input_area.x + 1,

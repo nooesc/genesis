@@ -390,53 +390,7 @@ impl ApprovalOverlay {
     fn draw_border(&self, area: Rect, buf: &mut Buffer) {
         let border_style = Style::default().fg(BORDER);
         let bg_style = Style::default().bg(Color::Rgb(25, 25, 30));
-
-        // Fill background.
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_symbol(" ");
-                    cell.set_style(bg_style);
-                }
-            }
-        }
-
-        // Top border.
-        if let Some(cell) = buf.cell_mut((area.x, area.y)) {
-            cell.set_symbol("┌"); cell.set_style(border_style);
-        }
-        for x in area.x + 1..area.x + area.width - 1 {
-            if let Some(cell) = buf.cell_mut((x, area.y)) {
-                cell.set_symbol("─"); cell.set_style(border_style);
-            }
-        }
-        if let Some(cell) = buf.cell_mut((area.x + area.width - 1, area.y)) {
-            cell.set_symbol("┐"); cell.set_style(border_style);
-        }
-
-        // Bottom border.
-        let bottom = area.y + area.height - 1;
-        if let Some(cell) = buf.cell_mut((area.x, bottom)) {
-            cell.set_symbol("└"); cell.set_style(border_style);
-        }
-        for x in area.x + 1..area.x + area.width - 1 {
-            if let Some(cell) = buf.cell_mut((x, bottom)) {
-                cell.set_symbol("─"); cell.set_style(border_style);
-            }
-        }
-        if let Some(cell) = buf.cell_mut((area.x + area.width - 1, bottom)) {
-            cell.set_symbol("┘"); cell.set_style(border_style);
-        }
-
-        // Side borders.
-        for y in area.y + 1..bottom {
-            if let Some(cell) = buf.cell_mut((area.x, y)) {
-                cell.set_symbol("│"); cell.set_style(border_style);
-            }
-            if let Some(cell) = buf.cell_mut((area.x + area.width - 1, y)) {
-                cell.set_symbol("│"); cell.set_style(border_style);
-            }
-        }
+        crate::render::draw_box(area, buf, border_style, Some(bg_style));
     }
 }
 
