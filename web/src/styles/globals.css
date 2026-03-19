@@ -160,6 +160,19 @@
 
 /* === Visual Polish === */
 
+/* Page title gradient — subtle fade from foreground to muted */
+.title-gradient {
+  background: linear-gradient(90deg, var(--foreground) 0%, var(--muted-foreground) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Section divider with gradient fade */
+.section-divider {
+  background: linear-gradient(90deg, var(--border) 0%, transparent 100%);
+}
+
 /* Flowing dash animation for topology connectors */
 @keyframes dash-flow {
   to { stroke-dashoffset: -12; }

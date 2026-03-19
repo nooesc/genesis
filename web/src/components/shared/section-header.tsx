@@ -4,7 +4,7 @@ export function SectionHeader({ title }: { title: string }) {
       <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/50">
         {title}
       </span>
-      <div className="h-px flex-1 bg-border/20" />
+      <div className="section-divider h-px flex-1 opacity-20" />
     </div>
   )
 }
