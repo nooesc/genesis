@@ -503,6 +503,8 @@ pub enum StorageError {
         expected: usize,
         actual: usize,
     },
+    #[error("database at {path} has an unrecognized memory_vec schema: {sql}")]
+    InvalidVectorIndexSchema { path: PathBuf, sql: String },
     #[error("unknown import status in database: {0}")]
     UnknownImportStatus(String),
 }
@@ -536,6 +538,8 @@ fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), Stora
 
 fn register_sqlite_vec() {
     SQLITE_VEC_REGISTERED.get_or_init(|| unsafe {
+        // SAFETY: `sqlite_vec::sqlite3_vec_init` is the sqlite-vec extension entry point
+        // with the exact function signature expected by `sqlite3_auto_extension`.
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
@@ -572,12 +576,63 @@ fn detect_uniform_embedding_dimensions(
     }
 }
 
+fn parse_memory_vec_dimensions(sql: &str) -> Option<usize> {
+    let start = sql.find("float[")? + "float[".len();
+    let end = sql[start..].find(']')? + start;
+    sql[start..end].parse().ok()
+}
+
+fn memory_vec_declared_dimensions(
+    conn: &Connection,
+    database_path: &Path,
+) -> Result<Option<usize>, StorageError> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+
+    match sql {
+        None => Ok(None),
+        Some(sql) => parse_memory_vec_dimensions(&sql)
+            .ok_or(StorageError::InvalidVectorIndexSchema {
+                path: database_path.to_path_buf(),
+                sql,
+            })
+            .map(Some),
+    }
+}
+
+fn create_memory_vec_table(
+    conn: &Connection,
+    database_path: &Path,
+    dimensions: usize,
+) -> Result<(), StorageError> {
+    exec_migration(
+        conn,
+        database_path,
+        &format!(
+            "CREATE VIRTUAL TABLE memory_vec USING vec0(
+                memory_rowid integer primary key,
+                embedding float[{dimensions}] distance_metric=cosine
+            );"
+        ),
+    )
+}
+
 fn ensure_memory_vec_table(
     conn: &Connection,
     database_path: &Path,
     dimensions: usize,
 ) -> Result<(), StorageError> {
-    if let Some(existing) = detect_uniform_embedding_dimensions(conn, database_path)? {
+    let embedding_dimensions = detect_uniform_embedding_dimensions(conn, database_path)?;
+    if let Some(existing) = embedding_dimensions {
         if existing != dimensions {
             return Err(StorageError::EmbeddingDimensionMismatch {
                 path: database_path.to_path_buf(),
@@ -587,35 +642,42 @@ fn ensure_memory_vec_table(
         }
     }
 
-    exec_migration(
-        conn,
-        database_path,
-        &format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
-                memory_rowid integer primary key,
-                embedding float[{dimensions}] distance_metric=cosine
-            );"
-        ),
-    )
+    match memory_vec_declared_dimensions(conn, database_path)? {
+        None => create_memory_vec_table(conn, database_path, dimensions),
+        Some(existing) if existing == dimensions => Ok(()),
+        Some(existing) if embedding_dimensions.is_none() => {
+            conn.execute("DROP TABLE memory_vec", [])
+                .map_err(|source| StorageError::Sqlite {
+                    path: database_path.to_path_buf(),
+                    source,
+                })?;
+            create_memory_vec_table(conn, database_path, dimensions)
+        }
+        Some(existing) => Err(StorageError::EmbeddingDimensionMismatch {
+            path: database_path.to_path_buf(),
+            expected: existing,
+            actual: dimensions,
+        }),
+    }
 }
 
 fn rebuild_memory_vec_index(conn: &Connection, database_path: &Path) -> Result<(), StorageError> {
-    let Some(dimensions) = detect_uniform_embedding_dimensions(conn, database_path)? else {
-        return Ok(());
+    let dimensions = match detect_uniform_embedding_dimensions(conn, database_path) {
+        Ok(Some(dimensions)) => dimensions,
+        Ok(None) => return Ok(()),
+        Err(StorageError::MixedEmbeddingDimensions { .. }) => return Ok(()),
+        Err(error) => return Err(error),
     };
 
     ensure_memory_vec_table(conn, database_path, dimensions)?;
-    conn.execute("DELETE FROM memory_vec", [])
-        .map_err(|source| StorageError::Sqlite {
-            path: database_path.to_path_buf(),
-            source,
-        })?;
-    conn.execute(
-        "INSERT INTO memory_vec(memory_rowid, embedding)
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DELETE FROM memory_vec;
+         INSERT INTO memory_vec(memory_rowid, embedding)
          SELECT m.rowid, me.embedding
          FROM memory_embeddings me
-         JOIN memories m ON m.id = me.memory_id",
-        [],
+         JOIN memories m ON m.id = me.memory_id;
+         COMMIT;",
     )
     .map_err(|source| StorageError::Sqlite {
         path: database_path.to_path_buf(),
@@ -624,13 +686,17 @@ fn rebuild_memory_vec_index(conn: &Connection, database_path: &Path) -> Result<(
     Ok(())
 }
 
-fn memory_vec_table_exists(conn: &Connection, database_path: &Path) -> Result<bool, StorageError> {
+fn sqlite_table_exists(
+    conn: &Connection,
+    database_path: &Path,
+    table_name: &str,
+) -> Result<bool, StorageError> {
     conn.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM sqlite_master
-            WHERE type = 'table' AND name = 'memory_vec'
+            WHERE (type = 'table' OR type = 'view') AND name = ?1
         )",
-        [],
+        params![table_name],
         |row| row.get::<_, i64>(0),
     )
     .map(|exists| exists != 0)
@@ -638,6 +704,10 @@ fn memory_vec_table_exists(conn: &Connection, database_path: &Path) -> Result<bo
         path: database_path.to_path_buf(),
         source,
     })
+}
+
+fn memory_vec_table_exists(conn: &Connection, database_path: &Path) -> Result<bool, StorageError> {
+    memory_vec_declared_dimensions(conn, database_path).map(|value| value.is_some())
 }
 
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
@@ -3516,6 +3586,17 @@ impl MemoryStore {
         if memory_vec_table_exists(&tx, &self.database_path)? {
             tx.execute(
                 "DELETE FROM memory_vec WHERE memory_rowid = ?1",
+                params![memory_rowid],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        }
+
+        if sqlite_table_exists(&tx, &self.database_path, "memory_search")? {
+            tx.execute(
+                "DELETE FROM memory_search WHERE memory_row_id = ?1",
                 params![memory_rowid],
             )
             .map_err(|source| StorageError::Sqlite {
@@ -7191,6 +7272,34 @@ mod memory_store_tests {
     }
 
     #[test]
+    fn delete_removes_memory_from_fts_index() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = seed_hybrid_search_fixture(dir.path());
+        let store = MemoryStore::new(&db_path);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = 'mem-vector-only'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        assert!(store.delete("mem-vector-only").unwrap());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_search WHERE memory_row_id = ?1",
+                rusqlite::params![rowid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     #[ignore = "benchmark harness for local performance checks"]
     fn hybrid_search_benchmark_10k_memories() {
         let dir = tempdir().expect("tempdir");
@@ -7387,6 +7496,50 @@ mod embedding_store_tests {
             .query_row("SELECT COUNT(*) FROM memory_vec", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn bootstrap_tolerates_legacy_mixed_embedding_dimensions() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
+             VALUES ('mem1', ?1, 'legacy-a', 2, CURRENT_TIMESTAMP)",
+            rusqlite::params![super::embedding_to_blob(&[1.0_f32, 0.0])],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
+             VALUES ('mem2', ?1, 'legacy-b', 3, CURRENT_TIMESTAMP)",
+            rusqlite::params![super::embedding_to_blob(&[0.0_f32, 1.0, 0.0])],
+        )
+        .unwrap();
+        drop(conn);
+
+        super::bootstrap(&db_path).expect("legacy mixed embeddings should not brick bootstrap");
+    }
+
+    #[test]
+    fn store_recreates_empty_vector_index_with_new_dimension() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0, 0.0], "model-a").unwrap();
+        assert!(store.delete("mem1").unwrap());
+        store.store("mem1", &[1.0, 0.0, 0.0], "model-b").unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_vec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("float[3]"), "unexpected schema: {sql}");
     }
 
     #[test]
