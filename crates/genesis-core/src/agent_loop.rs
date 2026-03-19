@@ -2790,6 +2790,7 @@ mod tests {
                     personality: None,
                 },
                 disabled_plugins: Vec::new(),
+                plugin_verbose: None,
                 config_values: BTreeMap::new(),
             })
             .build()

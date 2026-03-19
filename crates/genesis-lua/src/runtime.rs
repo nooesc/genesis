@@ -39,6 +39,7 @@ pub struct LuaRuntimeConfig {
     pub plugin_dir: PathBuf,
     pub session: LuaSessionContext,
     pub disabled_plugins: Vec<String>,
+    pub plugin_verbose: Option<bool>,
     pub config_values: BTreeMap<String, String>,
 }
 
@@ -261,10 +262,12 @@ impl LuaRuntime {
             "plugin_auto_disable_after",
             DEFAULT_AUTO_DISABLE_AFTER,
         );
-        let plugin_verbose = env_bool(
-            "GENESIS_PLUGIN_VERBOSE",
-            config_bool(&config.config_values, "plugin_verbose", false),
-        );
+        let plugin_verbose = config.plugin_verbose.unwrap_or_else(|| {
+            env_bool(
+                "GENESIS_PLUGIN_VERBOSE",
+                config_bool(&config.config_values, "plugin_verbose", false),
+            )
+        });
         let memory_limit_bytes = config_usize(
             &config.config_values,
             "plugin_memory_limit_bytes",
@@ -687,12 +690,31 @@ impl LuaRuntime {
             let _execution_guard = plugin_name
                 .as_deref()
                 .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            if let Some(plugin_name) = plugin_name.as_deref() {
+                self.push_verbose_hook_log(event, plugin_name, "invoke");
+            }
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
             match value {
                 Ok(values) => match parse_pre_hook_result(values, current.clone()) {
-                    Ok(PreHookOutcome::Allow(next)) => current = next,
+                    Ok(PreHookOutcome::Allow(next)) => {
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.push_verbose_hook_log(
+                                event,
+                                plugin_name,
+                                &format!("allow {next:?}"),
+                            );
+                        }
+                        current = next;
+                    }
                     Ok(PreHookOutcome::Veto { reason }) => {
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.push_verbose_hook_log(
+                                event,
+                                plugin_name,
+                                &format!("veto {:?}", reason),
+                            );
+                        }
                         return Ok(PreHookOutcome::Veto { reason })
                     }
                     Err(err) => {
@@ -743,12 +765,33 @@ impl LuaRuntime {
             let _execution_guard = plugin_name
                 .as_deref()
                 .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            if let Some(plugin_name) = plugin_name.as_deref() {
+                self.push_verbose_hook_log(event, plugin_name, "invoke");
+            }
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
             match value {
                 Ok(values) => match parse_post_hook_result(values, current.clone()) {
-                    Ok(PostHookOutcome::Keep(next)) => current = next,
-                    Ok(PostHookOutcome::Rewrite(next)) => current = next,
+                    Ok(PostHookOutcome::Keep(next)) => {
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.push_verbose_hook_log(
+                                event,
+                                plugin_name,
+                                &format!("keep {next:?}"),
+                            );
+                        }
+                        current = next;
+                    }
+                    Ok(PostHookOutcome::Rewrite(next)) => {
+                        if let Some(plugin_name) = plugin_name.as_deref() {
+                            self.push_verbose_hook_log(
+                                event,
+                                plugin_name,
+                                &format!("rewrite {next:?}"),
+                            );
+                        }
+                        current = next;
+                    }
                     Err(err) => {
                         self.push_hook_error(event, err.to_string());
                         if let Some(plugin_name) = plugin_name.as_deref() {
@@ -792,12 +835,22 @@ impl LuaRuntime {
             let _execution_guard = plugin_name
                 .as_deref()
                 .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            if let Some(plugin_name) = plugin_name.as_deref() {
+                self.push_verbose_hook_log(event, plugin_name, "invoke");
+            }
             let value: Result<mlua::MultiValue, mlua::Error> =
                 callback.function.call(context.clone());
-            if let Err(err) = value {
-                self.push_hook_error(event, err.to_string());
-                if let Some(plugin_name) = plugin_name.as_deref() {
-                    self.record_plugin_failure(plugin_name, &err.to_string());
+            match value {
+                Ok(_) => {
+                    if let Some(plugin_name) = plugin_name.as_deref() {
+                        self.push_verbose_hook_log(event, plugin_name, "ok");
+                    }
+                }
+                Err(err) => {
+                    self.push_hook_error(event, err.to_string());
+                    if let Some(plugin_name) = plugin_name.as_deref() {
+                        self.record_plugin_failure(plugin_name, &err.to_string());
+                    }
                 }
             }
         }
@@ -810,6 +863,19 @@ impl LuaRuntime {
             .lock()
             .expect("log sink mutex should not be poisoned");
         logs.push(format!("[hook::{event:?}] {message}"));
+    }
+
+    fn push_verbose_hook_log(&self, event: HookEvent, plugin_name: &str, message: &str) {
+        if !self.plugin_verbose {
+            return;
+        }
+        let mut logs = self
+            .logs
+            .lock()
+            .expect("log sink mutex should not be poisoned");
+        logs.push(format!(
+            "[hook::{event:?}::{plugin_name}] {message}"
+        ));
     }
 
     fn resolve_personality_prompt(&self, entry: LuaPersonalityEntry) -> Option<String> {

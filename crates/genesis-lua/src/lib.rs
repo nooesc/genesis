@@ -68,6 +68,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_verbose_logging_records_hook_invocation_and_result() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("hooks.lua"),
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "verbose:" .. ctx.user_message
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime_with_plugin_verbose(dir.path(), BTreeMap::new(), true)
+            .expect("runtime should build");
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("pre turn hook should run");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("verbose:hello".to_owned())
+        );
+        let logs = runtime.logs();
+        assert!(
+            logs.iter()
+                .any(|entry| entry.contains("[hook::PreTurn::hooks] invoke")),
+            "verbose hook logs should include invocation: {:?}",
+            logs
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.contains("[hook::PreTurn::hooks] allow \"verbose:hello\"")),
+            "verbose hook logs should include parsed result: {:?}",
+            logs
+        );
+    }
+
+    #[test]
     fn runtime_exposes_genesis_version() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
@@ -1143,13 +1181,40 @@ version = "0.1.0"
         plugin_dir: &std::path::Path,
         config_values: BTreeMap<String, String>,
     ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
-        test_runtime_with_disabled_plugins(plugin_dir, config_values, Vec::new())
+        test_runtime_with_disabled_plugins_and_verbose(plugin_dir, config_values, Vec::new(), None)
     }
 
     fn test_runtime_with_disabled_plugins(
         plugin_dir: &std::path::Path,
         mut config_values: BTreeMap<String, String>,
         disabled_plugins: Vec<String>,
+    ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
+        test_runtime_with_disabled_plugins_and_verbose(
+            plugin_dir,
+            config_values,
+            disabled_plugins,
+            None,
+        )
+    }
+
+    fn test_runtime_with_plugin_verbose(
+        plugin_dir: &std::path::Path,
+        config_values: BTreeMap<String, String>,
+        plugin_verbose: bool,
+    ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
+        test_runtime_with_disabled_plugins_and_verbose(
+            plugin_dir,
+            config_values,
+            Vec::new(),
+            Some(plugin_verbose),
+        )
+    }
+
+    fn test_runtime_with_disabled_plugins_and_verbose(
+        plugin_dir: &std::path::Path,
+        mut config_values: BTreeMap<String, String>,
+        disabled_plugins: Vec<String>,
+        plugin_verbose: Option<bool>,
     ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
         config_values
             .entry("plugin_hook_timeout_ms".to_owned())
@@ -1172,6 +1237,7 @@ version = "0.1.0"
                     personality: Some("default".to_owned()),
                 },
                 disabled_plugins,
+                plugin_verbose,
                 config_values,
             })
             .build()

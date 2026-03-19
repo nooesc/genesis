@@ -391,6 +391,7 @@ impl<'a> SessionExecutionService<'a> {
                 personality,
             },
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
+            plugin_verbose: None,
             config_values,
         }
     }
@@ -1274,6 +1275,7 @@ impl ExecutionSubagentSpawner {
                 personality: None,
             },
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
+            plugin_verbose: None,
             config_values,
         };
 
