@@ -86,7 +86,7 @@ impl WebhookDispatcher {
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("genesis-webhook")
             .build()
-            .unwrap_or_default();
+            .expect("webhook HTTP client should build");
         Self {
             client,
             configs,
@@ -143,7 +143,13 @@ impl WebhookDispatcher {
             let secret = config.secret.clone();
             let max_retries = config.max_retries;
             let backoff_ms = config.retry_backoff_ms;
-            let body = serde_json::to_string(&payload).unwrap_or_default();
+            let body = match serde_json::to_string(&payload) {
+                Ok(body) => body,
+                Err(e) => {
+                    warn!(error = %e, url = %config.url, "failed to serialize webhook payload, skipping");
+                    continue;
+                }
+            };
             let dead_letters = Arc::clone(&self.dead_letters);
             let metrics = Arc::clone(&self.metrics);
             let event_type = event_str.to_owned();

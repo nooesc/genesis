@@ -1304,6 +1304,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Derive trait tests (Copy, PartialEq, Eq)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compression_level_equality() {
+        assert_eq!(CompressionLevel::Light, CompressionLevel::Light);
+        assert_eq!(CompressionLevel::Medium, CompressionLevel::Medium);
+        assert_eq!(CompressionLevel::Heavy, CompressionLevel::Heavy);
+        assert_ne!(CompressionLevel::Light, CompressionLevel::Heavy);
+        assert_ne!(CompressionLevel::Light, CompressionLevel::Medium);
+        assert_ne!(CompressionLevel::Medium, CompressionLevel::Heavy);
+    }
+
+    #[test]
+    fn compressed_role_is_copy() {
+        let role = CompressedRole::Assistant;
+        let copied = role; // Copy
+                           // Both the original and the copy are usable after the copy.
+        assert_eq!(role, CompressedRole::Assistant);
+        assert_eq!(copied, CompressedRole::Assistant);
+        assert_eq!(role, copied);
+
+        // Same for the other variants.
+        let user = CompressedRole::User;
+        let user2 = user;
+        assert_eq!(user, user2);
+
+        let action = CompressedRole::ActionSummary;
+        let action2 = action;
+        assert_eq!(action, action2);
+    }
+
+    #[test]
+    fn compression_level_is_copy() {
+        let level = CompressionLevel::Medium;
+        let copied = level; // Copy
+        assert_eq!(level, copied);
+        // Original is still usable after the implicit copy.
+        assert_eq!(level, CompressionLevel::Medium);
+    }
+
+    // -----------------------------------------------------------------------
     // Helper
     // -----------------------------------------------------------------------
 

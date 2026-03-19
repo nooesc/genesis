@@ -3219,8 +3219,14 @@ async fn openai_streaming_response(
                 "finish_reason": null,
             }],
         });
-        let _ = tx.send(Ok(Event::default()
-            .data(serde_json::to_string(&initial_chunk).unwrap_or_default())));
+        let initial_data = match serde_json::to_string(&initial_chunk) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize SSE event");
+                serde_json::json!({"error": "serialization failed"}).to_string()
+            }
+        };
+        let _ = tx.send(Ok(Event::default().data(initial_data)));
 
         let completion_id_for_event = completion_id.clone();
         let model_for_event = model_for_task.clone();
@@ -3249,8 +3255,14 @@ async fn openai_streaming_response(
                                 "finish_reason": null,
                             }],
                         });
-                        let _ = tx_for_event.send(Ok(Event::default()
-                            .data(serde_json::to_string(&data).unwrap_or_default())));
+                        let chunk_data = match serde_json::to_string(&data) {
+                            Ok(json) => json,
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialize SSE event");
+                                serde_json::json!({"error": "serialization failed"}).to_string()
+                            }
+                        };
+                        let _ = tx_for_event.send(Ok(Event::default().data(chunk_data)));
                     }
                 },
             )
@@ -3268,8 +3280,14 @@ async fn openai_streaming_response(
                 "finish_reason": "stop",
             }],
         });
-        let _ = tx.send(Ok(Event::default()
-            .data(serde_json::to_string(&finish_chunk).unwrap_or_default())));
+        let finish_data = match serde_json::to_string(&finish_chunk) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize SSE event");
+                serde_json::json!({"error": "serialization failed"}).to_string()
+            }
+        };
+        let _ = tx.send(Ok(Event::default().data(finish_data)));
 
         // Send usage chunk if we got a successful outcome
         if let Ok(outcome) = run_result {
@@ -3285,8 +3303,14 @@ async fn openai_streaming_response(
                     "total_tokens": outcome.result.total_input_tokens + outcome.result.total_output_tokens,
                 },
             });
-            let _ = tx.send(Ok(Event::default()
-                .data(serde_json::to_string(&usage_chunk).unwrap_or_default())));
+            let usage_data = match serde_json::to_string(&usage_chunk) {
+                Ok(json) => json,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to serialize SSE event");
+                    serde_json::json!({"error": "serialization failed"}).to_string()
+                }
+            };
+            let _ = tx.send(Ok(Event::default().data(usage_data)));
         }
 
         // Send [DONE] sentinel
