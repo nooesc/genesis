@@ -2090,6 +2090,14 @@ impl AgentLoop {
         }
     }
 
+    fn run_lua_personality_transform(&self, response: &str) -> String {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return response.to_owned();
+        };
+
+        runtime.transform_personality_response(response)
+    }
+
     fn record_lua_completed_turn(&self, result: &AgentResult) {
         if let Some(runtime) = &self.lua_runtime {
             runtime.record_completed_turn(
@@ -2182,6 +2190,7 @@ impl AgentLoop {
     ) -> AgentResult {
         self.record_lua_completed_turn(&result);
         result.response = self.run_lua_post_turn(&result.response);
+        result.response = self.run_lua_personality_transform(&result.response);
         self.fire_shell_hooks(
             HookEvent::PostTurn,
             self.turn_result_context(session_id, &result),
@@ -2967,6 +2976,13 @@ mod tests {
     }
 
     fn test_lua_runtime(script: &str) -> Arc<LuaRuntime> {
+        test_lua_runtime_with_personality(script, None)
+    }
+
+    fn test_lua_runtime_with_personality(
+        script: &str,
+        personality: Option<&str>,
+    ) -> Arc<LuaRuntime> {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(dir.path().join("hooks.lua"), script).expect("lua hook file should write");
 
@@ -2979,7 +2995,7 @@ mod tests {
                     turn_count: 0,
                     total_tokens: 0,
                     platform: "cli".to_owned(),
-                    personality: None,
+                    personality: personality.map(str::to_owned),
                 },
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
@@ -4239,6 +4255,46 @@ end)
                 .any(|stdout| stdout.contains(r#""lua_vetoed":true"#)),
             "shell on_message hook should reflect the Lua veto: {hook_outputs:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn lua_personality_transform_response_rewrites_final_output() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let endpoint = start_mock_server(vec![response]);
+        let mut agent = test_agent_with_endpoint(endpoint, Vec::new());
+        let runtime = test_lua_runtime_with_personality(
+            r#"
+genesis.register_personality({
+    name = "pirate",
+    description = "A pirate lua personality",
+    system_prompt = "Speak like a pirate.",
+    transform_response = function(response)
+        return response .. " Arrr!"
+    end,
+})
+"#,
+            Some("pirate"),
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done Arrr!");
     }
 
     #[tokio::test]

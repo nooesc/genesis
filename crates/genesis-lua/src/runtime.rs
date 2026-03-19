@@ -471,6 +471,27 @@ impl LuaRuntime {
         self.resolve_personality_prompt(entry)
     }
 
+    pub fn transform_personality_response(&self, response: &str) -> String {
+        let selected = self
+            .session_state
+            .lock()
+            .expect("session state mutex should not be poisoned")
+            .personality
+            .clone();
+        let Some(selected) = selected else {
+            return response.to_owned();
+        };
+        let entry = self
+            .personality_registry
+            .lock()
+            .expect("personality registry mutex should not be poisoned")
+            .personality_entry(&selected);
+        let Some(entry) = entry else {
+            return response.to_owned();
+        };
+        self.apply_personality_response_transform(entry, response)
+    }
+
     pub fn invoke_tool(
         &self,
         name: &str,
@@ -975,6 +996,59 @@ impl LuaRuntime {
                 );
                 self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
                 fallback
+            }
+        }
+    }
+
+    fn apply_personality_response_transform(
+        &self,
+        entry: LuaPersonalityEntry,
+        response: &str,
+    ) -> String {
+        let Some(transform_response) = entry.transform_response else {
+            return response.to_owned();
+        };
+        let plugin_context = PluginContext::for_execution(
+            entry.metadata.plugin_name.clone(),
+            entry.permissions.clone(),
+        );
+        let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+        let _execution_guard = self.begin_plugin_execution(
+            &entry.metadata.plugin_name,
+            format!("personality `{}` transform_response", entry.metadata.name),
+            self.hook_timeout,
+        );
+
+        match transform_response.call::<Value>(response.to_owned()) {
+            Ok(Value::Nil) => response.to_owned(),
+            Ok(Value::String(text)) => match text.to_str() {
+                Ok(text) => text.to_owned(),
+                Err(error) => {
+                    self.push_personality_error(
+                        &entry.metadata.plugin_name,
+                        format!("transform_response returned invalid utf-8: {error}"),
+                    );
+                    self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
+                    response.to_owned()
+                }
+            },
+            Ok(other) => match other.to_string() {
+                Ok(text) => text,
+                Err(error) => {
+                    self.push_personality_error(
+                        &entry.metadata.plugin_name,
+                        format!("transform_response returned unsupported value: {error}"),
+                    );
+                    response.to_owned()
+                }
+            },
+            Err(error) => {
+                self.push_personality_error(
+                    &entry.metadata.plugin_name,
+                    format!("transform_response failed: {error}"),
+                );
+                self.record_plugin_failure(&entry.metadata.plugin_name, &error.to_string());
+                response.to_owned()
             }
         }
     }

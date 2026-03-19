@@ -21,6 +21,7 @@ pub struct LuaPersonalityRegistry {
 pub(crate) struct LuaPersonalityEntry {
     pub(crate) metadata: LuaRegisteredPersonality,
     pub(crate) build_prompt: Option<Function>,
+    pub(crate) transform_response: Option<Function>,
     pub(crate) permissions: PluginPermissions,
 }
 
@@ -35,6 +36,7 @@ impl LuaPersonalityRegistry {
         let description = required_string(&spec, "description", plugin_name)?;
         let system_prompt = optional_string(&spec, "system_prompt", plugin_name)?;
         let build_prompt = optional_function(&spec, "build_prompt", plugin_name)?;
+        let transform_response = optional_function(&spec, "transform_response", plugin_name)?;
 
         if self.personalities.contains_key(&name) {
             return Err(LuaRuntimeError::DuplicateLuaPersonalityName { name });
@@ -56,6 +58,7 @@ impl LuaPersonalityRegistry {
                     plugin_name: plugin_name.to_owned(),
                 },
                 build_prompt,
+                transform_response,
                 permissions: permissions.clone(),
             },
         );

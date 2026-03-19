@@ -634,6 +634,48 @@ genesis.register_personality({
     }
 
     #[test]
+    fn runtime_transforms_selected_personality_response() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("pirate.lua"),
+            r#"
+genesis.register_personality({
+    name = "pirate",
+    description = "A pirate lua personality",
+    system_prompt = "Speak like a pirate.",
+    transform_response = function(response)
+        return response .. " Arrr!"
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-1".to_owned(),
+                    model: "gpt-5.4".to_owned(),
+                    turn_count: 2,
+                    total_tokens: 42,
+                    platform: "cli".to_owned(),
+                    personality: Some("pirate".to_owned()),
+                },
+                disabled_plugins: Vec::new(),
+                plugin_verbose: None,
+                config_values: BTreeMap::new(),
+            })
+            .build()
+            .expect("runtime should build");
+
+        assert_eq!(
+            runtime.transform_personality_response("Ahoy"),
+            "Ahoy Arrr!"
+        );
+    }
+
+    #[test]
     fn runtime_rolls_back_personalities_from_failed_plugins() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(
