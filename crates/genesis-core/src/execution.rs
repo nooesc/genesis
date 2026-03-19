@@ -585,6 +585,7 @@ impl<'a> SessionExecutionService<'a> {
                 }),
                 response_format: self.response_format.clone(),
                 core_tools: self.loaded.config.runtime.core_tools.clone(),
+                routing: self.loaded.config.routing.clone(),
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -1841,6 +1842,7 @@ mod tests {
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

@@ -57,6 +57,9 @@ pub struct GenesisConfig {
     /// OpenTelemetry telemetry export configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryConfig>,
+    /// Adaptive model routing configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingConfig>,
 }
 
 /// Display and UI settings for the CLI.
@@ -721,6 +724,48 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Adaptive model routing configuration.
+///
+/// Routes tasks to different model tiers based on complexity analysis.
+/// When disabled (the default), the primary provider is always used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutingConfig {
+    /// Whether adaptive routing is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Model for simple/cheap tasks (short messages, basic Q&A).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap_model: Option<String>,
+    /// Model for moderate tasks (code editing, tool use).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid_model: Option<String>,
+    /// Model for complex tasks (multi-step reasoning, architecture).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_model: Option<String>,
+    /// Default tier when classification is ambiguous.
+    #[serde(default = "default_routing_tier")]
+    pub default_tier: String,
+}
+
+fn default_routing_tier() -> String {
+    "mid".to_owned()
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cheap_model: None,
+            mid_model: None,
+            top_model: None,
+            default_tier: default_routing_tier(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -766,6 +811,8 @@ struct FileConfig {
     tui: Option<TuiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     telemetry: Option<TelemetryConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing: Option<RoutingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -922,6 +969,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         display: DisplayConfig::default(),
         tui: TuiConfig::default(),
         telemetry: None,
+        routing: None,
     })
 }
 
@@ -1100,6 +1148,7 @@ pub fn load_from_map(
             display: file_config.display.unwrap_or_default(),
             tui: file_config.tui.unwrap_or_default(),
             telemetry: file_config.telemetry,
+            routing: file_config.routing,
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -2019,5 +2068,34 @@ tool_mode = "verbose"
             let deserialized: AltScreenMode = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, variant);
         }
+    }
+
+    #[test]
+    fn routing_config_defaults() {
+        let cfg = super::RoutingConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.cheap_model.is_none());
+        assert!(cfg.mid_model.is_none());
+        assert!(cfg.top_model.is_none());
+        assert_eq!(cfg.default_tier, "mid");
+    }
+
+    #[test]
+    fn routing_config_from_yaml() {
+        let yaml = r#"
+routing:
+  enabled: true
+  cheap_model: "haiku-4.5"
+  mid_model: "sonnet-4.6"
+  top_model: "opus-4.6"
+  default_tier: "cheap"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let routing: super::RoutingConfig =
+            serde_yaml::from_value(val["routing"].clone()).unwrap();
+        assert!(routing.enabled);
+        assert_eq!(routing.cheap_model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(routing.top_model.as_deref(), Some("opus-4.6"));
+        assert_eq!(routing.default_tier, "cheap");
     }
 }

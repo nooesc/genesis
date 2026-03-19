@@ -172,6 +172,10 @@ pub struct AgentLoopConfig {
     /// available in the registry and can be discovered at runtime.
     /// Reduces input tokens by 85-96% for large tool registries.
     pub core_tools: Option<Vec<String>>,
+    /// Adaptive model routing configuration. When enabled, the router
+    /// classifies each turn's complexity and selects the appropriate model
+    /// tier (cheap/mid/top) to optimize cost while maintaining quality.
+    pub routing: Option<genesis_config::RoutingConfig>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -211,6 +215,7 @@ impl Default for AgentLoopConfig {
             cache: None,
             guardrails: None,
             core_tools: None,
+            routing: None,
         }
     }
 }
@@ -591,6 +596,44 @@ impl AgentLoop {
         }
     }
 
+    /// Apply adaptive routing to the request by overriding the model based on
+    /// context classification. Returns the selected tier name for logging.
+    fn apply_routing(
+        &self,
+        request: &mut ChatCompletionRequest,
+        user_message: &str,
+        tool_calls_made: usize,
+        turns_used: usize,
+        had_failure: bool,
+    ) -> Option<&'static str> {
+        let routing = self.config.routing.as_ref()?;
+        if !routing.enabled {
+            return None;
+        }
+
+        let default = crate::routing::Tier::from_str_or_mid(&routing.default_tier);
+        let tier = crate::routing::classify(user_message, tool_calls_made, turns_used, had_failure, default);
+        let selected = crate::routing::model_for_tier(
+            tier,
+            routing.cheap_model.as_deref(),
+            routing.mid_model.as_deref(),
+            routing.top_model.as_deref(),
+            self.client.model(),
+        );
+
+        // Override the model on the request (the client will use it instead
+        // of its default when the model field is non-empty).
+        request.model = selected.to_owned();
+
+        info!(
+            tier = tier.as_str(),
+            model = selected,
+            "adaptive routing selected model"
+        );
+
+        Some(tier.as_str())
+    }
+
     /// Pick the right client for the current turn. Uses the tool client when
     /// the most recent message is a tool result (the agent is processing tool
     /// output and will likely make more tool calls). Falls back to the primary
@@ -901,11 +944,26 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
+            // Adaptive routing: classify and override model if enabled.
+            let had_failure = self.tool_failure_counts.values().any(|&c| c > 0);
+            self.apply_routing(
+                &mut request,
+                &user_message,
+                tool_calls_made,
+                turns_used,
+                had_failure,
+            );
+
             // Check response cache before making an LLM call
             let cache_key = if self.response_cache.is_some()
                 && self.config.cache.as_ref().is_some_and(|c| c.enabled)
             {
-                Some(self.compute_cache_key(self.active_client().model(), &tool_defs))
+                let model_for_cache = if request.model.is_empty() {
+                    self.active_client().model()
+                } else {
+                    &request.model
+                };
+                Some(self.compute_cache_key(model_for_cache, &tool_defs))
             } else {
                 None
             };
@@ -1440,6 +1498,16 @@ impl AgentLoop {
             request.thinking = self.config.thinking.clone();
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
+
+            // Adaptive routing: classify and override model if enabled.
+            let had_failure = self.tool_failure_counts.values().any(|&c| c > 0);
+            self.apply_routing(
+                &mut request,
+                &user_message,
+                tool_calls_made,
+                turns_used,
+                had_failure,
+            );
 
             self.hooks
                 .on_llm_request(&hook_session, self.active_client().model(), turns_used);
