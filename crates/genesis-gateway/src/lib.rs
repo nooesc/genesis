@@ -1843,7 +1843,6 @@ async fn search_memories_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
-    let embedding_store = EmbeddingStore::new(db_path);
 
     let mode = genesis_core::embedding::SearchMode::from_str_opt(params.mode.as_deref());
 
@@ -1859,7 +1858,6 @@ async fn search_memories_handler(
         params.limit,
         mode,
         &memory_store,
-        &embedding_store,
         provider.as_deref(),
     )
     .await

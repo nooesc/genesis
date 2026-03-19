@@ -396,7 +396,6 @@ pub async fn hybrid_search(
     limit: usize,
     mode: SearchMode,
     memory_store: &MemoryStore,
-    _embedding_store: &EmbeddingStore,
     provider: Option<&EmbeddingProvider>,
 ) -> Result<Vec<ScoredMemory>, EmbeddingError> {
     match mode {
@@ -761,18 +760,9 @@ mod tests {
         drop(conn);
 
         let memory_store = MemoryStore::new(&db_path);
-        let embedding_store = EmbeddingStore::new(&db_path);
-
-        let results = hybrid_search(
-            "genesis",
-            10,
-            SearchMode::Keyword,
-            &memory_store,
-            &embedding_store,
-            None,
-        )
-        .await
-        .expect("keyword search should succeed");
+        let results = hybrid_search("genesis", 10, SearchMode::Keyword, &memory_store, None)
+            .await
+            .expect("keyword search should succeed");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].memory.id, "mem1");
@@ -786,17 +776,7 @@ mod tests {
         genesis_storage::bootstrap(&db_path).expect("bootstrap");
 
         let memory_store = MemoryStore::new(&db_path);
-        let embedding_store = EmbeddingStore::new(&db_path);
-
-        let result = hybrid_search(
-            "test",
-            10,
-            SearchMode::Vector,
-            &memory_store,
-            &embedding_store,
-            None,
-        )
-        .await;
+        let result = hybrid_search("test", 10, SearchMode::Vector, &memory_store, None).await;
 
         assert!(result.is_err());
         assert!(
