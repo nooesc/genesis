@@ -92,6 +92,7 @@ impl HelpOverlay {
             ("Ctrl+P", "Open command palette"),
             ("Ctrl+K", "Delete from cursor to end of line"),
             ("Ctrl+T", "Toggle transcript overlay"),
+            ("Tab", "Toggle Plan/Act mode"),
             ("@", "File path completion"),
             ("Up/Down", "Navigate input history / lines"),
             ("Home/End", "Move cursor to start/end of line"),
@@ -123,6 +124,7 @@ impl HelpOverlay {
             ("/compact", "Compress context window"),
             ("/exit", "Exit Eve"),
             ("/help", "Show this help screen"),
+            ("/plan", "Toggle Plan/Act mode"),
         ];
 
         for (cmd, desc) in commands {

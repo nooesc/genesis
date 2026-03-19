@@ -23,7 +23,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::events::StatusState;
+use crate::events::{AgentMode, StatusState};
 use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 // ── Palette ─────────────────────────────────────────────────────────────────
@@ -107,6 +107,8 @@ pub struct StatusBarWidget {
     effects_enabled: bool,
     /// Inline braille heartbeat pattern.
     heartbeat: Pattern,
+    /// Current agent operating mode (Act / Plan).
+    agent_mode: AgentMode,
 }
 
 impl StatusBarWidget {
@@ -129,6 +131,7 @@ impl StatusBarWidget {
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_CAP),
             effects_enabled: false,
             heartbeat: Pattern::Flatline,
+            agent_mode: AgentMode::default(),
         }
     }
 
@@ -193,6 +196,11 @@ impl StatusBarWidget {
     /// Update the context usage percentage.
     pub fn set_context_percent(&mut self, pct: u8) {
         self.context_percent = pct;
+    }
+
+    /// Update the agent operating mode (Act / Plan).
+    pub fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.agent_mode = mode;
     }
 
     /// Whether the status bar is in an animated state (needs periodic redraws).
@@ -402,6 +410,19 @@ impl StatusBarWidget {
         spans.push(Span::styled(
             "◆ ",
             Style::default().fg(ACCENT).bg(bg),
+        ));
+
+        // Mode indicator (Act / Plan).
+        let mode_color = match self.agent_mode {
+            AgentMode::Act => Color::Rgb(135, 175, 95),    // Green
+            AgentMode::Plan => Color::Rgb(180, 167, 214),  // Lavender
+        };
+        spans.push(Span::styled(
+            format!("[{}] ", self.agent_mode.label()),
+            Style::default()
+                .fg(mode_color)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
         ));
 
         // Model name.
@@ -638,6 +659,7 @@ mod tests {
             token_history: VecDeque::new(),
             effects_enabled: false,
             heartbeat: Pattern::Flatline,
+            agent_mode: AgentMode::default(),
         }
     }
 

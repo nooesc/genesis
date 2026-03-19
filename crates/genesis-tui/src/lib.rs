@@ -232,6 +232,7 @@ pub async fn run_tui(
             delta: std::f64::consts::FRAC_PI_2,
         },
         file_completion: crate::widgets::file_completion::FileCompletion::new(),
+        agent_mode: crate::events::AgentMode::default(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -426,6 +427,9 @@ pub async fn run_tui(
                     };
                     app.effects.start_idle_effects(status_area);
                 }
+
+                // Sync agent mode to the status bar before rendering.
+                app.status_bar.set_agent_mode(app.agent_mode);
 
                 render_frame(&mut term, &mut app, frame_dt);
 

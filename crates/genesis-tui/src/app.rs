@@ -1,6 +1,6 @@
 //! Application state and event dispatch.
 
-use crate::events::{AgentEvent, AppEvent, OverlayKind, StatusState, Submission, TuiEvent};
+use crate::events::{AgentEvent, AgentMode, AppEvent, OverlayKind, StatusState, Submission, TuiEvent};
 use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
@@ -86,6 +86,8 @@ pub struct App {
     pub idle_pattern: Pattern,
     /// @-file completion popup.
     pub file_completion: FileCompletion,
+    /// Current agent operating mode (Act / Plan).
+    pub agent_mode: AgentMode,
 }
 
 impl App {
@@ -276,6 +278,10 @@ impl App {
                     self.frame_requester.schedule_frame();
                     // Trigger async model fetch via AppEvent.
                     let _ = self.app_tx.send(AppEvent::FetchModels);
+                }
+                "/plan" => {
+                    self.agent_mode = self.agent_mode.toggle();
+                    self.frame_requester.schedule_frame();
                 }
                 _ => {}
             },
@@ -507,6 +513,17 @@ impl App {
             return;
         }
 
+        // Tab toggles Plan/Act mode when no overlay/popup is active
+        // and the input field is empty (avoids accidental mode switch mid-typing).
+        if key.code == KeyCode::Tab
+            && key.modifiers == KeyModifiers::NONE
+            && self.chat.input.text().is_empty()
+        {
+            self.agent_mode = self.agent_mode.toggle();
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -584,8 +601,21 @@ impl App {
         }
         self.chat.input.push_history(text.clone());
         self.chat.add_user_message(text.clone());
+
+        // In Plan mode, prepend a system instruction so the LLM restricts
+        // itself to read-only analysis and planning.
+        let prompt = if self.agent_mode.is_plan() {
+            format!(
+                "[PLAN MODE - Read and analyze only. Do NOT edit files, run commands, or make \
+                 changes. Discuss your plan and ask for confirmation before switching to Act mode.]\n\n{}",
+                text
+            )
+        } else {
+            text
+        };
+
         let _ = self.submission_tx.send(Submission::UserMessage {
-            text,
+            text: prompt,
             images: vec![],
         });
     }
@@ -650,6 +680,7 @@ mod tests {
                 delta: std::f64::consts::FRAC_PI_2,
             },
             file_completion: FileCompletion::new(),
+            agent_mode: AgentMode::default(),
         };
         (app, submission_rx, app_rx)
     }
@@ -845,5 +876,62 @@ mod tests {
         app.handle_tui_event(TuiEvent::Key(key));
         assert_eq!(app.screen, AppScreen::Chat);
         assert_eq!(app.chat.input.text(), "");
+    }
+
+    #[tokio::test]
+    async fn tab_toggles_agent_mode() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        assert_eq!(app.agent_mode, AgentMode::Act);
+        app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.agent_mode, AgentMode::Plan);
+        app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.agent_mode, AgentMode::Act);
+    }
+
+    #[tokio::test]
+    async fn slash_plan_toggles_agent_mode() {
+        let (mut app, _sub_rx, _app_rx) = make_app();
+        assert_eq!(app.agent_mode, AgentMode::Act);
+        app.handle_app_event(AppEvent::SlashCommand("/plan".into()));
+        assert_eq!(app.agent_mode, AgentMode::Plan);
+        app.handle_app_event(AppEvent::SlashCommand("/plan".into()));
+        assert_eq!(app.agent_mode, AgentMode::Act);
+    }
+
+    #[tokio::test]
+    async fn plan_mode_prepends_instruction_to_submission() {
+        let (mut app, mut sub_rx, _app_rx) = make_app();
+        // Switch to plan mode.
+        app.agent_mode = AgentMode::Plan;
+        // Type "analyze this" and submit.
+        for c in "analyze this".chars() {
+            app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        match sub_rx.try_recv() {
+            Ok(Submission::UserMessage { text, .. }) => {
+                assert!(
+                    text.starts_with("[PLAN MODE"),
+                    "plan mode should prepend instruction, got: {text}"
+                );
+                assert!(
+                    text.contains("analyze this"),
+                    "original message should be preserved"
+                );
+            }
+            other => panic!("expected UserMessage, got {:?}", other),
+        }
     }
 }

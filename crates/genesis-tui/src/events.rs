@@ -94,6 +94,36 @@ pub enum OverlayKind {
     Help,
 }
 
+/// Agent operating mode — controls which tools are available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentMode {
+    /// Full autonomy — all tools available.
+    #[default]
+    Act,
+    /// Planning only — restricted to read-only tools.
+    Plan,
+}
+
+impl AgentMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            AgentMode::Act => AgentMode::Plan,
+            AgentMode::Plan => AgentMode::Act,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentMode::Act => "Act",
+            AgentMode::Plan => "Plan",
+        }
+    }
+
+    pub fn is_plan(self) -> bool {
+        matches!(self, AgentMode::Plan)
+    }
+}
+
 /// User actions sent to the agent.
 #[derive(Debug)]
 pub enum Submission {
@@ -107,4 +137,32 @@ pub enum Submission {
     /// Switch the active model (from model picker).
     /// Format: "backend/model" (e.g. "anthropic/claude-sonnet-4-6").
     ModelSwitch(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_mode_default_is_act() {
+        assert_eq!(AgentMode::default(), AgentMode::Act);
+    }
+
+    #[test]
+    fn agent_mode_toggles() {
+        assert_eq!(AgentMode::Act.toggle(), AgentMode::Plan);
+        assert_eq!(AgentMode::Plan.toggle(), AgentMode::Act);
+    }
+
+    #[test]
+    fn agent_mode_labels() {
+        assert_eq!(AgentMode::Act.label(), "Act");
+        assert_eq!(AgentMode::Plan.label(), "Plan");
+    }
+
+    #[test]
+    fn agent_mode_is_plan() {
+        assert!(!AgentMode::Act.is_plan());
+        assert!(AgentMode::Plan.is_plan());
+    }
 }
