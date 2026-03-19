@@ -10,7 +10,7 @@ pub mod markdown;
 pub mod renderable;
 pub mod shadow;
 pub use borders::draw_box;
-pub use diff::{diff_to_lines, is_unified_diff};
+pub use diff::{diff_to_lines, diff_to_lines_themed, is_unified_diff, DiffColors};
 pub use markdown::markdown_to_lines;
 pub use renderable::Renderable;
 pub use shadow::render_shadow;
