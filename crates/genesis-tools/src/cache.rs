@@ -422,7 +422,7 @@ pub fn extract_tracked_path(
         "search_files" => arguments
             .get("path")
             .map(PathBuf::from)
-            .or_else(|| Some(PathBuf::from("."))),
+            .or(Some(PathBuf::from("."))),
         "glob" => {
             // Extract base directory from glob pattern.
             arguments.get("pattern").map(|pattern| {
