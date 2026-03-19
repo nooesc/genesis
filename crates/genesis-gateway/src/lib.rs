@@ -4514,7 +4514,7 @@ mod tests {
     /// Used by router integration tests so they don't touch the real filesystem.
     #[cfg(test)]
     fn create_test_state() -> (Arc<AppState>, tempfile::TempDir) {
-        create_test_state_with_key(None, false)
+        create_test_state_with_key(None, false, None)
     }
 
     /// Like `create_test_state` but allows configuring API key authentication.
@@ -4522,11 +4522,17 @@ mod tests {
     fn create_test_state_with_key(
         api_key: Option<String>,
         api_key_required: bool,
+        embedding: Option<genesis_config::EmbeddingConfig>,
     ) -> (Arc<AppState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir should succeed");
         let database_path = dir.path().join("genesis.db");
         // Bootstrap the schema so AgentBus persistence doesn't fail on first access.
         genesis_storage::bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = genesis_storage::SessionStore::new(&database_path);
+        store
+            .create_session("s1", "test", None)
+            .expect("session should be created");
 
         let config = genesis_config::GenesisConfig {
             schema_version: 1,
@@ -4570,7 +4576,7 @@ mod tests {
             plugins: genesis_config::PluginsConfig::default(),
             toolsets: std::collections::HashMap::new(),
             personality: None,
-            embedding: None,
+            embedding,
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
@@ -4594,6 +4600,29 @@ mod tests {
             Vec::new(),
             genesis_core::execution::PluginRuntimeOverrides::default(),
         ));
+        (state, dir)
+    }
+
+    #[cfg(test)]
+    fn create_test_state_with_local_embedding() -> (Arc<AppState>, tempfile::TempDir) {
+        let embedding = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "sentence-transformers/all-MiniLM-L6-v2".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+
+        let (state, dir) = create_test_state_with_key(None, false, Some(embedding));
+        let db_path = dir.path().join("genesis.db");
+        let conn = rusqlite::Connection::open(&db_path).expect("open db");
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem-local', 's1', 'fact', 'genesis memory scaffold', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .expect("seed memory should succeed");
+
         (state, dir)
     }
 
@@ -4639,8 +4668,7 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt as _;
 
-        let (state, _dir) =
-            create_test_state_with_key(Some("test-key".to_string()), true);
+        let (state, _dir) = create_test_state_with_key(Some("test-key".to_string()), true, None);
         let app = build_router(state);
 
         // /api/health must return 200 with NO Authorization header
@@ -4666,6 +4694,62 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "/api/sessions must require auth when api_key_required is true"
         );
+    }
+
+    #[tokio::test]
+    async fn memories_search_returns_not_implemented_for_local_backend() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/memories/search?q=genesis&mode=vector&limit=5")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn memories_bulk_embed_returns_not_implemented_for_local_backend() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn memories_single_embed_returns_not_implemented_for_local_backend() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/mem-local/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[test]
