@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { z } from 'zod'
+import { RoutePending } from '@/components/shared/route-pending'
 
 const searchSchema = z.object({
   search: z.string().optional(),
@@ -7,4 +8,5 @@ const searchSchema = z.object({
 
 export const Route = createFileRoute('/sessions/')({
   validateSearch: searchSchema,
+  pendingComponent: RoutePending,
 })

@@ -1,3 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { RoutePending } from '@/components/shared/route-pending'
 
-export const Route = createFileRoute('/memories')({})
+export const Route = createFileRoute('/memories')({
+  pendingComponent: RoutePending,
+})
