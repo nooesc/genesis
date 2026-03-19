@@ -570,15 +570,9 @@ fn register_sqlite_vec() {
     SQLITE_VEC_REGISTERED.get_or_init(|| unsafe {
         // SAFETY: `sqlite_vec::sqlite3_vec_init` is the sqlite-vec extension entry point
         // with the exact function signature expected by `sqlite3_auto_extension`.
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
-        >(
-            sqlite_vec::sqlite3_vec_init as *const ()
+        #[allow(clippy::missing_transmute_annotations)]
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
         )));
     });
 }
