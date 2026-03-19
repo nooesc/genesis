@@ -187,7 +187,10 @@ function ToolsPage() {
     })
   }, [filtered])
 
-  const allSources = Array.from(sourceCounts.keys()).sort()
+  const allSources = React.useMemo(
+    () => Array.from(sourceCounts.keys()).sort(),
+    [sourceCounts],
+  )
 
   return (
     <div className="flex flex-col gap-4">
