@@ -193,6 +193,8 @@ pub struct AppState {
     pub(crate) request_duration_histogram: Mutex<HistogramBuckets>,
     /// Agent message bus for inter-agent communication.
     pub agent_bus: genesis_core::agent_bus::AgentBus,
+    /// Process-local plugin runtime overrides supplied by the embedding host.
+    pub plugin_runtime_overrides: genesis_core::execution::PluginRuntimeOverrides,
 }
 
 impl AppState {
@@ -203,6 +205,7 @@ impl AppState {
         mcp: Option<std::sync::Arc<genesis_mcp::McpManager>>,
         rate_limit_rpm: Option<u32>,
         trusted_proxies: Vec<IpAddr>,
+        plugin_runtime_overrides: genesis_core::execution::PluginRuntimeOverrides,
     ) -> Self {
         let webhook_configs = loaded
             .config
@@ -232,7 +235,17 @@ impl AppState {
             stream_requests_total: AtomicU64::new(0),
             request_duration_histogram: Mutex::new(HistogramBuckets::new(DURATION_BUCKETS)),
             agent_bus: genesis_core::agent_bus::AgentBus::with_persistence(&bus_db_path),
+            plugin_runtime_overrides,
         }
+    }
+
+    pub fn session_service(&self) -> SessionExecutionService<'_> {
+        let mut service = SessionExecutionService::new(&self.loaded);
+        if let Some(mcp) = &self.mcp {
+            service.set_mcp(std::sync::Arc::clone(mcp));
+        }
+        service.set_plugin_runtime_overrides(self.plugin_runtime_overrides);
+        service
     }
 }
 
@@ -2478,7 +2491,7 @@ async fn workflow_run_handler(
         ));
     }
 
-    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let service = state.session_service();
     let result = service
         .run_workflow(&workflow, input, session_id)
         .await
@@ -2645,7 +2658,7 @@ async fn eval_run_handler(
         ));
     }
 
-    let service = genesis_core::execution::SessionExecutionService::new(&state.loaded);
+    let service = state.session_service();
     let report = service.run_eval(&suite).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2730,10 +2743,7 @@ async fn chat_handler(
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, (StatusCode, String)> {
     let loaded = &state.loaded;
-    let mut service = SessionExecutionService::new(loaded);
-    if let Some(mcp) = &state.mcp {
-        service.set_mcp(std::sync::Arc::clone(mcp));
-    }
+    let mut service = state.session_service();
     if let Some(system_prompt) = request.system_prompt {
         service.set_system_prompt_override(system_prompt);
     }
@@ -2925,11 +2935,7 @@ async fn openai_blocking_response(
 ) -> Result<Response, (StatusCode, String)> {
     state.requests_total.fetch_add(1, Ordering::Relaxed);
 
-    let loaded = &state.loaded;
-    let mut service = SessionExecutionService::new(loaded);
-    if let Some(mcp) = &state.mcp {
-        service.set_mcp(std::sync::Arc::clone(mcp));
-    }
+    let mut service = state.session_service();
     if let Some(sp) = system_prompt {
         service.set_system_prompt_override(sp);
     }
@@ -3012,11 +3018,7 @@ async fn openai_streaming_response(
     let completion_id = format!("chatcmpl-{}", session_id);
 
     tokio::spawn(async move {
-        let loaded = &state_for_task.loaded;
-        let mut service = SessionExecutionService::new(loaded);
-        if let Some(mcp) = &state_for_task.mcp {
-            service.set_mcp(std::sync::Arc::clone(mcp));
-        }
+        let mut service = state_for_task.session_service();
         if let Some(sp) = system_prompt {
             service.set_system_prompt_override(sp);
         }
@@ -3195,10 +3197,7 @@ async fn websocket_session(state: Arc<AppState>, mut socket: axum::extract::ws::
         state.requests_total.fetch_add(1, Ordering::Relaxed);
         state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
 
-        let mut service = SessionExecutionService::new(&state.loaded);
-        if let Some(mcp) = &state.mcp {
-            service.set_mcp(std::sync::Arc::clone(mcp));
-        }
+        let mut service = state.session_service();
         if let Some(sp) = system_prompt {
             service.set_system_prompt_override(sp);
         }
@@ -3368,10 +3367,7 @@ async fn chat_stream_handler(
     );
     tokio::spawn(
         async move {
-            let mut service = SessionExecutionService::new(&state_for_task.loaded);
-            if let Some(mcp) = &state_for_task.mcp {
-                service.set_mcp(std::sync::Arc::clone(mcp));
-            }
+            let mut service = state_for_task.session_service();
             if let Some(system_prompt) = system_prompt {
                 service.set_system_prompt_override(system_prompt);
             }
@@ -3597,10 +3593,7 @@ async fn chat_batch_handler(
                 }
             };
 
-            let mut service = SessionExecutionService::new(&state.loaded);
-            if let Some(mcp) = &state.mcp {
-                service.set_mcp(std::sync::Arc::clone(mcp));
-            }
+            let mut service = state.session_service();
             if let Some(system_prompt) = item.system_prompt {
                 service.set_system_prompt_override(system_prompt);
             }
@@ -3928,7 +3921,15 @@ mod tests {
     #[test]
     fn build_router_creates_routes() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = Arc::new(AppState::new(loaded, None, false, None, None, Vec::new()));
+        let state = Arc::new(AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        ));
         let _router = build_router(state);
         // If this doesn't panic, routes were created successfully
     }
@@ -4035,14 +4036,30 @@ mod tests {
     #[test]
     fn rate_limiter_none_when_no_rpm() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = AppState::new(loaded, None, false, None, None, Vec::new());
+        let state = AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        );
         assert!(state.rate_limiter.is_none());
     }
 
     #[test]
     fn rate_limiter_some_when_rpm_set() {
         let loaded = genesis_config::load(None).expect("default config should load");
-        let state = AppState::new(loaded, None, false, None, Some(60), Vec::new());
+        let state = AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            Some(60),
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        );
         assert!(state.rate_limiter.is_some());
     }
 
@@ -4350,6 +4367,7 @@ mod tests {
                 guardrails: None,
             },
             gateway: None,
+            plugins: genesis_config::PluginsConfig::default(),
             toolsets: std::collections::HashMap::new(),
             personality: None,
             embedding: None,
@@ -4362,9 +4380,18 @@ mod tests {
                 config_path: std::path::PathBuf::from("/tmp/genesis.toml"),
                 data_dir: std::path::PathBuf::from("/tmp/genesis"),
                 database_path: std::path::PathBuf::from("/tmp/genesis/genesis.db"),
+                plugin_dir: std::path::PathBuf::from("/tmp/genesis/plugins"),
             },
         };
-        let state = AppState::new(loaded, None, false, None, None, Vec::new());
+        let state = AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        );
         assert_eq!(state.requests_total.load(Ordering::Relaxed), 0);
         assert_eq!(state.errors_total.load(Ordering::Relaxed), 0);
         assert_eq!(state.input_tokens_total.load(Ordering::Relaxed), 0);
@@ -4452,6 +4479,7 @@ mod tests {
                 guardrails: None,
             },
             gateway: None,
+            plugins: genesis_config::PluginsConfig::default(),
             toolsets: std::collections::HashMap::new(),
             personality: None,
             embedding: None,
@@ -4464,6 +4492,7 @@ mod tests {
                 config_path: dir.path().join("genesis.toml"),
                 data_dir: dir.path().to_path_buf(),
                 database_path,
+                plugin_dir: dir.path().join("plugins"),
             },
         };
         let state = Arc::new(AppState::new(
@@ -4473,6 +4502,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
         ));
         (state, dir)
     }

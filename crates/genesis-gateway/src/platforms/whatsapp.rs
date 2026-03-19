@@ -15,7 +15,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_core::execution::SessionTurnInput;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -319,7 +319,7 @@ pub async fn webhook_handler(
 
                 tokio::spawn(
                     async move {
-                        let service = SessionExecutionService::new(&state.loaded);
+                        let service = state.session_service();
 
                         let result = service
                             .run_turn(SessionTurnInput {

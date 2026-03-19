@@ -4,21 +4,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Datelike, Local, Timelike};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::execution::delivery_platform_from_str;
+use genesis_core::execution::PluginRuntimeOverrides;
 use genesis_core::execution::SessionTurnInput;
 use genesis_core::scheduler::{check_due_schedules, CronTime};
-use genesis_gateway::{AppState, build_router};
+use genesis_gateway::{build_router, AppState};
 use genesis_storage::{bootstrap, ScheduleStore};
 
-use crate::{CliError, mcp_startup_strict, resolve_api_key_required, parse_trusted_proxies};
 use crate::chat::build_session_service;
+use crate::{mcp_startup_strict, parse_trusted_proxies, resolve_api_key_required, CliError};
 
-pub(crate) async fn run_schedule_daemon(loaded: &LoadedConfig) -> Result<String, CliError> {
+pub(crate) async fn run_schedule_daemon(
+    loaded: &LoadedConfig,
+    runtime_overrides: PluginRuntimeOverrides,
+) -> Result<String, CliError> {
     println!(
         "starting genesis scheduler daemon for provider {} / {}",
         loaded.config.provider.backend, loaded.config.provider.model
     );
     let strict_startup = mcp_startup_strict(loaded)?;
-    let service = build_session_service(loaded, strict_startup, false).await?;
+    let service = build_session_service(loaded, strict_startup, false, runtime_overrides).await?;
 
     loop {
         let store = ScheduleStore::new(&loaded.config.storage.database_path);
@@ -55,12 +59,13 @@ pub(crate) async fn run_serve(
     config_path: Option<PathBuf>,
     host: &str,
     port: u16,
+    runtime_overrides: PluginRuntimeOverrides,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
 
     let strict_startup = mcp_startup_strict(&loaded)?;
-    let service = build_session_service(&loaded, strict_startup, false).await?;
+    let service = build_session_service(&loaded, strict_startup, false, runtime_overrides).await?;
     let mcp = service.mcp_manager();
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
@@ -70,7 +75,13 @@ pub(crate) async fn run_serve(
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
-        .or_else(|| loaded.config.gateway.as_ref().and_then(|g| g.rate_limit_rpm));
+        .or_else(|| {
+            loaded
+                .config
+                .gateway
+                .as_ref()
+                .and_then(|g| g.rate_limit_rpm)
+        });
     let state = std::sync::Arc::new(AppState::new(
         loaded,
         api_key,
@@ -78,13 +89,14 @@ pub(crate) async fn run_serve(
         mcp,
         rate_limit_rpm,
         trusted_proxies,
+        runtime_overrides,
     ));
     let router = build_router(std::sync::Arc::clone(&state));
 
     let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        CliError::Io(e)
-    })?;
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| CliError::Io(e))?;
 
     // Start background scheduler
     let db_path = state.loaded.config.storage.database_path.clone();
@@ -147,11 +159,7 @@ impl genesis_core::scheduler::ScheduleExecutor for GatewayScheduleExecutor {
         schedule: genesis_core::scheduler::DueSchedule,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            let mut service =
-                genesis_core::execution::SessionExecutionService::new(&self.loaded.loaded);
-            if let Some(mcp) = &self.loaded.mcp {
-                service.set_mcp(std::sync::Arc::clone(mcp));
-            }
+            let service = self.loaded.session_service();
             let session_id = format!("schedule-{}", schedule.id);
             let title = format!("Schedule: {}", schedule.id);
             let platform =
@@ -173,7 +181,10 @@ impl genesis_core::scheduler::ScheduleExecutor for GatewayScheduleExecutor {
     }
 }
 
-pub(crate) async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, CliError> {
+pub(crate) async fn run_nudge(
+    config_path: Option<PathBuf>,
+    runtime_overrides: PluginRuntimeOverrides,
+) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
 
@@ -185,8 +196,24 @@ pub(crate) async fn run_nudge(config_path: Option<PathBuf>) -> Result<String, Cl
             .as_millis()
     );
 
-    let response = genesis_core::nudge::run_nudge(&loaded, &session_id).await?;
-    Ok(format!("Nudge complete (session: {session_id}):\n\n{response}"))
+    let prompt = genesis_core::nudge::build_nudge_prompt(&loaded);
+    let mut service = genesis_core::execution::SessionExecutionService::new(&loaded);
+    service.set_plugin_runtime_overrides(runtime_overrides);
+    let response = service
+        .run_turn(SessionTurnInput {
+            session_id: &session_id,
+            session_platform: "nudge",
+            delivery_platform: genesis_types::DeliveryPlatform::Cli,
+            prompt: &prompt,
+            title: Some("Self-reflection nudge"),
+            images: Vec::new(),
+        })
+        .await?
+        .result
+        .response;
+    Ok(format!(
+        "Nudge complete (session: {session_id}):\n\n{response}"
+    ))
 }
 
 pub(crate) fn default_schedule_id() -> String {

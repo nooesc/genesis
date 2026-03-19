@@ -993,7 +993,7 @@ pub enum CliError {
 }
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
-    let _runtime_override_guard = RuntimeOverrideGuard::apply(&cli);
+    let runtime_overrides = runtime_overrides_from_cli(&cli);
     // --json implies --color=never (machine-readable output must be plain).
     let color_mode = if cli.json {
         ColorMode::Never
@@ -1020,13 +1020,29 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if no_tui || !std::io::stdout().is_terminal() {
                 // Legacy rustyline path
                 chat::run_chat(
-                    cli.config, session_id, resume, prompt, system, last, worktree, clipboard, &ui,
+                    cli.config,
+                    session_id,
+                    resume,
+                    prompt,
+                    system,
+                    last,
+                    worktree,
+                    clipboard,
+                    runtime_overrides,
+                    &ui,
                 )
                 .await
             } else {
                 // Ratatui TUI path
                 chat::run_chat_tui(
-                    cli.config, session_id, resume, prompt, system, last, worktree,
+                    cli.config,
+                    session_id,
+                    resume,
+                    prompt,
+                    system,
+                    last,
+                    worktree,
+                    runtime_overrides,
                 )
                 .await
             }
@@ -1639,7 +1655,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_schedule_list(&schedules))
                     }
                 }
-                ScheduleCommand::Run => commands::serve::run_schedule_daemon(&loaded).await,
+                ScheduleCommand::Run => {
+                    commands::serve::run_schedule_daemon(&loaded, runtime_overrides).await
+                }
                 ScheduleCommand::Delete { id } => {
                     if !store.delete(&id)? {
                         return Err(CliError::ScheduleNotFound(id));
@@ -1652,8 +1670,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Model(model_command) => {
             commands::misc::run_model(cli.config, model_command, cli.json)
         }
-        Command::Serve { host, port } => commands::serve::run_serve(cli.config, &host, port).await,
-        Command::Nudge => commands::serve::run_nudge(cli.config).await,
+        Command::Serve { host, port } => {
+            commands::serve::run_serve(cli.config, &host, port, runtime_overrides).await
+        }
+        Command::Nudge => commands::serve::run_nudge(cli.config, runtime_overrides).await,
         Command::Insights { days } => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -1691,7 +1711,16 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             images,
         } => {
             chat::run_oneshot(
-                cli.config, &prompt, session_id, raw, cli.json, system, stream, &images, &ui,
+                cli.config,
+                &prompt,
+                session_id,
+                raw,
+                cli.json,
+                system,
+                stream,
+                &images,
+                runtime_overrides,
+                &ui,
             )
             .await
         }
@@ -1823,7 +1852,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 format!("workflow-{}-{ts}", workflow.name)
             });
 
-            let svc = genesis_core::execution::SessionExecutionService::new(&loaded);
+            let mut svc = genesis_core::execution::SessionExecutionService::new(&loaded);
+            svc.set_plugin_runtime_overrides(runtime_overrides);
             let result = svc
                 .run_workflow(&workflow, &input, &session_id)
                 .await
@@ -1864,51 +1894,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
     }
 }
 
-struct RuntimeOverrideGuard {
-    no_plugins_previous: Option<Option<String>>,
-    plugin_verbose_previous: Option<Option<String>>,
-}
-
-impl RuntimeOverrideGuard {
-    fn apply(cli: &Cli) -> Self {
-        let mut guard = Self {
-            no_plugins_previous: None,
-            plugin_verbose_previous: None,
-        };
-        if cli.no_plugins {
-            guard.no_plugins_previous = Some(std::env::var("GENESIS_NO_PLUGINS").ok());
-            unsafe {
-                std::env::set_var("GENESIS_NO_PLUGINS", "1");
-            }
-        }
-        if cli.plugin_verbose {
-            guard.plugin_verbose_previous = Some(std::env::var("GENESIS_PLUGIN_VERBOSE").ok());
-            unsafe {
-                std::env::set_var("GENESIS_PLUGIN_VERBOSE", "1");
-            }
-        }
-        guard
-    }
-}
-
-impl Drop for RuntimeOverrideGuard {
-    fn drop(&mut self) {
-        if let Some(previous) = self.no_plugins_previous.take() {
-            unsafe {
-                match previous {
-                    Some(value) => std::env::set_var("GENESIS_NO_PLUGINS", value),
-                    None => std::env::remove_var("GENESIS_NO_PLUGINS"),
-                }
-            }
-        }
-        if let Some(previous) = self.plugin_verbose_previous.take() {
-            unsafe {
-                match previous {
-                    Some(value) => std::env::set_var("GENESIS_PLUGIN_VERBOSE", value),
-                    None => std::env::remove_var("GENESIS_PLUGIN_VERBOSE"),
-                }
-            }
-        }
+fn runtime_overrides_from_cli(cli: &Cli) -> genesis_core::execution::PluginRuntimeOverrides {
+    genesis_core::execution::PluginRuntimeOverrides {
+        plugins_enabled: cli.no_plugins.then_some(false),
+        plugin_verbose: cli.plugin_verbose.then_some(true),
     }
 }
 
@@ -2446,47 +2435,18 @@ storage:
     }
 
     #[test]
-    fn runtime_override_guard_sets_and_restores_plugin_env() {
-        unsafe {
-            std::env::remove_var("GENESIS_NO_PLUGINS");
-            std::env::set_var("GENESIS_PLUGIN_VERBOSE", "0");
-        }
+    fn cli_runtime_overrides_map_global_plugin_flags() {
+        let overrides = runtime_overrides_from_cli(&Cli {
+            config: None,
+            json: false,
+            no_plugins: true,
+            plugin_verbose: true,
+            color: "auto".to_owned(),
+            command: Command::Status,
+        });
 
-        {
-            let _guard = RuntimeOverrideGuard::apply(&Cli {
-                config: None,
-                json: false,
-                no_plugins: true,
-                plugin_verbose: true,
-                color: "auto".to_owned(),
-                command: Command::Status,
-            });
-
-            assert_eq!(
-                std::env::var("GENESIS_NO_PLUGINS").as_deref(),
-                Ok("1"),
-                "guard should enable no-plugins override"
-            );
-            assert_eq!(
-                std::env::var("GENESIS_PLUGIN_VERBOSE").as_deref(),
-                Ok("1"),
-                "guard should enable plugin-verbose override"
-            );
-        }
-
-        assert!(
-            std::env::var("GENESIS_NO_PLUGINS").is_err(),
-            "guard should restore missing GENESIS_NO_PLUGINS"
-        );
-        assert_eq!(
-            std::env::var("GENESIS_PLUGIN_VERBOSE").as_deref(),
-            Ok("0"),
-            "guard should restore existing GENESIS_PLUGIN_VERBOSE value"
-        );
-
-        unsafe {
-            std::env::remove_var("GENESIS_PLUGIN_VERBOSE");
-        }
+        assert_eq!(overrides.plugins_enabled, Some(false));
+        assert_eq!(overrides.plugin_verbose, Some(true));
     }
 
     #[test]

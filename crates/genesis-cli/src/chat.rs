@@ -4,17 +4,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use genesis_config::{load, LoadedConfig};
 use genesis_core::agent_loop::StreamEvent;
-use genesis_core::execution::{SessionExecutionService, SessionTurnInput};
+use genesis_core::execution::{PluginRuntimeOverrides, SessionExecutionService, SessionTurnInput};
 use genesis_storage::{bootstrap, SessionStore};
 use genesis_types::DeliveryPlatform;
-use genesis_ui::UiContext;
 use genesis_ui::markdown::StreamMarkdown;
 use genesis_ui::status_bar::{BarState, StatusBar};
 use genesis_ui::tool_display::{ToolCallBuffer, ToolDisplayMode};
+use genesis_ui::UiContext;
 
 use crate::clipboard;
-use crate::slash::{SlashCompleter, handle_chat_command};
-use crate::{CliError, mcp_startup_strict, is_exit_command};
+use crate::slash::{handle_chat_command, SlashCompleter};
+use crate::{is_exit_command, mcp_startup_strict, CliError};
 
 /// Convert the config crate's `ToolDisplayMode` to the UI crate's equivalent.
 fn to_ui_tool_mode(mode: genesis_config::ToolDisplayMode) -> ToolDisplayMode {
@@ -55,8 +55,10 @@ pub(crate) async fn build_session_service<'a>(
     loaded: &'a LoadedConfig,
     strict_startup: bool,
     approval_handler: bool,
+    runtime_overrides: PluginRuntimeOverrides,
 ) -> Result<SessionExecutionService<'a>, CliError> {
     let mut service = SessionExecutionService::with_mcp(loaded, strict_startup).await?;
+    service.set_plugin_runtime_overrides(runtime_overrides);
     if approval_handler {
         service.set_approval_handler(std::sync::Arc::new(CliApprovalHandler));
     }
@@ -73,11 +75,13 @@ pub(crate) async fn run_chat_tui(
     system_override: Option<String>,
     last: bool,
     worktree: bool,
+    runtime_overrides: PluginRuntimeOverrides,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
     let strict_startup = mcp_startup_strict(&loaded)?;
-    let mut service = build_session_service(&loaded, strict_startup, true).await?;
+    let mut service =
+        build_session_service(&loaded, strict_startup, true, runtime_overrides).await?;
     if let Some(ref sys) = system_override {
         service.set_system_prompt_override(sys.clone());
     }
@@ -128,13 +132,15 @@ pub(crate) async fn run_chat(
     last: bool,
     worktree: bool,
     clipboard: bool,
+    runtime_overrides: PluginRuntimeOverrides,
     ui: &UiContext,
 ) -> Result<String, CliError> {
     let loaded = load(config_path.as_deref())?;
     bootstrap(&loaded.config.storage.database_path)?;
     let tool_mode = to_ui_tool_mode(loaded.config.display.tool_progress);
     let strict_startup = mcp_startup_strict(&loaded)?;
-    let mut service = build_session_service(&loaded, strict_startup, true).await?;
+    let mut service =
+        build_session_service(&loaded, strict_startup, true, runtime_overrides).await?;
     if let Some(ref sys) = system_override {
         service.set_system_prompt_override(sys.clone());
     }
@@ -730,6 +736,7 @@ pub(crate) async fn run_oneshot(
     system_override: Option<String>,
     stream: bool,
     image_paths: &[String],
+    runtime_overrides: PluginRuntimeOverrides,
     ui: &UiContext,
 ) -> Result<String, CliError> {
     // Support piping: `echo "prompt" | genesis run -`
@@ -748,7 +755,8 @@ pub(crate) async fn run_oneshot(
     bootstrap(&loaded.config.storage.database_path)?;
     let tool_mode = to_ui_tool_mode(loaded.config.display.tool_progress);
     let strict_startup = mcp_startup_strict(&loaded)?;
-    let mut service = build_session_service(&loaded, strict_startup, true).await?;
+    let mut service =
+        build_session_service(&loaded, strict_startup, true, runtime_overrides).await?;
     if let Some(sys) = system_override {
         service.set_system_prompt_override(sys);
     }

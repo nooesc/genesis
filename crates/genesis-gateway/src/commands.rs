@@ -417,6 +417,7 @@ mod tests {
                 guardrails: None,
             },
             gateway: None,
+            plugins: genesis_config::PluginsConfig::default(),
             toolsets: std::collections::HashMap::new(),
             personality: None,
             embedding: None,

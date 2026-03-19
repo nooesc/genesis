@@ -81,13 +81,24 @@ fn lua_runtime_build_count(key: &LuaRuntimeCacheKey) -> usize {
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    std::env::var(name).ok().is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
-fn plugins_enabled(loaded: &LoadedConfig) -> bool {
-    loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS")
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PluginRuntimeOverrides {
+    pub plugins_enabled: Option<bool>,
+    pub plugin_verbose: Option<bool>,
+}
+
+fn plugins_enabled(loaded: &LoadedConfig, overrides: PluginRuntimeOverrides) -> bool {
+    overrides
+        .plugins_enabled
+        .unwrap_or(loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS"))
 }
 
 impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
@@ -119,6 +130,7 @@ impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
 pub struct SessionExecutionService<'a> {
     loaded: &'a LoadedConfig,
     mcp: Option<Arc<McpManager>>,
+    plugin_runtime_overrides: PluginRuntimeOverrides,
     system_prompt_override: Option<String>,
     response_format: Option<genesis_provider::ResponseFormat>,
     approval_handler: Option<Arc<dyn genesis_tools::ApprovalHandler>>,
@@ -177,6 +189,7 @@ impl<'a> SessionExecutionService<'a> {
         Self {
             loaded,
             mcp: None,
+            plugin_runtime_overrides: PluginRuntimeOverrides::default(),
             system_prompt_override: None,
             response_format: None,
             approval_handler: None,
@@ -233,6 +246,7 @@ impl<'a> SessionExecutionService<'a> {
         Ok(Self {
             loaded,
             mcp,
+            plugin_runtime_overrides: PluginRuntimeOverrides::default(),
             system_prompt_override: None,
             response_format: None,
             approval_handler: None,
@@ -247,6 +261,18 @@ impl<'a> SessionExecutionService<'a> {
     /// Attach an already-connected MCP manager (e.g. from gateway startup).
     pub fn set_mcp(&mut self, mcp: Arc<McpManager>) {
         self.mcp = Some(mcp);
+    }
+
+    pub fn set_plugin_runtime_overrides(&mut self, overrides: PluginRuntimeOverrides) {
+        self.plugin_runtime_overrides = overrides;
+    }
+
+    pub fn set_plugins_enabled_override(&mut self, enabled: bool) {
+        self.plugin_runtime_overrides.plugins_enabled = Some(enabled);
+    }
+
+    pub fn set_plugin_verbose_override(&mut self, verbose: bool) {
+        self.plugin_runtime_overrides.plugin_verbose = Some(verbose);
     }
 
     /// Override the system prompt / agent identity for this service instance.
@@ -305,7 +331,7 @@ impl<'a> SessionExecutionService<'a> {
     }
 
     fn plugins_enabled(&self) -> bool {
-        plugins_enabled(self.loaded)
+        plugins_enabled(self.loaded, self.plugin_runtime_overrides)
     }
 
     fn lua_runtime_cache_key(
@@ -391,7 +417,7 @@ impl<'a> SessionExecutionService<'a> {
                 personality,
             },
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
-            plugin_verbose: None,
+            plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
         }
     }
@@ -845,6 +871,7 @@ impl<'a> SessionExecutionService<'a> {
             hook_runner,
             hooks: Arc::clone(&hooks),
             model_override: self.model_override.clone(),
+            plugin_runtime_overrides: self.plugin_runtime_overrides,
         }));
 
         // Set up response cache if configured
@@ -1210,11 +1237,12 @@ struct ExecutionSubagentSpawner {
     hook_runner: crate::hooks::HookRunner,
     hooks: Arc<dyn crate::agent_loop::AgentHooks>,
     model_override: Option<(String, String)>,
+    plugin_runtime_overrides: PluginRuntimeOverrides,
 }
 
 impl ExecutionSubagentSpawner {
     fn build_lua_runtime(&self, child_session_id: &str) -> Option<Arc<LuaRuntime>> {
-        if !plugins_enabled(self.loaded.as_ref()) {
+        if !plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides) {
             return None;
         }
 
@@ -1233,7 +1261,7 @@ impl ExecutionSubagentSpawner {
         config_values.insert("delivery_platform".to_owned(), "cli".to_owned());
         config_values.insert(
             "plugins_enabled".to_owned(),
-            plugins_enabled(self.loaded.as_ref()).to_string(),
+            plugins_enabled(self.loaded.as_ref(), self.plugin_runtime_overrides).to_string(),
         );
         config_values.insert(
             "plugin_hook_timeout_ms".to_owned(),
@@ -1275,7 +1303,7 @@ impl ExecutionSubagentSpawner {
                 personality: None,
             },
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
-            plugin_verbose: None,
+            plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
         };
 
@@ -1759,7 +1787,7 @@ mod tests {
     use super::{
         delivery_platform_from_str, generate_session_title, maybe_inject_skill_nudge,
         persist_new_messages, restore_chat_history, ExecutedTurn, ExecutionSubagentSpawner,
-        SessionExecutionService, SessionTurnInput,
+        PluginRuntimeOverrides, SessionExecutionService, SessionTurnInput,
     };
     use crate::agent_loop::{AgentResult, NoopHooks};
     use crate::tests::test_loaded_config;
@@ -2496,6 +2524,58 @@ genesis.register_personality({
     }
 
     #[tokio::test]
+    async fn lua_runtime_skips_creation_when_disabled_by_override() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("logger.lua"), "genesis.log('loaded')")
+            .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_plugins_enabled_override(false);
+
+        let runtime = service.lua_runtime_for_session("session-1", DeliveryPlatform::Cli);
+
+        assert!(
+            runtime.is_none(),
+            "explicit override should suppress runtime creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_runtime_config_propagates_plugin_verbose_override() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("hooky.lua"),
+            "genesis.on('PreTurn', function(ctx) return ctx.user_message end)",
+        )
+        .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_plugin_verbose_override(true);
+
+        let runtime = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should load");
+
+        runtime
+            .run_pre_turn("hello")
+            .expect("pre-turn hook should execute");
+        let log = runtime.logs();
+        assert!(
+            log.iter()
+                .any(|entry| entry.contains("[hook::PreTurn::hooky] invoke")),
+            "plugin verbose override should enable detailed hook logging"
+        );
+    }
+
+    #[tokio::test]
     async fn lua_runtime_skips_plugins_disabled_in_config() {
         let dir = tempdir().expect("tempdir");
         let data_dir = dir.path().join("data");
@@ -2597,6 +2677,7 @@ end)
             hook_runner: crate::hooks::HookRunner::default(),
             hooks: Arc::new(NoopHooks),
             model_override: None,
+            plugin_runtime_overrides: PluginRuntimeOverrides::default(),
         };
 
         let runtime = spawner
