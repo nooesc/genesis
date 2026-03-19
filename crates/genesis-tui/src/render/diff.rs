@@ -6,24 +6,52 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-// ── Diff palette ────────────────────────────────────────────────────────────
+// ── Diff colors ─────────────────────────────────────────────────────────────
 
-/// Addition foreground (UI_SUCCESS green).
-const ADD_FG: Color = Color::Rgb(135, 175, 95);
-/// Addition background (muted green tint).
-const ADD_BG: Color = Color::Rgb(33, 58, 43);
-/// Deletion foreground (UI_ERROR red).
-const DEL_FG: Color = Color::Rgb(215, 95, 95);
-/// Deletion background (muted red tint).
-const DEL_BG: Color = Color::Rgb(74, 34, 29);
-/// Context foreground (UI_DIM gray).
-const CONTEXT_FG: Color = Color::Rgb(108, 108, 108);
-/// Hunk header foreground (EVE_LAVENDER accent).
-const HUNK_FG: Color = Color::Rgb(180, 167, 214);
-/// Line-number gutter foreground (very dim).
-const GUTTER_FG: Color = Color::Rgb(88, 88, 88);
-/// File header foreground (UI_TEXT).
-const FILE_HEADER_FG: Color = Color::Rgb(208, 208, 208);
+/// Colors for diff rendering — sourced from the active theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffColors {
+    pub add_fg: Color,
+    pub add_bg: Color,
+    pub del_fg: Color,
+    pub del_bg: Color,
+    pub context_fg: Color,
+    pub hunk_fg: Color,
+    pub gutter_fg: Color,
+    pub file_header_fg: Color,
+}
+
+impl Default for DiffColors {
+    /// Default colors (Eve theme palette).
+    fn default() -> Self {
+        Self {
+            add_fg: Color::Rgb(135, 175, 95),
+            add_bg: Color::Rgb(33, 58, 43),
+            del_fg: Color::Rgb(215, 95, 95),
+            del_bg: Color::Rgb(74, 34, 29),
+            context_fg: Color::Rgb(108, 108, 108),
+            hunk_fg: Color::Rgb(180, 167, 214),
+            gutter_fg: Color::Rgb(88, 88, 88),
+            file_header_fg: Color::Rgb(208, 208, 208),
+        }
+    }
+}
+
+impl DiffColors {
+    /// Create `DiffColors` from a [`Theme`](crate::theme::Theme).
+    pub fn from_theme(theme: &dyn crate::theme::Theme) -> Self {
+        Self {
+            add_fg: theme.diff_add_fg(),
+            add_bg: theme.diff_add_bg(),
+            del_fg: theme.diff_del_fg(),
+            del_bg: theme.diff_del_bg(),
+            context_fg: theme.text_dim(),
+            hunk_fg: theme.primary(),
+            gutter_fg: theme.border(),
+            file_header_fg: theme.text(),
+        }
+    }
+}
 
 /// Returns `true` if the text looks like a unified diff.
 pub fn is_unified_diff(text: &str) -> bool {
@@ -41,8 +69,13 @@ pub fn is_unified_diff(text: &str) -> bool {
     text.contains("\n@@ ") || text.starts_with("@@ ")
 }
 
-/// Parse a unified diff string into styled Lines.
+/// Parse a unified diff string into styled Lines using default (Eve) colors.
 pub fn diff_to_lines(text: &str) -> Vec<Line<'static>> {
+    diff_to_lines_themed(text, &DiffColors::default())
+}
+
+/// Parse a unified diff string into styled Lines with theme-derived colors.
+pub fn diff_to_lines_themed(text: &str, colors: &DiffColors) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut old_line: u32 = 0;
     let mut new_line: u32 = 0;
@@ -50,33 +83,33 @@ pub fn diff_to_lines(text: &str) -> Vec<Line<'static>> {
     for raw_line in text.lines() {
         if raw_line.starts_with("diff ") {
             // File diff header: "diff --git a/file b/file"
-            lines.push(diff_header_line(raw_line));
+            lines.push(diff_header_line(raw_line, colors));
         } else if raw_line.starts_with("--- ") || raw_line.starts_with("+++ ") {
             // File path headers
-            lines.push(file_header_line(raw_line));
+            lines.push(file_header_line(raw_line, colors));
         } else if raw_line.starts_with("@@ ") {
             // Hunk header: "@@ -n,m +n,m @@ optional context"
             if let Some((old_start, new_start)) = parse_hunk_header(raw_line) {
                 old_line = old_start;
                 new_line = new_start;
             }
-            lines.push(hunk_header_line(raw_line));
+            lines.push(hunk_header_line(raw_line, colors));
         } else if let Some(content) = raw_line.strip_prefix('+') {
             // Addition
-            lines.push(addition_line(new_line, content));
+            lines.push(addition_line(new_line, content, colors));
             new_line += 1;
         } else if let Some(content) = raw_line.strip_prefix('-') {
             // Deletion
-            lines.push(deletion_line(old_line, content));
+            lines.push(deletion_line(old_line, content, colors));
             old_line += 1;
         } else if let Some(content) = raw_line.strip_prefix(' ') {
             // Context
-            lines.push(context_line(old_line, new_line, content));
+            lines.push(context_line(old_line, new_line, content, colors));
             old_line += 1;
             new_line += 1;
         } else {
             // Other lines (e.g. "\ No newline at end of file", index, mode)
-            lines.push(meta_line(raw_line));
+            lines.push(meta_line(raw_line, colors));
         }
     }
 
@@ -97,74 +130,85 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     Some((old_start, new_start))
 }
 
-fn diff_header_line(raw: &str) -> Line<'static> {
+fn diff_header_line(raw: &str, colors: &DiffColors) -> Line<'static> {
     Line::from(Span::styled(
         raw.to_owned(),
         Style::default()
-            .fg(FILE_HEADER_FG)
+            .fg(colors.file_header_fg)
             .add_modifier(Modifier::BOLD),
     ))
 }
 
-fn file_header_line(raw: &str) -> Line<'static> {
+fn file_header_line(raw: &str, colors: &DiffColors) -> Line<'static> {
     Line::from(Span::styled(
         raw.to_owned(),
         Style::default()
-            .fg(FILE_HEADER_FG)
+            .fg(colors.file_header_fg)
             .add_modifier(Modifier::BOLD),
     ))
 }
 
-fn hunk_header_line(raw: &str) -> Line<'static> {
+fn hunk_header_line(raw: &str, colors: &DiffColors) -> Line<'static> {
     Line::from(Span::styled(
         raw.to_owned(),
-        Style::default().fg(HUNK_FG),
+        Style::default().fg(colors.hunk_fg),
     ))
 }
 
-fn addition_line(line_num: u32, content: &str) -> Line<'static> {
+fn addition_line(line_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
     let gutter = format!("    {:>4} ", line_num);
     Line::from(vec![
-        Span::styled(gutter, Style::default().fg(GUTTER_FG)),
+        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
         Span::styled(
             "+",
-            Style::default().fg(ADD_FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(colors.add_fg)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(content.to_owned(), Style::default().fg(ADD_FG).bg(ADD_BG)),
+        Span::styled(
+            content.to_owned(),
+            Style::default().fg(colors.add_fg).bg(colors.add_bg),
+        ),
     ])
 }
 
-fn deletion_line(line_num: u32, content: &str) -> Line<'static> {
+fn deletion_line(line_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
     let gutter = format!("{:<4}     ", line_num);
     Line::from(vec![
-        Span::styled(gutter, Style::default().fg(GUTTER_FG)),
+        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
         Span::styled(
             "-",
-            Style::default().fg(DEL_FG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(colors.del_fg)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(content.to_owned(), Style::default().fg(DEL_FG).bg(DEL_BG)),
+        Span::styled(
+            content.to_owned(),
+            Style::default().fg(colors.del_fg).bg(colors.del_bg),
+        ),
     ])
 }
 
-fn context_line(old_num: u32, new_num: u32, content: &str) -> Line<'static> {
+fn context_line(old_num: u32, new_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
     let gutter = format!("{:<4}{:>4} ", old_num, new_num);
     Line::from(vec![
-        Span::styled(gutter, Style::default().fg(GUTTER_FG)),
-        Span::styled(" ", Style::default().fg(CONTEXT_FG)),
-        Span::styled(content.to_owned(), Style::default().fg(CONTEXT_FG)),
+        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
+        Span::styled(" ", Style::default().fg(colors.context_fg)),
+        Span::styled(content.to_owned(), Style::default().fg(colors.context_fg)),
     ])
 }
 
-fn meta_line(raw: &str) -> Line<'static> {
+fn meta_line(raw: &str, colors: &DiffColors) -> Line<'static> {
     Line::from(Span::styled(
         raw.to_owned(),
-        Style::default().fg(CONTEXT_FG),
+        Style::default().fg(colors.context_fg),
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
 
     const SAMPLE_DIFF: &str = "\
 diff --git a/src/main.rs b/src/main.rs
@@ -223,6 +267,7 @@ index abc1234..def5678 100644
 
     #[test]
     fn additions_use_green() {
+        let colors = DiffColors::default();
         let lines = diff_to_lines(SAMPLE_DIFF);
         // Find an addition line (should contain "+")
         let add_line = lines
@@ -231,11 +276,12 @@ index abc1234..def5678 100644
         assert!(add_line.is_some(), "should have an addition line");
         let spans = &add_line.unwrap().spans;
         let plus_span = spans.iter().find(|s| s.content.as_ref() == "+").unwrap();
-        assert_eq!(plus_span.style.fg, Some(ADD_FG));
+        assert_eq!(plus_span.style.fg, Some(colors.add_fg));
     }
 
     #[test]
     fn deletions_use_red() {
+        let colors = DiffColors::default();
         let lines = diff_to_lines(SAMPLE_DIFF);
         let del_line = lines
             .iter()
@@ -243,18 +289,79 @@ index abc1234..def5678 100644
         assert!(del_line.is_some(), "should have a deletion line");
         let spans = &del_line.unwrap().spans;
         let minus_span = spans.iter().find(|s| s.content.as_ref() == "-").unwrap();
-        assert_eq!(minus_span.style.fg, Some(DEL_FG));
+        assert_eq!(minus_span.style.fg, Some(colors.del_fg));
     }
 
     #[test]
     fn hunk_headers_use_accent() {
+        let colors = DiffColors::default();
         let lines = diff_to_lines(SAMPLE_DIFF);
         let hunk_line = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.starts_with("@@")));
         assert!(hunk_line.is_some());
         let span = &hunk_line.unwrap().spans[0];
-        assert_eq!(span.style.fg, Some(HUNK_FG));
+        assert_eq!(span.style.fg, Some(colors.hunk_fg));
+    }
+
+    #[test]
+    fn themed_diff_uses_custom_colors() {
+        let colors = DiffColors {
+            add_fg: Color::Cyan,
+            add_bg: Color::Reset,
+            del_fg: Color::Magenta,
+            del_bg: Color::Reset,
+            ..DiffColors::default()
+        };
+        let text = "@@ -1 +1 @@\n-old\n+new";
+        let lines = diff_to_lines_themed(text, &colors);
+        // Find addition line and verify color
+        let add_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "+"))
+            .unwrap();
+        let plus_span = add_line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "+")
+            .unwrap();
+        assert_eq!(plus_span.style.fg, Some(Color::Cyan));
+        // Find deletion line and verify color
+        let del_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "-"))
+            .unwrap();
+        let minus_span = del_line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "-")
+            .unwrap();
+        assert_eq!(minus_span.style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn default_diff_colors_match_eve_theme() {
+        let default = DiffColors::default();
+        let eve = crate::theme::EveTheme;
+        let themed = DiffColors::from_theme(&eve);
+        assert_eq!(default.add_fg, themed.add_fg);
+        assert_eq!(default.add_bg, themed.add_bg);
+        assert_eq!(default.del_fg, themed.del_fg);
+        assert_eq!(default.del_bg, themed.del_bg);
+        assert_eq!(default.context_fg, themed.context_fg);
+        assert_eq!(default.hunk_fg, themed.hunk_fg);
+        assert_eq!(default.gutter_fg, themed.gutter_fg);
+        assert_eq!(default.file_header_fg, themed.file_header_fg);
+    }
+
+    #[test]
+    fn from_theme_uses_theme_colors() {
+        let dracula = crate::theme::DraculaTheme;
+        let colors = DiffColors::from_theme(&dracula);
+        assert_eq!(colors.add_fg, dracula.diff_add_fg());
+        assert_eq!(colors.del_fg, dracula.diff_del_fg());
+        assert_eq!(colors.hunk_fg, dracula.primary());
+        assert_eq!(colors.context_fg, dracula.text_dim());
     }
 
     #[test]
