@@ -12,6 +12,7 @@ pub enum HookEvent {
     PostToolCall,
     PreTurn,
     PostTurn,
+    OnMessage,
     OnError,
     OnComplete,
 }

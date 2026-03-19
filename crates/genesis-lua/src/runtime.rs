@@ -583,6 +583,28 @@ impl LuaRuntime {
         self.run_post_hook(HookEvent::PostTurn, context, response.to_owned())
     }
 
+    pub fn run_on_message(
+        &self,
+        role: &str,
+        content: &str,
+        tool_call_count: usize,
+        image_count: usize,
+    ) -> Result<PreHookOutcome<String>, LuaRuntimeError> {
+        let session_id = self
+            .session_state
+            .lock()
+            .expect("session state mutex should not be poisoned")
+            .id
+            .clone();
+        let context = self.lua.create_table()?;
+        context.set("session_id", session_id)?;
+        context.set("role", role)?;
+        context.set("content", content)?;
+        context.set("tool_call_count", tool_call_count)?;
+        context.set("image_count", image_count)?;
+        self.run_pre_hook(HookEvent::OnMessage, context, content.to_owned())
+    }
+
     pub fn run_on_error(&self, stage: &str, error: &str) -> Result<(), LuaRuntimeError> {
         let context = self.lua.create_table()?;
         context.set("stage", stage)?;

@@ -93,6 +93,54 @@ fn summarize_args(args_json: &str) -> String {
     format!("{truncated}...")
 }
 
+fn message_image_count(message: &ChatMessage) -> usize {
+    match message.content.as_ref() {
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
+            .count(),
+        _ => 0,
+    }
+}
+
+fn set_message_text(message: &mut ChatMessage, text: String) {
+    match message.content.as_mut() {
+        Some(MessageContent::Text(current)) => *current = text,
+        Some(MessageContent::Parts(parts)) => {
+            if let Some(ContentPart::Text { text: current }) = parts
+                .iter_mut()
+                .find(|part| matches!(part, ContentPart::Text { .. }))
+            {
+                *current = text;
+            } else {
+                parts.insert(0, ContentPart::Text { text });
+            }
+        }
+        None => {
+            message.content = Some(MessageContent::Text(text));
+        }
+    }
+}
+
+fn suppress_message_text(message: &mut ChatMessage) -> bool {
+    if message
+        .tool_calls
+        .as_ref()
+        .is_some_and(|tool_calls| !tool_calls.is_empty())
+    {
+        message.content = None;
+        return true;
+    }
+
+    match message.content.as_mut() {
+        Some(MessageContent::Parts(parts)) => {
+            parts.retain(|part| !matches!(part, ContentPart::Text { .. }));
+            !parts.is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// Result of a complete agent turn (user message → final assistant response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResult {
@@ -732,13 +780,21 @@ impl AgentLoop {
             user_message.to_owned()
         };
 
-        self.trajectory.record_user_message(&user_message);
-
-        if images.is_empty() {
-            self.messages.push(ChatMessage::user(&user_message));
+        let user_message = if images.is_empty() {
+            self.push_message_with_lua_hooks(&hook_session, ChatMessage::user(&user_message))
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default()
         } else {
-            self.messages
-                .push(ChatMessage::user_with_images(user_message.clone(), images));
+            self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::user_with_images(user_message.clone(), images),
+            )
+            .and_then(|message| message.content_text().map(str::to_owned))
+            .unwrap_or_default()
+        };
+
+        if !user_message.is_empty() {
+            self.trajectory.record_user_message(&user_message);
         }
 
         // Fire turn-start hook
@@ -976,10 +1032,6 @@ impl AgentLoop {
             if let Some(tool_calls) = &assistant_msg.tool_calls {
                 if !tool_calls.is_empty() {
                     // Record assistant message with tool calls
-                    if let Some(text) = assistant_msg.content_text() {
-                        self.trajectory.record_assistant_message(text);
-                    }
-
                     // Append the assistant message (with tool_calls) to history,
                     // preserving provider_metadata (e.g. reasoning blobs) for multi-turn continuity.
                     let mut msg = ChatMessage::assistant_with_tool_calls(
@@ -987,7 +1039,13 @@ impl AgentLoop {
                         tool_calls.clone(),
                     );
                     msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                    self.messages.push(msg);
+                    if let Some(message) = self.push_message_with_lua_hooks(&hook_session, msg) {
+                        if let Some(text) = message.content_text() {
+                            if !text.is_empty() {
+                                self.trajectory.record_assistant_message(text);
+                            }
+                        }
+                    }
 
                     // Execute tool calls in parallel (up to max_concurrency).
                     tool_calls_made += tool_calls.len();
@@ -1037,8 +1095,6 @@ impl AgentLoop {
                         result = sanitize::sanitize_credentials(&result);
                         let success = !result.starts_with("Error:");
                         let result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                        self.trajectory
-                            .record_tool_result(&tc.function.name, &result);
                         if !success {
                             let count = self
                                 .tool_failure_counts
@@ -1067,10 +1123,18 @@ impl AgentLoop {
                                 "lua_vetoed": lua_vetoed,
                             }),
                         );
+                        let result = self
+                            .push_message_with_lua_hooks(
+                                &hook_session,
+                                ChatMessage::tool_result(&tc.id, result),
+                            )
+                            .and_then(|message| message.content_text().map(str::to_owned))
+                            .unwrap_or_default();
+                        self.trajectory
+                            .record_tool_result(&tc.function.name, &result);
                         if requires_input {
                             clarification = Some(result.clone());
                         }
-                        self.messages.push(ChatMessage::tool_result(&tc.id, result));
                     }
 
                     // Inject stuck-loop nudge if any tool failed too many times
@@ -1116,10 +1180,15 @@ impl AgentLoop {
                 }
             }
 
-            self.trajectory.record_assistant_message(&response_text);
             let mut msg = ChatMessage::assistant(&response_text);
             msg.provider_metadata = assistant_msg.provider_metadata.clone();
-            self.messages.push(msg);
+            let response_text = self
+                .push_message_with_lua_hooks(&hook_session, msg)
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default();
+            if !response_text.is_empty() {
+                self.trajectory.record_assistant_message(&response_text);
+            }
 
             self.save_trajectory();
             let result = AgentResult {
@@ -1229,13 +1298,21 @@ impl AgentLoop {
             user_message.to_owned()
         };
 
-        self.trajectory.record_user_message(&user_message);
-
-        if images.is_empty() {
-            self.messages.push(ChatMessage::user(&user_message));
+        let user_message = if images.is_empty() {
+            self.push_message_with_lua_hooks(&hook_session, ChatMessage::user(&user_message))
+                .and_then(|message| message.content_text().map(str::to_owned))
+                .unwrap_or_default()
         } else {
-            self.messages
-                .push(ChatMessage::user_with_images(user_message.clone(), images));
+            self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::user_with_images(user_message.clone(), images),
+            )
+            .and_then(|message| message.content_text().map(str::to_owned))
+            .unwrap_or_default()
+        };
+
+        if !user_message.is_empty() {
+            self.trajectory.record_user_message(&user_message);
         }
 
         // Fire turn-start hook (streaming)
@@ -1419,20 +1496,24 @@ impl AgentLoop {
                     }
 
                     if !streamed_tool_calls.is_empty() {
-                        // Record assistant message if present
-                        if !response_text.is_empty() {
-                            self.trajectory.record_assistant_message(&response_text);
-                        }
-
                         // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
-                        self.messages.push(ChatMessage::assistant_with_tool_calls(
-                            if response_text.is_empty() {
-                                None
-                            } else {
-                                Some(MessageContent::Text(response_text.clone()))
-                            },
-                            streamed_tool_calls.clone(),
-                        ));
+                        if let Some(message) = self.push_message_with_lua_hooks(
+                            &hook_session,
+                            ChatMessage::assistant_with_tool_calls(
+                                if response_text.is_empty() {
+                                    None
+                                } else {
+                                    Some(MessageContent::Text(response_text.clone()))
+                                },
+                                streamed_tool_calls.clone(),
+                            ),
+                        ) {
+                            if let Some(text) = message.content_text() {
+                                if !text.is_empty() {
+                                    self.trajectory.record_assistant_message(text);
+                                }
+                            }
+                        }
 
                         let (effective_tool_calls, veto_reasons) =
                             self.prepare_tool_calls(&hook_session, &streamed_tool_calls, true);
@@ -1502,8 +1583,6 @@ impl AgentLoop {
                                 duration_ms: tool_exec_duration_ms,
                                 success: tool_success,
                             });
-                            self.trajectory
-                                .record_tool_result(&tc.function.name, &result);
                             if !tool_success {
                                 let count = self
                                     .tool_failure_counts
@@ -1526,11 +1605,19 @@ impl AgentLoop {
                                     "lua_vetoed": lua_vetoed,
                                 }),
                             );
+                            let result = self
+                                .push_message_with_lua_hooks(
+                                    &hook_session,
+                                    ChatMessage::tool_result(&tc.id, result),
+                                )
+                                .and_then(|message| message.content_text().map(str::to_owned))
+                                .unwrap_or_default();
+                            self.trajectory
+                                .record_tool_result(&tc.function.name, &result);
                             if requires_input {
                                 on_event(StreamEvent::ClarificationNeeded { question: &result });
                                 clarification = Some(result.clone());
                             }
-                            self.messages.push(ChatMessage::tool_result(&tc.id, result));
                         }
 
                         self.maybe_inject_stuck_nudge();
@@ -1554,9 +1641,16 @@ impl AgentLoop {
                         continue;
                     }
 
-                    self.trajectory.record_assistant_message(&response_text);
-                    // TODO: propagate provider_metadata for streaming reasoning continuity
-                    self.messages.push(ChatMessage::assistant(&response_text));
+                    let response_text = self
+                        .push_message_with_lua_hooks(
+                            &hook_session,
+                            ChatMessage::assistant(&response_text),
+                        )
+                        .and_then(|message| message.content_text().map(str::to_owned))
+                        .unwrap_or_default();
+                    if !response_text.is_empty() {
+                        self.trajectory.record_assistant_message(&response_text);
+                    }
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1622,10 +1716,6 @@ impl AgentLoop {
 
                     if let Some(tool_calls) = &assistant_msg.tool_calls {
                         if !tool_calls.is_empty() {
-                            if let Some(text) = assistant_msg.content_text() {
-                                self.trajectory.record_assistant_message(text);
-                            }
-
                             let (effective_tool_calls, veto_reasons) =
                                 self.prepare_tool_calls(&hook_session, tool_calls, false);
                             let tool_calls = effective_tool_calls;
@@ -1635,7 +1725,15 @@ impl AgentLoop {
                                 tool_calls.clone(),
                             );
                             msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                            self.messages.push(msg);
+                            if let Some(message) =
+                                self.push_message_with_lua_hooks(&hook_session, msg)
+                            {
+                                if let Some(text) = message.content_text() {
+                                    if !text.is_empty() {
+                                        self.trajectory.record_assistant_message(text);
+                                    }
+                                }
+                            }
 
                             // Emit start events.
                             for tc in tool_calls.iter() {
@@ -1703,8 +1801,6 @@ impl AgentLoop {
                                     duration_ms: tool_exec_duration_ms,
                                     success: tool_success,
                                 });
-                                self.trajectory
-                                    .record_tool_result(&tc.function.name, &result);
                                 if !tool_success {
                                     let count = self
                                         .tool_failure_counts
@@ -1727,13 +1823,21 @@ impl AgentLoop {
                                         "lua_vetoed": lua_vetoed,
                                     }),
                                 );
+                                let result = self
+                                    .push_message_with_lua_hooks(
+                                        &hook_session,
+                                        ChatMessage::tool_result(&tc.id, result),
+                                    )
+                                    .and_then(|message| message.content_text().map(str::to_owned))
+                                    .unwrap_or_default();
+                                self.trajectory
+                                    .record_tool_result(&tc.function.name, &result);
                                 if requires_input {
                                     on_event(StreamEvent::ClarificationNeeded {
                                         question: &result,
                                     });
                                     clarification = Some(result.clone());
                                 }
-                                self.messages.push(ChatMessage::tool_result(&tc.id, result));
                             }
 
                             self.maybe_inject_stuck_nudge();
@@ -1773,10 +1877,15 @@ impl AgentLoop {
                         }
                     }
 
-                    self.trajectory.record_assistant_message(&response_text);
                     let mut msg = ChatMessage::assistant(&response_text);
                     msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                    self.messages.push(msg);
+                    let response_text = self
+                        .push_message_with_lua_hooks(&hook_session, msg)
+                        .and_then(|message| message.content_text().map(str::to_owned))
+                        .unwrap_or_default();
+                    if !response_text.is_empty() {
+                        self.trajectory.record_assistant_message(&response_text);
+                    }
 
                     self.maybe_inject_skill_nudge(tool_calls_made);
                     self.save_trajectory();
@@ -1808,7 +1917,9 @@ impl AgentLoop {
                     tool_calls_made,
                     interval, "injecting memory consolidation nudge"
                 );
-                self.messages.push(ChatMessage::system(MEMORY_NUDGE));
+                let hook_session = self.session_id_str().to_owned();
+                let _ = self
+                    .push_message_with_lua_hooks(&hook_session, ChatMessage::system(MEMORY_NUDGE));
             }
         }
     }
@@ -1822,8 +1933,11 @@ impl AgentLoop {
                 threshold = SKILL_CREATION_THRESHOLD,
                 "injecting skill creation nudge"
             );
-            self.messages
-                .push(ChatMessage::system(SKILL_CREATION_NUDGE));
+            let hook_session = self.session_id_str().to_owned();
+            let _ = self.push_message_with_lua_hooks(
+                &hook_session,
+                ChatMessage::system(SKILL_CREATION_NUDGE),
+            );
         }
     }
 
@@ -1861,7 +1975,7 @@ impl AgentLoop {
              (2) modifying the arguments, (3) breaking the task into smaller steps, or \
              (4) asking the user for clarification."
         );
-        self.messages.push(ChatMessage::system(&nudge));
+        let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
@@ -1898,6 +2012,26 @@ impl AgentLoop {
     fn fire_shell_hooks(&mut self, event: HookEvent, context: serde_json::Value) {
         let results = self.hook_runner.run_hooks(event, &context);
         self.hook_results.extend(results);
+    }
+
+    fn run_lua_on_message(
+        &self,
+        role: &str,
+        content: &str,
+        tool_call_count: usize,
+        image_count: usize,
+    ) -> PreHookOutcome<String> {
+        let Some(runtime) = self.lua_runtime.as_ref() else {
+            return PreHookOutcome::Allow(content.to_owned());
+        };
+
+        match runtime.run_on_message(role, content, tool_call_count, image_count) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(error = %error, role = %role, "lua on_message hook failed");
+                PreHookOutcome::Allow(content.to_owned())
+            }
+        }
     }
 
     fn run_lua_pre_turn(&self, user_message: &str) -> PreHookOutcome<String> {
@@ -1978,6 +2112,64 @@ impl AgentLoop {
         if let Some(runtime) = &self.lua_runtime {
             if let Err(error) = runtime.run_on_complete() {
                 warn!(error = %error, "lua on_complete hook failed");
+            }
+        }
+    }
+
+    fn push_message_with_lua_hooks(
+        &mut self,
+        session_id: &str,
+        mut message: ChatMessage,
+    ) -> Option<ChatMessage> {
+        let Some(original_content) = message.content_text().map(str::to_owned) else {
+            self.messages.push(message.clone());
+            return Some(message);
+        };
+        let tool_call_count = message.tool_calls.as_ref().map_or(0, Vec::len);
+        let image_count = message_image_count(&message);
+
+        match self.run_lua_on_message(
+            &message.role,
+            &original_content,
+            tool_call_count,
+            image_count,
+        ) {
+            PreHookOutcome::Allow(rewritten) => {
+                set_message_text(&mut message, rewritten.clone());
+                self.fire_shell_hooks(
+                    HookEvent::OnMessage,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "role": &message.role,
+                        "content": rewritten,
+                        "tool_call_count": tool_call_count,
+                        "image_count": image_count,
+                        "lua_vetoed": false,
+                    }),
+                );
+                self.messages.push(message.clone());
+                Some(message)
+            }
+            PreHookOutcome::Veto { reason } => {
+                self.fire_shell_hooks(
+                    HookEvent::OnMessage,
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "role": &message.role,
+                        "content": original_content,
+                        "tool_call_count": tool_call_count,
+                        "image_count": image_count,
+                        "lua_vetoed": true,
+                        "lua_reason": reason,
+                    }),
+                );
+
+                if suppress_message_text(&mut message) {
+                    self.messages.push(message.clone());
+                    Some(message)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -3875,6 +4067,177 @@ end)
             pre_turn.stdout.contains("rewritten: hello"),
             "shell hook should see the Lua-rewritten message: {}",
             pre_turn.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_message_hook_rewrites_user_and_assistant_messages() {
+        let response = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![response]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::OnMessage,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("OnMessage", function(ctx)
+    if ctx.role == "user" then
+        return "rewritten user: " .. ctx.content
+    end
+    if ctx.role == "assistant" then
+        return ctx.content .. " [lua]"
+    end
+    return ctx.content
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent.run_turn("hello").await.expect("turn should succeed");
+        assert_eq!(result.response, "done [lua]");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains("rewritten user: hello"),
+            "request body should contain the rewritten user message: {request}"
+        );
+
+        let hook_outputs: Vec<&str> = agent
+            .hook_results()
+            .iter()
+            .filter(|result| result.event == HookEvent::OnMessage)
+            .map(|result| result.stdout.as_str())
+            .collect();
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""role":"user""#)
+                    && stdout.contains("rewritten user: hello")),
+            "shell on_message hook should see the rewritten user message: {hook_outputs:?}"
+        );
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""role":"assistant""#)
+                    && stdout.contains("done [lua]")),
+            "shell on_message hook should see the rewritten assistant message: {hook_outputs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_message_hook_can_strip_tool_call_text_without_breaking_protocol() {
+        let first = serde_json::json!({
+            "id": "cmpl-1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "tool chatter",
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "echo",
+                            "arguments": "{\"message\":\"hi\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let second = serde_json::json!({
+            "id": "cmpl-2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "final"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+        let (endpoint, captured) = start_mock_server_with_capture(vec![first, second]);
+        let mut agent = test_agent_with_endpoint(
+            endpoint,
+            vec![HookConfig {
+                event: HookEvent::OnMessage,
+                command: "printf '%s' \"$GENESIS_HOOK_CONTEXT\"".to_owned(),
+                timeout_ms: 1000,
+                enabled: true,
+            }],
+        );
+        let runtime = test_lua_runtime(
+            r#"
+genesis.on("OnMessage", function(ctx)
+    if ctx.role == "assistant" and ctx.tool_call_count > 0 then
+        return false, "hide tool chatter"
+    end
+    return ctx.content
+end)
+"#,
+        );
+        agent.set_lua_runtime(runtime);
+
+        let result = agent
+            .run_turn("use a tool")
+            .await
+            .expect("turn should succeed");
+        assert_eq!(result.response, "final");
+
+        let request = captured.lock().expect("capture mutex").join("\n");
+        assert!(
+            request.contains(r#""tool_calls":[{"#),
+            "tool-call protocol should stay intact: {request}"
+        );
+        assert!(
+            !request.contains("tool chatter"),
+            "vetoed tool-call chatter should be stripped from follow-up history: {request}"
+        );
+
+        let hook_outputs: Vec<&str> = agent
+            .hook_results()
+            .iter()
+            .filter(|result| result.event == HookEvent::OnMessage)
+            .map(|result| result.stdout.as_str())
+            .collect();
+        assert!(
+            hook_outputs
+                .iter()
+                .any(|stdout| stdout.contains(r#""lua_vetoed":true"#)),
+            "shell on_message hook should reflect the Lua veto: {hook_outputs:?}"
         );
     }
 
