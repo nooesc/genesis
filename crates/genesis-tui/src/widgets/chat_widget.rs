@@ -211,6 +211,15 @@ impl ChatWidget {
         &self.committed_cells
     }
 
+    /// Change the display mode for all existing tool cells.
+    pub fn set_tool_display(&mut self, mode: crate::history::tool_cell::ToolDisplayMode) {
+        for cell in &mut self.committed_cells {
+            if let HistoryCell::Tool(tc) = cell {
+                tc.display_mode = mode;
+            }
+        }
+    }
+
     /// Find runs of 2+ consecutive `HistoryCell::Tool` entries.
     ///
     /// Returns `(start_idx, count)` pairs where `start_idx` is the index

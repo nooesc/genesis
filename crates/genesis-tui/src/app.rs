@@ -261,8 +261,6 @@ impl App {
             AppEvent::SlashCommand(cmd) => match cmd.as_str() {
                 "/exit" | "/quit" => self.should_exit = true,
                 "/clear" => {
-                    // Clear committed cells (history will be lost from the viewport,
-                    // though it remains in terminal scrollback).
                     self.chat = ChatWidget::new();
                     self.frame_requester.schedule_frame();
                 }
@@ -273,14 +271,35 @@ impl App {
                 }
                 "/models" => {
                     self.command_popup.hide();
-                    // Open model picker in loading state — models fetched async.
                     self.overlay = Some(ActiveOverlay::Models(ModelPicker::new_loading()));
                     self.frame_requester.schedule_frame();
-                    // Trigger async model fetch via AppEvent.
                     let _ = self.app_tx.send(AppEvent::FetchModels);
                 }
                 "/plan" => {
                     self.agent_mode = self.agent_mode.toggle();
+                    self.frame_requester.schedule_frame();
+                }
+                "/compact" | "/summary" => {
+                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Summary);
+                    self.frame_requester.schedule_frame();
+                }
+                "/verbose" => {
+                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Verbose);
+                    self.frame_requester.schedule_frame();
+                }
+                "/grouped" => {
+                    self.chat.set_tool_display(crate::history::tool_cell::ToolDisplayMode::Grouped);
+                    self.frame_requester.schedule_frame();
+                }
+                "/transcript" => {
+                    self.command_popup.hide();
+                    self.overlay = Some(ActiveOverlay::Transcript(
+                        TranscriptOverlay::from_cells(
+                            self.chat.committed_cells(),
+                            self.viewport_width,
+                            24, // default visible rows
+                        ),
+                    ));
                     self.frame_requester.schedule_frame();
                 }
                 _ => {}
