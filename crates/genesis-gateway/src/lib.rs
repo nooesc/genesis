@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
@@ -195,6 +195,21 @@ pub struct AppState {
     pub agent_bus: genesis_core::agent_bus::AgentBus,
     /// Process-local plugin runtime overrides supplied by the embedding host.
     pub plugin_runtime_overrides: genesis_core::execution::PluginRuntimeOverrides,
+    /// Shared embedding provider cached on first use to avoid rebuilding per request.
+    embedding_provider_cache: OnceLock<Arc<genesis_core::embedding::EmbeddingProvider>>,
+}
+
+fn get_or_try_init_arc<T, E, F>(cache: &OnceLock<Arc<T>>, init: F) -> Result<Arc<T>, E>
+where
+    F: FnOnce() -> Result<T, E>,
+{
+    if let Some(value) = cache.get() {
+        return Ok(Arc::clone(value));
+    }
+
+    let value = Arc::new(init()?);
+    let _ = cache.set(Arc::clone(&value));
+    Ok(cache.get().cloned().unwrap_or(value))
 }
 
 impl AppState {
@@ -236,6 +251,7 @@ impl AppState {
             request_duration_histogram: Mutex::new(HistogramBuckets::new(DURATION_BUCKETS)),
             agent_bus: genesis_core::agent_bus::AgentBus::with_persistence(&bus_db_path),
             plugin_runtime_overrides,
+            embedding_provider_cache: OnceLock::new(),
         }
     }
 
@@ -246,6 +262,24 @@ impl AppState {
         }
         service.set_plugin_runtime_overrides(self.plugin_runtime_overrides);
         service
+    }
+
+    fn embedding_provider(
+        &self,
+    ) -> Result<Option<Arc<genesis_core::embedding::EmbeddingProvider>>, (StatusCode, String)> {
+        let Some(config) = self.loaded.config.embedding.as_ref() else {
+            return Ok(None);
+        };
+
+        let provider = self.embedding_provider_cache.get();
+        if let Some(provider) = provider {
+            return Ok(Some(Arc::clone(provider)));
+        }
+
+        get_or_try_init_arc(&self.embedding_provider_cache, || {
+            build_embedding_provider(config)
+        })
+        .map(Some)
     }
 }
 
@@ -857,10 +891,13 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         backend: primary.backend.clone(),
         model: primary.model.clone(),
         role: "primary".to_owned(),
-        circuit_breaker: primary.circuit_breaker.as_ref().map(|cb| CircuitBreakerInfo {
-            failure_threshold: cb.failure_threshold,
-            cooldown_secs: cb.cooldown_secs,
-        }),
+        circuit_breaker: primary
+            .circuit_breaker
+            .as_ref()
+            .map(|cb| CircuitBreakerInfo {
+                failure_threshold: cb.failure_threshold,
+                cooldown_secs: cb.cooldown_secs,
+            }),
     });
     for fp in &state.loaded.config.fallback_providers {
         providers.push(ProviderInfo {
@@ -1071,9 +1108,7 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
 ///
 /// Returns the same counters as the Prometheus endpoint but in a structured
 /// JSON format that is easier for browser-based clients to consume.
-async fn metrics_json_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<MetricsJsonResponse> {
+async fn metrics_json_handler(State(state): State<Arc<AppState>>) -> Json<MetricsJsonResponse> {
     let (total_sessions, active_schedules) =
         fetch_db_stats(&state.loaded.config.storage.database_path);
 
@@ -1735,10 +1770,16 @@ fn embedding_provider_error(
         );
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("embedding provider error: {error}"),
-    )
+    match error {
+        genesis_core::embedding::EmbeddingError::ApiError { status, body } => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            format!("embedding provider error: {body}"),
+        ),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("embedding provider error: {other}"),
+        ),
+    }
 }
 
 fn embedding_runtime_error(
@@ -1763,10 +1804,16 @@ fn embedding_runtime_error(
         }
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("{context} error: {error}"),
-    )
+    match error {
+        genesis_core::embedding::EmbeddingError::ApiError { status, body } => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            format!("{context} error: {body}"),
+        ),
+        other => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{context} error: {other}"),
+        ),
+    }
 }
 
 async fn list_memories_handler(
@@ -1795,10 +1842,7 @@ async fn search_memories_handler(
 
     // Build embedding provider if configured and needed
     let provider = if mode != genesis_core::embedding::SearchMode::Keyword {
-        match &state.loaded.config.embedding {
-            Some(config) => Some(build_embedding_provider(config)?),
-            None => None,
-        }
+        state.embedding_provider()?
     } else {
         None
     };
@@ -1809,10 +1853,10 @@ async fn search_memories_handler(
         mode,
         &memory_store,
         &embedding_store,
-        provider.as_ref(),
+        provider.as_deref(),
     )
     .await
-    .map_err(|error| embedding_runtime_error(provider.as_ref(), "search", error))?;
+    .map_err(|error| embedding_runtime_error(provider.as_deref(), "search", error))?;
 
     let count = results.len();
     let mode_str = match mode {
@@ -1857,14 +1901,16 @@ async fn delete_memory_handler(
 async fn embed_memories_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config = state.loaded.config.embedding.as_ref().ok_or_else(|| {
-        (
+    if state.loaded.config.embedding.is_none() {
+        return Err((
             StatusCode::BAD_REQUEST,
             "no embedding provider configured; add an [embedding] section to config".to_owned(),
-        )
-    })?;
+        ));
+    }
 
-    let provider = build_embedding_provider(config)?;
+    let provider = state
+        .embedding_provider()?
+        .expect("embedding config should yield a provider");
 
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
@@ -1897,7 +1943,7 @@ async fn embed_memories_handler(
                     && matches!(e, genesis_core::embedding::EmbeddingError::NotConfigured)
                 {
                     return Err(embedding_runtime_error(
-                        Some(&provider),
+                        Some(provider.as_ref()),
                         "bulk embedding",
                         e,
                     ));
@@ -1921,14 +1967,16 @@ async fn embed_single_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let config = state.loaded.config.embedding.as_ref().ok_or_else(|| {
-        (
+    if state.loaded.config.embedding.is_none() {
+        return Err((
             StatusCode::BAD_REQUEST,
             "no embedding provider configured".to_owned(),
-        )
-    })?;
+        ));
+    }
 
-    let provider = build_embedding_provider(config)?;
+    let provider = state
+        .embedding_provider()?
+        .expect("embedding config should yield a provider");
 
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
@@ -1948,7 +1996,7 @@ async fn embed_single_memory_handler(
         provider.model(),
     )
     .await
-    .map_err(|error| embedding_runtime_error(Some(&provider), "embedding", error))?;
+    .map_err(|error| embedding_runtime_error(Some(provider.as_ref()), "embedding", error))?;
 
     Ok(Json(serde_json::json!({
         "embedded": true,
@@ -4642,7 +4690,11 @@ mod tests {
             .uri("/health")
             .body(Body::empty())
             .expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -4655,11 +4707,7 @@ mod tests {
             .body(Body::empty())
             .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "/api/health must return 200"
-        );
+        assert_eq!(resp.status(), StatusCode::OK, "/api/health must return 200");
     }
 
     /// Verify that `/api/health` is accessible without authentication even when an API key is
@@ -4678,7 +4726,11 @@ mod tests {
             .uri("/api/health")
             .body(Body::empty())
             .expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -4767,6 +4819,18 @@ mod tests {
         let (state, _dir) = create_test_state_with_local_embedding();
         let app = build_router(state);
 
+        let embed_req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let embed_resp = app
+            .clone()
+            .oneshot(embed_req)
+            .await
+            .expect("request should succeed");
+        assert_eq!(embed_resp.status(), StatusCode::OK);
+
         let req = Request::builder()
             .uri("/api/memories/search?q=genesis&mode=vector&limit=5")
             .body(Body::empty())
@@ -4774,6 +4838,15 @@ mod tests {
         let resp = app.oneshot(req).await.expect("request should succeed");
 
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["mode"], "vector");
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["memories"][0]["id"], "mem-local");
+        assert_eq!(json["memories"][0]["source"], "vector");
     }
 
     #[cfg(feature = "local-embeddings")]
@@ -4784,6 +4857,7 @@ mod tests {
         use tower::ServiceExt as _;
 
         let (state, _dir) = create_test_state_with_local_embedding();
+        let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
         let req = Request::builder()
@@ -4791,9 +4865,23 @@ mod tests {
             .uri("/api/memories/embed")
             .body(Body::empty())
             .expect("request should build");
-        let resp = app.oneshot(req).await.expect("request should succeed");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
 
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embedded"], 1);
+        assert_eq!(json["skipped"], 0);
+        assert_eq!(json["errors"], 0);
+        assert_eq!(json["total"], 1);
+        assert_eq!(EmbeddingStore::new(&db_path).count().unwrap(), 1);
     }
 
     #[cfg(feature = "local-embeddings")]
@@ -4804,6 +4892,7 @@ mod tests {
         use tower::ServiceExt as _;
 
         let (state, _dir) = create_test_state_with_local_embedding();
+        let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
         let req = Request::builder()
@@ -4811,9 +4900,103 @@ mod tests {
             .uri("/api/memories/mem-local/embed")
             .body(Body::empty())
             .expect("request should build");
-        let resp = app.oneshot(req).await.expect("request should succeed");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
 
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embedded"], true);
+        assert_eq!(json["memory_id"], "mem-local");
+        assert_eq!(json["model"], "sentence-transformers/all-MiniLM-L6-v2");
+        assert_eq!(EmbeddingStore::new(&db_path).count().unwrap(), 1);
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn app_state_reuses_shared_local_embedding_provider() {
+        let (state, _dir) = create_test_state_with_local_embedding();
+        let first = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
+        let second = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[tokio::test]
+    async fn local_embedding_config_errors_return_bad_request() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let embedding = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "unsupported-local-model".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+        let (state, _dir) = create_test_state_with_key(None, false, Some(embedding));
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let message = String::from_utf8(body.to_vec()).unwrap();
+        assert!(message.contains("unsupported local embedding model"));
+    }
+
+    #[test]
+    fn get_or_try_init_arc_does_not_cache_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = OnceLock::new();
+        let attempts = AtomicUsize::new(0);
+
+        let first = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Err("transient failure")
+        });
+        assert_eq!(first.unwrap_err(), "transient failure");
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        assert!(cache.get().is_none());
+
+        let second = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Ok(42)
+        })
+        .expect("second init should succeed");
+        assert_eq!(*second, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+
+        let third = get_or_try_init_arc(&cache, || -> Result<usize, &'static str> {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            Ok(7)
+        })
+        .expect("cached init should succeed");
+        assert_eq!(*third, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -4881,7 +5064,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert!(json.get("uptime_seconds").is_some());

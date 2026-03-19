@@ -18,10 +18,13 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding as FastTextEmbedding}
 use std::path::PathBuf;
 
 #[cfg(feature = "local-embeddings")]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "local-embeddings")]
 const LOCAL_EMBEDDING_DIMENSIONS: usize = 384;
+
+#[cfg(feature = "local-embeddings")]
+const LOCAL_EMBEDDING_MODEL_NAME: &str = "sentence-transformers/all-MiniLM-L6-v2";
 
 /// Errors from embedding operations.
 #[derive(Debug, Error)]
@@ -128,10 +131,43 @@ fn local_embedding_cache_dir() -> PathBuf {
 }
 
 #[cfg(feature = "local-embeddings")]
+fn resolve_local_embedding_model(
+    config: &EmbeddingConfig,
+) -> Result<(EmbeddingModel, String), EmbeddingError> {
+    let requested_model = config.model.trim();
+    let requested_dimensions = config.dimensions.unwrap_or(LOCAL_EMBEDDING_DIMENSIONS);
+
+    if requested_dimensions != LOCAL_EMBEDDING_DIMENSIONS {
+        return Err(EmbeddingError::ApiError {
+            status: 400,
+            body: format!(
+                "local embedding backend requires dimensions={LOCAL_EMBEDDING_DIMENSIONS}, got {requested_dimensions}"
+            ),
+        });
+    }
+
+    if requested_model.eq_ignore_ascii_case(LOCAL_EMBEDDING_MODEL_NAME)
+        || requested_model.eq_ignore_ascii_case("AllMiniLML6V2")
+    {
+        return Ok((
+            EmbeddingModel::AllMiniLML6V2,
+            LOCAL_EMBEDDING_MODEL_NAME.to_owned(),
+        ));
+    }
+
+    Err(EmbeddingError::ApiError {
+        status: 400,
+        body: format!(
+            "unsupported local embedding model '{requested_model}'; supported model: {LOCAL_EMBEDDING_MODEL_NAME} (alias: AllMiniLML6V2)"
+        ),
+    })
+}
+
+#[cfg(feature = "local-embeddings")]
 pub struct LocalEmbeddingProvider {
     model: String,
     dimensions: usize,
-    inner: Mutex<FastTextEmbedding>,
+    inner: Arc<Mutex<FastTextEmbedding>>,
 }
 
 #[cfg(not(feature = "local-embeddings"))]
@@ -144,13 +180,14 @@ impl LocalEmbeddingProvider {
     fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
         #[cfg(feature = "local-embeddings")]
         {
+            let (model, model_name) = resolve_local_embedding_model(config)?;
             let cache_dir = local_embedding_cache_dir();
             std::fs::create_dir_all(&cache_dir).map_err(|e| EmbeddingError::ApiError {
                 status: 500,
                 body: e.to_string(),
             })?;
 
-            let init = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            let init = InitOptions::new(model)
                 .with_cache_dir(cache_dir)
                 .with_show_download_progress(true);
             let inner = FastTextEmbedding::try_new(init).map_err(|e| EmbeddingError::ApiError {
@@ -159,9 +196,9 @@ impl LocalEmbeddingProvider {
             })?;
 
             return Ok(Self {
-                model: config.model.clone(),
+                model: model_name,
                 dimensions: LOCAL_EMBEDDING_DIMENSIONS,
-                inner: Mutex::new(inner),
+                inner: Arc::new(Mutex::new(inner)),
             });
         }
 
@@ -250,27 +287,39 @@ impl EmbeddingProvider {
             }
             #[cfg(feature = "local-embeddings")]
             Self::Local(provider) => {
-                let mut inner = provider
-                    .inner
-                    .lock()
-                    .expect("embedding model lock poisoned");
-                let embeddings = inner
-                    .embed(texts, None)
-                    .map_err(|e| EmbeddingError::ApiError {
+                let inner = Arc::clone(&provider.inner);
+                let texts = texts.to_vec();
+                let expected_dimensions = provider.dimensions;
+
+                tokio::task::spawn_blocking(move || {
+                    let mut inner = inner.lock().map_err(|_| EmbeddingError::ApiError {
                         status: 500,
-                        body: e.to_string(),
+                        body: "embedding model lock poisoned".to_owned(),
                     })?;
+                    let embeddings =
+                        inner
+                            .embed(&texts, None)
+                            .map_err(|e| EmbeddingError::ApiError {
+                                status: 500,
+                                body: e.to_string(),
+                            })?;
 
-                for embedding in &embeddings {
-                    if embedding.len() != provider.dimensions {
-                        return Err(EmbeddingError::DimensionMismatch {
-                            expected: provider.dimensions,
-                            actual: embedding.len(),
-                        });
+                    for embedding in &embeddings {
+                        if embedding.len() != expected_dimensions {
+                            return Err(EmbeddingError::DimensionMismatch {
+                                expected: expected_dimensions,
+                                actual: embedding.len(),
+                            });
+                        }
                     }
-                }
 
-                Ok(embeddings)
+                    Ok(embeddings)
+                })
+                .await
+                .map_err(|error| EmbeddingError::ApiError {
+                    status: 500,
+                    body: format!("local embedding task failed: {error}"),
+                })?
             }
             #[cfg(not(feature = "local-embeddings"))]
             Self::Local(_provider) => {
@@ -777,6 +826,44 @@ mod tests {
         assert_eq!(vectors.len(), 1);
         assert_eq!(vectors[0].len(), 384);
         assert!(vectors[0].iter().any(|value| value.abs() > 0.0));
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn local_backend_rejects_unsupported_model_names() {
+        let config = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "sentence-transformers/all-mpnet-base-v2".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+
+        let error = match EmbeddingProvider::from_config(&config) {
+            Ok(_) => panic!("unsupported local model should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported local embedding model"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn local_backend_accepts_fastembed_alias_and_reports_canonical_model() {
+        let config = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "AllMiniLML6V2".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+
+        let provider = EmbeddingProvider::from_config(&config).expect("provider should build");
+        assert_eq!(provider.model(), "sentence-transformers/all-MiniLM-L6-v2");
     }
 
     #[tokio::test]
