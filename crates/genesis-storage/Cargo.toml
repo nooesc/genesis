@@ -8,6 +8,7 @@ version.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlite-vec.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

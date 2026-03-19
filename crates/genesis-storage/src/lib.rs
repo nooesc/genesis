@@ -1,11 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
+
+static SQLITE_VEC_REGISTERED: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -32,7 +35,14 @@ mod session_store_tests {
             .append_message("session-1", "user", Some("hello eve"), None, None, None)
             .expect("first message should be stored");
         store
-            .append_message("session-1", "assistant", Some("hello operator"), None, None, None)
+            .append_message(
+                "session-1",
+                "assistant",
+                Some("hello operator"),
+                None,
+                None,
+                None,
+            )
             .expect("second message should be stored");
 
         let messages = store
@@ -61,10 +71,24 @@ mod session_store_tests {
             .create_session("session-beta", "slack", None)
             .expect("second session should be created");
         store
-            .append_message("session-alpha", "user", Some("rust migration checklist"), None, None, None)
+            .append_message(
+                "session-alpha",
+                "user",
+                Some("rust migration checklist"),
+                None,
+                None,
+                None,
+            )
             .expect("first message should be stored");
         store
-            .append_message("session-beta", "user", Some("provider client work"), None, None, None)
+            .append_message(
+                "session-beta",
+                "user",
+                Some("provider client work"),
+                None,
+                None,
+                None,
+            )
             .expect("second message should be stored");
 
         let matches = store
@@ -182,7 +206,9 @@ mod session_store_tests {
 
         let store = SessionStore::new(&database_path);
         store.create_session("recent", "cli", None).expect("create");
-        store.append_message("recent", "user", Some("hello"), None, None, None).expect("msg");
+        store
+            .append_message("recent", "user", Some("hello"), None, None, None)
+            .expect("msg");
 
         let deleted = store.purge_older_than(30).unwrap();
         assert_eq!(deleted, 0);
@@ -238,7 +264,14 @@ mod session_store_tests {
             .append_mirror_message("session-mixed", "scheduled reminder", "schedule")
             .expect("mirror message should be stored");
         store
-            .append_message("session-mixed", "assistant", Some("got it"), None, None, None)
+            .append_message(
+                "session-mixed",
+                "assistant",
+                Some("got it"),
+                None,
+                None,
+                None,
+            )
             .expect("regular reply should be stored");
 
         let messages = store
@@ -370,7 +403,14 @@ mod session_store_tests {
             .expect("session should be created");
 
         store
-            .append_message("session-search", "user", Some("hello world"), None, None, None)
+            .append_message(
+                "session-search",
+                "user",
+                Some("hello world"),
+                None,
+                None,
+                None,
+            )
             .expect("first message should be stored");
         store
             .append_message(
@@ -383,7 +423,14 @@ mod session_store_tests {
             )
             .expect("second message should be stored");
         store
-            .append_message("session-search", "user", Some("hello again"), None, None, None)
+            .append_message(
+                "session-search",
+                "user",
+                Some("hello again"),
+                None,
+                None,
+                None,
+            )
             .expect("third message should be stored");
 
         let results = store
@@ -448,6 +495,14 @@ pub enum StorageError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("database at {path} contains mixed embedding dimensions: {dimensions:?}")]
+    MixedEmbeddingDimensions { path: PathBuf, dimensions: Vec<i64> },
+    #[error("database at {path} uses embedding dimensions {expected}, cannot store vector with {actual}")]
+    EmbeddingDimensionMismatch {
+        path: PathBuf,
+        expected: usize,
+        actual: usize,
+    },
     #[error("unknown import status in database: {0}")]
     UnknownImportStatus(String),
 }
@@ -477,6 +532,96 @@ fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), Stora
             path: path.to_path_buf(),
             source,
         })
+}
+
+fn register_sqlite_vec() {
+    SQLITE_VEC_REGISTERED.get_or_init(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
+fn detect_uniform_embedding_dimensions(
+    conn: &Connection,
+    database_path: &Path,
+) -> Result<Option<usize>, StorageError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT dimensions FROM memory_embeddings ORDER BY dimensions ASC LIMIT 2",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    let dimensions = collect_rows(rows, database_path)?;
+
+    match dimensions.as_slice() {
+        [] => Ok(None),
+        [dimension] => Ok(Some(*dimension as usize)),
+        _ => Err(StorageError::MixedEmbeddingDimensions {
+            path: database_path.to_path_buf(),
+            dimensions,
+        }),
+    }
+}
+
+fn ensure_memory_vec_table(
+    conn: &Connection,
+    database_path: &Path,
+    dimensions: usize,
+) -> Result<(), StorageError> {
+    if let Some(existing) = detect_uniform_embedding_dimensions(conn, database_path)? {
+        if existing != dimensions {
+            return Err(StorageError::EmbeddingDimensionMismatch {
+                path: database_path.to_path_buf(),
+                expected: existing,
+                actual: dimensions,
+            });
+        }
+    }
+
+    exec_migration(
+        conn,
+        database_path,
+        &format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
+                memory_rowid integer primary key,
+                embedding float[{dimensions}] distance_metric=cosine
+            );"
+        ),
+    )
+}
+
+fn rebuild_memory_vec_index(conn: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    let Some(dimensions) = detect_uniform_embedding_dimensions(conn, database_path)? else {
+        return Ok(());
+    };
+
+    ensure_memory_vec_table(conn, database_path, dimensions)?;
+    conn.execute("DELETE FROM memory_vec", [])
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    conn.execute(
+        "INSERT INTO memory_vec(memory_rowid, embedding)
+         SELECT m.rowid, me.embedding
+         FROM memory_embeddings me
+         JOIN memories m ON m.id = me.memory_id",
+        [],
+    )
+    .map_err(|source| StorageError::Sqlite {
+        path: database_path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError> {
@@ -686,6 +831,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v7(&connection, database_path)?;
     migrate_to_v8(&connection, database_path)?;
     migrate_to_v9(&connection, database_path)?;
+    migrate_to_v10(&connection, database_path)?;
 
     connection
         .execute(
@@ -833,10 +979,7 @@ fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), St
 
     if !has_column {
         connection
-            .execute(
-                "ALTER TABLE messages ADD COLUMN provider_metadata TEXT",
-                [],
-            )
+            .execute("ALTER TABLE messages ADD COLUMN provider_metadata TEXT", [])
             .map_err(|source| StorageError::Sqlite {
                 path: database_path.to_path_buf(),
                 source,
@@ -862,6 +1005,11 @@ fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), St
         })?;
 
     Ok(())
+}
+
+/// Migrate v9 → v10: create and backfill the sqlite-vec memory index when dimensions are uniform.
+fn migrate_to_v10(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    rebuild_memory_vec_index(connection, database_path)
 }
 
 pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {
@@ -3279,21 +3427,57 @@ impl EmbeddingStore {
         embedding: &[f32],
         model: &str,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
-        let blob = embedding_to_blob(embedding);
-        connection
-            .execute(
-                "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
-                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
-                 ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding,
-                    model = excluded.model, dimensions = excluded.dimensions,
-                    created_at = excluded.created_at",
-                params![memory_id, blob, model, embedding.len() as i64],
+        let mut connection = open(&self.database_path)?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let memory_rowid: i64 = tx
+            .query_row(
+                "SELECT rowid FROM memories WHERE id = ?1",
+                params![memory_id],
+                |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
+        ensure_memory_vec_table(&tx, &self.database_path, embedding.len())?;
+        let blob = embedding_to_blob(embedding);
+        tx.execute(
+            "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding,
+                model = excluded.model, dimensions = excluded.dimensions,
+                created_at = excluded.created_at",
+            params![memory_id, &blob, model, embedding.len() as i64],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        tx.execute(
+            "DELETE FROM memory_vec WHERE memory_rowid = ?1",
+            params![memory_rowid],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        tx.execute(
+            "INSERT INTO memory_vec(memory_rowid, embedding) VALUES (?1, ?2)",
+            params![memory_rowid, &blob],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
         Ok(())
     }
 
@@ -3383,6 +3567,7 @@ fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
 }
 
 fn open(database_path: &Path) -> Result<Connection, StorageError> {
+    register_sqlite_vec();
     let conn = Connection::open(database_path).map_err(|source| StorageError::OpenDatabase {
         path: database_path.to_path_buf(),
         source,
@@ -5060,10 +5245,24 @@ mod tests {
             .expect("create should work");
 
         store
-            .append_message("s-3", "user", Some("Tell me about quantum computing"), None, None, None)
+            .append_message(
+                "s-3",
+                "user",
+                Some("Tell me about quantum computing"),
+                None,
+                None,
+                None,
+            )
             .expect("append should work");
         store
-            .append_message("s-4", "user", Some("What is the weather today"), None, None, None)
+            .append_message(
+                "s-4",
+                "user",
+                Some("What is the weather today"),
+                None,
+                None,
+                None,
+            )
             .expect("append should work");
 
         let results = store
@@ -5808,10 +6007,18 @@ mod tests {
     #[test]
     fn fork_session_copies_messages_and_sets_parent() {
         let (_dir, store) = bootstrapped_store();
-        store.create_session("s-orig", "cli", Some("Original")).unwrap();
-        store.append_message("s-orig", "system", Some("sys"), None, None, None).unwrap();
-        store.append_message("s-orig", "user", Some("hello"), None, None, None).unwrap();
-        store.append_message("s-orig", "assistant", Some("hi"), None, None, None).unwrap();
+        store
+            .create_session("s-orig", "cli", Some("Original"))
+            .unwrap();
+        store
+            .append_message("s-orig", "system", Some("sys"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-orig", "user", Some("hello"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-orig", "assistant", Some("hi"), None, None, None)
+            .unwrap();
 
         let forked_id = store.fork_session("s-orig", "s-fork").unwrap();
         assert_eq!(forked_id, "s-fork");
@@ -5837,7 +6044,9 @@ mod tests {
     fn fork_session_without_title() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-notitle", "api", None).unwrap();
-        store.append_message("s-notitle", "user", Some("test"), None, None, None).unwrap();
+        store
+            .append_message("s-notitle", "user", Some("test"), None, None, None)
+            .unwrap();
 
         store.fork_session("s-notitle", "s-fork2").unwrap();
 
@@ -5859,11 +6068,21 @@ mod tests {
     fn delete_last_n_messages_removes_most_recent() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-del", "cli", None).unwrap();
-        store.append_message("s-del", "system", Some("sys"), None, None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg1"), None, None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp1"), None, None, None).unwrap();
-        store.append_message("s-del", "user", Some("msg2"), None, None, None).unwrap();
-        store.append_message("s-del", "assistant", Some("resp2"), None, None, None).unwrap();
+        store
+            .append_message("s-del", "system", Some("sys"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "user", Some("msg1"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "assistant", Some("resp1"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "user", Some("msg2"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s-del", "assistant", Some("resp2"), None, None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-del", 2).unwrap();
         assert_eq!(deleted, 2);
@@ -5880,7 +6099,9 @@ mod tests {
     fn delete_last_n_messages_zero_is_noop() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-noop", "cli", None).unwrap();
-        store.append_message("s-noop", "user", Some("hello"), None, None, None).unwrap();
+        store
+            .append_message("s-noop", "user", Some("hello"), None, None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-noop", 0).unwrap();
         assert_eq!(deleted, 0);
@@ -5891,7 +6112,9 @@ mod tests {
     fn delete_last_n_messages_more_than_exists() {
         let (_dir, store) = bootstrapped_store();
         store.create_session("s-over", "cli", None).unwrap();
-        store.append_message("s-over", "user", Some("hello"), None, None, None).unwrap();
+        store
+            .append_message("s-over", "user", Some("hello"), None, None, None)
+            .unwrap();
 
         let deleted = store.delete_last_n_messages("s-over", 100).unwrap();
         assert_eq!(deleted, 1);
@@ -6571,7 +6794,9 @@ mod tests {
         bootstrap(&database_path).expect("bootstrap should succeed");
 
         let store = SessionStore::new(&database_path);
-        store.create_session("s-no-meta", "cli", None).expect("create");
+        store
+            .create_session("s-no-meta", "cli", None)
+            .expect("create");
         store
             .append_message("s-no-meta", "user", Some("hello"), None, None, None)
             .expect("append");
@@ -6693,12 +6918,33 @@ mod embedding_store_tests {
         let store = EmbeddingStore::new(&db_path);
 
         store.store("mem1", &[1.0, 2.0], "model-v1").unwrap();
-        store.store("mem1", &[3.0, 4.0, 5.0], "model-v2").unwrap();
+        store.store("mem1", &[3.0, 4.0], "model-v2").unwrap();
 
         assert_eq!(store.count().unwrap(), 1);
         let all = store.all_embeddings().unwrap();
-        assert_eq!(all[0].1.len(), 3);
+        assert_eq!(all[0].1.len(), 2);
         assert!((all[0].1[0] - 3.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn store_rejects_dimension_mismatch_for_existing_database() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store.store("mem1", &[1.0, 2.0], "model-v1").unwrap();
+        let error = store
+            .store("mem2", &[3.0, 4.0, 5.0], "model-v2")
+            .expect_err("mixed dimensions should be rejected");
+
+        assert!(matches!(
+            error,
+            super::StorageError::EmbeddingDimensionMismatch {
+                expected: 2,
+                actual: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -6753,5 +6999,37 @@ mod embedding_store_tests {
         let db_path = dir.path().join("genesis.db");
         let store = EmbeddingStore::new(&db_path);
         assert_eq!(store.database_path(), db_path);
+    }
+
+    #[test]
+    fn bootstrap_registers_sqlite_vec_functions() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+        let version: String = conn
+            .query_row("SELECT vec_version()", [], |row| row.get(0))
+            .expect("sqlite-vec should be available after bootstrap");
+
+        assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn store_populates_memory_vec_index() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = EmbeddingStore::new(&db_path);
+
+        store
+            .store("mem1", &[0.1, 0.2, 0.3, 0.4], "local-384")
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open connection");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_vec", [], |row| row.get(0))
+            .expect("memory_vec should exist after storing an embedding");
+
+        assert_eq!(count, 1);
     }
 }
