@@ -6,7 +6,9 @@
 
 pub mod diff;
 pub mod markdown;
+pub mod renderable;
 pub mod shadow;
 pub use diff::{diff_to_lines, is_unified_diff};
 pub use markdown::markdown_to_lines;
+pub use renderable::Renderable;
 pub use shadow::render_shadow;
