@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn tool_choice_function_serializes_as_object() {
         let json =
-            serde_json::to_value(&ToolChoice::Function("search".to_owned())).expect("serialize");
+            serde_json::to_value(ToolChoice::Function("search".to_owned())).expect("serialize");
         assert_eq!(json["type"], "function");
         assert_eq!(json["function"]["name"], "search");
     }

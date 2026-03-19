@@ -897,7 +897,7 @@ mod tests {
         let has_separator = (0..area.height).any(|row| {
             (0..area.width).all(|col| {
                 buf.cell((col, row))
-                    .map_or(false, |c| c.symbol() == "\u{2500}")
+                    .is_some_and(|c| c.symbol() == "\u{2500}")
             })
         });
         assert!(
@@ -928,7 +928,7 @@ mod tests {
             .filter(|&row| {
                 (0..area.width).all(|col| {
                     buf.cell((col, row))
-                        .map_or(false, |c| c.symbol() == "\u{2500}")
+                        .is_some_and(|c| c.symbol() == "\u{2500}")
                 })
             })
             .count();
@@ -1012,7 +1012,7 @@ mod tests {
         let has_cursor = (0..area.height).any(|row| {
             (0..area.width).any(|col| {
                 buf.cell((col, row))
-                    .map_or(false, |c| c.symbol() == "\u{258D}")
+                    .is_some_and(|c| c.symbol() == "\u{258D}")
             })
         });
         assert!(has_cursor, "should render block cursor during streaming");
@@ -1034,7 +1034,7 @@ mod tests {
         let has_cursor = (0..area.height).any(|row| {
             (0..area.width).any(|col| {
                 buf.cell((col, row))
-                    .map_or(false, |c| c.symbol() == "\u{258D}")
+                    .is_some_and(|c| c.symbol() == "\u{258D}")
             })
         });
         assert!(

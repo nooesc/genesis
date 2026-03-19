@@ -77,21 +77,51 @@ impl PluginContext {
 
 impl UserData for SessionView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("id", |_, this| Ok(this.ctx.lock().unwrap().id.clone()));
+        fields.add_field_method_get("id", |_, this| {
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .id
+                .clone())
+        });
         fields.add_field_method_get("model", |_, this| {
-            Ok(this.ctx.lock().unwrap().model.clone())
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .model
+                .clone())
         });
         fields.add_field_method_get("turn_count", |_, this| {
-            Ok(this.ctx.lock().unwrap().turn_count)
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .turn_count)
         });
         fields.add_field_method_get("total_tokens", |_, this| {
-            Ok(this.ctx.lock().unwrap().total_tokens)
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .total_tokens)
         });
         fields.add_field_method_get("platform", |_, this| {
-            Ok(this.ctx.lock().unwrap().platform.clone())
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .platform
+                .clone())
         });
         fields.add_field_method_get("personality", |_, this| {
-            Ok(this.ctx.lock().unwrap().personality.clone())
+            Ok(this
+                .ctx
+                .lock()
+                .expect("session context lock poisoned")
+                .personality
+                .clone())
         });
     }
 }

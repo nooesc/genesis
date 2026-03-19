@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn tool_definitions_prefixed_with_server_name() {
-        let tools = vec![McpToolDef {
+        let tools = [McpToolDef {
             name: "read_file".to_owned(),
             description: Some("Read a file".to_owned()),
             input_schema: Some(json!({

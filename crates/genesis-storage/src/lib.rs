@@ -6076,7 +6076,7 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content.as_deref(), Some("Hello Eve"));
         assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[2].tool_calls_json.is_some(), true);
+        assert!(messages[2].tool_calls_json.is_some());
         assert_eq!(messages[3].role, "tool");
         assert_eq!(messages[3].tool_call_id.as_deref(), Some("call_1"));
     }

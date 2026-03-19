@@ -3619,7 +3619,7 @@ tools = [{tools_list}]
 
         // A success should clear the counter
         agent.tool_failure_counts.remove("shell_exec");
-        assert!(agent.tool_failure_counts.get("shell_exec").is_none());
+        assert!(!agent.tool_failure_counts.contains_key("shell_exec"));
     }
 
     #[test]

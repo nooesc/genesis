@@ -183,8 +183,10 @@ mod tests {
     fn write_and_read_store_roundtrips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("auth.json");
-        let mut store = AuthStore::default();
-        store.active_provider = Some(CODEX_PROVIDER_ID.to_owned());
+        let mut store = AuthStore {
+            active_provider: Some(CODEX_PROVIDER_ID.to_owned()),
+            ..Default::default()
+        };
         store.providers.insert(
             CODEX_PROVIDER_ID.to_owned(),
             ProviderState::Codex(CodexState {

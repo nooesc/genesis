@@ -573,7 +573,7 @@ mod tests {
             "outcome-only should be 1.0 for success"
         );
         // Default includes other dimensions, so won't be exactly 1.0
-        assert!(default_score.overall < 1.0 || default_score.overall == 1.0);
+        assert!(default_score.overall <= 1.0);
     }
 
     #[test]

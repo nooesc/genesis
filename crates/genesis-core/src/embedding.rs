@@ -503,9 +503,15 @@ mod tests {
     fn cosine_similarity_normalized_vectors() {
         // Two unit vectors at 45 degrees: cos(45) = sqrt(2)/2 ~ 0.7071
         let a = vec![1.0, 0.0];
-        let b = vec![0.7071068, 0.7071068];
+        let b = vec![
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ];
         let sim = cosine_similarity(&a, &b);
-        assert!((sim - 0.7071068).abs() < 1e-4, "expected ~0.707, got {sim}");
+        assert!(
+            (sim - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4,
+            "expected ~0.707, got {sim}"
+        );
     }
 
     #[test]

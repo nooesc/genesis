@@ -435,7 +435,7 @@ mod tests {
         let remaining = overlay.remaining_secs();
         // Allow a small margin for test execution time.
         assert!(
-            remaining >= 58 && remaining <= 60,
+            (58..=60).contains(&remaining),
             "expected ~60, got {remaining}"
         );
     }

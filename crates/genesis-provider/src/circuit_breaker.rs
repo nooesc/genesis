@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn circuit_state_clone_and_copy() {
         let state = CircuitState::Open;
-        let cloned = state.clone();
+        let cloned = state;
         let copied = state; // Copy
         assert_eq!(state, cloned);
         assert_eq!(state, copied);

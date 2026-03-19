@@ -33,6 +33,7 @@ mod tests {
 
     #[derive(Default)]
     struct TestHostToolExecutor {
+        #[allow(clippy::type_complexity)]
         calls: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
     }
 
