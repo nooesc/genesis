@@ -1,5 +1,7 @@
 //! UserCell — renders the user's message with a dim `you> ` prefix.
 
+use std::cell::Cell;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -15,12 +17,18 @@ const PREFIX: &str = "you> ";
 pub struct UserCell {
     /// The raw message text.
     pub text: String,
+    /// Cached `(width, height)` to avoid recomputation when the width hasn't
+    /// changed.  Uses interior mutability so `height()` can stay `&self`.
+    cached_height: Cell<Option<(u16, u16)>>,
 }
 
 impl UserCell {
     /// Construct a new `UserCell` with the given message text.
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self {
+            text: text.into(),
+            cached_height: Cell::new(None),
+        }
     }
 
     /// Render the cell into the given buffer area.
@@ -33,8 +41,15 @@ impl UserCell {
 
     /// Return the number of rows this cell occupies at the given terminal width.
     pub fn height(&self, width: u16) -> u16 {
+        if let Some((cached_w, cached_h)) = self.cached_height.get() {
+            if cached_w == width {
+                return cached_h;
+            }
+        }
         let usable_width = width.max(1);
-        wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1)
+        let h = wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1);
+        self.cached_height.set(Some((width, h)));
+        h
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.

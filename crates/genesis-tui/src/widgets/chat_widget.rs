@@ -213,7 +213,7 @@ impl ChatWidget {
     pub fn set_tool_display(&mut self, mode: crate::history::tool_cell::ToolDisplayMode) {
         for cell in &mut self.committed_cells {
             if let HistoryCell::Tool(tc) = cell {
-                tc.display_mode = mode;
+                tc.set_display_mode(mode);
             }
         }
     }
@@ -313,10 +313,25 @@ impl ChatWidget {
                 if prev_is_user == Some(true) {
                     total = total.saturating_add(1);
                 }
-                // Rough estimate: use line count based on prefix_markdown_lines.
-                let lines =
-                    crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
-                let h = wrapped_row_count(&lines, width).max(1);
+                // Reuse the active cell cache when possible to avoid redundant
+                // markdown re-parsing.
+                let h = if let Some(cache) = self.active_cell_cache.as_ref() {
+                    if cache.parsed_len == active.text_buffer.len()
+                        && cache.parsed_width == width
+                    {
+                        wrapped_row_count(&cache.lines, width).max(1)
+                    } else {
+                        let lines = crate::history::agent_cell::prefix_markdown_lines(
+                            &active.text_buffer,
+                        );
+                        wrapped_row_count(&lines, width).max(1)
+                    }
+                } else {
+                    let lines = crate::history::agent_cell::prefix_markdown_lines(
+                        &active.text_buffer,
+                    );
+                    wrapped_row_count(&lines, width).max(1)
+                };
                 total = total.saturating_add(h);
             }
         }
