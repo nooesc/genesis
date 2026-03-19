@@ -176,6 +176,9 @@ pub struct AgentLoopConfig {
     /// classifies each turn's complexity and selects the appropriate model
     /// tier (cheap/mid/top) to optimize cost while maintaining quality.
     pub routing: Option<genesis_config::RoutingConfig>,
+    /// Compiled tool policy for permission scoping. When set, tool calls
+    /// are checked against allow/deny rules before execution.
+    pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -216,6 +219,7 @@ impl Default for AgentLoopConfig {
             guardrails: None,
             core_tools: None,
             routing: None,
+            tool_policy: None,
         }
     }
 }
@@ -1150,6 +1154,7 @@ impl AgentLoop {
                         tool_calls,
                         self.config.max_concurrency,
                         self.config.tool_timeout_secs,
+                        self.config.tool_policy.as_ref(),
                     )
                     .await
                     {
@@ -1631,6 +1636,7 @@ impl AgentLoop {
                             &streamed_tool_calls,
                             self.config.max_concurrency,
                             self.config.tool_timeout_secs,
+                            self.config.tool_policy.as_ref(),
                         )
                         .await
                         {
@@ -1850,6 +1856,7 @@ impl AgentLoop {
                                 tool_calls,
                                 self.config.max_concurrency,
                                 self.config.tool_timeout_secs,
+                                self.config.tool_policy.as_ref(),
                             )
                             .await
                             {
@@ -2450,10 +2457,18 @@ async fn execute_tool_calls_parallel(
     tool_calls: &[ToolCallEntry],
     max_concurrency: usize,
     timeout_secs: u64,
+    policy: Option<&crate::tool_policy::ToolPolicy>,
 ) -> Result<Vec<(String, bool)>, AgentError> {
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
 
     if tool_calls.len() == 1 {
+        // Check tool policy before execution.
+        if let Some(policy) = policy {
+            if let Some(denial) = check_tool_policy(policy, &tool_calls[0]) {
+                return Ok(vec![(denial, false)]);
+            }
+        }
+
         // Fast path: avoid semaphore overhead for single tool calls.
         // execute_single_tool converts all errors to soft "Error:" content,
         // so the Ok(r) branch always succeeds and timeouts are the only
@@ -2502,7 +2517,12 @@ async fn execute_tool_calls_parallel(
         .map(|tc| {
             let sem = Arc::clone(&semaphore);
             let tool_name = tc.function.name.clone();
+            // Pre-check tool policy so denied calls never reach execution.
+            let denial = policy.and_then(|p| check_tool_policy(p, tc));
             async move {
+                if let Some(denial_msg) = denial {
+                    return Ok((denial_msg, false));
+                }
                 let Ok(_permit) = sem.acquire().await else {
                     return Ok((
                         format!("Error: tool `{tool_name}` skipped — concurrency semaphore closed"),
@@ -2539,6 +2559,39 @@ async fn execute_tool_calls_parallel(
 
     // Collect results, short-circuiting on the first hard error.
     results.into_iter().collect()
+}
+
+/// Check a single tool call against the policy, returning a denial message
+/// if the call is blocked, or `None` if it is allowed.
+fn check_tool_policy(
+    policy: &crate::tool_policy::ToolPolicy,
+    tc: &ToolCallEntry,
+) -> Option<String> {
+    let args: std::collections::BTreeMap<String, String> = serde_json::from_str::<
+        std::collections::BTreeMap<String, serde_json::Value>,
+    >(&tc.function.arguments)
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(k, v)| {
+        let s = match v {
+            serde_json::Value::String(s) => s,
+            other => other.to_string(),
+        };
+        (k, s)
+    })
+    .collect();
+    let decision = policy.evaluate(&tc.function.name, &args);
+    match decision {
+        crate::tool_policy::PolicyDecision::Deny(reason) => {
+            warn!(
+                tool = tc.function.name.as_str(),
+                reason = reason.as_str(),
+                "tool call blocked by policy"
+            );
+            Some(format!("Error: {reason}"))
+        }
+        crate::tool_policy::PolicyDecision::Allow => None,
+    }
 }
 
 /// Execute a single tool call against the provided runtime, returning the
@@ -3177,7 +3230,7 @@ mod tests {
         ];
 
         let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
                 .await
                 .expect("parallel execution should succeed");
 
@@ -3205,7 +3258,7 @@ mod tests {
         }];
 
         let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
                 .await
                 .expect("single-item parallel should succeed");
 
@@ -3236,7 +3289,7 @@ mod tests {
         ];
 
         let result =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
+            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120, None)
                 .await;
 
         // ToolNotFound is now recoverable, so the parallel execution should succeed

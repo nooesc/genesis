@@ -556,6 +556,34 @@ impl<'a> SessionExecutionService<'a> {
         let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
             crate::audit::AuditHooks::shared(db_path);
 
+        let tool_policy = self
+            .loaded
+            .config
+            .runtime
+            .tool_policy_path
+            .as_ref()
+            .map(|path| {
+                let expanded = if path.starts_with("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        format!("{}{}", home.display(), &path[1..])
+                    } else {
+                        path.clone()
+                    }
+                } else {
+                    path.clone()
+                };
+                match crate::tool_policy::ToolPolicy::load(std::path::Path::new(&expanded)) {
+                    Ok(policy) => {
+                        info!(path = expanded.as_str(), "loaded tool policy");
+                        policy
+                    }
+                    Err(e) => {
+                        warn!(path = expanded.as_str(), error = %e, "failed to load tool policy, using deny-all fallback");
+                        crate::tool_policy::ToolPolicy::deny_all()
+                    }
+                }
+            });
+
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
             client,
@@ -586,6 +614,7 @@ impl<'a> SessionExecutionService<'a> {
                 response_format: self.response_format.clone(),
                 core_tools: self.loaded.config.runtime.core_tools.clone(),
                 routing: self.loaded.config.routing.clone(),
+                tool_policy,
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -1834,6 +1863,7 @@ mod tests {
                     guardrails: None,
                     core_tools: None,
                     batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),

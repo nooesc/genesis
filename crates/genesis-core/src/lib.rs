@@ -29,6 +29,7 @@ pub mod skills_guard;
 pub mod skills_hub;
 pub mod tagger;
 pub mod templates;
+pub mod tool_policy;
 pub mod toolset;
 pub mod trajectory;
 pub mod workflow;
@@ -1128,6 +1129,7 @@ pub(crate) mod tests {
                     guardrails: None,
                     core_tools: None,
                     batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1184,6 +1186,7 @@ pub(crate) mod tests {
                     guardrails: None,
                     core_tools: None,
                     batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
