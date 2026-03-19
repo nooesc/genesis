@@ -172,10 +172,10 @@ impl FileCompletion {
 
         let border_style = Style::default().fg(BORDER_FG);
 
-        // Top border with title.
-        if let Some(cell) = buf.cell_mut((popup_x, popup_y)) {
-            cell.set_symbol("┌"); cell.set_style(border_style);
-        }
+        // Draw the full box border in one call.
+        crate::render::draw_box(popup_rect, buf, border_style, None);
+
+        // Overlay title on the top border.
         let title = " Files ";
         let mut col = popup_x + 1;
         for ch in title.chars() {
@@ -185,14 +185,6 @@ impl FileCompletion {
                 cell.set_style(Style::default().fg(PATH_FG));
             }
             col += 1;
-        }
-        for x in col..popup_x + popup_width - 1 {
-            if let Some(cell) = buf.cell_mut((x, popup_y)) {
-                cell.set_symbol("─"); cell.set_style(border_style);
-            }
-        }
-        if let Some(cell) = buf.cell_mut((popup_x + popup_width - 1, popup_y)) {
-            cell.set_symbol("┐"); cell.set_style(border_style);
         }
 
         // Item rows.
@@ -214,14 +206,6 @@ impl FileCompletion {
             let is_selected = item_idx == self.selected;
 
             let row_y = popup_y + 1 + row_idx as u16;
-
-            // Left/right borders.
-            if let Some(cell) = buf.cell_mut((popup_x, row_y)) {
-                cell.set_symbol("│"); cell.set_style(border_style);
-            }
-            if let Some(cell) = buf.cell_mut((popup_x + popup_width - 1, row_y)) {
-                cell.set_symbol("│"); cell.set_style(border_style);
-            }
 
             // Content.
             let indicator = if is_selected { "▸ " } else { "  " };
@@ -258,20 +242,6 @@ impl FileCompletion {
                 }
                 x += 1;
             }
-        }
-
-        // Bottom border.
-        let bot_row = popup_y + popup_height - 1;
-        if let Some(cell) = buf.cell_mut((popup_x, bot_row)) {
-            cell.set_symbol("└"); cell.set_style(border_style);
-        }
-        for x in popup_x + 1..popup_x + popup_width - 1 {
-            if let Some(cell) = buf.cell_mut((x, bot_row)) {
-                cell.set_symbol("─"); cell.set_style(border_style);
-            }
-        }
-        if let Some(cell) = buf.cell_mut((popup_x + popup_width - 1, bot_row)) {
-            cell.set_symbol("┘"); cell.set_style(border_style);
         }
     }
 
