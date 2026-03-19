@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { createLazyFileRoute } from '@tanstack/react-router'
 import { PlusIcon, Trash2Icon, Clock, Play, Pause } from 'lucide-react'
+import { PageHeader } from '@/components/shared/page-header'
 import { toast } from 'sonner'
 import { useSchedules } from '@/lib/api/queries/schedules'
 import {
@@ -252,17 +253,7 @@ function SchedulesPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Schedules
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {activeCount}/{totalCount} active
-            </span>
-          )}
-        </div>
+      <PageHeader title="Schedules" icon={Clock} count={isLoading ? undefined : `${activeCount}/${totalCount}`}>
         <Button
           size="sm"
           className="h-7 gap-1.5 px-2 font-mono text-[10px]"
@@ -271,7 +262,7 @@ function SchedulesPage() {
           <PlusIcon className="size-3" />
           New
         </Button>
-      </div>
+      </PageHeader>
 
       {isLoading ? (
         <div className="card-stagger grid grid-cols-1 gap-2 lg:grid-cols-2">

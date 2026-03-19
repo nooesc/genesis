@@ -16,6 +16,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { formatRelativeTime } from '@/lib/utils'
 import { getPlatformColor } from '@/lib/platforms'
 import { SectionHeader } from '@/components/shared/section-header'
+import { PageHeader } from '@/components/shared/page-header'
+import { Settings as SettingsIcon } from 'lucide-react'
 import type { ApprovedUser, PendingPairing } from '@/lib/api/types'
 
 export const Route = createLazyFileRoute('/settings')({
@@ -335,9 +337,7 @@ function PairingSection() {
 function SettingsPage() {
   return (
     <div className="flex flex-col gap-5">
-      <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-        Settings
-      </h1>
+      <PageHeader title="Settings" icon={SettingsIcon} />
 
       <SectionHeader title="Authentication" />
       <ApiKeySection />

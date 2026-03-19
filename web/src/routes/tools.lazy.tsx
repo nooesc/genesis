@@ -2,6 +2,7 @@ import * as React from 'react'
 import { createLazyFileRoute } from '@tanstack/react-router'
 import { useTools } from '@/lib/api/queries/tools'
 import { EmptyState } from '@/components/shared/empty-state'
+import { PageHeader } from '@/components/shared/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -194,25 +195,14 @@ function ToolsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Tools Registry
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {filtered.length}
-            </span>
-          )}
-        </div>
+      <PageHeader title="Tools Registry" icon={WrenchIcon} count={isLoading ? undefined : filtered.length}>
         <Input
           placeholder="Search..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-48 font-mono text-[11px]"
         />
-      </div>
+      </PageHeader>
 
       {/* Source filter chips */}
       {!isLoading && allSources.length > 1 && (

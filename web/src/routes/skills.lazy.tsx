@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { useSkills } from '@/lib/api/queries/skills'
 import { useCreateSkill, useDeleteSkill } from '@/lib/api/mutations/skills'
 import { EmptyState } from '@/components/shared/empty-state'
+import { PageHeader } from '@/components/shared/page-header'
 import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -199,17 +200,7 @@ function SkillsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Skills
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {filtered.length}
-            </span>
-          )}
-        </div>
+      <PageHeader title="Skills" icon={Brain} count={isLoading ? undefined : filtered.length}>
         <div className="flex items-center gap-2">
           <Input
             placeholder="Search..."
@@ -240,7 +231,7 @@ function SkillsPage() {
             New
           </Button>
         </div>
-      </div>
+      </PageHeader>
 
       {isLoading ? (
         <div className="card-stagger grid grid-cols-1 gap-2 lg:grid-cols-2">

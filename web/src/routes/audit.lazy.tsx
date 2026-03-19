@@ -2,6 +2,7 @@ import * as React from 'react'
 import { createLazyFileRoute, Link } from '@tanstack/react-router'
 import { useAuditLog } from '@/lib/api/queries/audit'
 import { EmptyState } from '@/components/shared/empty-state'
+import { PageHeader } from '@/components/shared/page-header'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { AuditEntry } from '@/lib/api/types'
@@ -135,25 +136,14 @@ function AuditPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Event Stream
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {filtered.length}
-            </span>
-          )}
-        </div>
+      <PageHeader title="Event Stream" icon={Activity} count={isLoading ? undefined : filtered.length}>
         <Input
           placeholder="Search..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-48 font-mono text-[11px]"
         />
-      </div>
+      </PageHeader>
 
       {/* Category filter chips */}
       {!isLoading && activeCategories.length > 1 && (

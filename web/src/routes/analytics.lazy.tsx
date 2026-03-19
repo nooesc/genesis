@@ -15,6 +15,8 @@ import { Sparkline } from '@/components/dashboard/sparkline'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPlatformColor } from '@/lib/platforms'
 import { SectionHeader } from '@/components/shared/section-header'
+import { PageHeader } from '@/components/shared/page-header'
+import { BarChart3Icon } from 'lucide-react'
 
 export const Route = createLazyFileRoute('/analytics')({
   component: AnalyticsPage,
@@ -263,11 +265,7 @@ function AnalyticsPage() {
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Header + period selector */}
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-          Analytics
-        </h1>
+      <PageHeader title="Analytics" icon={BarChart3Icon}>
         <div className="flex items-center gap-1">
           {PERIODS.map(({ label, value }) => (
             <button
@@ -283,7 +281,7 @@ function AnalyticsPage() {
             </button>
           ))}
         </div>
-      </div>
+      </PageHeader>
 
       {/* KPI metrics strip */}
       {insightsLoading || usageLoading ? (

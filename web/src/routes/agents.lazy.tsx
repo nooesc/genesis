@@ -5,8 +5,9 @@ import { useInsights } from '@/lib/api/queries/analytics'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatUptime, isHealthyStatus } from '@/lib/utils'
 import { getPlatformColor } from '@/lib/platforms'
+import { PageHeader } from '@/components/shared/page-header'
 import {
-  Bot, Server, Clock, Cpu, Activity,
+  Bot, Server, Clock, Cpu, Activity, Network,
   MessageSquare, Globe,
 } from 'lucide-react'
 
@@ -124,9 +125,7 @@ function AgentsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-        Agent Topology
-      </h1>
+      <PageHeader title="Agent Topology" icon={Network} />
 
       <div className="relative overflow-hidden rounded-lg border border-border/20 bg-[#0b0b0b] p-6">
         {/* Dot grid background */}

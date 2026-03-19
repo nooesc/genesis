@@ -6,9 +6,11 @@ import { DataTable } from '@/components/shared/data-table'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { PageHeader } from '@/components/shared/page-header'
 import type { SessionSummary } from '@/lib/api/types'
 import { formatRelativeTime, formatTokens } from '@/lib/utils'
 import { getPlatformColor } from '@/lib/platforms'
+import { MessagesSquareIcon } from 'lucide-react'
 
 export const Route = createLazyFileRoute('/sessions/')({
   component: SessionsPage,
@@ -139,24 +141,14 @@ function SessionsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Sessions
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {totalCount}
-            </span>
-          )}
-        </div>
+      <PageHeader title="Sessions" icon={MessagesSquareIcon} count={isLoading ? undefined : totalCount}>
         <Input
           placeholder="Search..."
           value={inputValue}
           onChange={handleSearchChange}
           className="w-48 font-mono text-[11px]"
         />
-      </div>
+      </PageHeader>
 
       {isLoading ? (
         <div className="flex flex-col gap-1.5">

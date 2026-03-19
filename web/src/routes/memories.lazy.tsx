@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { useMemories, useSearchMemories } from '@/lib/api/queries/memories'
 import { useDeleteMemory, useEmbedAll } from '@/lib/api/mutations/memories'
 import { EmptyState } from '@/components/shared/empty-state'
+import { PageHeader } from '@/components/shared/page-header'
 import { ConfirmDeleteDialog } from '@/components/shared/confirm-delete-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -122,18 +123,7 @@ function MemoriesPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <h1 className="font-mono text-sm font-medium uppercase tracking-wider text-muted-foreground">
-            Memories
-          </h1>
-          {!isLoading && (
-            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/30">
-              {memories?.length ?? 0}
-            </span>
-          )}
-        </div>
+      <PageHeader title="Memories" icon={DatabaseIcon} count={isLoading ? undefined : (memories?.length ?? 0)}>
         <div className="flex items-center gap-2">
           <Input
             placeholder="Search..."
@@ -152,7 +142,7 @@ function MemoriesPage() {
             {embedAll.isPending ? 'Embedding...' : 'Embed All'}
           </Button>
         </div>
-      </div>
+      </PageHeader>
 
       {/* Source filter strip */}
       {!isLoading && sources.length > 1 && (
