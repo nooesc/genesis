@@ -11,6 +11,15 @@ use genesis_storage::{EmbeddingStore, MemoryStore, StoredMemory};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(feature = "local-embeddings")]
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding as FastTextEmbedding};
+
+#[cfg(feature = "local-embeddings")]
+use std::path::PathBuf;
+
+#[cfg(feature = "local-embeddings")]
+use std::sync::Mutex;
+
 /// Errors from embedding operations.
 #[derive(Debug, Error)]
 pub enum EmbeddingError {
@@ -106,10 +115,22 @@ impl RemoteEmbeddingProvider {
     }
 }
 
-/// Local embedding provider scaffold.
-///
-/// Task 1 only needs backend selection and feature plumbing. The fastembed
-/// implementation lands in the next task.
+#[cfg(feature = "local-embeddings")]
+fn local_embedding_cache_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("genesis")
+        .join("models")
+        .join("fastembed")
+}
+
+#[cfg(feature = "local-embeddings")]
+pub struct LocalEmbeddingProvider {
+    model: String,
+    inner: Mutex<FastTextEmbedding>,
+}
+
+#[cfg(not(feature = "local-embeddings"))]
 #[derive(Debug, Clone)]
 pub struct LocalEmbeddingProvider {
     model: String,
@@ -117,6 +138,29 @@ pub struct LocalEmbeddingProvider {
 
 impl LocalEmbeddingProvider {
     fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
+        #[cfg(feature = "local-embeddings")]
+        {
+            let cache_dir = local_embedding_cache_dir();
+            std::fs::create_dir_all(&cache_dir).map_err(|e| EmbeddingError::ApiError {
+                status: 500,
+                body: e.to_string(),
+            })?;
+
+            let init = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(cache_dir)
+                .with_show_download_progress(true);
+            let inner = FastTextEmbedding::try_new(init).map_err(|e| EmbeddingError::ApiError {
+                status: 500,
+                body: e.to_string(),
+            })?;
+
+            return Ok(Self {
+                model: config.model.clone(),
+                inner: Mutex::new(inner),
+            });
+        }
+
+        #[cfg(not(feature = "local-embeddings"))]
         Ok(Self {
             model: config.model.clone(),
         })
@@ -199,6 +243,20 @@ impl EmbeddingProvider {
 
                 Ok(response.data.into_iter().map(|d| d.embedding).collect())
             }
+            #[cfg(feature = "local-embeddings")]
+            Self::Local(provider) => {
+                let mut inner = provider
+                    .inner
+                    .lock()
+                    .expect("embedding model lock poisoned");
+                inner
+                    .embed(texts, None)
+                    .map_err(|e| EmbeddingError::ApiError {
+                        status: 500,
+                        body: e.to_string(),
+                    })
+            }
+            #[cfg(not(feature = "local-embeddings"))]
             Self::Local(_provider) => {
                 let _ = texts;
                 Err(EmbeddingError::NotConfigured)
@@ -681,6 +739,27 @@ mod tests {
         assert!(matches!(provider, EmbeddingProvider::Local(_)));
         assert_eq!(provider.backend(), "local");
         assert_eq!(provider.model(), "sentence-transformers/all-MiniLM-L6-v2");
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn local_provider_returns_non_zero_embeddings() {
+        let config = genesis_config::EmbeddingConfig {
+            backend: "local".to_owned(),
+            model: "sentence-transformers/all-MiniLM-L6-v2".to_owned(),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
+        };
+
+        let provider = EmbeddingProvider::from_config(&config).unwrap();
+        let vectors = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(provider.embed(&["query: genesis memory".to_owned()]))
+            .unwrap();
+
+        assert_eq!(vectors.len(), 1);
+        assert!(vectors[0].iter().any(|value| value.abs() > 0.0));
     }
 
     #[tokio::test]
