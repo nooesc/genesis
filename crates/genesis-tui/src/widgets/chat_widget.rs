@@ -303,7 +303,15 @@ impl ChatWidget {
                     lines,
                 });
             }
-            let lines = self.active_cell_cache.as_ref().unwrap().lines.clone();
+            let mut lines = self.active_cell_cache.as_ref().unwrap().lines.clone();
+
+            // Append a block cursor to the last line to indicate streaming.
+            let cursor_style = Style::default()
+                .fg(crate::history::rgb(genesis_ui::colors::EVE_LAVENDER));
+            if let Some(last_line) = lines.last_mut() {
+                last_line.spans.push(Span::styled("\u{258D}", cursor_style));
+            }
+
             let wrap_width = width.max(1);
             let cell_height = wrapped_row_count(&lines, wrap_width).max(1);
             let rows_to_use = cell_height.min(remaining_rows);
@@ -839,6 +847,54 @@ mod tests {
         assert!(
             !has_indicator,
             "should not show overflow indicator when all messages fit"
+        );
+    }
+
+    #[test]
+    fn streaming_cursor_shown_during_active_cell() {
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        cw.append_text("streaming text");
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // The buffer should contain the block cursor character ▍ (U+258D).
+        let has_cursor = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "\u{258D}")
+            })
+        });
+        assert!(
+            has_cursor,
+            "should render block cursor \u{258D} during streaming"
+        );
+    }
+
+    #[test]
+    fn no_streaming_cursor_without_active_cell() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hello".to_string());
+        cw.start_turn();
+        cw.append_text("done");
+        cw.complete_turn();
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // No block cursor should appear once the turn is complete.
+        let has_cursor = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .map_or(false, |c| c.symbol() == "\u{258D}")
+            })
+        });
+        assert!(
+            !has_cursor,
+            "should not render block cursor after turn is complete"
         );
     }
 }
