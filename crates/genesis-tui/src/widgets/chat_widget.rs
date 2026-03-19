@@ -272,30 +272,30 @@ impl ChatWidget {
 
             // Check if this index starts a tool group.
             if let Some((start, count)) = Self::group_containing(i, &tool_groups) {
-                if i == start {
-                    // Separator between user turn and this group?
-                    if let Some(prev) = prev_is_user {
-                        if cur_is_user != prev {
-                            total = total.saturating_add(1);
-                        }
+                // The `i == start` guard is always true here: the start
+                // branch advances `i` past the whole group, so we never
+                // encounter a mid-group index.
+                debug_assert_eq!(i, start);
+
+                // Separator between user turn and this group?
+                if let Some(prev) = prev_is_user {
+                    if cur_is_user != prev {
+                        total = total.saturating_add(1);
                     }
-                    if self.expanded_tool_groups.contains(&start) {
-                        // Expanded: render each tool cell individually.
-                        for j in start..start + count {
-                            let c = &self.committed_cells[j];
-                            total = total.saturating_add(c.height(width).max(1));
-                        }
-                    } else {
-                        // Collapsed: single summary line.
-                        total =
-                            total.saturating_add(tool_group_summary_height(count));
-                    }
-                    prev_is_user = Some(false); // tool cells are not user cells
-                    i = start + count;
-                    continue;
                 }
-                // Inside a group but not at start — skip (handled by the start case).
-                i += 1;
+                if self.expanded_tool_groups.contains(&start) {
+                    // Expanded: render each tool cell individually.
+                    for j in start..start + count {
+                        let c = &self.committed_cells[j];
+                        total = total.saturating_add(c.height(width).max(1));
+                    }
+                } else {
+                    // Collapsed: single summary line.
+                    total =
+                        total.saturating_add(tool_group_summary_height(count));
+                }
+                prev_is_user = Some(false); // tool cells are not user cells
+                i = start + count;
                 continue;
             }
 
@@ -475,32 +475,51 @@ impl ChatWidget {
 
                 if self.expanded_tool_groups.contains(&start) {
                     // Expanded: emit each tool cell individually (in reverse).
-                    let mut group_cost = 0u16;
                     let mut temp: Vec<RenderEntry<'_>> = Vec::new();
                     for j in (start..start + count).rev() {
                         let tc = &self.committed_cells[j];
                         let h = tc.height(area.width).max(1);
-                        group_cost += h;
                         temp.push(RenderEntry::Single {
                             height: h,
                             cell: tc,
                             separator_after: false,
                         });
                     }
-                    // The first entry of the expanded group carries the sep.
+                    // In the reverse walk, temp[0] is the newest entry.
+                    // After entries.reverse(), it becomes the last entry —
+                    // which is where the separator belongs (between this
+                    // group and the next-newer cell collected earlier).
                     if let Some(RenderEntry::Single {
                         separator_after, ..
-                    }) = temp.last_mut()
+                    }) = temp.first_mut()
                     {
                         *separator_after = needs_sep;
                     }
-                    let total_cost =
-                        group_cost + if needs_sep { 1 } else { 0 };
-                    if used + total_cost > remaining_rows {
+                    // Fit as many individual cells from the group as the
+                    // budget allows, instead of dropping the entire group.
+                    let sep_cost = if needs_sep { 1u16 } else { 0 };
+                    if used + sep_cost > remaining_rows {
                         break;
                     }
+                    let mut fitted = 0u16;
+                    let mut accepted = 0usize;
+                    for t in &temp {
+                        let th = match t {
+                            RenderEntry::Single { height, .. } => *height,
+                            RenderEntry::GroupSummary { height, .. } => *height,
+                        };
+                        if used + sep_cost + fitted + th > remaining_rows {
+                            break;
+                        }
+                        fitted += th;
+                        accepted += 1;
+                    }
+                    if accepted == 0 {
+                        break;
+                    }
+                    temp.truncate(accepted);
                     entries.extend(temp);
-                    used += total_cost;
+                    used += sep_cost + fitted;
                 } else {
                     // Collapsed: single summary line.
                     let h = tool_group_summary_height(count);
