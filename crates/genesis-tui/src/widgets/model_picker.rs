@@ -21,6 +21,84 @@ const DIM: Color = rgb(genesis_ui::colors::UI_DIM);
 const SUCCESS: Color = rgb(genesis_ui::colors::UI_SUCCESS);
 const BORDER: Color = Color::Rgb(88, 88, 88);
 const SELECTED_BG: Color = Color::Rgb(45, 42, 55);
+const NEW_COLOR: Color = Color::Rgb(255, 175, 50);
+
+/// Sort order for the model list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SortMode {
+    #[default]
+    Newest,
+    Cheapest,
+    LargestContext,
+}
+
+impl SortMode {
+    fn next(self) -> Self {
+        match self {
+            SortMode::Newest => SortMode::Cheapest,
+            SortMode::Cheapest => SortMode::LargestContext,
+            SortMode::LargestContext => SortMode::Newest,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Newest => "Newest",
+            SortMode::Cheapest => "Cheapest",
+            SortMode::LargestContext => "Largest Context",
+        }
+    }
+}
+
+/// Capability filter for the model list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CapabilityFilter {
+    #[default]
+    All,
+    Tools,
+    Vision,
+    Reasoning,
+}
+
+impl CapabilityFilter {
+    fn next(self) -> Self {
+        match self {
+            CapabilityFilter::All => CapabilityFilter::Tools,
+            CapabilityFilter::Tools => CapabilityFilter::Vision,
+            CapabilityFilter::Vision => CapabilityFilter::Reasoning,
+            CapabilityFilter::Reasoning => CapabilityFilter::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            CapabilityFilter::All => "All",
+            CapabilityFilter::Tools => "Tools",
+            CapabilityFilter::Vision => "Vision",
+            CapabilityFilter::Reasoning => "Reasoning",
+        }
+    }
+}
+
+/// Format a model's age from its creation timestamp.
+fn format_age(created: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age_secs = now.saturating_sub(created);
+    let days = age_secs / 86400;
+
+    if days < 7 {
+        "new!".to_owned()
+    } else if days < 30 {
+        format!("{}d", days)
+    } else if days < 365 {
+        format!("{}mo", days / 30)
+    } else {
+        format!("{}y", days / 365)
+    }
+}
 
 /// Result of handling a key in the model picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +126,10 @@ pub struct ModelPicker {
     loading: bool,
     /// Error message if fetch failed.
     error: Option<String>,
+    /// Current sort order.
+    sort_mode: SortMode,
+    /// Current capability filter.
+    capability_filter: CapabilityFilter,
 }
 
 impl ModelPicker {
@@ -61,6 +143,8 @@ impl ModelPicker {
             scroll: 0,
             loading: true,
             error: None,
+            sort_mode: SortMode::Newest,
+            capability_filter: CapabilityFilter::All,
         }
     }
 
@@ -77,8 +161,9 @@ impl ModelPicker {
         self.loading = false;
     }
 
-    /// Handle a key event.
-    pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+    /// Handle a key event. `_visible_rows` is accepted for API consistency
+    /// with other overlays but is not currently used.
+    pub fn handle_key(&mut self, key: KeyEvent, _visible_rows: u16) -> ModelPickerAction {
         match (key.code, key.modifiers) {
             // Close
             (KeyCode::Esc, _) => ModelPickerAction::Close,
@@ -91,6 +176,20 @@ impl ModelPicker {
                 } else {
                     ModelPickerAction::None
                 }
+            }
+
+            // Sort toggle
+            (KeyCode::Tab, _) => {
+                self.sort_mode = self.sort_mode.next();
+                self.refilter();
+                ModelPickerAction::None
+            }
+
+            // Capability filter toggle
+            (KeyCode::Char('f'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.capability_filter = self.capability_filter.next();
+                self.refilter();
+                ModelPickerAction::None
             }
 
             // Navigate
@@ -143,6 +242,42 @@ impl ModelPicker {
             })
             .map(|(i, _)| i)
             .collect();
+
+        // Apply capability filter.
+        match self.capability_filter {
+            CapabilityFilter::All => {}
+            CapabilityFilter::Tools => {
+                self.filtered.retain(|&i| self.all_models[i].supports_tools());
+            }
+            CapabilityFilter::Vision => {
+                self.filtered.retain(|&i| self.all_models[i].supports_vision());
+            }
+            CapabilityFilter::Reasoning => {
+                self.filtered.retain(|&i| self.all_models[i].supports_reasoning());
+            }
+        }
+
+        // Sort filtered results.
+        match self.sort_mode {
+            SortMode::Newest => {
+                self.filtered.sort_by(|&a, &b| {
+                    self.all_models[b].created.cmp(&self.all_models[a].created)
+                });
+            }
+            SortMode::Cheapest => {
+                self.filtered.sort_by(|&a, &b| {
+                    let price_a = self.all_models[a].pricing.prompt.parse::<f64>().unwrap_or(f64::MAX);
+                    let price_b = self.all_models[b].pricing.prompt.parse::<f64>().unwrap_or(f64::MAX);
+                    price_a.partial_cmp(&price_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortMode::LargestContext => {
+                self.filtered.sort_by(|&a, &b| {
+                    self.all_models[b].context_length.cmp(&self.all_models[a].context_length)
+                });
+            }
+        }
+
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
         self.scroll = self.scroll.min(self.selected);
     }
@@ -166,14 +301,22 @@ impl ModelPicker {
 
         // Header.
         let header = Line::from(vec![
-            Span::styled(" ◆ ", Style::default().fg(ACCENT)),
-            Span::styled("Model Picker", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled("  — ", Style::default().fg(DIM)),
+            Span::styled(" Model Picker", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  -- ", Style::default().fg(DIM)),
             Span::styled(
                 format!("{} models", self.filtered.len()),
                 Style::default().fg(DIM),
             ),
-            Span::styled("  Esc to close", Style::default().fg(DIM)),
+            Span::styled("  Sort: ", Style::default().fg(DIM)),
+            Span::styled(
+                self.sort_mode.label(),
+                Style::default().fg(ACCENT),
+            ),
+            Span::styled("  Filter: ", Style::default().fg(DIM)),
+            Span::styled(
+                self.capability_filter.label(),
+                Style::default().fg(ACCENT),
+            ),
         ]);
         let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
         Paragraph::new(header).render(header_area, buf);
@@ -181,12 +324,12 @@ impl ModelPicker {
         // Search bar.
         let search_y = area.y + 1;
         let search = Line::from(vec![
-            Span::styled(" 🔍 ", Style::default().fg(DIM)),
+            Span::styled(" > ", Style::default().fg(DIM)),
             Span::styled(
                 if self.query.is_empty() { "Type to search..." } else { &self.query },
                 Style::default().fg(if self.query.is_empty() { DIM } else { TEXT }),
             ),
-            Span::styled("▎", Style::default().fg(ACCENT)),
+            Span::styled("|", Style::default().fg(ACCENT)),
         ]);
         let search_area = Rect { x: area.x, y: search_y, width: area.width, height: 1 };
         Paragraph::new(search).render(search_area, buf);
@@ -265,7 +408,7 @@ impl ModelPicker {
 
             // Indicator.
             spans.push(Span::styled(
-                if is_selected { " ▸ " } else { "   " },
+                if is_selected { " > " } else { "   " },
                 Style::default().fg(ACCENT),
             ));
 
@@ -276,9 +419,9 @@ impl ModelPicker {
                 Style::default().fg(TEXT)
             };
             // Truncate ID to fit.
-            let max_id_len = (area.width as usize).saturating_sub(45).min(40);
+            let max_id_len = (area.width as usize).saturating_sub(50).min(40);
             let id_display = if model.id.len() > max_id_len {
-                format!("{}…", &model.id[..model.id.floor_char_boundary(max_id_len)])
+                format!("{}...", &model.id[..model.id.floor_char_boundary(max_id_len)])
             } else {
                 format!("{:<width$}", model.id, width = max_id_len)
             };
@@ -309,6 +452,15 @@ impl ModelPicker {
                 spans.push(Span::styled(" R", Style::default().fg(Color::Yellow).bg(badge_bg)));
             }
 
+            // Age indicator.
+            let age = format_age(model.created);
+            let age_style = if age == "new!" {
+                Style::default().fg(NEW_COLOR).bg(badge_bg)
+            } else {
+                Style::default().fg(DIM).bg(badge_bg)
+            };
+            spans.push(Span::styled(format!(" {age}"), age_style));
+
             let line = Line::from(spans);
             let line_area = Rect { x: area.x, y: row_y, width: area.width, height: 1 };
             Paragraph::new(line).render(line_area, buf);
@@ -319,8 +471,12 @@ impl ModelPicker {
         let footer = Line::from(vec![
             Span::styled(" Enter", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
             Span::styled(" select  ", Style::default().fg(DIM)),
-            Span::styled("↑↓", Style::default().fg(ACCENT)),
-            Span::styled(" navigate  ", Style::default().fg(DIM)),
+            Span::styled("Tab", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" sort  ", Style::default().fg(DIM)),
+            Span::styled("Ctrl+F", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" filter  ", Style::default().fg(DIM)),
+            Span::styled("Esc", Style::default().fg(ACCENT)),
+            Span::styled(" close  ", Style::default().fg(DIM)),
             Span::styled("T", Style::default().fg(SUCCESS)),
             Span::styled("ools ", Style::default().fg(DIM)),
             Span::styled("V", Style::default().fg(Color::Cyan)),
@@ -377,7 +533,7 @@ mod tests {
     fn esc_closes() {
         let mut picker = ModelPicker::new_loading();
         picker.set_models(make_models());
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), 24);
         assert_eq!(action, ModelPickerAction::Close);
     }
 
@@ -385,16 +541,129 @@ mod tests {
     fn enter_selects_model() {
         let mut picker = ModelPicker::new_loading();
         picker.set_models(make_models());
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(action, ModelPickerAction::Select("openai/gpt-4.1".to_owned()));
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
+        // Default sort is Newest, so claude (created=2000) should be first.
+        assert_eq!(action, ModelPickerAction::Select("anthropic/claude-sonnet-4-6".to_owned()));
     }
 
     #[test]
     fn navigate_and_select() {
         let mut picker = ModelPicker::new_loading();
         picker.set_models(make_models());
-        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), 24);
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
+        // Second item in Newest order (created=1000) is gpt-4.1.
+        assert_eq!(action, ModelPickerAction::Select("openai/gpt-4.1".to_owned()));
+    }
+
+    #[test]
+    fn sort_mode_cycles() {
+        assert_eq!(SortMode::Newest.next(), SortMode::Cheapest);
+        assert_eq!(SortMode::Cheapest.next(), SortMode::LargestContext);
+        assert_eq!(SortMode::LargestContext.next(), SortMode::Newest);
+    }
+
+    #[test]
+    fn capability_filter_cycles() {
+        assert_eq!(CapabilityFilter::All.next(), CapabilityFilter::Tools);
+        assert_eq!(CapabilityFilter::Tools.next(), CapabilityFilter::Vision);
+        assert_eq!(CapabilityFilter::Vision.next(), CapabilityFilter::Reasoning);
+        assert_eq!(CapabilityFilter::Reasoning.next(), CapabilityFilter::All);
+    }
+
+    #[test]
+    fn tab_cycles_sort_mode() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(vec![]);
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), 24);
+        assert_eq!(action, ModelPickerAction::None);
+        // Sort mode should have advanced from default.
+        assert_eq!(picker.sort_mode, SortMode::Cheapest);
+    }
+
+    #[test]
+    fn ctrl_f_cycles_filter() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(vec![]);
+        let action = picker.handle_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            24,
+        );
+        assert_eq!(action, ModelPickerAction::None);
+        assert_eq!(picker.capability_filter, CapabilityFilter::Tools);
+    }
+
+    #[test]
+    fn format_age_new_model() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now), "new!");
+        assert_eq!(format_age(now - 86400 * 3), "new!");
+    }
+
+    #[test]
+    fn format_age_old_model() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let age = format_age(now - 86400 * 45);
+        assert!(age.contains("mo"), "45 days should show months: {age}");
+    }
+
+    #[test]
+    fn sort_cheapest_orders_by_price() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        // Switch to cheapest sort.
+        picker.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), 24);
+        assert_eq!(picker.sort_mode, SortMode::Cheapest);
+        // gpt-4.1 has prompt price 0.000002, claude has 0.000003 — gpt first.
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
+        assert_eq!(action, ModelPickerAction::Select("openai/gpt-4.1".to_owned()));
+    }
+
+    #[test]
+    fn sort_largest_context_orders_by_context() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        // Tab twice: Newest -> Cheapest -> LargestContext.
+        picker.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), 24);
+        picker.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), 24);
+        assert_eq!(picker.sort_mode, SortMode::LargestContext);
+        // gpt-4.1 has 1M context, claude has 200k — gpt first.
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
+        assert_eq!(action, ModelPickerAction::Select("openai/gpt-4.1".to_owned()));
+    }
+
+    #[test]
+    fn filter_vision_only() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        // Ctrl+F twice: All -> Tools -> Vision.
+        picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 24);
+        picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 24);
+        assert_eq!(picker.capability_filter, CapabilityFilter::Vision);
+        // Only claude supports vision.
+        assert_eq!(picker.filtered.len(), 1);
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
+        assert_eq!(action, ModelPickerAction::Select("anthropic/claude-sonnet-4-6".to_owned()));
+    }
+
+    #[test]
+    fn filter_reasoning_only() {
+        let mut picker = ModelPicker::new_loading();
+        picker.set_models(make_models());
+        // Ctrl+F three times: All -> Tools -> Vision -> Reasoning.
+        picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 24);
+        picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 24);
+        picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), 24);
+        assert_eq!(picker.capability_filter, CapabilityFilter::Reasoning);
+        // Only claude supports reasoning.
+        assert_eq!(picker.filtered.len(), 1);
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), 24);
         assert_eq!(action, ModelPickerAction::Select("anthropic/claude-sonnet-4-6".to_owned()));
     }
 }
