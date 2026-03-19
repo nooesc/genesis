@@ -20,6 +20,10 @@ const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
 const DIM: Color = rgb(genesis_ui::colors::UI_DIM);
 const WARNING: Color = rgb(genesis_ui::colors::UI_WARNING);
 const BORDER: Color = Color::Rgb(88, 88, 88);
+const SHELL_COLOR: Color = Color::Rgb(215, 95, 95);
+const WRITE_COLOR: Color = Color::Rgb(212, 165, 116);
+const ADD_COLOR: Color = Color::Rgb(135, 175, 95);
+const DEL_COLOR: Color = Color::Rgb(215, 95, 95);
 
 /// Result of handling a key in the approval overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,8 @@ pub enum ApprovalAction {
     Approve,
     /// User denied the tool call.
     Deny,
+    /// Approve this tool and remember approval for the session.
+    AlwaysApprove,
 }
 
 /// Overlay widget showing a pending tool approval request.
@@ -65,11 +71,18 @@ impl ApprovalOverlay {
         }
     }
 
+    /// The name of the tool being requested.
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
     /// Handle a key event.
     pub fn handle_key(&mut self, key: KeyEvent) -> ApprovalAction {
         match (key.code, key.modifiers) {
             // Approve
             (KeyCode::Char('y'), _) | (KeyCode::Enter, _) => ApprovalAction::Approve,
+            // Always approve this tool for the session
+            (KeyCode::Char('a'), _) => ApprovalAction::AlwaysApprove,
             // Deny
             (KeyCode::Char('n'), _) | (KeyCode::Esc, _) => ApprovalAction::Deny,
             // Ctrl+C denies
@@ -116,11 +129,18 @@ impl ApprovalOverlay {
 
         // Header.
         if modal_area.height > 2 {
+            let tool_color = match self.tool_name.as_str() {
+                "shell_exec" | "docker_exec" | "ssh_exec" | "code_execute" => SHELL_COLOR,
+                "write_file" | "patch_file" | "create_file" | "delete_file" => WRITE_COLOR,
+                _ if self.tool_name.starts_with("git_") => WRITE_COLOR,
+                _ => ACCENT,
+            };
             let header = Line::from(vec![
                 Span::styled(" ⚠ ", Style::default().fg(WARNING).add_modifier(Modifier::BOLD)),
+                Span::styled("Approve tool: ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    format!("Approve tool: {}", self.tool_name),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    self.tool_name.clone(),
+                    Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
                 ),
             ]);
             let header_area = Rect {
@@ -153,6 +173,8 @@ impl ApprovalOverlay {
             let footer = Line::from(vec![
                 Span::styled(" y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 Span::styled(" approve  ", Style::default().fg(DIM)),
+                Span::styled("a", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(" always  ", Style::default().fg(DIM)),
                 Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Span::styled(" deny  ", Style::default().fg(DIM)),
                 Span::styled("Esc", Style::default().fg(DIM)),
@@ -168,8 +190,141 @@ impl ApprovalOverlay {
         }
     }
 
-    fn build_content_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    pub(crate) fn build_content_lines(&self, _width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+
+        // Shell tools: highlight command prominently.
+        let is_shell = matches!(
+            self.tool_name.as_str(),
+            "shell_exec" | "docker_exec" | "ssh_exec" | "code_execute"
+        );
+
+        if is_shell {
+            if let Some((_, cmd)) = self
+                .arg_lines
+                .iter()
+                .find(|(k, _)| k == "command" || k == "cmd")
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  $ ",
+                        Style::default()
+                            .fg(SHELL_COLOR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(cmd.clone(), Style::default().fg(TEXT)),
+                ]));
+                // Show other args below if any.
+                for (key, value) in &self.arg_lines {
+                    if key != "command" && key != "cmd" {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {key}: "),
+                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(value.clone(), Style::default().fg(DIM)),
+                        ]));
+                    }
+                }
+                return lines_or_empty(lines);
+            }
+        }
+
+        // File edit tools: show diff preview if content includes old/new text.
+        let is_file_edit = matches!(
+            self.tool_name.as_str(),
+            "write_file" | "patch_file" | "create_file" | "delete_file"
+        );
+
+        if is_file_edit {
+            // Show path prominently.
+            if let Some((_, path)) = self.arg_lines.iter().find(|(k, _)| k == "path") {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(
+                        path.clone(),
+                        Style::default()
+                            .fg(WRITE_COLOR)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            }
+            // Show old_text/new_text as a mini diff.
+            let old_text = self
+                .arg_lines
+                .iter()
+                .find(|(k, _)| k == "old_text")
+                .map(|(_, v)| v.as_str());
+            let new_text = self
+                .arg_lines
+                .iter()
+                .find(|(k, _)| k == "new_text")
+                .map(|(_, v)| v.as_str());
+            if let (Some(old), Some(new)) = (old_text, new_text) {
+                lines.push(Line::default()); // spacer
+                for line in old.lines().take(10) {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  - ",
+                            Style::default()
+                                .fg(DEL_COLOR)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(line.to_owned(), Style::default().fg(DEL_COLOR)),
+                    ]));
+                }
+                for line in new.lines().take(10) {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  + ",
+                            Style::default()
+                                .fg(ADD_COLOR)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(line.to_owned(), Style::default().fg(ADD_COLOR)),
+                    ]));
+                }
+                if old.lines().count() > 10 || new.lines().count() > 10 {
+                    lines.push(Line::from(Span::styled(
+                        "  ...(truncated)",
+                        Style::default().fg(DIM),
+                    )));
+                }
+                // Show remaining non-path/old/new args.
+                for (key, value) in &self.arg_lines {
+                    if key != "path" && key != "old_text" && key != "new_text" && key != "content" {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {key}: "),
+                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(value.clone(), Style::default().fg(DIM)),
+                        ]));
+                    }
+                }
+                return lines_or_empty(lines);
+            }
+            // write_file with content: show content preview.
+            if let Some((_, content)) = self.arg_lines.iter().find(|(k, _)| k == "content") {
+                let preview_lines: Vec<&str> = content.lines().take(10).collect();
+                lines.push(Line::default());
+                for line in &preview_lines {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled((*line).to_owned(), Style::default().fg(DIM)),
+                    ]));
+                }
+                if content.lines().count() > 10 {
+                    lines.push(Line::from(Span::styled(
+                        "  ...(truncated)",
+                        Style::default().fg(DIM),
+                    )));
+                }
+                return lines_or_empty(lines);
+            }
+        }
+
+        // Default: generic key-value rendering.
         for (key, value) in &self.arg_lines {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -179,13 +334,8 @@ impl ApprovalOverlay {
                 Span::styled(value.clone(), Style::default().fg(DIM)),
             ]));
         }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  (no arguments)",
-                Style::default().fg(DIM),
-            )));
-        }
-        lines
+
+        lines_or_empty(lines)
     }
 
     fn draw_border(&self, area: Rect, buf: &mut Buffer) {
@@ -241,6 +391,17 @@ impl ApprovalOverlay {
     }
 }
 
+fn lines_or_empty(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "  (no arguments)",
+            Style::default().fg(DIM),
+        ))]
+    } else {
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +443,61 @@ mod tests {
         let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &args);
         assert_eq!(overlay.arg_lines.len(), 1);
         assert_eq!(overlay.arg_lines[0].0, "command");
+    }
+
+    #[test]
+    fn always_approve_on_a() {
+        let mut overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        let action = overlay.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(action, ApprovalAction::AlwaysApprove);
+    }
+
+    #[test]
+    fn shell_shows_dollar_prompt() {
+        let args = BTreeMap::from([("command".to_owned(), "ls -la".to_owned())]);
+        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &args);
+        let lines = overlay.build_content_lines(80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("$ "), "shell should show $ prompt");
+        assert!(text.contains("ls -la"), "shell should show command");
+    }
+
+    #[test]
+    fn patch_shows_diff_preview() {
+        let args = BTreeMap::from([
+            ("path".to_owned(), "src/main.rs".to_owned()),
+            ("old_text".to_owned(), "fn old() {}".to_owned()),
+            ("new_text".to_owned(), "fn new() {}".to_owned()),
+        ]);
+        let overlay = ApprovalOverlay::new("patch_file".to_owned(), &args);
+        let lines = overlay.build_content_lines(80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("src/main.rs"), "should show path");
+        assert!(text.contains("- "), "should show deletions");
+        assert!(text.contains("+ "), "should show additions");
+    }
+
+    #[test]
+    fn write_file_shows_path_prominently() {
+        let args = BTreeMap::from([
+            ("path".to_owned(), "config.yaml".to_owned()),
+            ("content".to_owned(), "key: value\nother: data".to_owned()),
+        ]);
+        let overlay = ApprovalOverlay::new("write_file".to_owned(), &args);
+        let lines = overlay.build_content_lines(80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains("config.yaml"), "should show path");
     }
 }
