@@ -355,6 +355,7 @@ fn default_request_id() -> String {
 
 /// Map a storage error into an HTTP 500 response pair.
 fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
+    error!(error = %e, "storage operation failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("storage error: {e}"),
@@ -2484,45 +2485,49 @@ struct AuditQueryParams {
 async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(50);
     let entries = if let Some(ref event_type) = params.event_type {
-        store.by_event_type(event_type, limit).unwrap_or_default()
+        store
+            .by_event_type(event_type, limit)
+            .map_err(storage_err)?
     } else {
-        store.recent(limit).unwrap_or_default()
+        store.recent(limit).map_err(storage_err)?
     };
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "entries": entries,
         "count": entries.len(),
-    }))
+    })))
 }
 
-async fn audit_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn audit_stats_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.stats().unwrap_or_default();
+    let stats = store.stats().map_err(storage_err)?;
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "total_entries": total,
         "by_event_type": stats.into_iter().map(|(t, c)| {
             serde_json::json!({"event_type": t, "count": c})
         }).collect::<Vec<_>>(),
-    }))
+    })))
 }
 
 async fn audit_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(100);
-    let entries = store.by_session(&id, limit).unwrap_or_default();
-    Json(serde_json::json!({
+    let entries = store.by_session(&id, limit).map_err(storage_err)?;
+    Ok(Json(serde_json::json!({
         "session_id": id,
         "entries": entries,
         "count": entries.len(),
-    }))
+    })))
 }
 
 #[derive(Deserialize)]
@@ -2533,18 +2538,14 @@ struct AuditPurgeRequest {
 async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = request.older_than_days.unwrap_or(90);
-    match store.purge_older_than(days) {
-        Ok(deleted) => Json(serde_json::json!({
-            "purged": deleted,
-            "older_than_days": days,
-        })),
-        Err(e) => Json(serde_json::json!({
-            "error": e.to_string(),
-        })),
-    }
+    let deleted = store.purge_older_than(days).map_err(storage_err)?;
+    Ok(Json(serde_json::json!({
+        "purged": deleted,
+        "older_than_days": days,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -2559,27 +2560,27 @@ struct AnalyticsQuery {
 async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
-    let analytics = store.tool_analytics(days).unwrap_or_default();
-    Json(serde_json::json!({
+    let analytics = store.tool_analytics(days).map_err(storage_err)?;
+    Ok(Json(serde_json::json!({
         "period_days": days,
         "tools": analytics,
-    }))
+    })))
 }
 
 async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
-    let analytics = store.llm_analytics(days).unwrap_or_default();
-    Json(serde_json::json!({
+    let analytics = store.llm_analytics(days).map_err(storage_err)?;
+    Ok(Json(serde_json::json!({
         "period_days": days,
         "models": analytics,
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------
