@@ -53,12 +53,19 @@ impl Renderable for &str {
 
     fn desired_height(&self, width: u16) -> u16 {
         let w = width.max(1) as usize;
-        let text_width = self.width();
-        if text_width == 0 {
-            1
-        } else {
-            ((text_width.saturating_sub(1)) / w + 1) as u16
+        // Handle multi-line strings by summing per-line heights.
+        let mut total: u16 = 0;
+        for line in self.lines() {
+            let line_width = line.width();
+            let rows = if line_width == 0 {
+                1
+            } else {
+                ((line_width.saturating_sub(1)) / w + 1) as u16
+            };
+            total = total.saturating_add(rows);
         }
+        // Empty string = 1 row (blank line).
+        if total == 0 { 1 } else { total }
     }
 }
 
@@ -129,27 +136,30 @@ impl Default for Column {
 impl Renderable for Column {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut y = area.y;
+        let bottom = area.y.saturating_add(area.height);
         for child in &self.children {
-            let h = child.desired_height(area.width);
-            if y + h > area.y + area.height {
-                break; // No more space
+            if y >= bottom {
+                break;
             }
+            let h = child.desired_height(area.width);
+            // Clamp to available space (partial render is better than drop).
+            let available = bottom.saturating_sub(y);
+            let clamped = h.min(available);
             let child_area = Rect {
                 x: area.x,
                 y,
                 width: area.width,
-                height: h,
+                height: clamped,
             };
             child.render(child_area, buf);
-            y += h;
+            y = y.saturating_add(clamped);
         }
     }
 
     fn desired_height(&self, width: u16) -> u16 {
         self.children
             .iter()
-            .map(|c| c.desired_height(width))
-            .sum::<u16>()
+            .fold(0u16, |acc, c| acc.saturating_add(c.desired_height(width)))
     }
 }
 
@@ -201,7 +211,10 @@ impl Renderable for Inset {
 
     fn desired_height(&self, width: u16) -> u16 {
         let inner_width = width.saturating_sub(self.left + self.right);
-        self.child.desired_height(inner_width) + self.top + self.bottom
+        self.child
+            .desired_height(inner_width)
+            .saturating_add(self.top)
+            .saturating_add(self.bottom)
     }
 }
 
@@ -297,8 +310,7 @@ impl Renderable for FlexColumn {
         // Desired height = sum of fixed items' heights + flex items' desired heights
         self.items
             .iter()
-            .map(|item| item.child.desired_height(width))
-            .sum()
+            .fold(0u16, |acc, item| acc.saturating_add(item.child.desired_height(width)))
     }
 }
 
