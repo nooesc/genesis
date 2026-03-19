@@ -3183,6 +3183,58 @@ impl MemoryStore {
         collect_rows(rows, &self.database_path)
     }
 
+    /// Create and index a new memory entry.
+    pub fn create(
+        &self,
+        session_id: Option<&str>,
+        kind: &str,
+        content: &str,
+    ) -> Result<StoredMemory, StorageError> {
+        let connection = open(&self.database_path)?;
+        exec_migration(
+            &connection,
+            &self.database_path,
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )?;
+
+        let id = format!("memory-{}", memory_unique_suffix());
+        connection
+            .execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
+                params![id, session_id, kind, content],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let memory_row_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
+                params![memory_row_id, kind, content],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        connection
+            .query_row(
+                "SELECT id, session_id, kind, content, created_at
+                 FROM memories WHERE id = ?1",
+                params![id],
+                Self::row_to_memory,
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
+
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3194,6 +3246,13 @@ impl MemoryStore {
             })?;
         Ok(rows > 0)
     }
+}
+
+fn memory_unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 /// Embedding persistence layer for vector/semantic memory search.

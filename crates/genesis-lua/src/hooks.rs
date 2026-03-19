@@ -14,6 +14,7 @@ pub enum HookEvent {
     PostToolCall,
     OnError,
     OnComplete,
+    OnPluginLoad,
 }
 
 impl HookEvent {
@@ -25,6 +26,7 @@ impl HookEvent {
             "PostToolCall" | "post_tool_call" => Some(Self::PostToolCall),
             "OnError" | "on_error" => Some(Self::OnError),
             "OnComplete" | "on_complete" => Some(Self::OnComplete),
+            "OnPluginLoad" | "on_plugin_load" => Some(Self::OnPluginLoad),
             _ => None,
         }
     }

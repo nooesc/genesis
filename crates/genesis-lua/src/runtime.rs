@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     api::{install_genesis_api, PluginContext},
-    discovery::discover_plugins_best_effort,
+    discovery::{discover_plugins_best_effort, PluginKind},
     hooks::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
@@ -409,7 +409,9 @@ impl LuaRuntime {
                     .push(format!("plugin `{}` failed to load: {err}", plugin.name));
                 continue;
             }
-            self.plugin_names.push(plugin.name);
+            let plugin_name = plugin.name.clone();
+            self.plugin_names.push(plugin_name.clone());
+            let _ = self.run_on_plugin_load(&plugin_name, plugin.kind);
         }
         Ok(())
     }
@@ -591,6 +593,17 @@ impl LuaRuntime {
     pub fn run_on_complete(&self) -> Result<(), LuaRuntimeError> {
         let context = self.lua.create_table()?;
         self.run_observe_hook(HookEvent::OnComplete, context)
+    }
+
+    pub fn run_on_plugin_load(
+        &self,
+        plugin_name: &str,
+        plugin_kind: PluginKind,
+    ) -> Result<(), LuaRuntimeError> {
+        let context = self.lua.create_table()?;
+        context.set("plugin_name", plugin_name)?;
+        context.set("plugin_kind", plugin_kind_name(plugin_kind))?;
+        self.run_observe_hook(HookEvent::OnPluginLoad, context)
     }
 
     fn plugin_environment(
@@ -1048,6 +1061,13 @@ impl LuaRuntime {
                 "[plugin::{plugin_name}] disabled for this session after {failures} failures"
             ));
         }
+    }
+}
+
+fn plugin_kind_name(kind: PluginKind) -> &'static str {
+    match kind {
+        PluginKind::SingleFile => "single_file",
+        PluginKind::Package => "package",
     }
 }
 

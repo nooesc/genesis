@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use genesis_storage::MemoryStore;
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
@@ -14,6 +16,7 @@ use crate::{
 pub struct GenesisApi {
     version: String,
     plugin_dir: String,
+    database_path: PathBuf,
     session: Arc<Mutex<LuaSessionContext>>,
     config_values: Arc<std::collections::BTreeMap<String, String>>,
     logs: Arc<Mutex<Vec<String>>>,
@@ -132,6 +135,9 @@ impl UserData for GenesisApi {
                 Arc::clone(&this.active_plugin),
             )
         });
+        fields.add_field_method_get("memory", |lua, this| {
+            make_memory_bridge(lua, this.database_path.clone(), Arc::clone(&this.session))
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -206,6 +212,11 @@ pub(crate) fn install_genesis_api(
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         plugin_dir: config.plugin_dir.to_string_lossy().into_owned(),
+        database_path: config
+            .config_values
+            .get("database_path")
+            .map(PathBuf::from)
+            .unwrap_or_default(),
         session,
         config_values: Arc::new(config.config_values.clone()),
         logs,
@@ -216,6 +227,77 @@ pub(crate) fn install_genesis_api(
         active_plugin,
         plugin_context,
     })?)
+}
+
+fn make_memory_bridge(
+    lua: &Lua,
+    database_path: PathBuf,
+    session: Arc<Mutex<LuaSessionContext>>,
+) -> mlua::Result<Table> {
+    let memory = lua.create_table()?;
+
+    let list_path = database_path.clone();
+    memory.set(
+        "list",
+        lua.create_function(move |lua, limit: Option<usize>| {
+            let store = MemoryStore::new(&list_path);
+            let memories = store
+                .list(limit.unwrap_or(10))
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&memories)
+        })?,
+    )?;
+
+    let search_path = database_path.clone();
+    memory.set(
+        "search",
+        lua.create_function(move |lua, (query, limit): (String, Option<usize>)| {
+            let store = MemoryStore::new(&search_path);
+            let memories = store
+                .search(&query, limit.unwrap_or(5))
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&memories)
+        })?,
+    )?;
+
+    memory.set(
+        "create",
+        lua.create_function(move |lua, (content, metadata): (String, Option<Value>)| {
+            let kind = resolve_memory_kind(metadata)?;
+            let session_id = session
+                .lock()
+                .expect("session state mutex should not be poisoned")
+                .id
+                .clone();
+            let store = MemoryStore::new(&database_path);
+            let created = store
+                .create(Some(&session_id), &kind, &content)
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&created)
+        })?,
+    )?;
+
+    Ok(memory)
+}
+
+fn resolve_memory_kind(metadata: Option<Value>) -> mlua::Result<String> {
+    match metadata {
+        None | Some(Value::Nil) => Ok("note".to_owned()),
+        Some(Value::String(kind)) => Ok(kind.to_str()?.to_owned()),
+        Some(Value::Table(table)) => {
+            if let Ok(kind) = table.get::<String>("kind") {
+                return Ok(kind);
+            }
+            if let Ok(kind) = table.get::<String>(1) {
+                return Ok(kind);
+            }
+            Ok("note".to_owned())
+        }
+        Some(other) => Err(mlua::Error::external(format!(
+            "unsupported memory metadata: {}",
+            other.type_name()
+        ))),
+    }
 }
 
 fn make_logger(

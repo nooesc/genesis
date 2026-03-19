@@ -106,6 +106,80 @@ end)
     }
 
     #[test]
+    fn runtime_runs_on_plugin_load_hooks() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("observer.lua"),
+            r#"
+genesis.on("OnPluginLoad", function(ctx)
+    genesis.log("loaded:" .. ctx.plugin_name .. ":" .. ctx.plugin_kind)
+end)
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(dir.path().join("worker.lua"), "genesis.log('worker ready')")
+            .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert_eq!(
+            runtime.logs(),
+            vec![
+                "loaded:observer:single_file".to_owned(),
+                "worker ready".to_owned(),
+                "loaded:worker:single_file".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_exposes_memory_api() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let db_path = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap should succeed");
+        let sessions = genesis_storage::SessionStore::new(&db_path);
+        sessions
+            .create_session("sess-1", "cli", None)
+            .expect("session should exist");
+
+        let runtime = test_runtime(
+            dir.path(),
+            BTreeMap::from([(
+                "database_path".to_owned(),
+                db_path.to_string_lossy().into_owned(),
+            )]),
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string(
+                r#"
+local created = genesis.memory.create("Remember the milk", "fact")
+local listed = genesis.memory.list(5)
+local searched = genesis.memory.search("milk", 5)
+
+return {
+    created_kind = created.kind,
+    created_session_id = created.session_id,
+    list_count = #listed,
+    first_content = searched[1].content,
+}
+"#,
+            )
+            .expect("memory api should evaluate");
+
+        assert_eq!(
+            value,
+            json!({
+                "created_kind": "fact",
+                "created_session_id": "sess-1",
+                "list_count": 1,
+                "first_content": "Remember the milk",
+            })
+        );
+    }
+
+    #[test]
     fn runtime_exposes_genesis_version() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
@@ -1186,7 +1260,7 @@ version = "0.1.0"
 
     fn test_runtime_with_disabled_plugins(
         plugin_dir: &std::path::Path,
-        mut config_values: BTreeMap<String, String>,
+        config_values: BTreeMap<String, String>,
         disabled_plugins: Vec<String>,
     ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
         test_runtime_with_disabled_plugins_and_verbose(
