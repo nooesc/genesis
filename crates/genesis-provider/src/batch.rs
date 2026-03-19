@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -39,7 +39,6 @@ struct BatchStatus {
     #[serde(default)]
     output_file_id: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     error_file_id: Option<String>,
     #[serde(default)]
     request_counts: Option<BatchRequestCounts>,
@@ -92,7 +91,6 @@ impl BatchClient {
     /// Create a new Batch API client.
     pub fn new(base_url: &str, api_key: &str) -> Result<Self, ProviderError> {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if !api_key.is_empty() {
             let auth_value = format!("Bearer {api_key}");
             headers.insert(
@@ -105,6 +103,7 @@ impl BatchClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(300))
             .build()?;
 
@@ -152,6 +151,10 @@ impl BatchClient {
             status = status.status.as_str(),
             "batch completed"
         );
+
+        if let Some(ref error_file) = status.error_file_id {
+            tracing::warn!(error_file_id = %error_file, "batch completed with errors — download error file for details");
+        }
 
         // 5. Download and parse results
         let output_file_id = status.output_file_id.ok_or_else(|| {
@@ -259,8 +262,6 @@ impl BatchClient {
                 });
             }
 
-            tokio::time::sleep(delay).await;
-
             let resp = self
                 .http
                 .get(format!("{}/batches/{}", self.base_url, batch_id))
@@ -308,6 +309,7 @@ impl BatchClient {
             }
 
             // Exponential backoff capped at max_delay.
+            tokio::time::sleep(delay).await;
             delay = (delay * 2).min(max_delay);
         }
     }
@@ -394,11 +396,20 @@ pub fn parse_batch_results(
         })?;
 
         // Extract index from custom_id "req-N"
-        let index = result_line
+        let index = match result_line
             .custom_id
             .strip_prefix("req-")
             .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+        {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!(
+                    custom_id = %result_line.custom_id,
+                    "unrecognized custom_id in batch result — result will be discarded"
+                );
+                continue;
+            }
+        };
 
         if let Some(err) = result_line.error {
             result_map.insert(
@@ -425,7 +436,8 @@ pub fn parse_batch_results(
                     }
                 }
             } else {
-                let body_str = serde_json::to_string(&resp.body).unwrap_or_default();
+                let body_str = serde_json::to_string(&resp.body)
+                    .unwrap_or_else(|e| format!("<serialization error: {e}>"));
                 result_map.insert(
                     index,
                     Err(ProviderError::ApiError {
