@@ -6,6 +6,7 @@ version.workspace = true
 
 [features]
 default = []
+local-embeddings = ["genesis-cli/local-embeddings"]
 telemetry = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
