@@ -4,6 +4,8 @@
 //! or `ApprovalPolicy::Always` is called. The user presses `y` to approve or
 //! `n`/`Esc` to deny.
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -14,6 +16,9 @@ use ratatui::{
 };
 
 use crate::history::rgb;
+
+/// How long the approval overlay waits before auto-denying.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 const ACCENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
 const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
@@ -46,6 +51,8 @@ pub struct ApprovalOverlay {
     arg_lines: Vec<(String, String)>,
     /// Scroll offset for long argument lists.
     scroll: usize,
+    /// When this overlay was created (for auto-deny countdown).
+    created_at: Instant,
 }
 
 impl ApprovalOverlay {
@@ -75,12 +82,25 @@ impl ApprovalOverlay {
             tool_name,
             arg_lines,
             scroll: 0,
+            created_at: Instant::now(),
         }
     }
 
     /// The name of the tool being requested.
     pub fn tool_name(&self) -> &str {
         &self.tool_name
+    }
+
+    /// Seconds remaining before auto-deny.
+    pub fn remaining_secs(&self) -> u64 {
+        APPROVAL_TIMEOUT
+            .saturating_sub(self.created_at.elapsed())
+            .as_secs()
+    }
+
+    /// Whether the approval timeout has been exceeded.
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= APPROVAL_TIMEOUT
     }
 
     /// Handle a key event.
@@ -181,6 +201,8 @@ impl ApprovalOverlay {
         // Footer with key hints.
         let footer_y = modal_area.y + modal_area.height - 1;
         if footer_y > modal_area.y {
+            let remaining = self.remaining_secs();
+            let countdown_text = format!(" [{remaining}s]");
             let footer = Line::from(vec![
                 Span::styled(" y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 Span::styled(" approve  ", Style::default().fg(DIM)),
@@ -190,6 +212,7 @@ impl ApprovalOverlay {
                 Span::styled(" deny  ", Style::default().fg(DIM)),
                 Span::styled("Esc", Style::default().fg(DIM)),
                 Span::styled(" cancel", Style::default().fg(DIM)),
+                Span::styled(countdown_text, Style::default().fg(WARNING)),
             ]);
             let footer_area = Rect {
                 x: modal_area.x + 1,
@@ -432,6 +455,46 @@ fn lines_or_empty(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn is_expired_false_immediately() {
+        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        assert!(!overlay.is_expired());
+    }
+
+    #[test]
+    fn remaining_secs_starts_near_60() {
+        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        let remaining = overlay.remaining_secs();
+        // Allow a small margin for test execution time.
+        assert!(remaining >= 58 && remaining <= 60, "expected ~60, got {remaining}");
+    }
+
+    #[test]
+    fn countdown_text_rendered_in_footer() {
+        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        // Extract all text from the buffer and check for the countdown string.
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+        }
+        assert!(
+            text.contains("[60s]") || text.contains("[59s]"),
+            "footer should contain countdown text, got: {text}"
+        );
+    }
 
     #[test]
     fn approve_on_y() {
