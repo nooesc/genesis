@@ -180,17 +180,15 @@ impl ToolPolicy {
             }
         }
 
-        // If no known key (command/cmd) matched, check ALL argument values
-        // against deny patterns. This runs regardless of whether allow patterns
-        // exist — a deny-only rule must still block matching values.
-        if !cmd_checked && !arguments.is_empty() {
-            for val in arguments.values() {
-                for pattern in &rule.deny_patterns {
-                    if pattern.matches(val) {
-                        return PolicyDecision::Deny(format!(
-                            "tool `{tool_name}` denied: argument value matches deny pattern `{pattern}`"
-                        ));
-                    }
+        // Always check ALL argument values against deny patterns. This catches
+        // non-command keys (e.g. "host" on ssh_exec) that the command-specific
+        // block above skips when cmd_checked is true.
+        for val in arguments.values() {
+            for pattern in &rule.deny_patterns {
+                if pattern.matches(val) {
+                    return PolicyDecision::Deny(format!(
+                        "tool `{tool_name}` denied: argument value matches deny pattern `{pattern}`"
+                    ));
                 }
             }
         }
@@ -490,16 +488,14 @@ mod tests {
         .unwrap();
 
         // Should be denied — matches the deny pattern.
-        let mut deny_args = BTreeMap::new();
-        deny_args.insert("input".to_string(), "evil_payload".to_string());
+        let deny_args = args(&[("input", "evil_payload")]);
         match policy.evaluate("custom_exec", &deny_args) {
             PolicyDecision::Deny(reason) => assert!(reason.contains("deny pattern")),
             PolicyDecision::Allow => panic!("deny-only rule should block matching value"),
         }
 
         // Should be allowed — no deny match and no allow patterns to enforce.
-        let mut safe_args = BTreeMap::new();
-        safe_args.insert("input".to_string(), "safe_value".to_string());
+        let safe_args = args(&[("input", "safe_value")]);
         assert_eq!(
             policy.evaluate("custom_exec", &safe_args),
             PolicyDecision::Allow

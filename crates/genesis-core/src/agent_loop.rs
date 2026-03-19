@@ -2567,22 +2567,33 @@ fn check_tool_policy(
     policy: &crate::tool_policy::ToolPolicy,
     tc: &ToolCallEntry,
 ) -> Option<String> {
-    let args: std::collections::BTreeMap<String, String> = serde_json::from_str::<
+    let parse_result = serde_json::from_str::<
         std::collections::BTreeMap<String, serde_json::Value>,
-    >(&tc.function.arguments)
-    .unwrap_or_else(|e| {
-        warn!(tool = %tc.function.name, error = %e, "failed to parse tool arguments for policy check");
-        std::collections::BTreeMap::new()
-    })
-    .into_iter()
-    .map(|(k, v)| {
-        let s = match v {
-            serde_json::Value::String(s) => s,
-            other => other.to_string(),
-        };
-        (k, s)
-    })
-    .collect();
+    >(&tc.function.arguments);
+    let raw_map = match parse_result {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                tool = %tc.function.name,
+                error = %e,
+                "failed to parse tool arguments for policy check; denying call"
+            );
+            return Some(format!(
+                "Error: tool `{}` denied: could not parse arguments for policy evaluation",
+                tc.function.name
+            ));
+        }
+    };
+    let args: std::collections::BTreeMap<String, String> = raw_map
+        .into_iter()
+        .map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            (k, s)
+        })
+        .collect();
     let decision = policy.evaluate(&tc.function.name, &args);
     match decision {
         crate::tool_policy::PolicyDecision::Deny(reason) => {
