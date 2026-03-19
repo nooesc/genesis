@@ -1376,7 +1376,8 @@ macro_rules! parse_and_set {
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
 ///   runtime.thinking_budget, runtime.max_context_tokens, runtime.max_iterations,
 ///   runtime.reasoning_effort,
-///   gateway.idle_timeout_minutes, gateway.daily_reset_hour, gateway.rate_limit_rpm
+///   gateway.idle_timeout_minutes, gateway.daily_reset_hour, gateway.rate_limit_rpm,
+///   tui.theme
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let mut file_config = read_config_file(config_path)?;
 
@@ -1532,6 +1533,12 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(GatewayConfig::default)
                 .rate_limit_rpm
         ),
+        "tui.theme" => {
+            file_config
+                .tui
+                .get_or_insert_with(TuiConfig::default)
+                .theme = value.to_owned();
+        }
         _ => {
             return Err(ConfigError::InvalidEnvValue {
                 name: "key",
@@ -1543,13 +1550,21 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      runtime.thinking_budget, runtime.max_context_tokens, \
                      runtime.max_iterations, runtime.reasoning_effort, \
                      gateway.idle_timeout_minutes, gateway.daily_reset_hour, \
-                     gateway.rate_limit_rpm"
+                     gateway.rate_limit_rpm, tui.theme"
                 ),
             });
         }
     }
 
     write_file_config(config_path, &file_config)
+}
+
+/// Convenience function to persist a theme name to the user's config file.
+///
+/// Resolves the default config path and sets `tui.theme` to the given value.
+pub fn set_theme(theme_name: &str) -> Result<(), ConfigError> {
+    let paths = AppPaths::resolve(None)?;
+    set_value_in_file(&paths.config_path, "tui.theme", theme_name)
 }
 
 pub fn set_plugin_disabled_in_file(
