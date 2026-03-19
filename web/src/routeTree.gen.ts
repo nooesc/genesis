@@ -25,17 +25,17 @@ const ToolsRoute = ToolsRouteImport.update({
   id: '/tools',
   path: '/tools',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/tools.lazy').then((d) => d.Route))
 const SkillsRoute = SkillsRouteImport.update({
   id: '/skills',
   path: '/skills',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/skills.lazy').then((d) => d.Route))
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/settings.lazy').then((d) => d.Route))
 const SchedulesRoute = SchedulesRouteImport.update({
   id: '/schedules',
   path: '/schedules',
@@ -45,22 +45,22 @@ const MonitorRoute = MonitorRouteImport.update({
   id: '/monitor',
   path: '/monitor',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/monitor.lazy').then((d) => d.Route))
 const MemoriesRoute = MemoriesRouteImport.update({
   id: '/memories',
   path: '/memories',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/memories.lazy').then((d) => d.Route))
 const AuditRoute = AuditRouteImport.update({
   id: '/audit',
   path: '/audit',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/audit.lazy').then((d) => d.Route))
 const AnalyticsRoute = AnalyticsRouteImport.update({
   id: '/analytics',
   path: '/analytics',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/analytics.lazy').then((d) => d.Route))
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -70,12 +70,14 @@ const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() =>
+  import('./routes/sessions/index.lazy').then((d) => d.Route),
+)
 const SessionsIdRoute = SessionsIdRouteImport.update({
   id: '/sessions/$id',
   path: '/sessions/$id',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/sessions/$id.lazy').then((d) => d.Route))
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
