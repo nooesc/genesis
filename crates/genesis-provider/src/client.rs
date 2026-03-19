@@ -275,6 +275,11 @@ impl ChatClient {
         if request.model.is_empty() {
             request.model = self.model.clone();
         }
+        tracing::debug!(
+            model = request.model.as_str(),
+            backend = self.backend.as_str(),
+            "provider.complete.start"
+        );
 
         if self.backend == "anthropic" {
             return self.complete_anthropic(request, started_at).await;
@@ -507,6 +512,11 @@ impl ChatClient {
         if request.model.is_empty() {
             request.model = self.model.clone();
         }
+        tracing::debug!(
+            model = request.model.as_str(),
+            backend = self.backend.as_str(),
+            "provider.complete_stream.start"
+        );
         request.stream = Some(true);
 
         if self.backend == "anthropic" {
@@ -845,6 +855,19 @@ impl ChatClient {
     /// Returns the backend identifier (e.g., "openai", "anthropic").
     pub fn backend(&self) -> &str {
         &self.backend
+    }
+
+    /// Replace the circuit breaker with one using custom thresholds.
+    pub fn set_circuit_breaker(&mut self, failure_threshold: u32, cooldown_secs: u64) {
+        self.circuit = std::sync::Arc::new(crate::circuit_breaker::CircuitBreaker::new(
+            failure_threshold,
+            std::time::Duration::from_secs(cooldown_secs),
+        ));
+    }
+
+    /// Total number of times the circuit has opened (lifetime).
+    pub fn circuit_open_count(&self) -> u64 {
+        self.circuit.open_count()
     }
 
     /// Returns the current circuit breaker state for this provider.

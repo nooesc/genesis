@@ -11,6 +11,7 @@ genesis-types.path = "../genesis-types"
 genesis-config.path = "../genesis-config"
 genesis-storage.path = "../genesis-storage"
 genesis-provider.path = "../genesis-provider"
+genesis-tools.path = "../genesis-tools"
 ratatui.workspace = true
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
@@ -22,5 +23,7 @@ tracing.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
 libc.workspace = true
+tachyonfx.workspace = true
+tui-big-text.workspace = true
 
 [dev-dependencies]

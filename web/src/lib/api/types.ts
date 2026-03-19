@@ -105,10 +105,14 @@ export interface InsightsData {
   sessions_count: number
   total_input_tokens: number
   total_output_tokens: number
-  sessions_per_day: Record<string, number>
-  platform_breakdown: Record<string, number>
-  tokens_per_day: Record<string, number>
-  tool_usage: Record<string, number>
+  /** [date, count] tuples — Rust Vec<(String, u64)> */
+  sessions_per_day: [string, number][]
+  /** [platform, count] tuples — Rust Vec<(String, u64)> */
+  platform_breakdown: [string, number][]
+  /** [date, input_tokens, output_tokens] tuples — Rust Vec<(String, u64, u64)> */
+  tokens_per_day: [string, number, number][]
+  /** [tool_name, count] tuples — Rust Vec<(String, u64)> */
+  tool_usage: [string, number][]
   avg_input_tokens: number
   avg_output_tokens: number
 }

@@ -23,6 +23,20 @@ export function useSessions(params?: SessionsParams) {
   })
 }
 
+/** Returns sessions + total count from API (not truncated by limit) */
+export function useSessionsWithCount(params?: SessionsParams) {
+  const searchParams = new URLSearchParams()
+  if (params?.search) searchParams.set('search', params.search)
+  if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
+  const qs = searchParams.toString()
+
+  return useQuery({
+    queryKey: ['sessions-with-count', params],
+    queryFn: () => api.get<SessionsResponse>(`/sessions${qs ? `?${qs}` : ''}`),
+    refetchInterval: 30_000,
+  })
+}
+
 export function useSession(id: string) {
   return useQuery({
     queryKey: ['sessions', id],

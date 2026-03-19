@@ -4,10 +4,26 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[features]
+default = []
+telemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dependencies]
 clap.workspace = true
 genesis-cli = { path = "../../crates/genesis-cli" }
+genesis-config = { path = "../../crates/genesis-config" }
 genesis-tui = { path = "../../crates/genesis-tui" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry"] }
+
+# Optional telemetry dependencies (behind `telemetry` feature flag)
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }

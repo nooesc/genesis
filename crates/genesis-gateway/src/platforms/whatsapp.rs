@@ -434,8 +434,11 @@ mod tests {
         assert_eq!(change.field, "messages");
         assert_eq!(change.value.messages[0].from, "15551234567");
         assert_eq!(
-            change.value.messages[0].text.as_ref().unwrap().body,
-            "Hello Eve"
+            change.value.messages[0]
+                .text
+                .as_ref()
+                .map(|t| t.body.as_str()),
+            Some("Hello Eve")
         );
         assert_eq!(change.value.contacts[0].profile.name, "Cole");
     }
@@ -474,6 +477,36 @@ mod tests {
         assert!(json.contains("\"messaging_product\":\"whatsapp\""));
         assert!(json.contains("\"to\":\"15551234567\""));
         assert!(json.contains("\"body\":\"Hello!\""));
+    }
+
+    #[test]
+    fn webhook_payload_handles_media_only_message() {
+        let json = r#"{
+            "object": "whatsapp_business_account",
+            "entry": [{
+                "id": "123",
+                "changes": [{
+                    "field": "messages",
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "contacts": [{
+                            "profile": {"name": "Cole"},
+                            "wa_id": "15551234567"
+                        }],
+                        "messages": [{
+                            "from": "15551234567",
+                            "id": "msg-2",
+                            "type": "image",
+                            "timestamp": "1709875200"
+                        }]
+                    }
+                }]
+            }]
+        }"#;
+        let payload: WebhookPayload = serde_json::from_str(json).expect("should parse");
+        let msg = &payload.entry[0].changes[0].value.messages[0];
+        assert_eq!(msg.msg_type, "image");
+        assert!(msg.text.is_none(), "media-only messages have no text field");
     }
 
     #[test]

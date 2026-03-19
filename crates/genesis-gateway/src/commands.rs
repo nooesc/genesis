@@ -392,6 +392,7 @@ mod tests {
                 api_key_env: None,
                 extra_body: None,
                 tool_call_parser: None,
+                circuit_breaker: None,
             },
             tool_provider: None,
             fallback_providers: Vec::new(),
@@ -415,6 +416,9 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                core_tools: None,
+                batch: None,
+                tool_policy_path: None,
             },
             gateway: None,
             plugins: genesis_config::PluginsConfig::default(),
@@ -423,6 +427,8 @@ mod tests {
             embedding: None,
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
+            telemetry: None,
+            routing: None,
         }
     }
 

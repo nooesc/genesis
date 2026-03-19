@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -217,6 +217,18 @@ pub struct AgentLoopConfig {
     /// Guardrails configuration. When set, user input is validated before
     /// processing and agent output is validated before returning.
     pub guardrails: Option<crate::guardrails::GuardrailConfig>,
+    /// Core tool set. When set, only these tools (plus any discovered via
+    /// `find_tools`) are sent in the LLM request. Other tools remain
+    /// available in the registry and can be discovered at runtime.
+    /// Reduces input tokens by 85-96% for large tool registries.
+    pub core_tools: Option<Vec<String>>,
+    /// Adaptive model routing configuration. When enabled, the router
+    /// classifies each turn's complexity and selects the appropriate model
+    /// tier (cheap/mid/top) to optimize cost while maintaining quality.
+    pub routing: Option<genesis_config::RoutingConfig>,
+    /// Compiled tool policy for permission scoping. When set, tool calls
+    /// are checked against allow/deny rules before execution.
+    pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -255,9 +267,28 @@ impl Default for AgentLoopConfig {
             reasoning_effort: None,
             cache: None,
             guardrails: None,
+            core_tools: None,
+            routing: None,
+            tool_policy: None,
         }
     }
 }
+
+/// Default core tool set — the minimum set of tools always available.
+/// When `core_tools` is `None`, all tools are sent (backwards compatible).
+/// When `core_tools` is `Some(vec![])`, this default set is used.
+pub const DEFAULT_CORE_TOOLS: &[&str] = &[
+    "shell_exec",
+    "read_file",
+    "write_file",
+    "patch",
+    "list_dir",
+    "list_tree",
+    "search_files",
+    "find_tools",
+    "memory_recall",
+    "clarify",
+];
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -375,6 +406,9 @@ pub struct AgentLoop {
     cache_misses: u32,
     /// Pre-compiled guardrails (avoids recompiling regexes on every check).
     compiled_guardrails: Option<crate::guardrails::CompiledGuardrails>,
+    /// Tools discovered via `find_tools` during this session. These are added
+    /// to the core set for subsequent LLM requests.
+    discovered_tools: HashSet<String>,
 }
 
 /// Number of consecutive failures for the same tool before injecting a
@@ -448,6 +482,45 @@ impl AgentLoop {
             cache_hits: 0,
             cache_misses: 0,
             compiled_guardrails,
+            discovered_tools: HashSet::new(),
+        }
+    }
+
+    /// Filter tool definitions to the core set + discovered tools.
+    /// When `core_tools` is None, returns all tools (backwards compatible).
+    fn filter_tool_defs(&self, all_defs: Vec<ChatTool>) -> Vec<ChatTool> {
+        let core = match &self.config.core_tools {
+            Some(core) if !core.is_empty() => core,
+            Some(_) => {
+                // Empty list = use defaults
+                let defaults: HashSet<&str> = DEFAULT_CORE_TOOLS.iter().copied().collect();
+                return all_defs
+                    .into_iter()
+                    .filter(|t| {
+                        defaults.contains(t.function.name.as_str())
+                            || self.discovered_tools.contains(&t.function.name)
+                    })
+                    .collect();
+            }
+            None => return all_defs, // No core set = send everything
+        };
+
+        let mut core_set: HashSet<&str> = core.iter().map(String::as_str).collect();
+        // Always include find_tools when filtering is active so discovery works.
+        core_set.insert("find_tools");
+        all_defs
+            .into_iter()
+            .filter(|t| {
+                core_set.contains(t.function.name.as_str())
+                    || self.discovered_tools.contains(&t.function.name)
+            })
+            .collect()
+    }
+
+    /// Add a tool name to the discovered set so it's included in future requests.
+    fn discover_tool(&mut self, name: &str) {
+        if self.discovered_tools.insert(name.to_owned()) {
+            debug!(tool = name, "tool discovered and added to active set");
         }
     }
 
@@ -583,6 +656,50 @@ impl AgentLoop {
         }
     }
 
+    /// Apply adaptive routing to the request by overriding the model based on
+    /// context classification. Returns the selected tier name for logging.
+    fn apply_routing(
+        &self,
+        request: &mut ChatCompletionRequest,
+        user_message: &str,
+        tool_calls_made: usize,
+        turns_used: usize,
+        had_failure: bool,
+    ) -> Option<&'static str> {
+        let routing = self.config.routing.as_ref()?;
+        if !routing.enabled {
+            return None;
+        }
+
+        let default = crate::routing::Tier::from_str_or_mid(&routing.default_tier);
+        let tier = crate::routing::classify(
+            user_message,
+            tool_calls_made,
+            turns_used,
+            had_failure,
+            default,
+        );
+        let selected = crate::routing::model_for_tier(
+            tier,
+            routing.cheap_model.as_deref(),
+            routing.mid_model.as_deref(),
+            routing.top_model.as_deref(),
+            self.client.model(),
+        );
+
+        // Override the model on the request (the client will use it instead
+        // of its default when the model field is non-empty).
+        request.model = selected.to_owned();
+
+        info!(
+            tier = tier.as_str(),
+            model = selected,
+            "adaptive routing selected model"
+        );
+
+        Some(tier.as_str())
+    }
+
     /// Pick the right client for the current turn. Uses the tool client when
     /// the most recent message is a tool result (the agent is processing tool
     /// output and will likely make more tool calls). Falls back to the primary
@@ -621,8 +738,11 @@ impl AgentLoop {
             }
         }
 
+        // Track how many providers were actually attempted.
+        let mut attempted = 1; // primary was already attempted
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            attempted += 1;
             match fallback.complete(request.clone()).await {
                 Ok(response) => {
                     info!(
@@ -643,9 +763,7 @@ impl AgentLoop {
             }
         }
 
-        Err(ProviderError::AllProvidersFailed {
-            count: 1 + self.fallback_clients.len(),
-        })
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Try a streaming completion against the active client, falling back to
@@ -672,8 +790,10 @@ impl AgentLoop {
             }
         }
 
+        let mut attempted = 1; // primary was already attempted
         for (i, fallback) in self.fallback_clients.iter().enumerate() {
             let fb_model = fallback.model().to_owned();
+            attempted += 1;
             match fallback.complete_stream(request.clone()).await {
                 Ok(stream) => {
                     info!(
@@ -694,9 +814,7 @@ impl AgentLoop {
             }
         }
 
-        Err(ProviderError::AllProvidersFailed {
-            count: 1 + self.fallback_clients.len(),
-        })
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Run a single user turn through the agent loop.
@@ -714,6 +832,13 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
+        // Record turn-level span attributes via tracing events rather than
+        // holding a non-Send span guard across await points.
+        info!(
+            session_id = self.session_id_str(),
+            image_count = images.len(),
+            "agent.turn.start"
+        );
         let hook_session = self.session_id_str().to_owned();
         let lua_pre_turn = self.run_lua_pre_turn(user_message);
         let user_message = match lua_pre_turn {
@@ -800,7 +925,7 @@ impl AgentLoop {
         // Fire turn-start hook
         self.hooks.on_turn_start(&hook_session, &user_message);
 
-        let tool_defs: Vec<ChatTool> = self
+        let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
             .await
@@ -814,6 +939,14 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            // When core set filtering is active, recompute the filtered set
+            // each iteration (discovered set may grow). Otherwise use all tools.
+            let tool_defs = if self.config.core_tools.is_some() {
+                self.filter_tool_defs(all_tool_defs.clone())
+            } else {
+                all_tool_defs.clone()
+            };
+
             // Check cancellation at each turn boundary
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal");
@@ -897,11 +1030,26 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
+            // Adaptive routing: classify and override model if enabled.
+            let had_failure = self.tool_failure_counts.values().any(|&c| c > 0);
+            self.apply_routing(
+                &mut request,
+                &user_message,
+                tool_calls_made,
+                turns_used,
+                had_failure,
+            );
+
             // Check response cache before making an LLM call
             let cache_key = if self.response_cache.is_some()
                 && self.config.cache.as_ref().is_some_and(|c| c.enabled)
             {
-                Some(self.compute_cache_key(self.active_client().model(), &tool_defs))
+                let model_for_cache = if request.model.is_empty() {
+                    self.active_client().model()
+                } else {
+                    &request.model
+                };
+                Some(self.compute_cache_key(model_for_cache, &tool_defs))
             } else {
                 None
             };
@@ -956,12 +1104,20 @@ impl AgentLoop {
                 if cache_key.is_some() {
                     self.cache_misses += 1;
                 }
-                match self.complete_with_failover(request).await {
+                let llm_started_at = std::time::Instant::now();
+                let result = match self.complete_with_failover(request).await {
                     Ok(result) => result,
                     Err(err) => {
-                        return Err(self.report_error(&hook_session, "llm_request", err.into()))
+                        return Err(self.report_error(&hook_session, "llm_request", err.into()));
                     }
-                }
+                };
+                info!(
+                    model = result.1.as_str(),
+                    turn = turns_used,
+                    latency_ms = llm_started_at.elapsed().as_millis() as u64,
+                    "agent.llm_request.completed"
+                );
+                result
             };
 
             // Apply tool call parser for models that embed tool calls in text
@@ -1000,6 +1156,14 @@ impl AgentLoop {
             }
 
             if let Some(usage) = &response.usage {
+                // Log token usage for OTel / structured logging.
+                info!(
+                    model = active_model.as_str(),
+                    turn = turns_used,
+                    input_tokens = usage.prompt_tokens,
+                    output_tokens = usage.completion_tokens,
+                    "agent.llm_response"
+                );
                 total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                 total_output_tokens = total_output_tokens.saturating_add(usage.completion_tokens);
                 self.last_prompt_tokens = usage.prompt_tokens;
@@ -1066,12 +1230,17 @@ impl AgentLoop {
                             &executable_tool_calls,
                             self.config.max_concurrency,
                             self.config.tool_timeout_secs,
+                            self.config.tool_policy.as_ref(),
                         )
                         .await
                         {
                             Ok(results) => results,
                             Err(err) => {
-                                return Err(self.report_error(&hook_session, "tool_execution", err))
+                                return Err(self.report_error(
+                                    &hook_session,
+                                    "tool_execution",
+                                    err,
+                                ));
                             }
                         }
                     };
@@ -1093,7 +1262,29 @@ impl AgentLoop {
                                 .expect("executed tool results should align with allowed calls"),
                         };
                         result = sanitize::sanitize_credentials(&result);
+                        // When find_tools returns results and core set filtering is active,
+                        // extract discovered tool names and add them to the active set.
+                        if self.config.core_tools.is_some()
+                            && tc.function.name == "find_tools"
+                            && !result.starts_with("Error:")
+                            && !result.starts_with("No tools")
+                        {
+                            for line in result.lines() {
+                                let trimmed = line.trim();
+                                // find_tools output format: "  **tool_name** — description"
+                                if let Some(rest) = trimmed.strip_prefix("**") {
+                                    if let Some(name_end) = rest.find("**") {
+                                        self.discover_tool(&rest[..name_end]);
+                                    }
+                                }
+                            }
+                        }
+
                         let success = !result.starts_with("Error:");
+                        if success && self.config.core_tools.is_some() {
+                            // Auto-discover tools called outside the core set.
+                            self.discover_tool(&tc.function.name);
+                        }
                         let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                         if !success {
                             let count = self
@@ -1319,7 +1510,7 @@ impl AgentLoop {
         self.hooks.on_turn_start(&hook_session, &user_message);
         on_event(StreamEvent::TurnStarted);
 
-        let tool_defs: Vec<ChatTool> = self
+        let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
             .await
@@ -1333,6 +1524,12 @@ impl AgentLoop {
         let mut total_output_tokens = 0u32;
 
         loop {
+            let tool_defs = if self.config.core_tools.is_some() {
+                self.filter_tool_defs(all_tool_defs.clone())
+            } else {
+                all_tool_defs.clone()
+            };
+
             if self.cancelled.load(Ordering::Relaxed) {
                 info!("agent loop cancelled by external signal (streaming)");
                 self.save_trajectory();
@@ -1419,6 +1616,16 @@ impl AgentLoop {
             request.response_format = self.config.response_format.clone();
             self.inject_reasoning_effort(&mut request);
 
+            // Adaptive routing: classify and override model if enabled.
+            let had_failure = self.tool_failure_counts.values().any(|&c| c > 0);
+            self.apply_routing(
+                &mut request,
+                &user_message,
+                tool_calls_made,
+                turns_used,
+                had_failure,
+            );
+
             self.hooks
                 .on_llm_request(&hook_session, self.active_client().model(), turns_used);
             let stream_result = self.complete_stream_with_failover(request.clone()).await;
@@ -1438,7 +1645,7 @@ impl AgentLoop {
                                     &hook_session,
                                     "stream_chunk",
                                     err.into(),
-                                ))
+                                ));
                             }
                         };
                         let update = collect_stream_update(chunk);
@@ -1543,6 +1750,7 @@ impl AgentLoop {
                                 &executable_tool_calls,
                                 self.config.max_concurrency,
                                 self.config.tool_timeout_secs,
+                                self.config.tool_policy.as_ref(),
                             )
                             .await
                             {
@@ -1552,7 +1760,7 @@ impl AgentLoop {
                                         &hook_session,
                                         "tool_execution",
                                         err,
-                                    ))
+                                    ));
                                 }
                             }
                         };
@@ -1575,6 +1783,22 @@ impl AgentLoop {
                                 ),
                             };
                             result = sanitize::sanitize_credentials(&result);
+                            // Extract discovered tool names from find_tools results
+                            // (only when core set filtering is active).
+                            if self.config.core_tools.is_some()
+                                && tc.function.name == "find_tools"
+                                && !result.starts_with("Error:")
+                                && !result.starts_with("No tools")
+                            {
+                                for line in result.lines() {
+                                    let trimmed = line.trim();
+                                    if let Some(rest) = trimmed.strip_prefix("**") {
+                                        if let Some(name_end) = rest.find("**") {
+                                            self.discover_tool(&rest[..name_end]);
+                                        }
+                                    }
+                                }
+                            }
                             let tool_success = !result.starts_with("Error:");
                             let result = self.run_lua_post_tool_call(&tc.function.name, &result);
                             on_event(StreamEvent::ToolCallEnd {
@@ -1591,6 +1815,10 @@ impl AgentLoop {
                                 *count += 1;
                             } else {
                                 self.tool_failure_counts.remove(&tc.function.name);
+                                // Auto-discover tools called outside core set.
+                                if self.config.core_tools.is_some() {
+                                    self.discover_tool(&tc.function.name);
+                                }
                             }
                             self.fire_shell_hooks(
                                 HookEvent::PostToolCall,
@@ -1679,7 +1907,7 @@ impl AgentLoop {
                                 &hook_session,
                                 "llm_request_fallback",
                                 err.into(),
-                            ))
+                            ));
                         }
                     };
 
@@ -1761,6 +1989,7 @@ impl AgentLoop {
                                     &executable_tool_calls,
                                     self.config.max_concurrency,
                                     self.config.tool_timeout_secs,
+                                    self.config.tool_policy.as_ref(),
                                 )
                                 .await
                                 {
@@ -1770,7 +1999,7 @@ impl AgentLoop {
                                             &hook_session,
                                             "tool_execution",
                                             err,
-                                        ))
+                                        ));
                                     }
                                 }
                             };
@@ -1792,6 +2021,20 @@ impl AgentLoop {
                                     ),
                                 };
                                 result = sanitize::sanitize_credentials(&result);
+                                if self.config.core_tools.is_some()
+                                    && tc.function.name == "find_tools"
+                                    && !result.starts_with("Error:")
+                                    && !result.starts_with("No tools")
+                                {
+                                    for line in result.lines() {
+                                        let trimmed = line.trim();
+                                        if let Some(rest) = trimmed.strip_prefix("**") {
+                                            if let Some(name_end) = rest.find("**") {
+                                                self.discover_tool(&rest[..name_end]);
+                                            }
+                                        }
+                                    }
+                                }
                                 let tool_success = !result.starts_with("Error:");
                                 let result =
                                     self.run_lua_post_tool_call(&tc.function.name, &result);
@@ -2627,10 +2870,18 @@ async fn execute_tool_calls_parallel(
     tool_calls: &[ToolCallEntry],
     max_concurrency: usize,
     timeout_secs: u64,
+    policy: Option<&crate::tool_policy::ToolPolicy>,
 ) -> Result<Vec<(String, bool)>, AgentError> {
     let timeout_duration = std::time::Duration::from_secs(timeout_secs);
 
     if tool_calls.len() == 1 {
+        // Check tool policy before execution.
+        if let Some(policy) = policy {
+            if let Some(denial) = check_tool_policy(policy, &tool_calls[0]) {
+                return Ok(vec![(denial, false)]);
+            }
+        }
+
         // Fast path: avoid semaphore overhead for single tool calls.
         // execute_single_tool converts all errors to soft "Error:" content,
         // so the Ok(r) branch always succeeds and timeouts are the only
@@ -2679,7 +2930,12 @@ async fn execute_tool_calls_parallel(
         .map(|tc| {
             let sem = Arc::clone(&semaphore);
             let tool_name = tc.function.name.clone();
+            // Pre-check tool policy so denied calls never reach execution.
+            let denial = policy.and_then(|p| check_tool_policy(p, tc));
             async move {
+                if let Some(denial_msg) = denial {
+                    return Ok((denial_msg, false));
+                }
                 let Ok(_permit) = sem.acquire().await else {
                     return Ok((
                         format!("Error: tool `{tool_name}` skipped — concurrency semaphore closed"),
@@ -2716,6 +2972,53 @@ async fn execute_tool_calls_parallel(
 
     // Collect results, short-circuiting on the first hard error.
     results.into_iter().collect()
+}
+
+/// Check a single tool call against the policy, returning a denial message
+/// if the call is blocked, or `None` if it is allowed.
+fn check_tool_policy(
+    policy: &crate::tool_policy::ToolPolicy,
+    tc: &ToolCallEntry,
+) -> Option<String> {
+    let parse_result = serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(
+        &tc.function.arguments,
+    );
+    let raw_map = match parse_result {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                tool = %tc.function.name,
+                error = %e,
+                "failed to parse tool arguments for policy check; denying call"
+            );
+            return Some(format!(
+                "Error: tool `{}` denied: could not parse arguments for policy evaluation",
+                tc.function.name
+            ));
+        }
+    };
+    let args: std::collections::BTreeMap<String, String> = raw_map
+        .into_iter()
+        .map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            (k, s)
+        })
+        .collect();
+    let decision = policy.evaluate(&tc.function.name, &args);
+    match decision {
+        crate::tool_policy::PolicyDecision::Deny(reason) => {
+            warn!(
+                tool = tc.function.name.as_str(),
+                reason = reason.as_str(),
+                "tool call blocked by policy"
+            );
+            Some(format!("Error: {reason}"))
+        }
+        crate::tool_policy::PolicyDecision::Allow => None,
+    }
 }
 
 /// Execute a single tool call against the provided runtime, returning the
@@ -2984,7 +3287,23 @@ mod tests {
         personality: Option<&str>,
     ) -> Arc<LuaRuntime> {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(dir.path().join("hooks.lua"), script).expect("lua hook file should write");
+        write_test_package_plugin_with_permissions(
+            dir.path(),
+            "hooks",
+            script,
+            &[
+                "PreTurn",
+                "PostTurn",
+                "PreToolCall",
+                "PostToolCall",
+                "OnMessage",
+                "OnError",
+                "OnComplete",
+                "OnPluginLoad",
+            ],
+            &[],
+        )
+        .expect("lua package plugin should write");
 
         let runtime = LuaRuntime::builder()
             .with_config(LuaRuntimeConfig {
@@ -3004,6 +3323,40 @@ mod tests {
             .build()
             .expect("lua runtime should build");
         Arc::new(runtime)
+    }
+
+    fn write_test_package_plugin_with_permissions(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        source: &str,
+        hooks: &[&str],
+        tools: &[&str],
+    ) -> std::io::Result<()> {
+        let package_dir = plugin_dir.join(name);
+        fs::create_dir_all(&package_dir)?;
+        fs::write(package_dir.join("init.lua"), source)?;
+
+        let hooks_list = hooks
+            .iter()
+            .map(|hook| format!("\"{hook}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_list = tools
+            .iter()
+            .map(|tool| format!("\"{tool}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+
+[permissions]
+hooks = [{hooks_list}]
+tools = [{tools_list}]
+"#
+        );
+        fs::write(package_dir.join("plugin.toml"), manifest)
     }
 
     fn start_mock_server_with_capture(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
@@ -3414,10 +3767,16 @@ mod tests {
             },
         ];
 
-        let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
-                .await
-                .expect("parallel execution should succeed");
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await
+        .expect("parallel execution should succeed");
 
         assert_eq!(results.len(), 2);
         assert!(
@@ -3442,10 +3801,16 @@ mod tests {
             },
         }];
 
-        let results =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
-                .await
-                .expect("single-item parallel should succeed");
+        let results = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await
+        .expect("single-item parallel should succeed");
 
         assert_eq!(results.len(), 1);
         assert!(results[0].0.contains("solo"));
@@ -3473,9 +3838,15 @@ mod tests {
             },
         ];
 
-        let result =
-            execute_tool_calls_parallel(&agent.tools, &agent.subagent_spawner, &tool_calls, 4, 120)
-                .await;
+        let result = execute_tool_calls_parallel(
+            &agent.tools,
+            &agent.subagent_spawner,
+            &tool_calls,
+            4,
+            120,
+            None,
+        )
+        .await;
 
         // ToolNotFound is now recoverable, so the parallel execution should succeed
         let results = result.expect("should recover from ToolNotFound");
@@ -4916,5 +5287,89 @@ end)
 
         // System prompt untouched
         assert_eq!(agent.messages()[0].role, "system");
+    }
+
+    // ── Core tool set filtering tests ──────────────────────────────────
+
+    fn make_chat_tool(name: &str) -> ChatTool {
+        ChatTool {
+            tool_type: "function".to_owned(),
+            function: genesis_provider::ChatToolFunction {
+                name: name.to_owned(),
+                description: format!("{name} tool"),
+                parameters: None,
+                strict: None,
+            },
+        }
+    }
+
+    #[test]
+    fn filter_tool_defs_returns_all_when_core_tools_is_none() {
+        let agent = test_agent();
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+        ];
+        let filtered = agent.filter_tool_defs(all.clone());
+        assert_eq!(
+            filtered.len(),
+            3,
+            "should return all tools when core_tools is None"
+        );
+    }
+
+    #[test]
+    fn filter_tool_defs_filters_to_core_set() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec!["shell_exec".to_owned(), "read_file".to_owned()]);
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+            make_chat_tool("memory_store"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
+        assert!(filtered.iter().any(|t| t.function.name == "read_file"));
+    }
+
+    #[test]
+    fn filter_tool_defs_includes_discovered_tools() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec!["shell_exec".to_owned()]);
+
+        // Discover a new tool.
+        agent.discover_tool("web_request");
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("web_request"),
+            make_chat_tool("memory_store"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
+        assert!(filtered.iter().any(|t| t.function.name == "web_request"));
+    }
+
+    #[test]
+    fn filter_tool_defs_empty_core_uses_defaults() {
+        let mut agent = test_agent();
+        agent.config.core_tools = Some(vec![]); // Empty = use DEFAULT_CORE_TOOLS
+
+        let all = vec![
+            make_chat_tool("shell_exec"),
+            make_chat_tool("read_file"),
+            make_chat_tool("web_request"),
+            make_chat_tool("find_tools"),
+        ];
+        let filtered = agent.filter_tool_defs(all);
+        // shell_exec, read_file, find_tools are in DEFAULT_CORE_TOOLS; web_request is not
+        assert_eq!(filtered.len(), 3);
+        assert!(!filtered.iter().any(|t| t.function.name == "web_request"));
     }
 }

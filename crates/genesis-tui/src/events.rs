@@ -72,10 +72,14 @@ pub enum AppEvent {
     SlashCommand(String),
     /// Model was changed via /model.
     ModelChanged(String),
+    /// Trigger async model list fetch for the model picker.
+    FetchModels,
+    /// Model list fetched — deliver to the picker overlay.
+    ModelsFetched(Result<Vec<genesis_provider::openrouter_models::OpenRouterModel>, String>),
 }
 
 /// Status bar states.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StatusState {
     Idle,
     Thinking,
@@ -100,4 +104,7 @@ pub enum Submission {
     },
     /// Interrupt the current turn (Ctrl+C).
     Interrupt,
+    /// Switch the active model (from model picker).
+    /// Format: "backend/model" (e.g. "anthropic/claude-sonnet-4-6").
+    ModelSwitch(String),
 }

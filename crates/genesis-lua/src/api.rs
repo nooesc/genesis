@@ -142,15 +142,38 @@ impl UserData for GenesisApi {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
             lua.create_function(move |_, (event_name, callback): (String, Function)| {
-                let event = HookEvent::from_name(&event_name).ok_or_else(|| {
+                let plugin_context = plugin_context.clone().ok_or_else(|| {
+                    mlua::Error::external(LuaRuntimeError::HookRegistrationUnavailable)
+                })?;
+                if !plugin_context.load_active() {
+                    return Err(mlua::Error::external(
+                        LuaRuntimeError::HookRegistrationUnavailable,
+                    ));
+                }
+                let requested_event = event_name.clone();
+                let event = HookEvent::from_name(&requested_event).ok_or_else(|| {
                     mlua::Error::external(LuaRuntimeError::UnsupportedHookEvent {
-                        event: event_name,
+                        event: requested_event,
                     })
                 })?;
+                if !plugin_context.permissions.trusted
+                    && !plugin_context
+                        .permissions
+                        .hooks
+                        .iter()
+                        .any(|hook| HookEvent::from_name(hook) == Some(event))
+                {
+                    return Err(mlua::Error::external(
+                        LuaRuntimeError::HookPermissionDenied {
+                            plugin_name: plugin_context.name.clone(),
+                            event: event_name.clone(),
+                        },
+                    ));
+                }
                 hooks
                     .lock()
                     .expect("hook registry mutex should not be poisoned")
-                    .register(event, callback, plugin_context.clone());
+                    .register(event, callback, Some(plugin_context));
                 Ok(())
             })
         });

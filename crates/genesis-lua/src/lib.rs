@@ -20,11 +20,16 @@ pub use tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRe
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use serde_json::json;
 
     use crate::{LuaRuntimeConfig, LuaSessionContext};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[derive(Default)]
     struct TestHostToolExecutor {
@@ -72,8 +77,9 @@ mod tests {
     #[test]
     fn runtime_verbose_logging_records_hook_invocation_and_result() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("hooks.lua"),
+        write_package_plugin(
+            dir.path(),
+            "hooks",
             r#"
 genesis.on("PreTurn", function(ctx)
     return "verbose:" .. ctx.user_message
@@ -110,8 +116,9 @@ end)
     #[test]
     fn runtime_runs_on_plugin_load_hooks() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("observer.lua"),
+        write_package_plugin(
+            dir.path(),
+            "observer",
             r#"
 genesis.on("OnPluginLoad", function(ctx)
     genesis.log("loaded:" .. ctx.plugin_name .. ":" .. ctx.plugin_kind)
@@ -125,12 +132,11 @@ end)
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
         let logs = runtime.logs();
-        assert_eq!(logs[0], "loaded:observer:single_file");
+        assert_eq!(logs[0], "loaded:observer:package");
         assert_eq!(logs[1], "worker ready");
         assert_eq!(logs[2], "loaded:worker:single_file");
         assert!(
-            logs.iter()
-                .any(|entry| entry == "loaded:default:bundled"),
+            logs.iter().any(|entry| entry == "loaded:default:bundled"),
             "bundled personalities should also emit plugin-load events: {logs:?}"
         );
     }
@@ -246,20 +252,67 @@ return {
         let debug_missing = runtime
             .eval_string("return debug == nil")
             .expect("debug check should evaluate");
-        let os_execute_missing = runtime
-            .eval_string("return os == nil or os.execute == nil")
-            .expect("os.execute check should evaluate");
+        let os_missing = runtime
+            .eval_string("return os == nil")
+            .expect("os check should evaluate");
 
         assert_eq!(io_missing, json!(true));
         assert_eq!(debug_missing, json!(true));
-        assert_eq!(os_execute_missing, json!(true));
+        assert_eq!(os_missing, json!(true));
+    }
+
+    #[test]
+    fn runtime_rejects_unpermitted_hook_registration() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("guarded");
+        fs::create_dir_all(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.on("PreTurn", function(ctx)
+    return "rewritten"
+end)
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "guarded"
+version = "0.1.0"
+
+[permissions]
+hooks = ["PostTurn"]
+"#,
+        )
+        .expect("manifest should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("pre turn hook should run");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+        );
+        assert!(
+            runtime
+                .plugin_errors()
+                .iter()
+                .any(|entry| entry.contains("not permitted to register hook `PreTurn`")),
+            "permission failure should be recorded: {:?}",
+            runtime.plugin_errors()
+        );
     }
 
     #[test]
     fn runtime_registers_and_runs_pre_turn_hook() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("hooks.lua"),
+        write_package_plugin(
+            dir.path(),
+            "hooks",
             r#"
 genesis.on("PreTurn", function(ctx)
     return "rewritten: " .. ctx.user_message
@@ -283,8 +336,9 @@ end)
     #[test]
     fn runtime_vetoes_pre_tool_call() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("hooks.lua"),
+        write_package_plugin(
+            dir.path(),
+            "hooks",
             r#"
 genesis.on("PreToolCall", function(ctx)
     return false, "blocked"
@@ -310,8 +364,9 @@ end)
     #[test]
     fn runtime_rewrites_post_tool_call_output() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("hooks.lua"),
+        write_package_plugin(
+            dir.path(),
+            "hooks",
             r#"
 genesis.on("PostToolCall", function(ctx)
     return ctx.output .. " [rewritten]"
@@ -333,10 +388,48 @@ end)
     }
 
     #[test]
+    fn runtime_preserves_keep_semantics_for_post_hooks() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("keep");
+        fs::create_dir_all(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.on("PostTurn", function(ctx)
+    return nil
+end)
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "keep"
+version = "0.1.0"
+
+[permissions]
+hooks = ["PostTurn"]
+"#,
+        )
+        .expect("manifest should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert_eq!(
+            runtime
+                .run_post_turn("hello")
+                .expect("post turn should run"),
+            crate::hooks::PostHookOutcome::Keep("hello".to_owned())
+        );
+    }
+
+    #[test]
     fn runtime_logs_hook_errors_and_keeps_original_value() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("hooks.lua"),
+        write_package_plugin(
+            dir.path(),
+            "hooks",
             r#"
 genesis.on("PreTurn", function(_)
     error("boom")
@@ -365,8 +458,9 @@ end)
     #[test]
     fn runtime_times_out_long_running_hooks() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("timeout.lua"),
+        write_package_plugin(
+            dir.path(),
+            "timeout",
             r#"
 genesis.on("PreTurn", function(_)
     while true do end
@@ -390,7 +484,10 @@ end)
             crate::hooks::PreHookOutcome::Allow("hello".to_owned())
         );
         assert!(
-            runtime.logs().iter().any(|entry| entry.contains("timed out")),
+            runtime
+                .logs()
+                .iter()
+                .any(|entry| entry.contains("timed out")),
             "hook timeout should be logged: {:?}",
             runtime.logs()
         );
@@ -399,8 +496,9 @@ end)
     #[test]
     fn runtime_auto_disables_plugin_after_repeated_hook_failures() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("broken.lua"),
+        write_package_plugin(
+            dir.path(),
+            "broken",
             r#"
 genesis.on("PreTurn", function(_)
     error("boom")
@@ -427,7 +525,10 @@ end)
 
         let logs = runtime.logs();
         let boom_count = logs.iter().filter(|entry| entry.contains("boom")).count();
-        assert_eq!(boom_count, 3, "plugin should stop running after disable: {logs:?}");
+        assert_eq!(
+            boom_count, 3,
+            "plugin should stop running after disable: {logs:?}"
+        );
         assert!(
             logs.iter()
                 .any(|entry| entry.contains("disabled for this session")),
@@ -674,10 +775,7 @@ genesis.register_personality({
             .build()
             .expect("runtime should build");
 
-        assert_eq!(
-            runtime.transform_personality_response("Ahoy"),
-            "Ahoy Arrr!"
-        );
+        assert_eq!(runtime.transform_personality_response("Ahoy"), "Ahoy Arrr!");
     }
 
     #[test]
@@ -756,8 +854,9 @@ error("boom")
     #[test]
     fn runtime_rejects_personality_registration_after_plugin_load() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("late_personality.lua"),
+        write_package_plugin(
+            dir.path(),
+            "late_personality",
             r#"
 local late_register = genesis.register_personality
 
@@ -888,8 +987,9 @@ error("boom")
     #[test]
     fn runtime_rejects_tool_registration_after_plugin_load() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(
-            dir.path().join("late.lua"),
+        write_package_plugin(
+            dir.path(),
+            "late",
             r#"
 local late_register = genesis.register_tool
 
@@ -1102,27 +1202,16 @@ genesis.register_tool({
     #[test]
     fn runtime_hook_can_call_permitted_host_tool() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        let package_dir = dir.path().join("rewriter");
-        fs::create_dir(&package_dir).expect("package dir should exist");
-        fs::write(
-            package_dir.join("plugin.toml"),
-            r#"
-[plugin]
-name = "rewriter"
-version = "0.1.0"
-
-[permissions]
-tools = ["echo"]
-"#,
-        )
-        .expect("manifest should write");
-        fs::write(
-            package_dir.join("init.lua"),
+        write_package_plugin_with_permissions(
+            dir.path(),
+            "rewriter",
             r#"
 genesis.on("PreTurn", function(ctx)
     return genesis.tools.echo({ message = "hook:" .. ctx.user_message })
 end)
 "#,
+            &["PreTurn"],
+            &["echo"],
         )
         .expect("plugin should write");
 
@@ -1151,10 +1240,16 @@ end)
     #[test]
     fn runtime_skips_plugins_disabled_in_config() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
-        fs::write(dir.path().join("enabled.lua"), "genesis.log('enabled loaded')")
-            .expect("enabled plugin should write");
-        fs::write(dir.path().join("disabled.lua"), "genesis.log('disabled loaded')")
-            .expect("disabled plugin should write");
+        fs::write(
+            dir.path().join("enabled.lua"),
+            "genesis.log('enabled loaded')",
+        )
+        .expect("enabled plugin should write");
+        fs::write(
+            dir.path().join("disabled.lua"),
+            "genesis.log('disabled loaded')",
+        )
+        .expect("disabled plugin should write");
 
         let runtime = test_runtime_with_disabled_plugins(
             dir.path(),
@@ -1343,6 +1438,95 @@ version = "0.1.0"
             "mutation error should be recorded: {:?}",
             runtime.plugin_errors()
         );
+    }
+
+    #[test]
+    fn runtime_legacy_timeout_env_only_overrides_hook_timeout() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("GENESIS_PLUGIN_TIMEOUT", "7");
+        std::env::remove_var("GENESIS_PLUGIN_HOOK_TIMEOUT_MS");
+        std::env::remove_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert_eq!(runtime.hook_timeout_ms(), 7);
+        assert_eq!(runtime.tool_timeout_ms(), 120_000);
+
+        std::env::remove_var("GENESIS_PLUGIN_TIMEOUT");
+    }
+
+    #[test]
+    fn runtime_tool_timeout_env_overrides_tool_timeout_only() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::remove_var("GENESIS_PLUGIN_TIMEOUT");
+        std::env::remove_var("GENESIS_PLUGIN_HOOK_TIMEOUT_MS");
+        std::env::set_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS", "11");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert_eq!(runtime.hook_timeout_ms(), 5_000);
+        assert_eq!(runtime.tool_timeout_ms(), 11);
+
+        std::env::remove_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS");
+    }
+
+    fn write_package_plugin(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        source: &str,
+    ) -> std::io::Result<()> {
+        write_package_plugin_with_permissions(
+            plugin_dir,
+            name,
+            source,
+            &[
+                "PreTurn",
+                "PostTurn",
+                "PreToolCall",
+                "PostToolCall",
+                "OnMessage",
+                "OnError",
+                "OnComplete",
+                "OnPluginLoad",
+            ],
+            &[],
+        )
+    }
+
+    fn write_package_plugin_with_permissions(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        source: &str,
+        hooks: &[&str],
+        tools: &[&str],
+    ) -> std::io::Result<()> {
+        let package_dir = plugin_dir.join(name);
+        fs::create_dir_all(&package_dir)?;
+        fs::write(package_dir.join("init.lua"), source)?;
+
+        let hooks_list = hooks
+            .iter()
+            .map(|hook| format!("\"{hook}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_list = tools
+            .iter()
+            .map(|tool| format!("\"{tool}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+
+[permissions]
+hooks = [{hooks_list}]
+tools = [{tools_list}]
+"#
+        );
+        fs::write(package_dir.join("plugin.toml"), manifest)
     }
 
     fn test_runtime(

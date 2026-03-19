@@ -5,10 +5,13 @@ use crate::frame_requester::FrameRequester;
 use crate::widgets::chat_widget::ChatWidget;
 use crate::widgets::clarification::{ClarificationAction, ClarificationWidget};
 use crate::widgets::command_popup::{CommandAction, CommandPopup};
+use crate::widgets::file_completion::{FileCompletion, FileCompletionAction};
 use crate::widgets::help_overlay::{HelpAction, HelpOverlay};
 use crate::widgets::input_widget::InputAction;
+use crate::widgets::model_picker::{ModelPicker, ModelPickerAction};
 use crate::widgets::status_bar::StatusBarWidget;
 use crate::widgets::transcript::{TranscriptAction, TranscriptOverlay};
+use crate::widgets::braille_canvas::Pattern;
 use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
@@ -28,6 +31,8 @@ pub enum ActiveOverlay {
     Transcript(TranscriptOverlay),
     /// Keybinding and command reference.
     Help(HelpOverlay),
+    /// Interactive model picker.
+    Models(ModelPicker),
 }
 
 /// Central application state for the TUI event loop.
@@ -67,6 +72,18 @@ pub struct App {
     pub context_window_size: usize,
     /// Last known viewport width (used for transcript overlay).
     pub viewport_width: u16,
+    /// Active tool approval overlay (shown when a tool needs user approval).
+    pub approval: Option<crate::widgets::approval_overlay::ApprovalOverlay>,
+    /// Channel to send approval responses back to the tool execution thread.
+    pub approval_response: Option<std::sync::mpsc::Sender<bool>>,
+    /// Queue of pending approval requests (processed one at a time).
+    pub approval_queue: std::collections::VecDeque<crate::approval::ApprovalRequest>,
+    /// Post-render visual effects (tachyonfx).
+    pub effects: crate::effects::GenesisEffects,
+    /// Lissajous pattern shown below messages when idle.
+    pub idle_pattern: Pattern,
+    /// @-file completion popup.
+    pub file_completion: FileCompletion,
 }
 
 impl App {
@@ -129,6 +146,17 @@ impl App {
                 duration,
             } => {
                 self.chat.tool_call_end(&call_id, success, duration);
+                if !success {
+                    // Flash a brief glitch effect over the message area to
+                    // signal the tool failure visually.
+                    let chat_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        width: self.viewport_width,
+                        height: self.viewport_height.saturating_sub(1),
+                    };
+                    self.effects.flash_error(chat_area);
+                }
             }
             AgentEvent::TurnComplete {
                 input_tokens,
@@ -141,6 +169,7 @@ impl App {
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
                 self.status_bar.turn_elapsed = None;
+                self.status_bar.record_turn_tokens(input_tokens, output_tokens);
 
                 // Update context usage percentage. Use the latest turn's
                 // input_tokens (not the cumulative sum) because each LLM call
@@ -190,6 +219,20 @@ impl App {
             }
             AppEvent::UpdateStatus(state) => {
                 self.status_bar.set_state(state);
+
+                // Trigger transition effects if the state actually changed.
+                if let Some((from, to)) = self.status_bar.last_state_change() {
+                    if from != to {
+                        // Compute status bar area from viewport dimensions.
+                        let status_area = ratatui::layout::Rect {
+                            x: 0,
+                            y: self.viewport_height.saturating_sub(1),
+                            width: self.viewport_width,
+                            height: 1,
+                        };
+                        self.effects.on_status_change(from, to, status_area);
+                    }
+                }
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
@@ -224,10 +267,31 @@ impl App {
                     self.overlay = Some(ActiveOverlay::Help(HelpOverlay::new()));
                     self.frame_requester.schedule_frame();
                 }
+                "/models" => {
+                    self.command_popup.hide();
+                    // Open model picker in loading state — models fetched async.
+                    self.overlay = Some(ActiveOverlay::Models(ModelPicker::new_loading()));
+                    self.frame_requester.schedule_frame();
+                    // Trigger async model fetch via AppEvent.
+                    let _ = self.app_tx.send(AppEvent::FetchModels);
+                }
                 _ => {}
             },
             AppEvent::ModelChanged(model) => {
                 self.status_bar.set_model(model);
+                self.frame_requester.schedule_frame();
+            }
+            AppEvent::FetchModels => {
+                // Handled in lib.rs event loop — spawn async fetch.
+            }
+            AppEvent::ModelsFetched(result) => {
+                // Deliver fetched models to the picker overlay.
+                if let Some(ActiveOverlay::Models(ref mut picker)) = self.overlay {
+                    match result {
+                        Ok(models) => picker.set_models(models),
+                        Err(err) => picker.set_error(err),
+                    }
+                }
                 self.frame_requester.schedule_frame();
             }
         }
@@ -237,6 +301,7 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         // On the welcome screen, any key dismisses it and transitions to chat.
         if matches!(self.screen, AppScreen::Welcome) {
+            self.effects.cancel_all();
             self.screen = AppScreen::Chat;
             self.clear_after_welcome = true;
             self.frame_requester.schedule_frame();
@@ -250,19 +315,52 @@ impl App {
             return;
         }
 
+        // When a tool approval is pending, route keys to it first.
+        if let Some(approval) = &mut self.approval {
+            use crate::widgets::approval_overlay::ApprovalAction;
+            let action = approval.handle_key(key);
+            match action {
+                ApprovalAction::Approve | ApprovalAction::Deny => {
+                    let approved = matches!(action, ApprovalAction::Approve);
+                    if let Some(tx) = self.approval_response.take() {
+                        let _ = tx.send(approved);
+                    }
+                    self.approval = None;
+                    // Process next queued approval request, if any.
+                    self.pop_next_approval();
+                }
+                ApprovalAction::None => {}
+            }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
             let visible_rows = self.viewport_height.saturating_sub(2).max(1);
-            let should_close = match overlay {
+            let (should_close, model_selected) = match overlay {
                 ActiveOverlay::Transcript(t) => {
-                    matches!(t.handle_key(key, visible_rows), TranscriptAction::Close)
+                    (matches!(t.handle_key(key, visible_rows), TranscriptAction::Close), None)
                 }
                 ActiveOverlay::Help(h) => {
-                    matches!(h.handle_key(key, visible_rows), HelpAction::Close)
+                    (matches!(h.handle_key(key, visible_rows), HelpAction::Close), None)
+                }
+                ActiveOverlay::Models(m) => {
+                    match m.handle_key(key, visible_rows) {
+                        ModelPickerAction::Close => (true, None),
+                        ModelPickerAction::Select(id) => (true, Some(id)),
+                        ModelPickerAction::None => (false, None),
+                    }
                 }
             };
             if should_close {
                 self.overlay = None;
+            }
+            if let Some(model_id) = model_selected {
+                // Update status bar display.
+                let _ = self.app_tx.send(AppEvent::ModelChanged(model_id.clone()));
+                // Switch the actual execution service model via submission channel.
+                let _ = self.submission_tx.send(Submission::ModelSwitch(model_id));
             }
             self.frame_requester.schedule_frame();
             return;
@@ -294,6 +392,17 @@ impl App {
                 width,
                 visible_rows,
             )));
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        // Ctrl+P — open command palette (accessible anytime).
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if !self.command_popup.is_visible() {
+                self.command_popup.show();
+            } else {
+                self.command_popup.hide();
+            }
             self.frame_requester.schedule_frame();
             return;
         }
@@ -336,6 +445,59 @@ impl App {
             return;
         }
 
+        // When the @-file completion popup is visible, route keys to it.
+        if self.file_completion.is_visible() {
+            let is_text_key = matches!(key.code, KeyCode::Char(_))
+                && (key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT);
+            if is_text_key || matches!(key.code, KeyCode::Backspace) {
+                self.chat.input.handle_key(key);
+            }
+
+            match self.file_completion.handle_key(key) {
+                FileCompletionAction::Select(path) => {
+                    // Replace @query with the selected path, preserving
+                    // any text before and after the @-query token.
+                    let text = self.chat.input.text().to_owned();
+                    if let Some(at_pos) = text.rfind('@') {
+                        // Find end of the @-query: next space or end of text.
+                        let query_end = text[at_pos + 1..]
+                            .find(' ')
+                            .map(|p| at_pos + 1 + p)
+                            .unwrap_or(text.len());
+                        let before = &text[..at_pos];
+                        let after = &text[query_end..];
+                        self.chat.input.clear();
+                        let new_text = format!("{before}{path} {}", after.trim_start());
+                        for c in new_text.trim_end().chars() {
+                            self.chat.input.handle_key(KeyEvent::new(
+                                KeyCode::Char(c),
+                                KeyModifiers::NONE,
+                            ));
+                        }
+                        // Add trailing space.
+                        self.chat.input.handle_key(KeyEvent::new(
+                            KeyCode::Char(' '),
+                            KeyModifiers::NONE,
+                        ));
+                    }
+                }
+                FileCompletionAction::Dismiss => {}
+                FileCompletionAction::None => {}
+            }
+
+            // Update file completion query from input.
+            let input_text = self.chat.input.text().to_owned();
+            if let Some(at_pos) = input_text.rfind('@') {
+                let query = &input_text[at_pos + 1..];
+                self.file_completion.update_query(query);
+            } else {
+                self.file_completion.hide();
+            }
+
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -363,6 +525,14 @@ impl App {
                 } else if self.command_popup.is_visible() {
                     self.command_popup.hide();
                 }
+
+                // Check for @ at the end of input to trigger file completion.
+                // Only triggers when @ was just typed (last char), not when the
+                // buffer just happens to contain @ from earlier.
+                if input_text.ends_with('@') && !self.file_completion.is_visible() {
+                    self.file_completion.show();
+                }
+
                 match action {
                     InputAction::Submit(text) => self.submit_text(text),
                     InputAction::Exit => self.should_exit = true,
@@ -376,6 +546,19 @@ impl App {
             }
         }
         self.frame_requester.schedule_frame();
+    }
+
+    /// Pop the next queued approval request and show it, if any.
+    fn pop_next_approval(&mut self) {
+        if let Some(req) = self.approval_queue.pop_front() {
+            self.approval = Some(
+                crate::widgets::approval_overlay::ApprovalOverlay::new(
+                    req.tool_name,
+                    &req.arguments,
+                ),
+            );
+            self.approval_response = Some(req.response_tx);
+        }
     }
 
     /// Submit a user message: record it in the chat widget and send to agent.
@@ -439,6 +622,17 @@ mod tests {
             streaming_chars: 0,
             context_window_size: 128_000,
             viewport_width: 80,
+            approval: None,
+            approval_response: None,
+            approval_queue: std::collections::VecDeque::new(),
+            effects: crate::effects::GenesisEffects::new(false, false, Default::default()),
+            idle_pattern: Pattern::Lissajous {
+                t: 0.0,
+                a: 3.0,
+                b: 2.0,
+                delta: std::f64::consts::FRAC_PI_2,
+            },
+            file_completion: FileCompletion::new(),
         };
         (app, submission_rx, app_rx)
     }

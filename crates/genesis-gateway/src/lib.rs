@@ -370,6 +370,25 @@ pub(crate) struct HealthResponse {
     pub active_schedules: usize,
     pub total_sessions: usize,
     pub total_tools: usize,
+    /// Configured providers with their circuit breaker settings.
+    /// Always includes the primary provider; fallback providers follow in order.
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// Provider configuration info for the health endpoint.
+#[derive(Debug, Serialize)]
+pub(crate) struct ProviderInfo {
+    pub backend: String,
+    pub model: String,
+    pub role: String,
+    pub circuit_breaker: Option<CircuitBreakerInfo>,
+}
+
+/// Circuit breaker configuration info for health display.
+#[derive(Debug, Serialize)]
+pub(crate) struct CircuitBreakerInfo {
+    pub failure_threshold: u32,
+    pub cooldown_secs: u64,
 }
 
 /// JSON metrics response for the dashboard.
@@ -831,6 +850,30 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         None => 0,
     };
     let builtin_tools = genesis_core::default_tool_count();
+    // Build provider status list for health reporting.
+    let mut providers = Vec::new();
+    let primary = &state.loaded.config.provider;
+    providers.push(ProviderInfo {
+        backend: primary.backend.clone(),
+        model: primary.model.clone(),
+        role: "primary".to_owned(),
+        circuit_breaker: primary.circuit_breaker.as_ref().map(|cb| CircuitBreakerInfo {
+            failure_threshold: cb.failure_threshold,
+            cooldown_secs: cb.cooldown_secs,
+        }),
+    });
+    for fp in &state.loaded.config.fallback_providers {
+        providers.push(ProviderInfo {
+            backend: fp.backend.clone(),
+            model: fp.model.clone(),
+            role: "fallback".to_owned(),
+            circuit_breaker: fp.circuit_breaker.as_ref().map(|cb| CircuitBreakerInfo {
+                failure_threshold: cb.failure_threshold,
+                cooldown_secs: cb.cooldown_secs,
+            }),
+        });
+    }
+
     Json(HealthResponse {
         status: "ok".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -843,6 +886,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         active_schedules,
         total_sessions,
         total_tools: builtin_tools + mcp_tools,
+        providers,
     })
 }
 
@@ -3812,6 +3856,7 @@ mod tests {
             active_schedules: 0,
             total_sessions: 5,
             total_tools: 61,
+            providers: vec![],
         };
         let json = serde_json::to_string(&resp).expect("should serialize");
         assert!(json.contains("\"status\":\"ok\""));
@@ -4342,6 +4387,7 @@ mod tests {
                 api_key_env: None,
                 extra_body: None,
                 tool_call_parser: None,
+                circuit_breaker: None,
             },
             tool_provider: None,
             fallback_providers: Vec::new(),
@@ -4365,6 +4411,9 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                core_tools: None,
+                batch: None,
+                tool_policy_path: None,
             },
             gateway: None,
             plugins: genesis_config::PluginsConfig::default(),
@@ -4373,6 +4422,8 @@ mod tests {
             embedding: None,
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
+            telemetry: None,
+            routing: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,
@@ -4454,6 +4505,7 @@ mod tests {
                 api_key_env: None,
                 extra_body: None,
                 tool_call_parser: None,
+                circuit_breaker: None,
             },
             tool_provider: None,
             fallback_providers: Vec::new(),
@@ -4477,6 +4529,9 @@ mod tests {
                 cache: None,
                 tool_filter: None,
                 guardrails: None,
+                core_tools: None,
+                batch: None,
+                tool_policy_path: None,
             },
             gateway: None,
             plugins: genesis_config::PluginsConfig::default(),
@@ -4485,6 +4540,8 @@ mod tests {
             embedding: None,
             display: genesis_config::DisplayConfig::default(),
             tui: genesis_config::TuiConfig::default(),
+            telemetry: None,
+            routing: None,
         };
         let loaded = genesis_config::LoadedConfig {
             config,

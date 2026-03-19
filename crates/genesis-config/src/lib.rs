@@ -57,6 +57,12 @@ pub struct GenesisConfig {
     /// TUI (terminal user interface) settings.
     #[serde(default)]
     pub tui: TuiConfig,
+    /// OpenTelemetry telemetry export configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryConfig>,
+    /// Adaptive model routing configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingConfig>,
 }
 
 /// Display and UI settings for the CLI.
@@ -82,6 +88,45 @@ pub enum ToolDisplayMode {
     Verbose,
 }
 
+/// Granular toggles for individual visual effects.
+/// When `TuiConfig::animations` is false, all effects are suppressed regardless
+/// of these settings. These toggles allow fine-grained control for accessibility
+/// (e.g. respecting REDUCE_MOTION at the effect level).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectsConfig {
+    /// Show the boot sequence animation on startup.
+    #[serde(default = "default_true")]
+    pub boot_sequence: bool,
+    /// Enable transition animations between UI states.
+    #[serde(default = "default_true")]
+    pub transitions: bool,
+    /// Enable pulsing animation on status indicators.
+    #[serde(default = "default_true")]
+    pub status_pulse: bool,
+    /// Enable idle glow effect on the input border.
+    #[serde(default = "default_true")]
+    pub idle_glow: bool,
+    /// Enable breathing (fade in/out) animation while idle.
+    #[serde(default = "default_true")]
+    pub idle_breathing: bool,
+    /// Enable the braille-dot particle canvas.
+    #[serde(default = "default_true")]
+    pub braille_canvas: bool,
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self {
+            boot_sequence: true,
+            transitions: true,
+            status_pulse: true,
+            idle_glow: true,
+            idle_breathing: true,
+            braille_canvas: true,
+        }
+    }
+}
+
 /// TUI (terminal user interface) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TuiConfig {
@@ -100,6 +145,9 @@ pub struct TuiConfig {
     /// Display settings.
     #[serde(default)]
     pub display: TuiDisplayConfig,
+    /// Granular per-effect toggles (all default to true).
+    #[serde(default)]
+    pub effects: EffectsConfig,
 }
 
 impl Default for TuiConfig {
@@ -110,6 +158,7 @@ impl Default for TuiConfig {
             alt_screen: AltScreenMode::default(),
             welcome_screen: true,
             display: TuiDisplayConfig::default(),
+            effects: EffectsConfig::default(),
         }
     }
 }
@@ -193,6 +242,37 @@ pub struct ProviderConfig {
     /// when not set. Examples: "hermes", "llama", "mistral", "deepseek_v3".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_parser: Option<String>,
+    /// Circuit breaker configuration for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+}
+
+/// Circuit breaker configuration for a provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CircuitBreakerConfig {
+    /// Number of consecutive failures before opening the circuit (default: 5).
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Seconds to wait in Open state before probing (default: 30).
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+fn default_failure_threshold() -> u32 {
+    5
+}
+
+fn default_cooldown_secs() -> u64 {
+    30
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: default_failure_threshold(),
+            cooldown_secs: default_cooldown_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,6 +332,58 @@ pub struct RuntimeConfig {
     /// against the specified rules before processing / returning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardrails: Option<GuardrailsConfig>,
+    /// Core tool set sent to the LLM per request. When set, only these tools
+    /// (plus any discovered via `find_tools`) are included in the request.
+    /// Other tools remain available and can be discovered at runtime.
+    /// Reduces input tokens by 85-96% for large tool registries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_tools: Option<Vec<String>>,
+    /// Batch API configuration. When enabled, eval/batch commands route
+    /// through OpenAI's Batch API for a 50% cost discount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchApiConfig>,
+    /// Path to a JSON tool policy file for permission scoping.
+    /// When set, tool calls are checked against allow/deny rules before execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy_path: Option<String>,
+}
+
+/// Batch API routing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchApiConfig {
+    /// When to use the Batch API. Default: Auto.
+    #[serde(default)]
+    pub mode: BatchApiMode,
+    /// Maximum seconds to wait for batch completion before falling back
+    /// to the standard API. Default: 3600 (1 hour).
+    #[serde(default = "default_batch_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// When to route requests through the OpenAI Batch API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchApiMode {
+    /// Use Batch API for eval/batch commands, standard API for chat.
+    #[default]
+    Auto,
+    /// Always use the Batch API (even for interactive commands).
+    Always,
+    /// Never use the Batch API.
+    Never,
+}
+
+fn default_batch_timeout() -> u64 {
+    3600
+}
+
+impl Default for BatchApiConfig {
+    fn default() -> Self {
+        Self {
+            mode: BatchApiMode::default(),
+            timeout_secs: default_batch_timeout(),
+        }
+    }
 }
 
 /// Lua plugin runtime configuration.
@@ -603,6 +735,80 @@ fn default_plugin_auto_disable_after() -> u32 {
     3
 }
 
+/// OpenTelemetry telemetry export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    /// Whether telemetry export is enabled (default: true when section present).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// OTLP endpoint for trace export (default: http://localhost:4317).
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    /// Service name reported in traces (default: "genesis").
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_owned()
+}
+
+fn default_service_name() -> String {
+    "genesis".to_owned()
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            otlp_endpoint: default_otlp_endpoint(),
+            service_name: default_service_name(),
+        }
+    }
+}
+
+/// Adaptive model routing configuration.
+///
+/// Routes tasks to different model tiers based on complexity analysis.
+/// When disabled (the default), the primary provider is always used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutingConfig {
+    /// Whether adaptive routing is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Model for simple/cheap tasks (short messages, basic Q&A).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap_model: Option<String>,
+    /// Model for moderate tasks (code editing, tool use).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid_model: Option<String>,
+    /// Model for complex tasks (multi-step reasoning, architecture).
+    /// Falls back to primary provider model if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_model: Option<String>,
+    /// Default tier when classification is ambiguous.
+    #[serde(default = "default_routing_tier")]
+    pub default_tier: String,
+}
+
+fn default_routing_tier() -> String {
+    "mid".to_owned()
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cheap_model: None,
+            mid_model: None,
+            top_model: None,
+            default_tier: default_routing_tier(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -649,6 +855,10 @@ struct FileConfig {
     display: Option<DisplayConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tui: Option<TuiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    telemetry: Option<TelemetryConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing: Option<RoutingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -665,6 +875,8 @@ struct FileProviderConfig {
     extra_body: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_parser: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    circuit_breaker: Option<CircuitBreakerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -705,6 +917,12 @@ struct FileRuntimeConfig {
     tool_filter: Option<ToolFilterConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     guardrails: Option<GuardrailsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    core_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch: Option<BatchApiConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_policy_path: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -765,6 +983,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             api_key_env: Some("OPENAI_API_KEY".to_owned()),
             extra_body: None,
             tool_call_parser: None,
+            circuit_breaker: None,
         },
         tool_provider: None,
         fallback_providers: Vec::new(),
@@ -788,6 +1007,9 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             cache: None,
             tool_filter: None,
             guardrails: None,
+            core_tools: None,
+            batch: None,
+            tool_policy_path: None,
         },
         plugins: PluginsConfig::default(),
         gateway: None,
@@ -796,6 +1018,8 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         embedding: None,
         display: DisplayConfig::default(),
         tui: TuiConfig::default(),
+        telemetry: None,
+        routing: None,
     })
 }
 
@@ -862,6 +1086,7 @@ pub fn load_from_map(
             .or_else(|| prov.and_then(|p| p.api_key_env.clone())),
         extra_body: prov.and_then(|p| p.extra_body.clone()),
         tool_call_parser: prov.and_then(|p| p.tool_call_parser.clone()),
+        circuit_breaker: prov.and_then(|p| p.circuit_breaker.clone()),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -888,6 +1113,7 @@ pub fn load_from_map(
             .or_else(|| provider.api_key_env.clone()),
         extra_body: tp.extra_body.clone(),
         tool_call_parser: tp.tool_call_parser.clone(),
+        circuit_breaker: tp.circuit_breaker.clone(),
     });
 
     // Fallback providers — each inherits primary provider defaults when partially specified.
@@ -908,6 +1134,10 @@ pub fn load_from_map(
                 .or_else(|| provider.api_key_env.clone()),
             extra_body: fp.extra_body.clone(),
             tool_call_parser: fp.tool_call_parser.clone(),
+            circuit_breaker: fp
+                .circuit_breaker
+                .clone()
+                .or_else(|| provider.circuit_breaker.clone()),
         })
         .collect::<Vec<_>>();
 
@@ -942,6 +1172,9 @@ pub fn load_from_map(
         cache: rt.and_then(|r| r.cache.clone()),
         tool_filter: rt.and_then(|r| r.tool_filter.clone()),
         guardrails: rt.and_then(|r| r.guardrails.clone()),
+        core_tools: rt.and_then(|r| r.core_tools.clone()),
+        batch: rt.and_then(|r| r.batch.clone()),
+        tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -966,6 +1199,8 @@ pub fn load_from_map(
             embedding: file_config.embedding,
             display: file_config.display.unwrap_or_default(),
             tui: file_config.tui.unwrap_or_default(),
+            telemetry: file_config.telemetry,
+            routing: file_config.routing,
         },
         paths: AppPaths {
             config_path: paths.config_path,
@@ -1935,6 +2170,17 @@ provider:
     }
 
     #[test]
+    fn effects_config_defaults_all_true() {
+        let config: super::EffectsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(config.boot_sequence);
+        assert!(config.transitions);
+        assert!(config.status_pulse);
+        assert!(config.idle_glow);
+        assert!(config.idle_breathing);
+        assert!(config.braille_canvas);
+    }
+
+    #[test]
     fn tui_config_deserializes_from_toml() {
         let toml = r#"
 [tui]
@@ -2004,5 +2250,34 @@ tool_mode = "verbose"
             let deserialized: AltScreenMode = serde_json::from_str(&serialized).unwrap();
             assert_eq!(deserialized, variant);
         }
+    }
+
+    #[test]
+    fn routing_config_defaults() {
+        let cfg = super::RoutingConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.cheap_model.is_none());
+        assert!(cfg.mid_model.is_none());
+        assert!(cfg.top_model.is_none());
+        assert_eq!(cfg.default_tier, "mid");
+    }
+
+    #[test]
+    fn routing_config_from_yaml() {
+        let yaml = r#"
+routing:
+  enabled: true
+  cheap_model: "haiku-4.5"
+  mid_model: "sonnet-4.6"
+  top_model: "opus-4.6"
+  default_tier: "cheap"
+"#;
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let routing: super::RoutingConfig =
+            serde_yaml::from_value(val["routing"].clone()).unwrap();
+        assert!(routing.enabled);
+        assert_eq!(routing.cheap_model.as_deref(), Some("haiku-4.5"));
+        assert_eq!(routing.top_model.as_deref(), Some("opus-4.6"));
+        assert_eq!(routing.default_tier, "cheap");
     }
 }

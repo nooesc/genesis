@@ -13,9 +13,11 @@ import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as SkillsRouteImport } from './routes/skills'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as SchedulesRouteImport } from './routes/schedules'
+import { Route as MonitorRouteImport } from './routes/monitor'
 import { Route as MemoriesRouteImport } from './routes/memories'
 import { Route as AuditRouteImport } from './routes/audit'
 import { Route as AnalyticsRouteImport } from './routes/analytics'
+import { Route as AgentsRouteImport } from './routes/agents'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SessionsIdRouteImport } from './routes/sessions/$id'
@@ -24,37 +26,47 @@ const ToolsRoute = ToolsRouteImport.update({
   id: '/tools',
   path: '/tools',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/tools.lazy').then((d) => d.Route))
 const SkillsRoute = SkillsRouteImport.update({
   id: '/skills',
   path: '/skills',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/skills.lazy').then((d) => d.Route))
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/settings.lazy').then((d) => d.Route))
 const SchedulesRoute = SchedulesRouteImport.update({
   id: '/schedules',
   path: '/schedules',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/schedules.lazy').then((d) => d.Route))
+const MonitorRoute = MonitorRouteImport.update({
+  id: '/monitor',
+  path: '/monitor',
+  getParentRoute: () => rootRouteImport,
+} as any).lazy(() => import('./routes/monitor.lazy').then((d) => d.Route))
 const MemoriesRoute = MemoriesRouteImport.update({
   id: '/memories',
   path: '/memories',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/memories.lazy').then((d) => d.Route))
 const AuditRoute = AuditRouteImport.update({
   id: '/audit',
   path: '/audit',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/audit.lazy').then((d) => d.Route))
 const AnalyticsRoute = AnalyticsRouteImport.update({
   id: '/analytics',
   path: '/analytics',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/analytics.lazy').then((d) => d.Route))
+const AgentsRoute = AgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
+  getParentRoute: () => rootRouteImport,
+} as any).lazy(() => import('./routes/agents.lazy').then((d) => d.Route))
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -64,18 +76,22 @@ const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() =>
+  import('./routes/sessions/index.lazy').then((d) => d.Route),
+)
 const SessionsIdRoute = SessionsIdRouteImport.update({
   id: '/sessions/$id',
   path: '/sessions/$id',
   getParentRoute: () => rootRouteImport,
-} as any)
+} as any).lazy(() => import('./routes/sessions/$id.lazy').then((d) => d.Route))
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/agents': typeof AgentsRoute
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -85,9 +101,11 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/agents': typeof AgentsRoute
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -98,9 +116,11 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/agents': typeof AgentsRoute
   '/analytics': typeof AnalyticsRoute
   '/audit': typeof AuditRoute
   '/memories': typeof MemoriesRoute
+  '/monitor': typeof MonitorRoute
   '/schedules': typeof SchedulesRoute
   '/settings': typeof SettingsRoute
   '/skills': typeof SkillsRoute
@@ -112,9 +132,11 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/agents'
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -124,9 +146,11 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/agents'
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -136,9 +160,11 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/agents'
     | '/analytics'
     | '/audit'
     | '/memories'
+    | '/monitor'
     | '/schedules'
     | '/settings'
     | '/skills'
@@ -149,9 +175,11 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AgentsRoute: typeof AgentsRoute
   AnalyticsRoute: typeof AnalyticsRoute
   AuditRoute: typeof AuditRoute
   MemoriesRoute: typeof MemoriesRoute
+  MonitorRoute: typeof MonitorRoute
   SchedulesRoute: typeof SchedulesRoute
   SettingsRoute: typeof SettingsRoute
   SkillsRoute: typeof SkillsRoute
@@ -190,6 +218,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SchedulesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitor': {
+      id: '/monitor'
+      path: '/monitor'
+      fullPath: '/monitor'
+      preLoaderRoute: typeof MonitorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/memories': {
       id: '/memories'
       path: '/memories'
@@ -209,6 +244,13 @@ declare module '@tanstack/react-router' {
       path: '/analytics'
       fullPath: '/analytics'
       preLoaderRoute: typeof AnalyticsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/agents': {
+      id: '/agents'
+      path: '/agents'
+      fullPath: '/agents'
+      preLoaderRoute: typeof AgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -237,9 +279,11 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AgentsRoute: AgentsRoute,
   AnalyticsRoute: AnalyticsRoute,
   AuditRoute: AuditRoute,
   MemoriesRoute: MemoriesRoute,
+  MonitorRoute: MonitorRoute,
   SchedulesRoute: SchedulesRoute,
   SettingsRoute: SettingsRoute,
   SkillsRoute: SkillsRoute,

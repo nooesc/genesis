@@ -12,11 +12,11 @@ use crate::{
     api::{install_genesis_api, PluginContext},
     bundled::BUNDLED_PERSONALITIES,
     discovery::{discover_plugins_best_effort, PluginKind},
-    manifest::PluginManifest,
     hooks::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
     },
+    manifest::PluginManifest,
     personality::{LuaPersonalityEntry, LuaPersonalityRegistry, LuaRegisteredPersonality},
     tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
@@ -132,6 +132,10 @@ pub enum LuaRuntimeError {
     DuplicatePluginName { name: String },
     #[error("unsupported hook event `{event}`")]
     UnsupportedHookEvent { event: String },
+    #[error("lua hook registration is only available during plugin load")]
+    HookRegistrationUnavailable,
+    #[error("plugin `{plugin_name}` is not permitted to register hook `{event}`")]
+    HookPermissionDenied { plugin_name: String, event: String },
     #[error("duplicate lua tool name `{name}`")]
     DuplicateLuaToolName { name: String },
     #[error("invalid lua tool definition from plugin `{plugin_name}`: {reason}")]
@@ -218,10 +222,21 @@ fn config_bool(values: &BTreeMap<String, String>, key: &str, default: bool) -> b
         .unwrap_or(default)
 }
 
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
 fn env_bool(name: &str, default: bool) -> bool {
     std::env::var(name)
         .ok()
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 
@@ -229,29 +244,26 @@ fn strip_unsafe_globals(lua: &Lua) -> Result<(), LuaRuntimeError> {
     let globals = lua.globals();
     globals.set("io", Value::Nil)?;
     globals.set("debug", Value::Nil)?;
-    if let Ok(os) = globals.get::<Table>("os") {
-        os.set("execute", Value::Nil)?;
-    }
+    globals.set("os", Value::Nil)?;
     Ok(())
 }
 
 impl LuaRuntime {
     fn new(config: LuaRuntimeConfig) -> Result<Self, LuaRuntimeError> {
         let lua = Lua::new();
-        let override_timeout_ms = std::env::var("GENESIS_PLUGIN_TIMEOUT")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok());
         let hook_timeout = Duration::from_millis(
-            override_timeout_ms.unwrap_or_else(|| {
-                config_u64(
-                    &config.config_values,
-                    "plugin_hook_timeout_ms",
-                    DEFAULT_HOOK_TIMEOUT_MS,
-                )
-            }),
+            env_u64("GENESIS_PLUGIN_HOOK_TIMEOUT_MS")
+                .or_else(|| env_u64("GENESIS_PLUGIN_TIMEOUT"))
+                .unwrap_or_else(|| {
+                    config_u64(
+                        &config.config_values,
+                        "plugin_hook_timeout_ms",
+                        DEFAULT_HOOK_TIMEOUT_MS,
+                    )
+                }),
         );
         let tool_timeout = Duration::from_millis(
-            override_timeout_ms.unwrap_or_else(|| {
+            env_u64("GENESIS_PLUGIN_TOOL_TIMEOUT_MS").unwrap_or_else(|| {
                 config_u64(
                     &config.config_values,
                     "plugin_tool_timeout_ms",
@@ -499,7 +511,8 @@ impl LuaRuntime {
         let plugin_name = plugin_context.name.clone();
         let _active_guard =
             ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
-        let _guard = self.begin_plugin_execution(&plugin_name, format!("tool `{name}`"), self.tool_timeout);
+        let _guard =
+            self.begin_plugin_execution(&plugin_name, format!("tool `{name}`"), self.tool_timeout);
         let result = self
             .tool_registry
             .lock()
@@ -799,9 +812,9 @@ impl LuaRuntime {
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
-            let _execution_guard = plugin_name
-                .as_deref()
-                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            let _execution_guard = plugin_name.as_deref().map(|plugin| {
+                self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout)
+            });
             if let Some(plugin_name) = plugin_name.as_deref() {
                 self.push_verbose_hook_log(event, plugin_name, "invoke");
             }
@@ -827,7 +840,7 @@ impl LuaRuntime {
                                 &format!("veto {:?}", reason),
                             );
                         }
-                        return Ok(PreHookOutcome::Veto { reason })
+                        return Ok(PreHookOutcome::Veto { reason });
                     }
                     Err(err) => {
                         self.push_hook_error(event, err.to_string());
@@ -853,6 +866,7 @@ impl LuaRuntime {
         context: Table,
         mut current: String,
     ) -> Result<PostHookOutcome<String>, LuaRuntimeError> {
+        let mut rewritten = false;
         let callbacks = self
             .hook_registry
             .lock()
@@ -874,9 +888,9 @@ impl LuaRuntime {
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
-            let _execution_guard = plugin_name
-                .as_deref()
-                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            let _execution_guard = plugin_name.as_deref().map(|plugin| {
+                self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout)
+            });
             if let Some(plugin_name) = plugin_name.as_deref() {
                 self.push_verbose_hook_log(event, plugin_name, "invoke");
             }
@@ -902,6 +916,7 @@ impl LuaRuntime {
                                 &format!("rewrite {next:?}"),
                             );
                         }
+                        rewritten = true;
                         current = next;
                     }
                     Err(err) => {
@@ -919,7 +934,11 @@ impl LuaRuntime {
                 }
             }
         }
-        Ok(PostHookOutcome::Rewrite(current))
+        Ok(if rewritten {
+            PostHookOutcome::Rewrite(current)
+        } else {
+            PostHookOutcome::Keep(current)
+        })
     }
 
     fn run_observe_hook(&self, event: HookEvent, context: Table) -> Result<(), LuaRuntimeError> {
@@ -944,9 +963,9 @@ impl LuaRuntime {
                 Arc::clone(&self.active_plugin),
                 callback.plugin_context.clone(),
             );
-            let _execution_guard = plugin_name
-                .as_deref()
-                .map(|plugin| self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout));
+            let _execution_guard = plugin_name.as_deref().map(|plugin| {
+                self.begin_plugin_execution(plugin, format!("hook `{event:?}`"), self.hook_timeout)
+            });
             if let Some(plugin_name) = plugin_name.as_deref() {
                 self.push_verbose_hook_log(event, plugin_name, "invoke");
             }
@@ -985,9 +1004,7 @@ impl LuaRuntime {
             .logs
             .lock()
             .expect("log sink mutex should not be poisoned");
-        logs.push(format!(
-            "[hook::{event:?}::{plugin_name}] {message}"
-        ));
+        logs.push(format!("[hook::{event:?}::{plugin_name}] {message}"));
     }
 
     fn resolve_personality_prompt(&self, entry: LuaPersonalityEntry) -> Option<String> {
@@ -1224,6 +1241,17 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
+impl LuaRuntime {
+    pub(crate) fn hook_timeout_ms(&self) -> u64 {
+        self.hook_timeout.as_millis() as u64
+    }
+
+    pub(crate) fn tool_timeout_ms(&self) -> u64 {
+        self.tool_timeout.as_millis() as u64
+    }
+}
+
 struct ActivePluginGuard {
     stack: Arc<Mutex<Vec<PluginContext>>>,
     pushed: bool,
@@ -1259,7 +1287,7 @@ impl Drop for ActivePluginGuard {
             self.stack
                 .lock()
                 .expect("active plugin mutex should not be poisoned")
-            .pop();
+                .pop();
         }
     }
 }

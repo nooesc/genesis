@@ -115,7 +115,7 @@ pub(crate) async fn run_chat_tui(
 
     service.ensure_session(&session_id, "cli", None)?;
 
-    genesis_tui::run_tui(&loaded.config, &service, &session_id)
+    genesis_tui::run_tui(&loaded.config, &mut service, &session_id)
         .await
         .map_err(|e| CliError::Tui(e.to_string()))?;
 

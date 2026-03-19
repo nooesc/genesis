@@ -58,7 +58,7 @@ tracing-test = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
-crossterm = "0.28"
+crossterm = "0.29"
 owo-colors = "4"
 unicode-width = "0.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -66,11 +66,18 @@ termimad = "0.30"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 which = "6"
-ratatui = { version = "0.29", features = ["unstable-backend-writer"] }
+ratatui = { version = "0.30" }
+tachyonfx = "0.25"
+tui-big-text = "0.8"
 insta = { version = "1", features = ["yaml"] }
 rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
 mlua = { version = "0.11.6", features = ["luau", "async", "send", "serialize", "vendored"] }
+notify = "8"
+opentelemetry = "0.28"
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.29"
 
 [profile.dev]
 split-debuginfo = "unpacked"

@@ -11,17 +11,20 @@
 //! The bar has a subtle background tint during active operations and
 //! the Eve dance sprite `(~'.')~` / `~('.'~)` animates in the center.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    symbols,
     text::Span,
 };
 use unicode_width::UnicodeWidthChar;
 
 use crate::events::StatusState;
+use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 // ── Palette ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +44,8 @@ const BRANCH_COLOR: Color = Color::Rgb(135, 175, 95);
 const SEP_COLOR: Color = Color::Rgb(58, 55, 66);
 /// Token count color.
 const TOKEN_COLOR: Color = Color::Rgb(138, 138, 138);
+/// Sparkline bar color (dim lavender).
+const SPARKLINE_COLOR: Color = Color::Rgb(120, 112, 148);
 /// Active spinner/dance color.
 const DANCE_COLOR: Color = Color::Rgb(180, 167, 214);
 /// Tool name color (amber).
@@ -60,6 +65,18 @@ const DANCE_INTERVAL: Duration = Duration::from_millis(400);
 /// Interval between spinner frame advances (tool/streaming).
 const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Maximum number of per-turn token measurements to keep.
+const TOKEN_HISTORY_CAP: usize = 20;
+
+/// Width of the sparkline in cells.
+const SPARKLINE_WIDTH: usize = 12;
+
+/// Idle tick interval for effects (~100ms).
+const IDLE_EFFECTS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Width of the inline braille heartbeat in cells.
+const HEARTBEAT_WIDTH: usize = 10;
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A single-row status bar rendered at the bottom of the TUI viewport.
@@ -70,6 +87,8 @@ pub struct StatusBarWidget {
     pub context_percent: u8,
     /// Current agent state.
     pub state: StatusState,
+    /// Previous state before the last `set_state` call.
+    prev_state: Option<StatusState>,
     /// Current animation frame index.
     pub sprite_frame: usize,
     /// When the last frame advance happened.
@@ -82,6 +101,12 @@ pub struct StatusBarWidget {
     pub tokens_out: u64,
     /// Elapsed time since the current turn started.
     pub turn_elapsed: Option<Duration>,
+    /// Per-turn token totals (input + output) for sparkline display.
+    token_history: VecDeque<u64>,
+    /// Whether effects are enabled (used for animation interval).
+    effects_enabled: bool,
+    /// Inline braille heartbeat pattern.
+    heartbeat: Pattern,
 }
 
 impl StatusBarWidget {
@@ -94,12 +119,16 @@ impl StatusBarWidget {
             model,
             context_percent: 0,
             state: StatusState::Idle,
+            prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
             right_info: None,
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
+            token_history: VecDeque::with_capacity(TOKEN_HISTORY_CAP),
+            effects_enabled: false,
+            heartbeat: Pattern::Flatline,
         }
     }
 
@@ -113,11 +142,47 @@ impl StatusBarWidget {
         }
     }
 
-    /// Update the current agent state.
+    /// Update the current agent state, storing the previous for transition effects.
     pub fn set_state(&mut self, state: StatusState) {
-        self.state = state;
+        let was_idle = matches!(self.state, StatusState::Idle);
+        let is_idle = matches!(state, StatusState::Idle);
+        let old = std::mem::replace(&mut self.state, state);
+        self.prev_state = Some(old);
         self.sprite_frame = 0;
         self.last_tick = Instant::now();
+
+        // Switch heartbeat pattern on state transitions.
+        if was_idle && !is_idle {
+            self.heartbeat = Pattern::Waveform {
+                phase: 0.0,
+                frequency: 2.0,
+            };
+        } else if !was_idle && is_idle {
+            self.heartbeat = Pattern::Flatline;
+        }
+    }
+
+    /// Returns the most recent state transition as `(from, to)`.
+    ///
+    /// Returns `None` if `set_state` has never been called.
+    pub fn last_state_change(&self) -> Option<(&StatusState, &StatusState)> {
+        self.prev_state.as_ref().map(|prev| (prev, &self.state))
+    }
+
+    /// Record per-turn token usage for sparkline display.
+    ///
+    /// Pushes `tokens_in + tokens_out` onto the history ring, evicting the
+    /// oldest entry when the capacity limit is reached.
+    pub fn record_turn_tokens(&mut self, tokens_in: u64, tokens_out: u64) {
+        if self.token_history.len() >= TOKEN_HISTORY_CAP {
+            self.token_history.pop_front();
+        }
+        self.token_history.push_back(tokens_in + tokens_out);
+    }
+
+    /// Set whether effects are enabled (affects idle animation interval).
+    pub fn set_effects_enabled(&mut self, enabled: bool) {
+        self.effects_enabled = enabled;
     }
 
     /// Update the displayed model name.
@@ -136,24 +201,39 @@ impl StatusBarWidget {
     }
 
     /// The preferred animation interval for the current state.
+    ///
+    /// When effects are enabled and the agent is idle, returns ~100ms so
+    /// idle ambient effects (border glow, breathing) get ticked.
     pub fn animation_interval(&self) -> Duration {
         match &self.state {
             StatusState::Thinking => DANCE_INTERVAL,
             StatusState::ToolRunning { .. } | StatusState::Streaming { .. } => SPINNER_INTERVAL,
-            StatusState::Idle => Duration::from_secs(3600),
+            StatusState::Idle => {
+                if self.effects_enabled {
+                    IDLE_EFFECTS_INTERVAL
+                } else {
+                    Duration::from_secs(3600)
+                }
+            }
         }
     }
 
     /// Advance the animation frame if enough time has elapsed.
     pub fn tick(&mut self) {
+        let now = Instant::now();
+        // Tick the heartbeat with the actual elapsed time since last tick.
+        let dt = now.duration_since(self.last_tick);
+        self.heartbeat.tick(dt);
+
         if matches!(self.state, StatusState::Idle) {
+            self.last_tick = now;
             return;
         }
 
         let interval = self.animation_interval();
-        if self.last_tick.elapsed() >= interval {
+        if dt >= interval {
             self.sprite_frame = self.sprite_frame.wrapping_add(1);
-            self.last_tick = Instant::now();
+            self.last_tick = now;
         }
     }
 
@@ -187,6 +267,23 @@ impl StatusBarWidget {
         let center_w = spans_width(&center);
         let right_w = spans_width(&right);
 
+        // Heartbeat width: show if there's enough room (needs ~12 cells + padding).
+        let heartbeat_w = if total > left_w + center_w + right_w + HEARTBEAT_WIDTH + 6 {
+            HEARTBEAT_WIDTH + 1 // 1 cell gap
+        } else {
+            0
+        };
+
+        // Sparkline width: only show if we have data and enough room.
+        let sparkline_w = if !self.token_history.is_empty() {
+            // 2 cells padding + sparkline cells
+            (SPARKLINE_WIDTH + 2).min(
+                total.saturating_sub(left_w + center_w + right_w + heartbeat_w + 6),
+            )
+        } else {
+            0
+        };
+
         // Position sections.
         let center_start = if total > center_w {
             (total / 2).saturating_sub(center_w / 2)
@@ -215,35 +312,85 @@ impl StatusBarWidget {
             // Draw center.
             write_spans(&center, area.x + center_start as u16, row, area.x + area.width, buf);
 
-            // Draw fill between center and right.
+            // Draw fill between center and heartbeat/sparkline/right.
             let center_end = area.x + center_start as u16 + center_w as u16 + 1;
-            let right_x = area.x + right_start as u16;
-            if center_end < right_x {
-                let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in center_end..right_x {
-                    if let Some(cell) = buf.cell_mut((x, row)) {
-                        cell.set_symbol("─");
-                        cell.set_style(fill_style);
-                    }
-                }
-            }
+            fill_to_decorations(center_end, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
         } else {
-            // No center — fill between left and right.
+            // No center — fill between left and heartbeat/sparkline/right.
             let fill_start = area.x + 1 + left_w as u16 + 1;
-            let right_x = area.x + right_start as u16;
-            if fill_start < right_x {
-                let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
-                for x in fill_start..right_x {
-                    if let Some(cell) = buf.cell_mut((x, row)) {
-                        cell.set_symbol("─");
-                        cell.set_style(fill_style);
-                    }
-                }
-            }
+            fill_to_decorations(fill_start, area.x + right_start as u16, sparkline_w + heartbeat_w, row, bg, buf);
+        }
+
+        // Draw heartbeat (braille canvas, 1-row inline).
+        if heartbeat_w > 0 {
+            let hb_x = area.x + right_start as u16 - (sparkline_w + heartbeat_w) as u16;
+            let hb_area = Rect {
+                x: hb_x,
+                y: row,
+                width: HEARTBEAT_WIDTH as u16,
+                height: 1,
+            };
+            BrailleCanvas::new(&self.heartbeat).render(hb_area, buf);
+        }
+
+        // Draw sparkline (if we have data).
+        if sparkline_w > 0 {
+            let spark_x = area.x + right_start as u16 - sparkline_w as u16 + 1;
+            self.render_sparkline(spark_x, row, SPARKLINE_WIDTH, bg, buf);
         }
 
         // Draw right.
         write_spans(&right, area.x + right_start as u16, row, area.x + area.width, buf);
+    }
+
+    /// Render a tiny bar sparkline inline into the status bar.
+    fn render_sparkline(&self, start_x: u16, row: u16, width: usize, bg: Color, buf: &mut Buffer) {
+        let bar_set = symbols::bar::NINE_LEVELS;
+        let data: Vec<u64> = self.token_history.iter().copied().collect();
+        let max_val = data.iter().copied().max().unwrap_or(1).max(1);
+
+        // Take the last `width` entries (or pad with zeros on the left).
+        let style = Style::default().fg(SPARKLINE_COLOR).bg(bg);
+        for i in 0..width {
+            let data_idx = if data.len() >= width {
+                i + data.len() - width
+            } else if i >= width - data.len() {
+                i - (width - data.len())
+            } else {
+                // No data for this column — render empty bar.
+                let x = start_x + i as u16;
+                if let Some(cell) = buf.cell_mut((x, row)) {
+                    cell.set_symbol(bar_set.empty);
+                    cell.set_style(style);
+                }
+                continue;
+            };
+
+            let val = data[data_idx];
+            // Map to 0..8 bar levels.
+            let level = if max_val > 0 {
+                ((val as f64 / max_val as f64) * 8.0).round() as usize
+            } else {
+                0
+            };
+            let sym = match level {
+                0 => bar_set.empty,
+                1 => bar_set.one_eighth,
+                2 => bar_set.one_quarter,
+                3 => bar_set.three_eighths,
+                4 => bar_set.half,
+                5 => bar_set.five_eighths,
+                6 => bar_set.three_quarters,
+                7 => bar_set.seven_eighths,
+                _ => bar_set.full,
+            };
+
+            let x = start_x + i as u16;
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol(sym);
+                cell.set_style(style);
+            }
+        }
     }
 
     // ── Section builders ─────────────────────────────────────────────────
@@ -417,6 +564,31 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
+/// Fill with "─" from `fill_start` up to the decorations (heartbeat + sparkline) area.
+fn fill_to_decorations(
+    fill_start: u16,
+    right_start: u16,
+    decorations_w: usize,
+    row: u16,
+    bg: Color,
+    buf: &mut Buffer,
+) {
+    let decorations_start = if decorations_w > 0 {
+        right_start - decorations_w as u16
+    } else {
+        right_start
+    };
+    if fill_start < decorations_start {
+        let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
+        for x in fill_start..decorations_start {
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol("─");
+                cell.set_style(fill_style);
+            }
+        }
+    }
+}
+
 /// Write spans into the buffer starting at (start_x, row), clipped at bound_x.
 fn write_spans(spans: &[Span<'_>], start_x: u16, row: u16, bound_x: u16, buf: &mut Buffer) {
     let mut x = start_x;
@@ -456,12 +628,16 @@ mod tests {
             model: "gpt-4o".to_string(),
             context_percent: 42,
             state: StatusState::Idle,
+            prev_state: None,
             sprite_frame: 0,
             last_tick: Instant::now(),
             right_info: Some("main".to_string()),
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
+            token_history: VecDeque::new(),
+            effects_enabled: false,
+            heartbeat: Pattern::Flatline,
         }
     }
 
@@ -548,5 +724,96 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("↑5.0k"), "in tokens: {text:?}");
         assert!(text.contains("↓1.2k"), "out tokens: {text:?}");
+    }
+
+    #[test]
+    fn record_turn_tokens_accumulates_correctly() {
+        let mut w = make_widget();
+        w.record_turn_tokens(100, 50);
+        w.record_turn_tokens(200, 100);
+        w.record_turn_tokens(300, 150);
+        assert_eq!(w.token_history.len(), 3);
+        assert_eq!(w.token_history[0], 150); // 100 + 50
+        assert_eq!(w.token_history[1], 300); // 200 + 100
+        assert_eq!(w.token_history[2], 450); // 300 + 150
+    }
+
+    #[test]
+    fn record_turn_tokens_caps_at_20() {
+        let mut w = make_widget();
+        for i in 0..25 {
+            w.record_turn_tokens(i * 10, i * 5);
+        }
+        assert_eq!(w.token_history.len(), TOKEN_HISTORY_CAP);
+        // First entry should be from i=5 (evicted 0..5).
+        assert_eq!(w.token_history[0], 5 * 10 + 5 * 5); // 75
+    }
+
+    #[test]
+    fn last_state_change_returns_correct_transitions() {
+        let mut w = make_widget();
+        assert!(w.last_state_change().is_none(), "no transition yet");
+
+        w.set_state(StatusState::Thinking);
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::Idle));
+        assert!(matches!(to, StatusState::Thinking));
+
+        w.set_state(StatusState::ToolRunning {
+            tool_name: "shell".to_string(),
+        });
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::Thinking));
+        assert!(matches!(to, StatusState::ToolRunning { .. }));
+
+        w.set_state(StatusState::Idle);
+        let (from, to) = w.last_state_change().unwrap();
+        assert!(matches!(from, StatusState::ToolRunning { .. }));
+        assert!(matches!(to, StatusState::Idle));
+    }
+
+    #[test]
+    fn animation_interval_returns_idle_effects_interval_when_effects_enabled() {
+        let mut w = make_widget();
+        // Without effects: 1 hour.
+        assert_eq!(w.animation_interval(), Duration::from_secs(3600));
+
+        // With effects enabled: ~100ms.
+        w.set_effects_enabled(true);
+        assert_eq!(w.animation_interval(), IDLE_EFFECTS_INTERVAL);
+
+        // Non-idle states unaffected.
+        w.set_state(StatusState::Thinking);
+        assert_eq!(w.animation_interval(), DANCE_INTERVAL);
+    }
+
+    #[test]
+    fn heartbeat_changes_on_state_transition() {
+        let mut w = make_widget();
+        // Starts as Flatline.
+        assert!(matches!(w.heartbeat, Pattern::Flatline));
+
+        // Transition to active: becomes Waveform.
+        w.set_state(StatusState::Thinking);
+        assert!(
+            matches!(w.heartbeat, Pattern::Waveform { .. }),
+            "heartbeat should be Waveform when active"
+        );
+
+        // Transition between active states: stays Waveform.
+        w.set_state(StatusState::ToolRunning {
+            tool_name: "shell".to_string(),
+        });
+        assert!(
+            matches!(w.heartbeat, Pattern::Waveform { .. }),
+            "heartbeat should stay Waveform between active states"
+        );
+
+        // Transition back to idle: becomes Flatline.
+        w.set_state(StatusState::Idle);
+        assert!(
+            matches!(w.heartbeat, Pattern::Flatline),
+            "heartbeat should be Flatline when idle"
+        );
     }
 }

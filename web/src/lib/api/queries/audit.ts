@@ -7,7 +7,11 @@ interface AuditParams {
   offset?: number
 }
 
-export function useAuditLog(params?: AuditParams) {
+interface AuditQueryOptions {
+  refetchInterval?: number
+}
+
+export function useAuditLog(params?: AuditParams, options?: AuditQueryOptions) {
   const searchParams = new URLSearchParams()
   if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
   if (params?.offset !== undefined) searchParams.set('offset', String(params.offset))
@@ -16,5 +20,6 @@ export function useAuditLog(params?: AuditParams) {
   return useQuery({
     queryKey: ['audit', params],
     queryFn: () => api.get<AuditEntry[]>(`/audit${qs ? `?${qs}` : ''}`),
+    refetchInterval: options?.refetchInterval,
   })
 }

@@ -692,6 +692,17 @@ impl<'a> SessionExecutionService<'a> {
             tool_runtime.set_lua_runtime(Arc::clone(runtime));
         }
 
+        // Start filesystem watcher for tool result cache.
+        // Uses the working directory (or worktree dir) as the watch root.
+        {
+            let watch_dir = self
+                .default_working_dir
+                .as_deref()
+                .map(std::path::Path::new)
+                .unwrap_or(std::path::Path::new("."));
+            tool_runtime.start_cache_watcher(watch_dir);
+        }
+
         // Apply tool filter (allowlist/denylist)
         if let Some(ref filter) = self.loaded.config.runtime.tool_filter {
             let mut allowed: std::collections::HashSet<String> = if filter.allow.is_empty() {
@@ -773,11 +784,14 @@ impl<'a> SessionExecutionService<'a> {
         }
         let system_prompt = prompt_builder.build();
         let (backend, model) = self.effective_provider_selection();
-        let client = client_from_config(
+        let cb_cfg = self.loaded.config.provider.circuit_breaker.as_ref();
+        let client = genesis_provider::client_from_config_with_circuit_breaker(
             backend,
             model,
             self.loaded.config.provider.base_url.as_deref(),
             self.loaded.config.provider.api_key_env.as_deref(),
+            cb_cfg.map(|c| c.failure_threshold),
+            cb_cfg.map(|c| c.cooldown_secs),
         )
         .await?;
         debug!(
@@ -789,6 +803,26 @@ impl<'a> SessionExecutionService<'a> {
         let hook_runner = crate::hooks::HookRunner::default();
         let hooks: Arc<dyn crate::agent_loop::AgentHooks> =
             crate::audit::AuditHooks::shared(db_path);
+
+        let tool_policy = self
+            .loaded
+            .config
+            .runtime
+            .tool_policy_path
+            .as_ref()
+            .map(|path| {
+                let expanded = crate::tool_policy::expand_home(path);
+                match crate::tool_policy::ToolPolicy::load(std::path::Path::new(&expanded)) {
+                    Ok(policy) => {
+                        info!(path = expanded.as_str(), "loaded tool policy");
+                        policy
+                    }
+                    Err(e) => {
+                        warn!(path = expanded.as_str(), error = %e, "failed to load tool policy, using deny-all fallback");
+                        crate::tool_policy::ToolPolicy::deny_all()
+                    }
+                }
+            });
 
         let subagent_tool_runtime = Arc::new(tool_runtime.clone());
         let mut agent = AgentLoop::with_history(
@@ -818,6 +852,9 @@ impl<'a> SessionExecutionService<'a> {
                     }
                 }),
                 response_format: self.response_format.clone(),
+                core_tools: self.loaded.config.runtime.core_tools.clone(),
+                routing: self.loaded.config.routing.clone(),
+                tool_policy,
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -829,11 +866,14 @@ impl<'a> SessionExecutionService<'a> {
 
         // Set up tool provider routing if configured
         if let Some(tp) = &self.loaded.config.tool_provider {
-            let tool_client = client_from_config(
+            let tp_cb = tp.circuit_breaker.as_ref();
+            let tool_client = genesis_provider::client_from_config_with_circuit_breaker(
                 &tp.backend,
                 &tp.model,
                 tp.base_url.as_deref(),
                 tp.api_key_env.as_deref(),
+                tp_cb.map(|c| c.failure_threshold),
+                tp_cb.map(|c| c.cooldown_secs),
             )
             .await?;
             agent.set_tool_client(tool_client);
@@ -848,11 +888,14 @@ impl<'a> SessionExecutionService<'a> {
         if !self.loaded.config.fallback_providers.is_empty() {
             let mut fallbacks = Vec::new();
             for fp in &self.loaded.config.fallback_providers {
-                let fb_client = client_from_config(
+                let fb_cb = fp.circuit_breaker.as_ref();
+                let fb_client = genesis_provider::client_from_config_with_circuit_breaker(
                     &fp.backend,
                     &fp.model,
                     fp.base_url.as_deref(),
                     fp.api_key_env.as_deref(),
+                    fb_cb.map(|c| c.failure_threshold),
+                    fb_cb.map(|c| c.cooldown_secs),
                 )
                 .await?;
                 fallbacks.push(fb_client);
@@ -1813,6 +1856,40 @@ mod tests {
             .to_owned()
     }
 
+    fn write_test_package_plugin_with_permissions(
+        plugin_dir: &std::path::Path,
+        name: &str,
+        source: &str,
+        hooks: &[&str],
+        tools: &[&str],
+    ) {
+        let package_dir = plugin_dir.join(name);
+        fs::create_dir_all(&package_dir).expect("package plugin dir should exist");
+        fs::write(package_dir.join("init.lua"), source).expect("package plugin should write");
+
+        let hooks_list = hooks
+            .iter()
+            .map(|hook| format!("\"{hook}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tools_list = tools
+            .iter()
+            .map(|tool| format!("\"{tool}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"[plugin]
+name = "{name}"
+version = "0.1.0"
+
+[permissions]
+hooks = [{hooks_list}]
+tools = [{tools_list}]
+"#
+        );
+        fs::write(package_dir.join("plugin.toml"), manifest).expect("plugin manifest should write");
+    }
+
     #[test]
     fn restore_chat_history_round_trips_tool_calls() {
         let messages = restore_chat_history(vec![StoredMessage {
@@ -2136,6 +2213,7 @@ mod tests {
                     api_key_env: None,
                     extra_body: None,
                     tool_call_parser: None,
+                    circuit_breaker: None,
                 },
                 tool_provider: None,
                 fallback_providers: Vec::new(),
@@ -2159,6 +2237,9 @@ mod tests {
                     cache: None,
                     tool_filter: None,
                     guardrails: None,
+                    core_tools: None,
+                    batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -2167,6 +2248,8 @@ mod tests {
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
+                telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -2550,11 +2633,13 @@ genesis.register_personality({
         let data_dir = dir.path().join("data");
         let plugin_dir = data_dir.join("plugins");
         fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
-        fs::write(
-            plugin_dir.join("hooky.lua"),
+        write_test_package_plugin_with_permissions(
+            &plugin_dir,
+            "hooky",
             "genesis.on('PreTurn', function(ctx) return ctx.user_message end)",
-        )
-        .expect("plugin should write");
+            &["PreTurn"],
+            &[],
+        );
         let db_path = data_dir.join("genesis.db");
         let loaded = test_loaded_config(data_dir, db_path);
         let mut service = SessionExecutionService::new(&loaded);
@@ -2654,15 +2739,17 @@ genesis.register_personality({
         let data_dir = dir.path().join("data");
         let plugin_dir = data_dir.join("plugins");
         fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
-        fs::write(
-            plugin_dir.join("hooks.lua"),
+        write_test_package_plugin_with_permissions(
+            &plugin_dir,
+            "hooks",
             r#"
 genesis.on("PreTurn", function(ctx)
     return "child: " .. ctx.user_message
 end)
 "#,
-        )
-        .expect("plugin should write");
+            &["PreTurn"],
+            &[],
+        );
 
         let db_path = data_dir.join("genesis.db");
         let loaded = Arc::new(test_loaded_config(data_dir, db_path));

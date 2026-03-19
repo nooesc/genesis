@@ -1,10 +1,12 @@
 mod anthropic_types;
 mod api_types;
+pub mod batch;
 pub mod circuit_breaker;
 mod client;
 mod error;
 mod gemini_types;
 pub mod model_metadata;
+pub mod openrouter_models;
 pub mod parsers;
 pub mod pricing;
 mod resolve;
@@ -71,6 +73,22 @@ pub async fn client_from_config(
     let provider = resolve(backend, model, base_url, api_key_env, &env);
     let client = ChatClient::new(&provider)?;
     spawn_warmup(&client);
+    Ok(client)
+}
+
+/// Build a `ChatClient` from config, applying circuit breaker thresholds if set.
+pub async fn client_from_config_with_circuit_breaker(
+    backend: &str,
+    model: &str,
+    base_url: Option<&str>,
+    api_key_env: Option<&str>,
+    failure_threshold: Option<u32>,
+    cooldown_secs: Option<u64>,
+) -> Result<ChatClient, ProviderError> {
+    let mut client = client_from_config(backend, model, base_url, api_key_env).await?;
+    if let (Some(ft), Some(cs)) = (failure_threshold, cooldown_secs) {
+        client.set_circuit_breaker(ft, cs);
+    }
     Ok(client)
 }
 

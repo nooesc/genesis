@@ -23,7 +23,9 @@ use ratatui::{
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
+pub mod approval;
 pub mod custom_terminal;
+pub mod effects;
 pub mod events;
 pub mod frame_requester;
 pub mod history;
@@ -123,7 +125,7 @@ fn make_turn_future<'a>(
 /// cross-borrow issues in the `select!` macro expansion.
 pub async fn run_tui(
     config: &GenesisConfig,
-    service: &SessionExecutionService<'_>,
+    service: &mut SessionExecutionService<'_>,
     session_id: &str,
 ) -> Result<(), TuiError> {
     terminal::init()?;
@@ -137,6 +139,13 @@ pub async fn run_tui(
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (submission_tx, mut submission_rx) = mpsc::unbounded_channel::<Submission>();
     let (draw_tx, mut draw_rx) = broadcast::channel::<()>(16);
+
+    // Set up TUI-based tool approval handler.
+    let (approval_tx, mut approval_rx) =
+        mpsc::unbounded_channel::<crate::approval::ApprovalRequest>();
+    service.set_approval_handler(std::sync::Arc::new(
+        crate::approval::TuiApprovalHandler::new(approval_tx),
+    ));
 
     let frame_requester = FrameRequester::new(draw_tx);
 
@@ -183,6 +192,15 @@ pub async fn run_tui(
         &compact_art,
     );
 
+    let animations_enabled = config.tui.animations
+        && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
+    let no_color = std::env::var("NO_COLOR").is_ok();
+
+    let mut status_bar = crate::widgets::status_bar::StatusBarWidget::new(
+        config.provider.model.clone(),
+    );
+    status_bar.set_effects_enabled(animations_enabled);
+
     let mut app = App {
         submission_tx,
         app_tx,
@@ -193,9 +211,7 @@ pub async fn run_tui(
         screen: AppScreen::Welcome,
         welcome,
         chat: crate::widgets::chat_widget::ChatWidget::new(),
-        status_bar: crate::widgets::status_bar::StatusBarWidget::new(
-            config.provider.model.clone(),
-        ),
+        status_bar,
         overlay: None,
         viewport_height: viewport_area.height,
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
@@ -204,6 +220,17 @@ pub async fn run_tui(
         streaming_chars: 0,
         context_window_size,
         viewport_width: viewport_area.width,
+        approval: None,
+        approval_response: None,
+        approval_queue: std::collections::VecDeque::new(),
+        effects: crate::effects::GenesisEffects::new(animations_enabled, no_color, config.tui.effects.clone()),
+        idle_pattern: crate::widgets::braille_canvas::Pattern::Lissajous {
+            t: 0.0,
+            a: 3.0,
+            b: 2.0,
+            delta: std::f64::consts::FRAC_PI_2,
+        },
+        file_completion: crate::widgets::file_completion::FileCompletion::new(),
     };
 
     // Schedule an initial frame so the UI renders immediately.
@@ -215,7 +242,23 @@ pub async fn run_tui(
     // It lives here as an Option and gets polled in select!.
     let mut turn_future: Option<Pin<Box<dyn Future<Output = TurnResult> + '_>>> = None;
 
+    let mut pending_model_switch: Option<String> = None;
+
     loop {
+        // Process deferred model switch — must drop turn_future first
+        // to release the immutable borrow on `service`.
+        if let Some(model_id) = pending_model_switch.take() {
+            // Drop any active turn future to release the borrow on service.
+            turn_future = None;
+            let (backend, model) = if let Some(pos) = model_id.find('/') {
+                (model_id[..pos].to_owned(), model_id.clone())
+            } else {
+                ("openrouter".to_owned(), model_id.clone())
+            };
+            service.set_model_override(backend, model);
+            tracing::info!(model_id = model_id.as_str(), "model switched via picker");
+        }
+
         tokio::select! {
             // ── Terminal events — always active ──────────────────────
             ct_event = crossterm_events.next() => {
@@ -252,6 +295,12 @@ pub async fn run_tui(
                         // Drop the turn future to cancel
                         turn_future = None;
                     }
+                    Some(Submission::ModelSwitch(_model_id)) => {
+                        // Model switch is handled below, outside the select
+                        // block, to avoid borrow conflicts with turn_future.
+                        // Store it for deferred processing.
+                        pending_model_switch = Some(_model_id);
+                    }
                     None => break,
                 }
             }
@@ -287,6 +336,26 @@ pub async fn run_tui(
                 }
             }
 
+            // ── Tool approval requests ───────────────────────────────
+            approval = approval_rx.recv() => {
+                if let Some(req) = approval {
+                    if app.approval.is_some() {
+                        // Already showing an approval — queue this one.
+                        app.approval_queue.push_back(req);
+                    } else {
+                        // Show immediately.
+                        app.approval = Some(
+                            crate::widgets::approval_overlay::ApprovalOverlay::new(
+                                req.tool_name,
+                                &req.arguments,
+                            ),
+                        );
+                        app.approval_response = Some(req.response_tx);
+                    }
+                    app.frame_requester.schedule_frame();
+                }
+            }
+
             // ── Internal app events ─────────────────────────────────
             app_event = app_rx.recv() => {
                 if let Some(event) = app_event {
@@ -294,6 +363,18 @@ pub async fn run_tui(
                         // In alternate-screen mode, history insertion is handled
                         // by the transcript overlay and does not write to
                         // terminal scrollback.
+                    }
+                    if matches!(&event, AppEvent::FetchModels) {
+                        // Spawn async model fetch.
+                        let tx = app.app_tx.clone();
+                        let cache_dir = config.storage.data_dir.join("cache");
+                        tokio::spawn(async move {
+                            let result =
+                                genesis_provider::openrouter_models::fetch_models(None, &cache_dir)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                            let _ = tx.send(AppEvent::ModelsFetched(result));
+                        });
                     }
                     app.handle_app_event(event);
                 }
@@ -306,8 +387,19 @@ pub async fn run_tui(
                     break;
                 }
 
-                // Advance status bar animation (sprite / spinner).
+                // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
+
+                // Compute frame delta once — used by both braille patterns and tachyonfx.
+                let frame_dt = app.effects.frame_dt();
+                if animations_enabled {
+                    if matches!(app.screen, AppScreen::Welcome) {
+                        app.welcome.braille_pattern.tick(frame_dt);
+                    }
+                    if !app.turn_running {
+                        app.idle_pattern.tick(frame_dt);
+                    }
+                }
 
                 // Update elapsed time for the current turn.
                 if app.turn_running {
@@ -319,14 +411,36 @@ pub async fn run_tui(
                 if app.clear_after_welcome {
                     let _ = term.clear_all();
                     app.clear_after_welcome = false;
+                    let area = term.viewport_area();
+                    app.effects.start_chat_coalesce(area);
+                    // Start idle effects on the status bar area.
+                    let status_area = Rect {
+                        x: area.x,
+                        y: area.y + area.height.saturating_sub(1),
+                        width: area.width,
+                        height: 1,
+                    };
+                    app.effects.start_idle_effects(status_area);
                 }
 
-                render_frame(&mut term, &mut app);
+                render_frame(&mut term, &mut app, frame_dt);
 
                 // Schedule periodic redraws while animations are active.
-                if app.status_bar.is_animating() {
-                    app.frame_requester
-                        .schedule_frame_in(app.status_bar.animation_interval());
+                let has_tachyonfx = app.effects.is_running();
+                let has_sprite_anim = app.status_bar.is_animating();
+                let has_braille = animations_enabled
+                    && (matches!(app.screen, AppScreen::Welcome)
+                        || (!app.turn_running && matches!(app.screen, AppScreen::Chat)));
+                if has_tachyonfx || has_sprite_anim || has_braille {
+                    let interval = if has_tachyonfx {
+                        std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
+                    } else if has_sprite_anim {
+                        app.status_bar.animation_interval()
+                    } else {
+                        // Idle braille patterns — 200ms (~5fps) is plenty for slow curves
+                        std::time::Duration::from_millis(200)
+                    };
+                    app.frame_requester.schedule_frame_in(interval);
                 }
             }
         }
@@ -344,7 +458,7 @@ pub async fn run_tui(
 ///
 /// When an overlay is active it occupies the full viewport (no status bar).
 /// Otherwise, the chat widget and status bar share the viewport as usual.
-fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
+fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App, frame_dt: std::time::Duration) {
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -359,6 +473,7 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         match overlay {
             app::ActiveOverlay::Transcript(t) => t.render(area, buf),
             app::ActiveOverlay::Help(h) => h.render(area, buf),
+            app::ActiveOverlay::Models(m) => m.render(area, buf),
         }
         let _ = term.draw_diff();
         term.swap_buffers();
@@ -370,6 +485,18 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
         AppScreen::Welcome => {
             // Welcome screen occupies the full viewport.
             app.welcome.render(area, buf);
+
+            // Trigger boot sequence on first welcome render.
+            if !app.welcome.boot_triggered() {
+                app.welcome.mark_boot_triggered();
+                let areas = app.welcome.last_areas();
+                app.effects.start_boot_sequence(
+                    areas.title,
+                    areas.portrait,
+                    areas.status,
+                    areas.full,
+                );
+            }
         }
         AppScreen::Chat => {
             // Reserve the final row for status, leave space for a bounded input
@@ -434,6 +561,31 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
 
                 if message_area_height > 0 {
                     app.chat.render_messages(message_area, buf);
+
+                    // Idle braille canvas: show a small Lissajous animation
+                    // below the last message when the agent is idle and there
+                    // is remaining vertical space (at least 5 rows).
+                    const IDLE_CANVAS_HEIGHT: u16 = 5;
+                    const IDLE_CANVAS_WIDTH: u16 = 15;
+                    if !app.turn_running && app.effects.enabled() {
+                        let content_h = app.chat.visible_content_height(area.width);
+                        let remaining = message_area_height.saturating_sub(content_h);
+                        if remaining >= IDLE_CANVAS_HEIGHT {
+                            // Center the canvas horizontally in the message area.
+                            let canvas_x = message_area.x
+                                + message_area.width.saturating_sub(IDLE_CANVAS_WIDTH) / 2;
+                            let canvas_y = message_area.y + content_h
+                                + (remaining.saturating_sub(IDLE_CANVAS_HEIGHT)) / 2;
+                            let idle_area = Rect {
+                                x: canvas_x,
+                                y: canvas_y,
+                                width: IDLE_CANVAS_WIDTH.min(message_area.width),
+                                height: IDLE_CANVAS_HEIGHT,
+                            };
+                            crate::widgets::braille_canvas::BrailleCanvas::new(&app.idle_pattern)
+                                .render(idle_area, buf);
+                        }
+                    }
                 }
 
                 if separator_rows > 0 {
@@ -512,6 +664,11 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
                     app.command_popup.render(interactive_area, buf);
                 }
 
+                // Render the @-file completion popup above the input area.
+                if app.file_completion.is_visible() {
+                    app.file_completion.render(interactive_area, buf);
+                }
+
                 // Render the clarification picker as a centered overlay.
                 if app.clarification.is_visible() {
                     app.clarification.render(area, buf);
@@ -519,6 +676,14 @@ fn render_frame(term: &mut custom_terminal::CustomTerminal, app: &mut App) {
             }
         }
     }
+
+    // Render tool approval overlay as a modal on top of everything.
+    if let Some(approval) = &app.approval {
+        approval.render(area, buf);
+    }
+
+    // Apply post-render effects (tachyonfx).
+    app.effects.process(frame_dt, buf, area);
 
     // Write only changed cells to the terminal, then swap buffers.
     let _ = term.draw_diff();

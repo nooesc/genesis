@@ -18,6 +18,7 @@ pub mod personality;
 pub mod prompt;
 pub mod quality;
 pub mod replay;
+pub mod routing;
 pub mod sandbox;
 pub mod sanitize;
 pub mod scheduler;
@@ -28,6 +29,7 @@ pub mod skills_guard;
 pub mod skills_hub;
 pub mod tagger;
 pub mod templates;
+pub mod tool_policy;
 pub mod toolset;
 pub mod trajectory;
 pub mod workflow;
@@ -613,6 +615,17 @@ impl ToolRuntime {
         }
     }
 
+    /// Start the filesystem watcher for the tool result cache.
+    /// Should be called once after constructing the runtime.
+    pub fn start_cache_watcher(&self, dir: &std::path::Path) {
+        self.registry.cache().start_watching(dir);
+    }
+
+    /// Return a snapshot of tool cache statistics.
+    pub fn cache_stats(&self) -> genesis_tools::cache::CacheStats {
+        self.registry.cache().stats()
+    }
+
     /// Set the default working directory for shell commands.
     /// Used by worktree isolation to redirect tool execution.
     pub fn set_default_working_dir(&mut self, dir: String) {
@@ -710,6 +723,41 @@ impl ToolRuntime {
     /// Execute a tool call, routing MCP-prefixed tools to the MCP manager
     /// and `moa_consult` to the Mixture of Agents engine.
     pub async fn execute_async(&self, call: &ToolCall) -> Result<ToolOutput, ToolError> {
+        // Handle find_tools — needs direct registry access for search.
+        if call.name == "find_tools" {
+            let query = call.arguments.get("query").ok_or_else(|| {
+                genesis_tools::ToolError::MissingArgument {
+                    tool: call.name.clone(),
+                    argument: "query",
+                }
+            })?;
+            if query.trim().is_empty() {
+                return Err(genesis_tools::ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "query cannot be empty".to_owned(),
+                });
+            }
+            let results = self.registry.search_tools(query);
+            let content = if results.is_empty() {
+                format!("No tools found matching \"{query}\". Try a different search term.")
+            } else {
+                let mut lines = vec![format!(
+                    "Found {} tool(s) matching \"{query}\":\n",
+                    results.len()
+                )];
+                for tool in &results {
+                    lines.push(format!("  **{}** — {}", tool.name, tool.description));
+                }
+                lines.push(String::new());
+                lines.push("Use any of these tools by calling them directly.".to_owned());
+                lines.join("\n")
+            };
+            return Ok(genesis_tools::ToolOutput {
+                content,
+                metadata: std::collections::BTreeMap::new(),
+            });
+        }
+
         if call.name.starts_with("mcp_") {
             if let Some(mcp) = &self.mcp {
                 // Handle built-in MCP resource/prompt operations
@@ -1169,6 +1217,7 @@ pub(crate) mod tests {
                     api_key_env: None,
                     extra_body: None,
                     tool_call_parser: None,
+                    circuit_breaker: None,
                 },
                 tool_provider: None,
                 fallback_providers: Vec::new(),
@@ -1192,6 +1241,9 @@ pub(crate) mod tests {
                     cache: None,
                     tool_filter: None,
                     guardrails: None,
+                    core_tools: None,
+                    batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1200,6 +1252,8 @@ pub(crate) mod tests {
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
+                telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1222,6 +1276,7 @@ pub(crate) mod tests {
                     api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
                     extra_body: None,
                     tool_call_parser: None,
+                    circuit_breaker: None,
                 },
                 tool_provider: None,
                 fallback_providers: Vec::new(),
@@ -1245,6 +1300,9 @@ pub(crate) mod tests {
                     cache: None,
                     tool_filter: None,
                     guardrails: None,
+                    core_tools: None,
+                    batch: None,
+                    tool_policy_path: None,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1253,6 +1311,8 @@ pub(crate) mod tests {
                 embedding: None,
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
+                telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
