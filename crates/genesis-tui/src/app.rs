@@ -574,6 +574,24 @@ impl App {
         self.frame_requester.schedule_frame();
     }
 
+    /// Check whether the approval overlay has timed out, and auto-deny if so.
+    /// Returns `true` if the approval was expired and denied.
+    pub fn check_approval_timeout(&mut self) -> bool {
+        let expired = self
+            .approval
+            .as_ref()
+            .is_some_and(|a| a.is_expired());
+        if expired {
+            if let Some(tx) = self.approval_response.take() {
+                let _ = tx.send(false);
+            }
+            self.approval = None;
+            self.pop_next_approval();
+            return true;
+        }
+        false
+    }
+
     /// Pop the next queued approval request and show it, if any.
     /// Auto-approves queued requests for always-approved tools.
     fn pop_next_approval(&mut self) {

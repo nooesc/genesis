@@ -396,6 +396,9 @@ pub async fn run_tui(
                 // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
 
+                // Check if the approval overlay has timed out.
+                app.check_approval_timeout();
+
                 // Compute frame delta once — used by both braille patterns and tachyonfx.
                 let frame_dt = app.effects.frame_dt();
                 if animations_enabled {
@@ -440,11 +443,15 @@ pub async fn run_tui(
                 let has_braille = animations_enabled
                     && (matches!(app.screen, AppScreen::Welcome)
                         || (!app.turn_running && matches!(app.screen, AppScreen::Chat)));
-                if has_tachyonfx || has_sprite_anim || has_braille {
+                let has_approval = app.approval.is_some();
+                if has_tachyonfx || has_sprite_anim || has_braille || has_approval {
                     let interval = if has_tachyonfx {
                         std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
                     } else if has_sprite_anim {
                         app.status_bar.animation_interval()
+                    } else if has_approval {
+                        // Approval countdown updates once per second.
+                        std::time::Duration::from_secs(1)
                     } else {
                         // Idle braille patterns — 200ms (~5fps) is plenty for slow curves
                         std::time::Duration::from_millis(200)
