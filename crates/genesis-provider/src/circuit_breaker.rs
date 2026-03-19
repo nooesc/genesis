@@ -209,7 +209,7 @@ impl CircuitBreakerRegistry {
 
     /// Return the canonical key for a provider.
     fn key(backend: &str, model: &str) -> String {
-        format!("{}:{}", backend.to_ascii_lowercase(), model)
+        format!("{}:{}", backend.to_ascii_lowercase(), model.to_ascii_lowercase())
     }
 
     /// Get or create a circuit breaker for the given provider.
@@ -228,12 +228,10 @@ impl CircuitBreakerRegistry {
         let mut map = self.breakers.lock().unwrap();
         map.entry(key)
             .or_insert_with(|| {
-                let cb = match (failure_threshold, cooldown_secs) {
-                    (Some(ft), Some(cs)) => {
-                        CircuitBreaker::new(ft, Duration::from_secs(cs))
-                    }
-                    _ => CircuitBreaker::with_defaults(),
-                };
+                let cb = CircuitBreaker::new(
+                    failure_threshold.unwrap_or(5),
+                    Duration::from_secs(cooldown_secs.unwrap_or(30)),
+                );
                 std::sync::Arc::new(cb)
             })
             .clone()

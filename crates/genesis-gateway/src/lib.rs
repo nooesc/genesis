@@ -851,11 +851,14 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
     // Build provider status list with live circuit breaker state.
     let registry = &state.circuit_registry;
     let mut providers = Vec::new();
+    let global_cb = state.loaded.config.runtime.circuit_breaker.as_ref();
 
     // Helper: build CircuitBreakerInfo with live state from the shared registry.
+    // Falls back to the global runtime circuit_breaker config when the
+    // per-provider config is None.
     let build_cb_info =
         |backend: &str, model: &str, cfg: Option<&genesis_config::CircuitBreakerConfig>| -> Option<CircuitBreakerInfo> {
-            let cb_cfg = cfg?;
+            let cb_cfg = cfg.or(global_cb)?;
             let live = registry.get(backend, model);
             Some(CircuitBreakerInfo {
                 failure_threshold: cb_cfg.failure_threshold,
