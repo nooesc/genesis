@@ -21,7 +21,7 @@ pub enum PluginKind {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct DiscoveryReport {
+pub struct DiscoveryReport {
     pub plugins: Vec<DiscoveredPlugin>,
     pub errors: Vec<LuaRuntimeError>,
 }
@@ -30,7 +30,7 @@ pub fn discover_plugins(root: &Path) -> Result<Vec<DiscoveredPlugin>, LuaRuntime
     Ok(scan_plugins(root, false)?.plugins)
 }
 
-pub(crate) fn discover_plugins_best_effort(root: &Path) -> Result<DiscoveryReport, LuaRuntimeError> {
+pub fn discover_plugins_best_effort(root: &Path) -> Result<DiscoveryReport, LuaRuntimeError> {
     scan_plugins(root, true)
 }
 
@@ -50,8 +50,11 @@ fn scan_plugins(root: &Path, best_effort: bool) -> Result<DiscoveryReport, LuaRu
         path: root.to_path_buf(),
         source,
     })?;
-    let (entries, entry_errors) =
-        collect_plugin_entry_paths(read_dir.map(|entry| entry.map(|entry| entry.path())), root, best_effort)?;
+    let (entries, entry_errors) = collect_plugin_entry_paths(
+        read_dir.map(|entry| entry.map(|entry| entry.path())),
+        root,
+        best_effort,
+    )?;
     report.errors.extend(entry_errors);
 
     for entry in entries {
@@ -133,16 +136,18 @@ fn discover_plugin_entry(
             return Ok(None);
         }
 
-        let manifest_raw =
-            fs::read_to_string(&manifest_path).map_err(|source| LuaRuntimeError::ReadPluginManifest {
+        let manifest_raw = fs::read_to_string(&manifest_path).map_err(|source| {
+            LuaRuntimeError::ReadPluginManifest {
                 path: manifest_path.clone(),
                 source,
-            })?;
-        let manifest: PluginManifest =
-            toml::from_str(&manifest_raw).map_err(|source| LuaRuntimeError::ParsePluginManifest {
+            }
+        })?;
+        let manifest: PluginManifest = toml::from_str(&manifest_raw).map_err(|source| {
+            LuaRuntimeError::ParsePluginManifest {
                 path: manifest_path.clone(),
                 source,
-            })?;
+            }
+        })?;
         let name = manifest.plugin.name.clone();
         ensure_unique_name(names, &name)?;
 
@@ -288,7 +293,11 @@ name = "broken"
         )
         .expect("best-effort path collection should succeed");
 
-        assert_eq!(paths, vec![alpha, gamma], "valid paths should be retained and sorted");
+        assert_eq!(
+            paths,
+            vec![alpha, gamma],
+            "valid paths should be retained and sorted"
+        );
         assert_eq!(errors.len(), 1, "iterator error should be recorded");
         assert!(
             matches!(errors[0], LuaRuntimeError::ReadPluginEntry { ref path, .. } if path == &root),

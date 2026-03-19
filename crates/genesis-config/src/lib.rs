@@ -265,6 +265,8 @@ pub struct PluginsConfig {
     pub tool_timeout_ms: u64,
     #[serde(default = "default_plugin_auto_disable_after")]
     pub auto_disable_after: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<String>,
 }
 
 impl Default for PluginsConfig {
@@ -274,6 +276,7 @@ impl Default for PluginsConfig {
             hook_timeout_ms: default_plugin_hook_timeout_ms(),
             tool_timeout_ms: default_plugin_tool_timeout_ms(),
             auto_disable_after: default_plugin_auto_disable_after(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -1278,6 +1281,25 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
     write_file_config(config_path, &file_config)
 }
 
+pub fn set_plugin_disabled_in_file(
+    config_path: &Path,
+    plugin_name: &str,
+    disabled: bool,
+) -> Result<(), ConfigError> {
+    let mut file_config = read_config_file(config_path)?;
+    let plugins = file_config.plugins.get_or_insert_with(PluginsConfig::default);
+    let needle = plugin_name.trim();
+
+    plugins.disabled.retain(|name| name != needle);
+    if disabled {
+        plugins.disabled.push(needle.to_owned());
+        plugins.disabled.sort();
+        plugins.disabled.dedup();
+    }
+
+    write_file_config(config_path, &file_config)
+}
+
 fn write_file_config(path: &Path, file_config: &FileConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| ConfigError::WriteFile {
@@ -1624,6 +1646,40 @@ mcp_servers:
     }
 
     #[test]
+    fn plugins_config_defaults_to_no_disabled_plugins() {
+        let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.plugins.disabled.is_empty());
+    }
+
+    #[test]
+    fn set_plugin_disabled_in_file_adds_and_removes_plugin_names() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_plugin_disabled_in_file(&config_path, "pirate", true)
+            .expect("disable should succeed");
+        super::set_plugin_disabled_in_file(&config_path, "pirate", true)
+            .expect("second disable should stay idempotent");
+        super::set_plugin_disabled_in_file(&config_path, "noir", true)
+            .expect("disable should succeed");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
+        assert_eq!(
+            loaded.config.plugins.disabled,
+            vec!["noir".to_owned(), "pirate".to_owned()]
+        );
+
+        super::set_plugin_disabled_in_file(&config_path, "pirate", false)
+            .expect("enable should succeed");
+
+        let reloaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
+        assert_eq!(reloaded.config.plugins.disabled, vec!["noir".to_owned()]);
+    }
+
+    #[test]
     fn set_value_in_file_rejects_invalid_reset_hour() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
@@ -1870,7 +1926,10 @@ provider:
         assert!(config.enabled);
         assert!(config.animations);
         assert!(config.welcome_screen);
-        assert!(matches!(config.display.tool_mode, super::ToolDisplayMode::Grouped));
+        assert!(matches!(
+            config.display.tool_mode,
+            super::ToolDisplayMode::Grouped
+        ));
         assert!(matches!(config.alt_screen, super::AltScreenMode::Auto));
         assert!(matches!(config.display.diff_mode, super::DiffMode::Auto));
     }
@@ -1892,7 +1951,10 @@ tool_mode = "verbose"
         let config = wrapper.tui;
         assert!(!config.enabled);
         assert!(!config.animations);
-        assert!(matches!(config.display.tool_mode, super::ToolDisplayMode::Verbose));
+        assert!(matches!(
+            config.display.tool_mode,
+            super::ToolDisplayMode::Verbose
+        ));
     }
 
     #[test]

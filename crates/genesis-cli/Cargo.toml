@@ -17,6 +17,7 @@ genesis-ui = { path = "../genesis-ui" }
 genesis-config = { path = "../genesis-config" }
 genesis-core = { path = "../genesis-core" }
 genesis-gateway = { path = "../genesis-gateway" }
+genesis-lua = { path = "../genesis-lua" }
 genesis-mcp = { path = "../genesis-mcp" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }

@@ -390,6 +390,7 @@ impl<'a> SessionExecutionService<'a> {
                 platform: cache_key.delivery_platform,
                 personality,
             },
+            disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             config_values,
         }
     }
@@ -1272,6 +1273,7 @@ impl ExecutionSubagentSpawner {
                 platform: "cli".to_owned(),
                 personality: None,
             },
+            disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             config_values,
         };
 
@@ -2489,6 +2491,28 @@ genesis.register_personality({
             runtime.is_none(),
             "GENESIS_NO_PLUGINS should suppress runtime creation"
         );
+    }
+
+    #[tokio::test]
+    async fn lua_runtime_skips_plugins_disabled_in_config() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(plugin_dir.join("enabled.lua"), "genesis.log('enabled')")
+            .expect("enabled plugin should write");
+        fs::write(plugin_dir.join("disabled.lua"), "genesis.log('disabled')")
+            .expect("disabled plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let mut loaded = test_loaded_config(data_dir, db_path);
+        loaded.config.plugins.disabled = vec!["disabled".to_owned()];
+        let service = SessionExecutionService::new(&loaded);
+
+        let runtime = service
+            .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
+            .expect("runtime should load");
+
+        assert_eq!(runtime.plugin_names(), vec!["enabled".to_owned()]);
     }
 
     #[tokio::test]

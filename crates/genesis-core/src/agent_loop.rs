@@ -1021,7 +1021,9 @@ impl AgentLoop {
 
                     let mut executed_results = executed_results.into_iter();
                     let mut clarification = None;
-                    for (tc, veto_reason) in effective_tool_calls.iter().zip(veto_reasons.into_iter()) {
+                    for (tc, veto_reason) in
+                        effective_tool_calls.iter().zip(veto_reasons.into_iter())
+                    {
                         let lua_vetoed = veto_reason.is_some();
                         let (mut result, requires_input) = match veto_reason {
                             Some(reason) => (
@@ -1035,7 +1037,8 @@ impl AgentLoop {
                         result = sanitize::sanitize_credentials(&result);
                         let success = !result.starts_with("Error:");
                         let result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                        self.trajectory.record_tool_result(&tc.function.name, &result);
+                        self.trajectory
+                            .record_tool_result(&tc.function.name, &result);
                         if !success {
                             let count = self
                                 .tool_failure_counts
@@ -1475,20 +1478,20 @@ impl AgentLoop {
                         let tool_exec_duration = tool_exec_start.elapsed();
 
                         let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
-                            let mut clarification = None;
-                            let mut executed_results = executed_results.into_iter();
-                            for (tc, veto_reason) in streamed_tool_calls.iter().zip(veto_reasons.into_iter()) {
+                        let mut clarification = None;
+                        let mut executed_results = executed_results.into_iter();
+                        for (tc, veto_reason) in
+                            streamed_tool_calls.iter().zip(veto_reasons.into_iter())
+                        {
                             let lua_vetoed = veto_reason.is_some();
                             let (mut result, requires_input) = match veto_reason {
-                            Some(reason) => (
-                                    format!(
-                                        "Error: tool call blocked by Lua hook: {reason}"
-                                    ),
+                                Some(reason) => (
+                                    format!("Error: tool call blocked by Lua hook: {reason}"),
                                     false,
                                 ),
-                                None => executed_results
-                                    .next()
-                                    .expect("executed tool results should align with allowed calls"),
+                                None => executed_results.next().expect(
+                                    "executed tool results should align with allowed calls",
+                                ),
                             };
                             result = sanitize::sanitize_credentials(&result);
                             let tool_success = !result.starts_with("Error:");
@@ -1678,22 +1681,22 @@ impl AgentLoop {
 
                             let mut clarification = None;
                             let mut executed_results = executed_results.into_iter();
-                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter()) {
+                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter())
+                            {
                                 let lua_vetoed = veto_reason.is_some();
                                 let (mut result, requires_input) = match veto_reason {
                                     Some(reason) => (
-                                        format!(
-                                            "Error: tool call blocked by Lua hook: {reason}"
-                                        ),
+                                        format!("Error: tool call blocked by Lua hook: {reason}"),
                                         false,
                                     ),
-                                    None => executed_results
-                                    .next()
-                                    .expect("executed tool results should align with allowed calls"),
+                                    None => executed_results.next().expect(
+                                        "executed tool results should align with allowed calls",
+                                    ),
                                 };
                                 result = sanitize::sanitize_credentials(&result);
                                 let tool_success = !result.starts_with("Error:");
-                                let result = self.run_lua_post_tool_call(&tc.function.name, &result);
+                                let result =
+                                    self.run_lua_post_tool_call(&tc.function.name, &result);
                                 on_event(StreamEvent::ToolCallEnd {
                                     name: &tc.function.name,
                                     call_id: &tc.id,
@@ -2014,7 +2017,8 @@ impl AgentLoop {
         for tc in tool_calls {
             self.trajectory
                 .record_tool_call(&tc.function.name, &tc.function.arguments);
-            self.hooks.on_tool_call_start(hook_session, &tc.function.name);
+            self.hooks
+                .on_tool_call_start(hook_session, &tc.function.name);
 
             match self.run_lua_pre_tool_call(&tc.function.name, &tc.function.arguments) {
                 PreHookOutcome::Allow(arguments) => {
@@ -2726,9 +2730,9 @@ mod tests {
     use super::*;
     use crate::hooks::HookConfig;
     use genesis_lua::{LuaRuntime, LuaRuntimeConfig, LuaSessionContext};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Read, Write};
-    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     fn test_agent() -> AgentLoop {
@@ -2785,6 +2789,7 @@ mod tests {
                     platform: "cli".to_owned(),
                     personality: None,
                 },
+                disabled_plugins: Vec::new(),
                 config_values: BTreeMap::new(),
             })
             .build()
@@ -3972,7 +3977,8 @@ end)
             .expect("post tool shell hook");
 
         assert!(
-            pre.stdout.contains(r#""arguments":"{\"message\":\"rewritten\"}""#),
+            pre.stdout
+                .contains(r#""arguments":"{\"message\":\"rewritten\"}""#),
             "shell hook should see rewritten tool arguments: {}",
             pre.stdout
         );

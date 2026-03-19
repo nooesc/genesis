@@ -234,6 +234,8 @@ pub enum Command {
         about = "List and inspect toolset distributions for batch training"
     )]
     Toolset(ToolsetCommand),
+    #[command(subcommand, about = "Inspect and manage Lua plugins")]
+    Plugins(PluginsCommand),
     #[command(subcommand, about = "List and preview agent personalities")]
     Personality(PersonalityCommand),
     #[command(subcommand, about = "Run and manage multi-step workflows")]
@@ -294,6 +296,27 @@ pub enum PersonalityCommand {
     #[command(about = "Show details for a specific personality")]
     Show {
         #[arg(help = "Name of the personality")]
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginsCommand {
+    #[command(about = "List discovered Lua plugins")]
+    List,
+    #[command(about = "Show details for a specific Lua plugin")]
+    Info {
+        #[arg(help = "Plugin name")]
+        name: String,
+    },
+    #[command(about = "Disable a Lua plugin in config")]
+    Disable {
+        #[arg(help = "Plugin name")]
+        name: String,
+    },
+    #[command(about = "Enable a Lua plugin in config")]
+    Enable {
+        #[arg(help = "Plugin name")]
         name: String,
     },
 }
@@ -1756,6 +1779,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             commands::misc::run_pairing(cli.config, pairing_command, cli.json).await
         }
         Command::Toolset(toolset_command) => commands::misc::run_toolset(toolset_command, cli.json),
+        Command::Plugins(plugins_command) => {
+            commands::misc::run_plugins(cli.config, plugins_command, cli.json)
+        }
         Command::Personality(personality_command) => {
             commands::misc::run_personality(personality_command, cli.json)
         }
@@ -1971,7 +1997,7 @@ mod tests {
     use crate::commands::eval::run_eval_quality;
     use crate::commands::misc::{
         known_models, parse_compression_format, parse_compression_level, run_compress,
-        run_personality, run_toolset,
+        run_personality, run_plugins, run_toolset,
     };
     use crate::commands::serve::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
@@ -3722,6 +3748,111 @@ storage:
     }
 
     #[test]
+    fn run_plugins_list_reports_enabled_and_disabled_plugins() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        let plugin_dir = dir.path().join("data").join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(plugin_dir.join("enabled.lua"), "genesis.log('enabled')")
+            .expect("enabled plugin should write");
+        std::fs::write(plugin_dir.join("disabled.lua"), "genesis.log('disabled')")
+            .expect("disabled plugin should write");
+        genesis_config::set_plugin_disabled_in_file(&config_path, "disabled", true)
+            .expect("disable should persist");
+
+        let result = run_plugins(Some(config_path), PluginsCommand::List, false)
+            .expect("plugin list should succeed");
+
+        assert!(result.contains("enabled"));
+        assert!(result.contains("disabled"));
+        assert!(result.contains("single_file"));
+    }
+
+    #[test]
+    fn run_plugins_info_reports_manifest_details() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        let plugin_dir = dir.path().join("data").join("plugins");
+        let package_dir = plugin_dir.join("weather");
+        std::fs::create_dir_all(&package_dir).expect("package dir should exist");
+        std::fs::write(package_dir.join("init.lua"), "return true").expect("init should write");
+        std::fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "weather"
+version = "0.1.0"
+description = "Weather plugin"
+author = "tester"
+
+[permissions]
+tools = ["read_file"]
+hooks = ["PreTurn"]
+trusted = true
+"#,
+        )
+        .expect("manifest should write");
+
+        let result = run_plugins(
+            Some(config_path),
+            PluginsCommand::Info {
+                name: "weather".to_owned(),
+            },
+            false,
+        )
+        .expect("plugin info should succeed");
+
+        assert!(result.contains("Plugin: weather"));
+        assert!(result.contains("Version: 0.1.0"));
+        assert!(result.contains("Author: tester"));
+        assert!(result.contains("Allowed tools: read_file"));
+        assert!(result.contains("Allowed hooks: PreTurn"));
+    }
+
+    #[test]
+    fn run_plugins_disable_updates_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        let plugin_dir = dir.path().join("data").join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(plugin_dir.join("pirate.lua"), "return true").expect("plugin should write");
+
+        let result = run_plugins(
+            Some(config_path.clone()),
+            PluginsCommand::Disable {
+                name: "pirate".to_owned(),
+            },
+            false,
+        )
+        .expect("disable should succeed");
+
+        assert!(result.contains("disabled plugin `pirate`"));
+        let reloaded = genesis_config::load(Some(&config_path)).expect("reload");
+        assert_eq!(reloaded.config.plugins.disabled, vec!["pirate".to_owned()]);
+    }
+
+    #[test]
+    fn run_plugins_enable_removes_stale_disabled_entry() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        genesis_config::set_plugin_disabled_in_file(&config_path, "ghost", true)
+            .expect("disable should persist");
+
+        let result = run_plugins(
+            Some(config_path.clone()),
+            PluginsCommand::Enable {
+                name: "ghost".to_owned(),
+            },
+            false,
+        )
+        .expect("enable should succeed");
+
+        assert!(result.contains("enabled plugin `ghost`"));
+        let reloaded = genesis_config::load(Some(&config_path)).expect("reload");
+        assert!(reloaded.config.plugins.disabled.is_empty());
+    }
+
+    #[test]
     fn parses_personality_list_command() {
         let cli = Cli::try_parse_from(["genesis", "personality", "list"]).expect("should parse");
         match cli.command {
@@ -3740,6 +3871,58 @@ storage:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_plugins_list_command() {
+        let cli = Cli::try_parse_from(["genesis", "plugins", "list"]).expect("should parse");
+        match cli.command {
+            Command::Plugins(PluginsCommand::List) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plugins_info_command() {
+        let cli = Cli::try_parse_from(["genesis", "plugins", "info", "pirate"])
+            .expect("should parse");
+        match cli.command {
+            Command::Plugins(PluginsCommand::Info { name }) => assert_eq!(name, "pirate"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plugins_disable_command() {
+        let cli = Cli::try_parse_from(["genesis", "plugins", "disable", "pirate"])
+            .expect("should parse");
+        match cli.command {
+            Command::Plugins(PluginsCommand::Disable { name }) => assert_eq!(name, "pirate"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plugins_enable_command() {
+        let cli = Cli::try_parse_from(["genesis", "plugins", "enable", "pirate"])
+            .expect("should parse");
+        match cli.command {
+            Command::Plugins(PluginsCommand::Enable { name }) => assert_eq!(name, "pirate"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    fn write_plugin_test_config(dir: &std::path::Path, extra: Option<&str>) -> std::path::PathBuf {
+        let config_path = dir.join("config.yaml");
+        let mut body = format!(
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\nstorage:\n  data_dir: {}\n",
+            dir.join("data").display()
+        );
+        if let Some(extra) = extra {
+            body.push_str(extra);
+        }
+        std::fs::write(&config_path, body).expect("config should write");
+        config_path
     }
 
     #[test]

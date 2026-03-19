@@ -943,6 +943,25 @@ end)
     }
 
     #[test]
+    fn runtime_skips_plugins_disabled_in_config() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(dir.path().join("enabled.lua"), "genesis.log('enabled loaded')")
+            .expect("enabled plugin should write");
+        fs::write(dir.path().join("disabled.lua"), "genesis.log('disabled loaded')")
+            .expect("disabled plugin should write");
+
+        let runtime = test_runtime_with_disabled_plugins(
+            dir.path(),
+            BTreeMap::new(),
+            vec!["disabled".to_owned()],
+        )
+        .expect("runtime should build");
+
+        assert_eq!(runtime.plugin_names(), vec!["enabled".to_owned()]);
+        assert_eq!(runtime.logs(), vec!["enabled loaded".to_owned()]);
+    }
+
+    #[test]
     fn runtime_skips_broken_plugins_and_records_errors() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         fs::write(dir.path().join("good.lua"), "genesis.log('good loaded')")
@@ -1122,7 +1141,15 @@ version = "0.1.0"
 
     fn test_runtime(
         plugin_dir: &std::path::Path,
+        config_values: BTreeMap<String, String>,
+    ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
+        test_runtime_with_disabled_plugins(plugin_dir, config_values, Vec::new())
+    }
+
+    fn test_runtime_with_disabled_plugins(
+        plugin_dir: &std::path::Path,
         mut config_values: BTreeMap<String, String>,
+        disabled_plugins: Vec<String>,
     ) -> Result<crate::LuaRuntime, crate::LuaRuntimeError> {
         config_values
             .entry("plugin_hook_timeout_ms".to_owned())
@@ -1144,6 +1171,7 @@ version = "0.1.0"
                     platform: "cli".to_owned(),
                     personality: Some("default".to_owned()),
                 },
+                disabled_plugins,
                 config_values,
             })
             .build()

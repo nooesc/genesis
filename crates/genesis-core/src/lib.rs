@@ -1368,6 +1368,7 @@ genesis.register_tool({
                         platform: "cli".to_owned(),
                         personality: None,
                     },
+                    disabled_plugins: Vec::new(),
                     config_values: BTreeMap::new(),
                 })
                 .build()
@@ -1446,6 +1447,7 @@ genesis.register_tool({
                         platform: "cli".to_owned(),
                         personality: None,
                     },
+                    disabled_plugins: Vec::new(),
                     config_values: BTreeMap::new(),
                 })
                 .build()
@@ -1508,6 +1510,7 @@ genesis.register_tool({
                         platform: "cli".to_owned(),
                         personality: None,
                     },
+                    disabled_plugins: Vec::new(),
                     config_values: BTreeMap::new(),
                 })
                 .build()
@@ -1584,6 +1587,7 @@ genesis.register_tool({
                         platform: "cli".to_owned(),
                         personality: None,
                     },
+                    disabled_plugins: Vec::new(),
                     config_values: BTreeMap::new(),
                 })
                 .build()
@@ -1644,6 +1648,7 @@ genesis.register_tool({
                         platform: "cli".to_owned(),
                         personality: None,
                     },
+                    disabled_plugins: Vec::new(),
                     config_values: BTreeMap::new(),
                 })
                 .build()

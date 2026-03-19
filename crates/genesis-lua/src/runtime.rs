@@ -38,6 +38,7 @@ pub struct LuaSessionContext {
 pub struct LuaRuntimeConfig {
     pub plugin_dir: PathBuf,
     pub session: LuaSessionContext,
+    pub disabled_plugins: Vec<String>,
     pub config_values: BTreeMap<String, String>,
 }
 
@@ -357,7 +358,20 @@ impl LuaRuntime {
         self.plugin_errors
             .extend(report.errors.into_iter().map(|err| err.to_string()));
 
+        let configured_disabled = config
+            .disabled_plugins
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+
         for plugin in report.plugins {
+            if configured_disabled.contains(&plugin.name) {
+                self.disabled_plugins
+                    .lock()
+                    .expect("disabled plugins mutex should not be poisoned")
+                    .insert(plugin.name.clone());
+                continue;
+            }
             let source = match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
                 LuaRuntimeError::ReadPluginSource {
                     path: plugin.entrypoint.clone(),
