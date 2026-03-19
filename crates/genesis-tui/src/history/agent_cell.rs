@@ -22,8 +22,8 @@ const PREFIX: &str = "eve> ";
 /// A single agent (Eve) response cell.
 #[derive(Debug, Clone)]
 pub struct AgentCell {
-    /// The raw response text.
-    pub text: String,
+    /// The raw response text (private — use `text()` accessor).
+    text: String,
     /// Lazily-computed styled lines (avoids re-parsing markdown in both
     /// `height()` and `to_scrollback_lines()`).
     cached_lines: OnceCell<Vec<Line<'static>>>,
@@ -41,6 +41,11 @@ impl AgentCell {
             cached_lines: OnceCell::new(),
             cached_height: Cell::new(None),
         }
+    }
+
+    /// The raw response text.
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     /// Return the cached (or lazily computed) styled lines.
