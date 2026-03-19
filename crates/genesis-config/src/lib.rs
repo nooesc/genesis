@@ -57,6 +57,10 @@ pub struct GenesisConfig {
     /// OpenTelemetry telemetry export configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryConfig>,
+    /// Adaptive model routing configuration. Routes simple tasks to cheap
+    /// models and complex tasks to capable models for cost optimization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingConfig>,
 }
 
 /// Display and UI settings for the CLI.
@@ -721,6 +725,27 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Adaptive model routing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoutingConfig {
+    /// Whether adaptive routing is enabled. Default: true when section present.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Model for simple tasks (short questions, greetings, simple lookups).
+    pub cheap: String,
+    /// Model for moderate tasks (code edits, multi-step operations).
+    pub mid: String,
+    /// Model for complex tasks (architecture, multi-file refactors, reasoning).
+    pub top: String,
+    /// Default tier when classification is uncertain. Default: "mid".
+    #[serde(default = "default_routing_tier")]
+    pub default_tier: String,
+}
+
+fn default_routing_tier() -> String {
+    "mid".to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -766,6 +791,8 @@ struct FileConfig {
     tui: Option<TuiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     telemetry: Option<TelemetryConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing: Option<RoutingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -922,6 +949,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         display: DisplayConfig::default(),
         tui: TuiConfig::default(),
         telemetry: None,
+        routing: None,
     })
 }
 
@@ -1100,6 +1128,7 @@ pub fn load_from_map(
             display: file_config.display.unwrap_or_default(),
             tui: file_config.tui.unwrap_or_default(),
             telemetry: file_config.telemetry,
+            routing: file_config.routing,
         },
         paths: AppPaths {
             config_path: paths.config_path,

@@ -18,6 +18,7 @@ pub mod personality;
 pub mod prompt;
 pub mod quality;
 pub mod replay;
+pub mod routing;
 pub mod sandbox;
 pub mod sanitize;
 pub mod scheduler;
@@ -1135,6 +1136,7 @@ pub(crate) mod tests {
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1190,6 +1192,7 @@ pub(crate) mod tests {
                 display: genesis_config::DisplayConfig::default(),
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
+                routing: None,
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
