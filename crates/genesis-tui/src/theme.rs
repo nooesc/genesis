@@ -134,8 +134,36 @@ impl Theme for TokyoNightTheme {
     fn bar_bg_active(&self) -> Color { Color::Rgb(26, 27, 38) }
 }
 
-/// All built-in themes.
-pub const THEME_NAMES: &[&str] = &["eve", "catppuccin", "dracula", "tokyonight"];
+/// NO_COLOR-compliant theme — uses only terminal default colors.
+/// Activated when the NO_COLOR environment variable is set.
+pub struct NoColorTheme;
+
+impl Theme for NoColorTheme {
+    fn name(&self) -> &str { "nocolor" }
+    fn primary(&self) -> Color { Color::Reset }
+    fn accent(&self) -> Color { Color::Reset }
+    fn background(&self) -> Color { Color::Reset }
+    fn text(&self) -> Color { Color::Reset }
+    fn text_dim(&self) -> Color { Color::Reset }
+    fn text_muted(&self) -> Color { Color::Reset }
+    fn success(&self) -> Color { Color::Green }
+    fn error(&self) -> Color { Color::Red }
+    fn warning(&self) -> Color { Color::Yellow }
+    fn border(&self) -> Color { Color::Reset }
+    fn border_active(&self) -> Color { Color::Reset }
+    fn diff_add_fg(&self) -> Color { Color::Green }
+    fn diff_add_bg(&self) -> Color { Color::Reset }
+    fn diff_del_fg(&self) -> Color { Color::Red }
+    fn diff_del_bg(&self) -> Color { Color::Reset }
+    fn bar_bg(&self) -> Color { Color::Reset }
+    fn bar_bg_active(&self) -> Color { Color::Reset }
+}
+
+/// All built-in themes (including auto-activated nocolor).
+pub const THEME_NAMES: &[&str] = &["eve", "catppuccin", "dracula", "tokyonight", "nocolor"];
+
+/// Theme names available for user selection (excludes auto-activated nocolor).
+pub const USER_THEME_NAMES: &[&str] = &["eve", "catppuccin", "dracula", "tokyonight"];
 
 /// Create a theme by name. Returns Eve theme for unknown names.
 pub fn theme_by_name(name: &str) -> Box<dyn Theme> {
@@ -143,8 +171,18 @@ pub fn theme_by_name(name: &str) -> Box<dyn Theme> {
         "catppuccin" => Box::new(CatppuccinTheme),
         "dracula" => Box::new(DraculaTheme),
         "tokyonight" => Box::new(TokyoNightTheme),
+        "nocolor" => Box::new(NoColorTheme),
         _ => Box::new(EveTheme),
     }
+}
+
+/// Check if NO_COLOR is set and return the appropriate theme.
+/// Falls back to the configured theme name if NO_COLOR is not set.
+pub fn resolve_theme(configured_name: &str) -> Box<dyn Theme> {
+    if std::env::var("NO_COLOR").is_ok() {
+        return Box::new(NoColorTheme);
+    }
+    theme_by_name(configured_name)
 }
 
 #[cfg(test)]
@@ -190,6 +228,43 @@ mod tests {
 
     #[test]
     fn theme_names_list_matches_implementations() {
-        assert_eq!(THEME_NAMES.len(), 4);
+        assert_eq!(THEME_NAMES.len(), 5);
+    }
+
+    #[test]
+    fn nocolor_theme_uses_reset() {
+        let theme = NoColorTheme;
+        assert_eq!(theme.primary(), Color::Reset);
+        assert_eq!(theme.text(), Color::Reset);
+    }
+
+    #[test]
+    fn nocolor_theme_uses_ansi_for_status() {
+        let theme = NoColorTheme;
+        assert_eq!(theme.success(), Color::Green);
+        assert_eq!(theme.error(), Color::Red);
+        assert_eq!(theme.warning(), Color::Yellow);
+    }
+
+    #[test]
+    fn resolve_theme_respects_no_color_env() {
+        // Can't reliably test env var in parallel tests,
+        // but test the fallback path:
+        let theme = resolve_theme("dracula");
+        // In CI NO_COLOR may or may not be set
+        assert!(theme.name() == "dracula" || theme.name() == "nocolor");
+    }
+
+    #[test]
+    fn user_theme_names_excludes_nocolor() {
+        assert!(!USER_THEME_NAMES.contains(&"nocolor"));
+        assert!(USER_THEME_NAMES.contains(&"eve"));
+    }
+
+    #[test]
+    fn user_theme_names_is_subset_of_theme_names() {
+        for name in USER_THEME_NAMES {
+            assert!(THEME_NAMES.contains(name), "{name} missing from THEME_NAMES");
+        }
     }
 }

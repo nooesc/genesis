@@ -294,12 +294,14 @@ impl App {
                     self.frame_requester.schedule_frame();
                 }
                 "/theme" => {
-                    // Cycle through themes: eve -> catppuccin -> dracula -> tokyonight -> eve
-                    let names = crate::theme::THEME_NAMES;
+                    // Cycle through user-selectable themes (excludes nocolor which is env-activated).
+                    let names = crate::theme::USER_THEME_NAMES;
                     let current = self.active_theme.name().to_owned();
                     let idx = names.iter().position(|&n| n == current).unwrap_or(0);
                     let next = names[(idx + 1) % names.len()];
                     self.active_theme = crate::theme::theme_by_name(next);
+                    // Persist to config (best-effort, ignore errors).
+                    let _ = genesis_config::set_theme(next);
                     self.frame_requester.schedule_frame();
                 }
                 "/compact" | "/summary" => {
