@@ -16,6 +16,11 @@ use crate::clipboard;
 use crate::slash::{handle_chat_command, SlashCompleter};
 use crate::{is_exit_command, mcp_startup_strict, CliError};
 
+/// Extract a whitespace-trimmed argument from a split command, returning `""` if missing.
+fn get_arg<'a>(parts: &[&'a str], index: usize) -> &'a str {
+    parts.get(index).map(|s| s.trim()).unwrap_or("")
+}
+
 /// Convert the config crate's `ToolDisplayMode` to the UI crate's equivalent.
 fn to_ui_tool_mode(mode: genesis_config::ToolDisplayMode) -> ToolDisplayMode {
     match mode {
@@ -343,7 +348,7 @@ pub(crate) async fn run_chat(
         // Handle /system — view or set system prompt override
         if trimmed.starts_with("/system") {
             let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let arg = get_arg(&parts, 1);
             if arg.is_empty() {
                 println!("Current system prompt: (use the default agent prompt)");
                 println!("Override with: /system <prompt text>");
@@ -362,7 +367,7 @@ pub(crate) async fn run_chat(
         // Handle /template — apply an agent template (personality + system prompt + guidelines)
         if trimmed.starts_with("/template") {
             let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let arg = get_arg(&parts, 1);
             if arg.is_empty() {
                 let templates = genesis_core::templates::list_templates();
                 println!("Available agent templates:");
@@ -404,7 +409,7 @@ pub(crate) async fn run_chat(
         // Handle /workflow — run a YAML-defined multi-step workflow
         if trimmed.starts_with("/workflow") {
             let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
-            let sub = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let sub = get_arg(&parts, 1);
             if sub.is_empty() || sub == "help" {
                 println!(
                     "Usage:\n\
@@ -423,7 +428,7 @@ pub(crate) async fn run_chat(
                          terminal: true"
                 );
             } else if sub == "validate" {
-                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let file = get_arg(&parts, 2);
                 if file.is_empty() {
                     println!("Usage: /workflow validate <file.yaml>");
                 } else {
@@ -454,7 +459,7 @@ pub(crate) async fn run_chat(
                     }
                 }
             } else if sub == "show" {
-                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let file = get_arg(&parts, 2);
                 if file.is_empty() {
                     println!("Usage: /workflow show <file.yaml>");
                 } else {
@@ -488,7 +493,7 @@ pub(crate) async fn run_chat(
                     }
                 }
             } else if sub == "run" {
-                let rest = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let rest = get_arg(&parts, 2);
                 let (file, input_text) = rest.split_once(' ').unwrap_or((rest, ""));
                 if file.is_empty() {
                     println!("Usage: /workflow run <file.yaml> [input text]");
@@ -560,7 +565,7 @@ pub(crate) async fn run_chat(
         // Handle /eval — run evaluation suites
         if trimmed.starts_with("/eval") {
             let parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
-            let sub = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let sub = get_arg(&parts, 1);
             if sub.is_empty() || sub == "help" {
                 println!(
                     "Usage:\n\
@@ -577,7 +582,7 @@ pub(crate) async fn run_chat(
                            must_contain: [\"4\"]"
                 );
             } else if sub == "validate" {
-                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let file = get_arg(&parts, 2);
                 if file.is_empty() {
                     println!("Usage: /eval validate <file.yaml>");
                 } else {
@@ -608,7 +613,7 @@ pub(crate) async fn run_chat(
                     }
                 }
             } else if sub == "show" {
-                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let file = get_arg(&parts, 2);
                 if file.is_empty() {
                     println!("Usage: /eval show <file.yaml>");
                 } else {
@@ -654,7 +659,7 @@ pub(crate) async fn run_chat(
                     }
                 }
             } else if sub == "run" {
-                let file = parts.get(2).map(|s| s.trim()).unwrap_or("");
+                let file = get_arg(&parts, 2);
                 if file.is_empty() {
                     println!("Usage: /eval run <file.yaml>");
                 } else {
@@ -745,7 +750,7 @@ pub(crate) async fn run_chat(
 
         if trimmed.starts_with("/personality") {
             let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let arg = get_arg(&parts, 1);
             if arg.is_empty() {
                 let all = genesis_core::personality::list_personalities();
                 println!("Available personalities:");
@@ -780,7 +785,7 @@ pub(crate) async fn run_chat(
         // Handle /model — show or switch model at runtime
         if trimmed.starts_with("/model") {
             let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+            let arg = get_arg(&parts, 1);
             if arg.is_empty() {
                 println!("Active model: {}", model);
                 println!("Set with: /model <backend>/<model>  (e.g. /model anthropic/claude-sonnet-4-20250514)");
