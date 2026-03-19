@@ -3806,6 +3806,34 @@ trusted = true
     }
 
     #[test]
+    fn run_plugins_info_reports_disabled_local_plugin_as_other_entry() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        let plugin_dir = dir.path().join("data").join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(plugin_dir.join("pirate.lua"), "genesis.log('override')")
+            .expect("plugin should write");
+        genesis_config::set_plugin_disabled_in_file(&config_path, "pirate", true)
+            .expect("disable should persist");
+
+        let result = run_plugins(
+            Some(config_path),
+            PluginsCommand::Info {
+                name: "pirate".to_owned(),
+            },
+            false,
+        )
+        .expect("plugin info should succeed");
+
+        assert!(result.contains("Plugin: pirate"));
+        assert!(result.contains("Status: disabled"));
+        assert!(result.contains("Other entries:"));
+        assert!(!result.contains("Shadowed entries:"));
+        assert!(result.contains("single_file"));
+        assert!(result.contains("Source: built-in"));
+    }
+
+    #[test]
     fn run_plugins_disable_updates_config_file() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = write_plugin_test_config(dir.path(), None);

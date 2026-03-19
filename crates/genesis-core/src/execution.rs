@@ -777,10 +777,7 @@ impl<'a> SessionExecutionService<'a> {
         } else {
             None
         };
-        if effective_personality.is_some() {
-            let prompt = resolved_personality_prompt
-                .as_deref()
-                .expect("selected personality should have been resolved");
+        if let Some(prompt) = resolved_personality_prompt.as_deref() {
             prompt_builder = prompt_builder.personality_prompt(prompt);
         }
         if let Some(s) = skills_section.as_deref() {

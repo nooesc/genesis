@@ -678,10 +678,16 @@ fn render_plugin_info(
         .find(|entry| entry.status != "shadowed")
         .unwrap_or(matches[0]);
     let shadowed: Vec<&PluginCommandEntry> = matches
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            !same_plugin_entry(candidate, entry) && candidate.status == "shadowed"
+        })
+        .collect();
+    let alternates: Vec<&PluginCommandEntry> = matches
         .into_iter()
         .filter(|candidate| {
-            candidate.status == "shadowed"
-                || (candidate.kind != entry.kind || candidate.source != entry.source)
+            !same_plugin_entry(candidate, entry) && candidate.status != "shadowed"
         })
         .collect();
 
@@ -689,6 +695,7 @@ fn render_plugin_info(
         return Ok(serde_json::to_string_pretty(&serde_json::json!({
             "plugin": plugin_entry_json(entry),
             "shadowed": shadowed.iter().map(|entry| plugin_entry_json(entry)).collect::<Vec<_>>(),
+            "alternates": alternates.iter().map(|entry| plugin_entry_json(entry)).collect::<Vec<_>>(),
             "errors": errors,
         }))?);
     }
@@ -730,6 +737,18 @@ fn render_plugin_info(
             lines.push(format!("    Status: {}", shadowed_entry.status));
         }
     }
+    if !alternates.is_empty() {
+        lines.push(String::new());
+        lines.push("Other entries:".to_owned());
+        for alternate_entry in alternates {
+            lines.push(format!(
+                "  - {} [{}]",
+                alternate_entry.name, alternate_entry.kind
+            ));
+            lines.push(format!("    Source: {}", alternate_entry.source));
+            lines.push(format!("    Status: {}", alternate_entry.status));
+        }
+    }
     if !errors.is_empty() {
         lines.push(String::new());
         lines.push("Discovery warnings:".to_owned());
@@ -766,6 +785,10 @@ fn short_plugin_source(source: &str) -> &str {
     } else {
         "local"
     }
+}
+
+fn same_plugin_entry(left: &PluginCommandEntry, right: &PluginCommandEntry) -> bool {
+    left.name == right.name && left.kind == right.kind && left.source == right.source
 }
 
 fn join_or_none(items: &[String]) -> String {
