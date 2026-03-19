@@ -14,6 +14,41 @@ export const Route = createLazyFileRoute('/agents')({
   component: AgentsPage,
 })
 
+/** Animated SVG connector — horizontal flowing dashes */
+function Connector({ direction = 'right' }: { direction?: 'left' | 'right' }) {
+  return (
+    <svg width="32" height="2" className="shrink-0" aria-hidden>
+      <line
+        x1={direction === 'right' ? 0 : 32}
+        y1="1"
+        x2={direction === 'right' ? 32 : 0}
+        y2="1"
+        stroke="var(--border)"
+        strokeWidth="1"
+        strokeDasharray="4 4"
+        strokeOpacity="0.3"
+        className="connector-flow"
+      />
+    </svg>
+  )
+}
+
+/** Animated SVG connector — vertical flowing dashes */
+function VConnector({ height = 32 }: { height?: number }) {
+  return (
+    <svg width="2" height={height} className="shrink-0" aria-hidden>
+      <line
+        x1="1" y1="0" x2="1" y2={height}
+        stroke="var(--border)"
+        strokeWidth="1"
+        strokeDasharray="4 4"
+        strokeOpacity="0.3"
+        className="connector-flow"
+      />
+    </svg>
+  )
+}
+
 function TopoNode({
   label,
   subtitle,
@@ -28,7 +63,7 @@ function TopoNode({
   accent?: string
 }) {
   return (
-    <div className="rounded-lg border border-border/40 bg-card/40 px-3 py-2 transition-colors hover:border-border/60">
+    <div className="rounded-lg border border-border/40 bg-card/40 px-3 py-2 transition-all duration-200 hover:border-border/60 hover:-translate-y-px hover:shadow-[0_2px_8px_rgba(0,0,0,0.25)]">
       <div className="flex items-center gap-2">
         <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded bg-muted/30">
           <Icon className="h-3 w-3 text-muted-foreground" />
@@ -116,8 +151,7 @@ function AgentsPage() {
                       status={server.connected ? 'online' : 'offline'}
                       icon={Server}
                     />
-                    {/* Connector dash */}
-                    <div className="h-px w-6 border-t border-dashed border-border/30" />
+                    <Connector direction="right" />
                   </div>
                 ))}
               </>
@@ -126,8 +160,8 @@ function AgentsPage() {
 
           {/* Center: Eve */}
           <div className="flex flex-col items-center gap-4">
-            {/* Eve Card */}
-            <div className="rounded-xl border-2 border-primary/30 bg-card/60 px-6 py-4 shadow-lg shadow-primary/5">
+            {/* Eve Card — with pulse ring when healthy */}
+            <div className={`rounded-xl border-2 border-primary/30 bg-card/60 px-6 py-4 shadow-lg shadow-primary/5 ${isHealthy ? 'node-pulse-primary' : ''}`}>
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
                   <Bot className="h-5 w-5 text-primary" />
@@ -158,9 +192,7 @@ function AgentsPage() {
             </div>
 
             {/* Vertical connector to schedules */}
-            {activeSchedules.length > 0 && (
-              <div className="h-8 w-px border-l border-dashed border-border/30" />
-            )}
+            {activeSchedules.length > 0 && <VConnector />}
 
             {/* Schedules (below Eve) */}
             {activeSchedules.length > 0 && (
@@ -197,8 +229,7 @@ function AgentsPage() {
                 </span>
                 {platforms.map(([platform, count]) => (
                   <div key={platform} className="flex items-center gap-2">
-                    {/* Connector dash */}
-                    <div className="h-px w-6 border-t border-dashed border-border/30" />
+                    <Connector direction="left" />
                     <TopoNode
                       label={platform}
                       subtitle={`${count} sessions`}
