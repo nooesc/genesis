@@ -782,12 +782,53 @@ mod tests {
 
         let store = EmbeddingStore::new(&db_path);
         store.store("mem1", &[1.0, 2.0], "model-a").unwrap();
-        store.store("mem1", &[3.0, 4.0, 5.0], "model-b").unwrap();
+        store.store("mem1", &[3.0, 4.0], "model-b").unwrap();
 
         assert_eq!(store.count().unwrap(), 1);
         let all = store.all_embeddings().unwrap();
-        assert_eq!(all[0].1.len(), 3);
+        assert_eq!(all[0].1.len(), 2);
         assert!((all[0].1[0] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_store_rejects_dimension_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = genesis_storage::SessionStore::new(&db_path);
+        session_store.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'test', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'fact', 'test', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = EmbeddingStore::new(&db_path);
+        store.store("mem1", &[1.0, 2.0], "model-a").unwrap();
+
+        let error = store
+            .store("mem2", &[3.0, 4.0, 5.0], "model-b")
+            .expect_err("mixed dimensions should be rejected");
+
+        assert!(matches!(
+            error,
+            genesis_storage::StorageError::EmbeddingDimensionMismatch {
+                expected: 2,
+                actual: 3,
+                ..
+            }
+        ));
     }
 
     #[test]
