@@ -1,5 +1,6 @@
 mod anthropic_types;
 mod api_types;
+pub mod batch;
 pub mod circuit_breaker;
 mod client;
 mod error;

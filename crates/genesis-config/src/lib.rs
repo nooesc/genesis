@@ -332,6 +332,48 @@ pub struct RuntimeConfig {
     /// Reduces input tokens by 85-96% for large tool registries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_tools: Option<Vec<String>>,
+    /// Batch API configuration. When enabled, eval/batch commands route
+    /// through OpenAI's Batch API for a 50% cost discount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchApiConfig>,
+}
+
+/// Batch API routing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchApiConfig {
+    /// When to use the Batch API. Default: Auto.
+    #[serde(default)]
+    pub mode: BatchApiMode,
+    /// Maximum seconds to wait for batch completion before falling back
+    /// to the standard API. Default: 3600 (1 hour).
+    #[serde(default = "default_batch_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// When to route requests through the OpenAI Batch API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchApiMode {
+    /// Use Batch API for eval/batch commands, standard API for chat.
+    #[default]
+    Auto,
+    /// Always use the Batch API (even for interactive commands).
+    Always,
+    /// Never use the Batch API.
+    Never,
+}
+
+fn default_batch_timeout() -> u64 {
+    3600
+}
+
+impl Default for BatchApiConfig {
+    fn default() -> Self {
+        Self {
+            mode: BatchApiMode::default(),
+            timeout_secs: default_batch_timeout(),
+        }
+    }
 }
 
 /// Configuration for filtering which tools are available to the agent.
@@ -784,6 +826,8 @@ struct FileRuntimeConfig {
     guardrails: Option<GuardrailsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     core_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch: Option<BatchApiConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -869,6 +913,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             tool_filter: None,
             guardrails: None,
             core_tools: None,
+            batch: None,
         },
         gateway: None,
         toolsets: HashMap::new(),
@@ -1030,6 +1075,7 @@ pub fn load_from_map(
         tool_filter: rt.and_then(|r| r.tool_filter.clone()),
         guardrails: rt.and_then(|r| r.guardrails.clone()),
         core_tools: rt.and_then(|r| r.core_tools.clone()),
+        batch: rt.and_then(|r| r.batch.clone()),
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
