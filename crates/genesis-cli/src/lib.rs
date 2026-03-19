@@ -30,9 +30,17 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     #[arg(long, global = true, help = "Render machine-readable JSON output")]
     pub json: bool,
-    #[arg(long, global = true, help = "Disable Lua plugin loading for this process")]
+    #[arg(
+        long,
+        global = true,
+        help = "Disable Lua plugin loading for this process"
+    )]
     pub no_plugins: bool,
-    #[arg(long, global = true, help = "Log plugin execution timing and lifecycle events")]
+    #[arg(
+        long,
+        global = true,
+        help = "Log plugin execution timing and lifecycle events"
+    )]
     pub plugin_verbose: bool,
     /// Color output mode: auto, always, never.
     #[arg(long, global = true, default_value = "auto")]
@@ -3671,6 +3679,7 @@ storage:
         assert!(result.contains("pirate"));
         assert!(result.contains("kawaii"));
         assert!(result.contains("hacker"));
+        assert!(result.contains("bundled"));
     }
 
     #[test]
@@ -3691,6 +3700,7 @@ storage:
         )
         .expect("should succeed");
         assert!(result.contains("Personality: pirate"));
+        assert!(result.contains("Source: bundled"));
         assert!(result.contains("System prompt prefix:"));
     }
 
@@ -3723,6 +3733,8 @@ storage:
 
         assert!(result.contains("enabled"));
         assert!(result.contains("disabled"));
+        assert!(result.contains("default"));
+        assert!(result.contains("bundled"));
         assert!(result.contains("single_file"));
     }
 
@@ -3761,10 +3773,36 @@ trusted = true
         .expect("plugin info should succeed");
 
         assert!(result.contains("Plugin: weather"));
+        assert!(result.contains("Source:"));
         assert!(result.contains("Version: 0.1.0"));
         assert!(result.contains("Author: tester"));
         assert!(result.contains("Allowed tools: read_file"));
         assert!(result.contains("Allowed hooks: PreTurn"));
+    }
+
+    #[test]
+    fn run_plugins_info_reports_shadowed_bundled_plugin() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = write_plugin_test_config(dir.path(), None);
+        let plugin_dir = dir.path().join("data").join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(plugin_dir.join("pirate.lua"), "genesis.log('override')")
+            .expect("plugin should write");
+
+        let result = run_plugins(
+            Some(config_path),
+            PluginsCommand::Info {
+                name: "pirate".to_owned(),
+            },
+            false,
+        )
+        .expect("plugin info should succeed");
+
+        assert!(result.contains("Plugin: pirate"));
+        assert!(result.contains("Kind: single_file"));
+        assert!(result.contains("Shadowed entries:"));
+        assert!(result.contains("bundled"));
+        assert!(result.contains("Source: built-in"));
     }
 
     #[test]
@@ -3842,8 +3880,8 @@ trusted = true
 
     #[test]
     fn parses_plugins_info_command() {
-        let cli = Cli::try_parse_from(["genesis", "plugins", "info", "pirate"])
-            .expect("should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "plugins", "info", "pirate"]).expect("should parse");
         match cli.command {
             Command::Plugins(PluginsCommand::Info { name }) => assert_eq!(name, "pirate"),
             other => panic!("unexpected command: {other:?}"),
@@ -3852,8 +3890,8 @@ trusted = true
 
     #[test]
     fn parses_plugins_disable_command() {
-        let cli = Cli::try_parse_from(["genesis", "plugins", "disable", "pirate"])
-            .expect("should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "plugins", "disable", "pirate"]).expect("should parse");
         match cli.command {
             Command::Plugins(PluginsCommand::Disable { name }) => assert_eq!(name, "pirate"),
             other => panic!("unexpected command: {other:?}"),
@@ -3862,8 +3900,8 @@ trusted = true
 
     #[test]
     fn parses_plugins_enable_command() {
-        let cli = Cli::try_parse_from(["genesis", "plugins", "enable", "pirate"])
-            .expect("should parse");
+        let cli =
+            Cli::try_parse_from(["genesis", "plugins", "enable", "pirate"]).expect("should parse");
         match cli.command {
             Command::Plugins(PluginsCommand::Enable { name }) => assert_eq!(name, "pirate"),
             other => panic!("unexpected command: {other:?}"),
