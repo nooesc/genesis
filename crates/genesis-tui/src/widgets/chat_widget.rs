@@ -9,7 +9,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Style,
-    text::Line,
+    text::{Line, Span},
     widgets::{Paragraph, Widget as _, Wrap},
 };
 use unicode_width::UnicodeWidthStr as _;
@@ -349,6 +349,7 @@ impl ChatWidget {
         let mut entries: Vec<CellEntry<'_>> = Vec::new();
         let mut used = 0u16;
         let mut prev_is_user: Option<bool> = None;
+        let mut cells_collected = 0usize;
         for cell in self.committed_cells.iter().rev() {
             let cur_is_user = matches!(cell, HistoryCell::User(_));
             let h = cell.height(area.width).max(1);
@@ -372,8 +373,17 @@ impl ChatWidget {
                 separator_after: needs_sep,
             });
             used += cost;
+            cells_collected += 1;
             prev_is_user = Some(cur_is_user);
         }
+
+        // Count message cells (User/Agent) that were clipped above.
+        let skipped_message_count = self
+            .committed_cells
+            .iter()
+            .take(self.committed_cells.len().saturating_sub(cells_collected))
+            .filter(|c| matches!(c, HistoryCell::User(_) | HistoryCell::Agent(_)))
+            .count();
 
         // Also account for a separator between the last committed cell
         // and the active cell, if the active cell was rendered above.
@@ -424,6 +434,25 @@ impl ChatWidget {
         // active streaming cell, if needed.
         if active_sep {
             render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
+        }
+
+        // ── Overflow indicator ────────────────────────────────────────
+        // When committed messages were clipped, show a hint on the first row.
+        if skipped_message_count > 0 {
+            let hint = format!(
+                " \u{2191} {} more · Ctrl+T for transcript",
+                skipped_message_count
+            );
+            let dim_style =
+                Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+            let hint_line = Line::from(Span::styled(hint, dim_style));
+            let hint_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            };
+            Paragraph::new(hint_line).render(hint_area, buf);
         }
     }
 
@@ -750,6 +779,66 @@ mod tests {
         assert_eq!(
             separator_count, 0,
             "no turn separator between consecutive agent/tool cells"
+        );
+    }
+
+    #[test]
+    fn overflow_indicator_shown_when_messages_clipped() {
+        let mut cw = ChatWidget::new();
+        // Create enough messages to overflow a small viewport.
+        for i in 0..10 {
+            cw.add_user_message(format!("message {i}"));
+            cw.start_turn();
+            cw.append_text(&format!("response {i}"));
+            cw.complete_turn();
+        }
+
+        // Render into a tiny viewport (only 5 rows).
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // The first row should contain the overflow indicator with "↑".
+        let first_row: String = (0..area.width)
+            .filter_map(|col| buf.cell((col, 0)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(
+            first_row.contains('\u{2191}'),
+            "first row should contain ↑ indicator, got: {first_row:?}"
+        );
+        assert!(
+            first_row.contains("more"),
+            "first row should contain 'more', got: {first_row:?}"
+        );
+        assert!(
+            first_row.contains("Ctrl+T"),
+            "first row should contain 'Ctrl+T', got: {first_row:?}"
+        );
+    }
+
+    #[test]
+    fn no_overflow_indicator_when_all_messages_fit() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("hello".to_string());
+        cw.start_turn();
+        cw.append_text("hi");
+        cw.complete_turn();
+
+        // Render into a viewport big enough to fit everything.
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // No row should contain the "↑" overflow indicator.
+        let has_indicator = (0..area.height).any(|row| {
+            let row_text: String = (0..area.width)
+                .filter_map(|col| buf.cell((col, row)).map(|c| c.symbol().to_string()))
+                .collect();
+            row_text.contains('\u{2191}') && row_text.contains("more")
+        });
+        assert!(
+            !has_indicator,
+            "should not show overflow indicator when all messages fit"
         );
     }
 }
