@@ -13,7 +13,7 @@ function SystemClock() {
   }, [])
 
   return (
-    <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+    <span className="font-mono text-[11px] tabular-nums text-foreground/60">
       {time.toLocaleTimeString('en-US', { hour12: false })}
     </span>
   )
@@ -32,7 +32,10 @@ export function SystemBar() {
   const isHealthy = isHealthyStatus(health?.status)
 
   return (
-    <header className="system-bar flex h-9 items-center justify-between border-b border-border/50 bg-[#0c0c0c] px-4">
+    <header className="system-bar relative flex h-9 items-center justify-between border-b border-border/30 bg-[#0a0a0a] px-4">
+      {/* Subtle bottom glow line */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-primary/20 to-transparent" />
+
       {/* Left: Branding + Connection */}
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-2">
@@ -45,12 +48,12 @@ export function SystemBar() {
                   : 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]'
             }`}
           />
-          <span className="font-mono text-[11px] font-semibold tracking-wider text-primary">
+          <span className="bg-gradient-to-r from-primary to-primary/60 bg-clip-text font-mono text-[11px] font-bold tracking-[0.2em] text-transparent">
             GENESIS
           </span>
         </div>
         {health && (
-          <span className="font-mono text-[10px] text-muted-foreground/60">
+          <span className="font-mono text-[9px] tabular-nums text-muted-foreground/40">
             v{health.version}
           </span>
         )}
@@ -80,13 +83,16 @@ export function SystemBar() {
       {/* Right: Latest event + status + clock */}
       <div className="flex items-center gap-3">
         {latestEvent && (
-          <span className="max-w-[200px] truncate font-mono text-[9px] text-muted-foreground/25" title={`${latestEvent.action} — ${formatRelativeTime(latestEvent.created_at)}`}>
+          <span className="max-w-[180px] truncate font-mono text-[8px] text-muted-foreground/20" title={`${latestEvent.action} — ${formatRelativeTime(latestEvent.created_at)}`}>
             {latestEvent.action}
           </span>
         )}
-        <span className="font-mono text-[10px] text-muted-foreground/40">
-          {isError ? 'OFFLINE' : health ? 'ONLINE' : '...'}
+        <span className={`font-mono text-[9px] font-medium tracking-wider ${
+          isError ? 'text-red-400' : health ? 'text-emerald-400/60' : 'text-muted-foreground/30'
+        }`}>
+          {isError ? 'OFFLINE' : health ? 'ONLINE' : '···'}
         </span>
+        <Divider />
         <SystemClock />
       </div>
     </header>
@@ -96,10 +102,10 @@ export function SystemBar() {
 function StatusChip({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center gap-1.5 px-2">
-      <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground/50">
+      <span className="font-mono text-[8px] uppercase tracking-widest text-muted-foreground/30">
         {label}
       </span>
-      <span className="font-mono text-[11px] tabular-nums text-foreground/80">
+      <span className="font-mono text-[10px] tabular-nums text-foreground/70">
         {value}
       </span>
     </div>
@@ -107,5 +113,5 @@ function StatusChip({ label, value }: { label: string; value: string }) {
 }
 
 function Divider() {
-  return <div className="h-3 w-px bg-border/40" />
+  return <div className="h-3 w-px bg-border/20" />
 }
