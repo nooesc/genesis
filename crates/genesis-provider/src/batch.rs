@@ -153,7 +153,7 @@ impl BatchClient {
         );
 
         if let Some(ref error_file) = status.error_file_id {
-            tracing::warn!(error_file_id = %error_file, "batch has error file — check OpenAI dashboard for details");
+            tracing::warn!(error_file_id = %error_file, "batch completed with errors — download error file for details");
         }
 
         // 5. Download and parse results
@@ -396,16 +396,20 @@ pub fn parse_batch_results(
         })?;
 
         // Extract index from custom_id "req-N"
-        let index = result_line
+        let index = match result_line
             .custom_id
             .strip_prefix("req-")
-            .and_then(|s| s.parse::<usize>().ok());
-
-        if index.is_none() {
-            tracing::warn!(custom_id = %result_line.custom_id, "unrecognized custom_id in batch result");
-        }
-
-        let index = index.unwrap_or(usize::MAX);
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!(
+                    custom_id = %result_line.custom_id,
+                    "unrecognized custom_id in batch result — result will be discarded"
+                );
+                continue;
+            }
+        };
 
         if let Some(err) = result_line.error {
             result_map.insert(
