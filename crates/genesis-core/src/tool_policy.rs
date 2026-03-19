@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// A loaded tool policy with compiled rules.
 #[derive(Debug, Clone)]
@@ -72,10 +72,10 @@ impl PolicyResult {
 /// A single policy rule for a tool.
 #[derive(Debug, Clone)]
 struct PolicyRule {
-    /// Patterns that allow the tool call (checked before deny).
-    allow_patterns: RulePatterns,
-    /// Patterns that deny the tool call (checked after allow).
+    /// Patterns that deny the tool call (checked first — deny takes precedence).
     deny_patterns: RulePatterns,
+    /// Patterns that allow the tool call (checked after deny).
+    allow_patterns: RulePatterns,
 }
 
 /// Patterns to match against tool arguments.
@@ -197,8 +197,8 @@ impl ToolPolicy {
         let path = arguments.get("path");
         let url = arguments.get("url");
 
+        // Phase 1: Check deny rules across ALL rules — deny always wins.
         for rule in rules {
-            // Check deny patterns first — deny takes precedence over allow.
             if let Some(cmd) = command {
                 if matches_any(cmd, &rule.deny_patterns.command_patterns) {
                     return PolicyResult::deny(format!(
@@ -220,34 +220,40 @@ impl ToolPolicy {
                     ));
                 }
             }
+        }
 
-            // Check allow patterns — if allow patterns exist and none match, deny.
-            let has_allow = !rule.allow_patterns.command_patterns.is_empty()
+        // Phase 2: Check allow rules with OR semantics — if ANY rule allows, pass.
+        // Collect whether any rule has allow patterns defined.
+        let has_any_allow = rules.iter().any(|rule| {
+            !rule.allow_patterns.command_patterns.is_empty()
                 || !rule.allow_patterns.path_patterns.is_empty()
-                || !rule.allow_patterns.url_patterns.is_empty();
+                || !rule.allow_patterns.url_patterns.is_empty()
+        });
 
-            if has_allow {
-                let allowed = (command.is_none()
+        if has_any_allow {
+            let allowed = rules.iter().any(|rule| {
+                let cmd_ok = command.is_none()
                     || rule.allow_patterns.command_patterns.is_empty()
                     || command
                         .map(|c| matches_any(c, &rule.allow_patterns.command_patterns))
-                        .unwrap_or(true))
-                    && (path.is_none()
-                        || rule.allow_patterns.path_patterns.is_empty()
-                        || path
-                            .map(|p| matches_any(p, &rule.allow_patterns.path_patterns))
-                            .unwrap_or(true))
-                    && (url.is_none()
-                        || rule.allow_patterns.url_patterns.is_empty()
-                        || url
-                            .map(|u| matches_any(u, &rule.allow_patterns.url_patterns))
-                            .unwrap_or(true));
+                        .unwrap_or(true);
+                let path_ok = path.is_none()
+                    || rule.allow_patterns.path_patterns.is_empty()
+                    || path
+                        .map(|p| matches_any(p, &rule.allow_patterns.path_patterns))
+                        .unwrap_or(true);
+                let url_ok = url.is_none()
+                    || rule.allow_patterns.url_patterns.is_empty()
+                    || url
+                        .map(|u| matches_any(u, &rule.allow_patterns.url_patterns))
+                        .unwrap_or(true);
+                cmd_ok && path_ok && url_ok
+            });
 
-                if !allowed {
-                    return PolicyResult::deny(format!(
-                        "tool `{tool_name}` call does not match any allow pattern"
-                    ));
-                }
+            if !allowed {
+                return PolicyResult::deny(format!(
+                    "tool `{tool_name}` call does not match any allow pattern"
+                ));
             }
         }
 
@@ -286,14 +292,22 @@ fn matches_any(value: &str, patterns: &[String]) -> bool {
     false
 }
 
-/// Simple glob matching supporting `*` (any chars) and `**` (recursive).
+/// Glob matching supporting `*` (any chars) and `**` (recursive).
+///
+/// Invalid patterns log a warning and are treated as non-matching to
+/// avoid silently bypassing security rules.
 fn glob_match(pattern: &str, value: &str) -> bool {
-    // Use the `glob` crate's pattern matching for paths.
-    if let Ok(glob_pattern) = glob::Pattern::new(pattern) {
-        return glob_pattern.matches(value);
+    match glob::Pattern::new(pattern) {
+        Ok(glob_pattern) => glob_pattern.matches(value),
+        Err(e) => {
+            warn!(
+                pattern,
+                error = %e,
+                "invalid glob pattern in tool policy — treating as non-matching"
+            );
+            false
+        }
     }
-    // Fallback: exact match.
-    pattern == value
 }
 
 #[cfg(test)]
