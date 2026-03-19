@@ -224,6 +224,17 @@ pub fn classify_task(message: &str, message_count: usize) -> TaskComplexity {
         .filter(|kw| msg.contains(*kw))
         .count();
 
+    // Short simple messages — check FIRST to avoid false positives from
+    // broad code keywords like "add", "update", "file".
+    if len < 50 && simple_score >= 1 && complex_score == 0 {
+        return TaskComplexity::Simple;
+    }
+
+    // Short messages without any complexity or code signals → Simple
+    if len < 100 && complex_score == 0 && code_score <= 1 {
+        return TaskComplexity::Simple;
+    }
+
     // Long messages with multiple complex keywords → Complex
     if complex_score >= 2 || (len > 500 && complex_score >= 1) {
         return TaskComplexity::Complex;
@@ -237,16 +248,6 @@ pub fn classify_task(message: &str, message_count: usize) -> TaskComplexity {
     // Code-related work → Moderate
     if code_score >= 2 || (len > 200 && code_score >= 1) {
         return TaskComplexity::Moderate;
-    }
-
-    // Short simple messages → Simple
-    if len < 50 && simple_score >= 1 {
-        return TaskComplexity::Simple;
-    }
-
-    // Short messages without complex signals → Simple
-    if len < 100 && complex_score == 0 && code_score == 0 {
-        return TaskComplexity::Simple;
     }
 
     // Default → Moderate
