@@ -5,7 +5,7 @@
 //! styles.  The `eve> ` prefix is prepended to the first line and
 //! continuation lines are indented by the same width.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -27,6 +27,10 @@ pub struct AgentCell {
     /// Lazily-computed styled lines (avoids re-parsing markdown in both
     /// `height()` and `to_scrollback_lines()`).
     cached_lines: OnceCell<Vec<Line<'static>>>,
+    /// Cached `(width, height)` to avoid recomputing `wrapped_row_count` when
+    /// the width hasn't changed.  Uses interior mutability so `height()` can
+    /// stay `&self`.
+    cached_height: Cell<Option<(u16, u16)>>,
 }
 
 impl AgentCell {
@@ -35,6 +39,7 @@ impl AgentCell {
         Self {
             text: text.into(),
             cached_lines: OnceCell::new(),
+            cached_height: Cell::new(None),
         }
     }
 
@@ -54,8 +59,15 @@ impl AgentCell {
 
     /// Return the number of rows this cell occupies at the given terminal width.
     pub fn height(&self, width: u16) -> u16 {
+        if let Some((cached_w, cached_h)) = self.cached_height.get() {
+            if cached_w == width {
+                return cached_h;
+            }
+        }
         let usable_width = width.max(1);
-        wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1)
+        let h = wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1);
+        self.cached_height.set(Some((width, h)));
+        h
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.

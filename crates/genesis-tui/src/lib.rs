@@ -337,7 +337,15 @@ pub async fn run_tui(
             // ── Agent events (from streaming callback via channel) ──
             agent_event = agent_rx.recv() => {
                 if let Some(event) = agent_event {
-                    app.handle_agent_event(event);
+                    // Batch-process: drain all queued events before scheduling
+                    // a single frame redraw. During streaming, many TextDelta
+                    // events may arrive between frames; processing them all in
+                    // one go avoids redundant select! iterations.
+                    app.handle_agent_event_no_frame(event);
+                    while let Ok(extra) = agent_rx.try_recv() {
+                        app.handle_agent_event_no_frame(extra);
+                    }
+                    app.frame_requester.schedule_frame();
                 }
             }
 

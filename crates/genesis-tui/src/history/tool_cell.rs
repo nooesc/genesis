@@ -1,5 +1,6 @@
 //! ToolCell — renders a single tool invocation with configurable display modes.
 
+use std::cell::Cell;
 use std::time::Duration;
 
 use ratatui::buffer::Buffer;
@@ -169,6 +170,9 @@ pub struct ToolCell {
     pub display_mode: ToolDisplayMode,
     /// Optional output to show in Verbose mode.
     pub output: Option<String>,
+    /// Cached `(width, height)` to avoid recomputation when the width hasn't
+    /// changed.  Uses interior mutability so `height()` can stay `&self`.
+    cached_height: Cell<Option<(u16, u16)>>,
 }
 
 impl ToolCell {
@@ -188,18 +192,27 @@ impl ToolCell {
             duration,
             display_mode: ToolDisplayMode::default(),
             output: None,
+            cached_height: Cell::new(None),
         }
     }
 
     /// Set the display mode, returning `self` for builder-style chaining.
     pub fn with_display_mode(mut self, mode: ToolDisplayMode) -> Self {
         self.display_mode = mode;
+        self.cached_height.set(None); // invalidate — display mode affects height
         self
+    }
+
+    /// Set the display mode on an existing cell, invalidating cached height.
+    pub fn set_display_mode(&mut self, mode: ToolDisplayMode) {
+        self.display_mode = mode;
+        self.cached_height.set(None);
     }
 
     /// Set the optional output string (shown in Verbose mode).
     pub fn with_output(mut self, output: impl Into<String>) -> Self {
         self.output = Some(output.into());
+        self.cached_height.set(None); // invalidate — output affects Verbose height
         self
     }
 
@@ -218,8 +231,15 @@ impl ToolCell {
 
     /// Return the number of rows this cell occupies at the given terminal width.
     pub fn height(&self, width: u16) -> u16 {
-        let width = width.max(1);
-        wrapped_row_count(&self.to_scrollback_lines(width), width)
+        if let Some((cached_w, cached_h)) = self.cached_height.get() {
+            if cached_w == width {
+                return cached_h;
+            }
+        }
+        let w = width.max(1);
+        let h = wrapped_row_count(&self.to_scrollback_lines(w), w);
+        self.cached_height.set(Some((width, h)));
+        h
     }
 
     /// Produce the styled [`Line`]s for scrollback insertion.

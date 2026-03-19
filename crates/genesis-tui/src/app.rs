@@ -114,7 +114,20 @@ impl App {
     }
 
     /// Process an event from the agent streaming callback.
+    ///
+    /// Updates internal state and schedules a frame redraw. For batch
+    /// processing of multiple queued events, use [`handle_agent_event_no_frame`]
+    /// followed by a single `frame_requester.schedule_frame()` call.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
+        self.handle_agent_event_no_frame(event);
+        self.frame_requester.schedule_frame();
+    }
+
+    /// Process an agent event without scheduling a frame redraw.
+    ///
+    /// Use this in batch-drain loops where many events are processed in one
+    /// `select!` iteration, followed by a single `schedule_frame()` call.
+    pub fn handle_agent_event_no_frame(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
@@ -212,7 +225,6 @@ impl App {
             }
             AgentEvent::Warning(_) => {}
         }
-        self.frame_requester.schedule_frame();
     }
 
     /// Process an internal application event.
