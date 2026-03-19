@@ -37,6 +37,20 @@ pub enum BudgetStatus {
     Exceeded { used: f64, limit: f64 },
 }
 
+impl std::fmt::Display for BudgetStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ok => f.write_str("within budget"),
+            Self::Warning { used, limit } => {
+                write!(f, "approaching limit (${used:.4} / ${limit:.4})")
+            }
+            Self::Exceeded { used, limit } => {
+                write!(f, "exceeded (${used:.4} / ${limit:.4})")
+            }
+        }
+    }
+}
+
 impl SessionCost {
     pub fn new(budget_limit: Option<f64>) -> Self {
         Self {

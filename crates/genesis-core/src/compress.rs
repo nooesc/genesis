@@ -29,7 +29,7 @@ pub struct CompressedTurn {
     pub tools_used: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompressedRole {
     User,
     Assistant,
@@ -38,7 +38,7 @@ pub enum CompressedRole {
 }
 
 /// Compression strategies.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionLevel {
     /// Keep everything but remove system messages and truncate tool results.
     Light,

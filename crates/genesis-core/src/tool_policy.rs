@@ -18,6 +18,15 @@ pub enum PolicyDecision {
     Deny(String),
 }
 
+impl std::fmt::Display for PolicyDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allow => f.write_str("allow"),
+            Self::Deny(reason) => write!(f, "deny: {reason}"),
+        }
+    }
+}
+
 /// A loaded and compiled tool policy.
 #[derive(Debug, Clone)]
 pub struct ToolPolicy {
