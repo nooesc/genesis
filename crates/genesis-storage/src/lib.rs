@@ -1,13 +1,14 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 static SQLITE_VEC_REGISTERED: OnceLock<()> = OnceLock::new();
 
@@ -522,11 +523,21 @@ fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, StorageError> {
     Err(StorageError::InvalidTimestamp(value.to_owned()))
 }
 
-fn decayed_importance(importance: f32, accessed_at: &str, now: &str) -> Result<f32, StorageError> {
+fn decayed_importance(
+    importance: f32,
+    accessed_at: &str,
+    now: &DateTime<Utc>,
+) -> Result<f32, StorageError> {
     let accessed_at = parse_timestamp(accessed_at)?;
-    let now = parse_timestamp(now)?;
-    let days = ((now - accessed_at).num_seconds().max(0) as f32) / 86_400.0;
+    let days = (((*now) - accessed_at).num_seconds().max(0) as f32) / 86_400.0;
     Ok(importance * 0.99_f32.powf(days))
+}
+
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat("?")
+        .take(count)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Collect mapped rows into a Vec, converting any SQLite error into a StorageError.
@@ -983,6 +994,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v9(&connection, database_path)?;
     migrate_to_v10(&connection, database_path)?;
     migrate_to_v11(&connection, database_path)?;
+    migrate_to_v12(&connection, database_path)?;
 
     connection
         .execute(
@@ -1211,6 +1223,20 @@ fn migrate_to_v11(connection: &Connection, database_path: &Path) -> Result<(), S
             PRIMARY KEY (source_id, target_id),
             FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
             FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
+        );",
+    )
+}
+
+/// Migrate v11 → v12: store unresolved memory links until both notes exist.
+fn migrate_to_v12(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS pending_memory_links (
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_id, target_id)
         );",
     )
 }
@@ -3446,6 +3472,18 @@ pub struct ScoredMemory {
     pub source: String,
 }
 
+#[derive(Debug, Clone)]
+struct GraphAttributes {
+    importance: f32,
+    accessed_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct GraphCandidate {
+    memory: StoredMemory,
+    attributes: GraphAttributes,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewMemoryNote {
     pub id: String,
@@ -3628,26 +3666,52 @@ impl MemoryStore {
         Ok(reciprocal_rank_fusion(&fts_results, &vector_results, limit))
     }
 
-    pub fn graph_search(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>, StorageError> {
+    pub fn graph_search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
         let primary = self.search(query, limit)?;
-        let now = Utc::now().to_rfc3339();
-        let mut seen = std::collections::HashSet::new();
+        if primary.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let connection = open(&self.database_path)?;
+        let primary_ids: Vec<String> = primary.iter().map(|memory| memory.id.clone()).collect();
+        let attributes = self.graph_attributes_for_ids(&connection, &primary_ids)?;
+        let linked_memories = self.linked_memories_for_sources(&connection, &primary_ids)?;
+        let now = Utc::now();
+        let mut seen = HashSet::new();
         let mut expanded = Vec::new();
 
         for (rank, memory) in primary.iter().enumerate() {
             let base_score = 1.0 / (60.0 + rank as f64);
             if seen.insert(memory.id.clone()) {
-                expanded.push(self.score_graph_memory(memory, base_score, &now)?);
+                if let Some(attributes) = attributes.get(&memory.id) {
+                    expanded.push(Self::score_graph_memory(
+                        memory, attributes, base_score, &now,
+                    )?);
+                }
             }
 
-            for (link_rank, linked) in self.linked_memories(&memory.id)?.into_iter().enumerate() {
-                if seen.insert(linked.id.clone()) {
+            for (link_rank, linked) in linked_memories
+                .get(&memory.id)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if seen.insert(linked.memory.id.clone()) {
                     let link_score = base_score * (0.5 / (link_rank as f64 + 1.0));
-                    expanded.push(self.score_graph_memory(&linked, link_score, &now)?);
+                    expanded.push(Self::score_graph_memory(
+                        &linked.memory,
+                        &linked.attributes,
+                        link_score,
+                        &now,
+                    )?);
                 }
             }
         }
@@ -3728,23 +3792,10 @@ impl MemoryStore {
             .iter()
             .filter(|linked_id| linked_id.as_str() != note_id.as_str())
         {
-            tx.execute(
-                "INSERT OR IGNORE INTO memory_links (source_id, target_id) VALUES (?1, ?2)",
-                params![&note_id, linked_id],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-            tx.execute(
-                "INSERT OR IGNORE INTO memory_links (source_id, target_id) VALUES (?1, ?2)",
-                params![linked_id, &note_id],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
+            insert_pending_memory_link(&tx, &self.database_path, &note_id, linked_id)?;
+            insert_pending_memory_link(&tx, &self.database_path, linked_id, &note_id)?;
         }
+        resolve_pending_memory_links(&tx, &self.database_path, &note_id)?;
 
         tx.commit().map_err(|source| StorageError::Sqlite {
             path: self.database_path.clone(),
@@ -3798,51 +3849,114 @@ impl MemoryStore {
         collect_rows(rows, &self.database_path)
     }
 
-    fn linked_memories(&self, id: &str) -> Result<Vec<StoredMemory>, StorageError> {
-        let connection = open(&self.database_path)?;
+    fn graph_attributes_for_ids(
+        &self,
+        connection: &Connection,
+        memory_ids: &[String],
+    ) -> Result<HashMap<String, GraphAttributes>, StorageError> {
+        if memory_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let mut stmt = connection
-            .prepare(
-                "SELECT m.id, m.session_id, m.kind, m.content, m.created_at
-                 FROM memory_links ml
-                 JOIN memories m ON m.id = ml.target_id
-                 WHERE ml.source_id = ?1
-                 ORDER BY m.created_at ASC",
-            )
+            .prepare(&format!(
+                "SELECT id, importance, accessed_at
+                 FROM memories
+                 WHERE id IN ({})",
+                sql_placeholders(memory_ids.len()),
+            ))
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
             })?;
         let rows = stmt
-            .query_map(params![id], Self::row_to_memory)
-            .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
-                source,
-            })?;
-        collect_rows(rows, &self.database_path)
-    }
-
-    fn graph_attributes(&self, id: &str) -> Result<(f32, String), StorageError> {
-        let connection = open(&self.database_path)?;
-        connection
-            .query_row(
-                "SELECT importance, accessed_at FROM memories WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get::<_, f32>(0)?, row.get::<_, String>(1)?)),
+            .query_map(
+                params_from_iter(memory_ids.iter().map(|id| id.as_str())),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        GraphAttributes {
+                            importance: row.get::<_, f32>(1)?,
+                            accessed_at: row.get::<_, String>(2)?,
+                        },
+                    ))
+                },
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
                 source,
-            })
+            })?;
+        collect_rows(rows, &self.database_path).map(|pairs| pairs.into_iter().collect())
+    }
+
+    fn linked_memories_for_sources(
+        &self,
+        connection: &Connection,
+        source_ids: &[String],
+    ) -> Result<HashMap<String, Vec<GraphCandidate>>, StorageError> {
+        if source_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut stmt = connection
+            .prepare(&format!(
+                "SELECT ml.source_id, m.id, m.session_id, m.kind, m.content, m.created_at,
+                        m.importance, m.accessed_at
+                 FROM memory_links ml
+                 JOIN memories m ON m.id = ml.target_id
+                 WHERE ml.source_id IN ({})
+                 ORDER BY ml.source_id ASC, m.created_at ASC",
+                sql_placeholders(source_ids.len()),
+            ))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(
+                params_from_iter(source_ids.iter().map(|id| id.as_str())),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        GraphCandidate {
+                            memory: StoredMemory {
+                                id: row.get(1)?,
+                                session_id: row.get(2)?,
+                                kind: row.get(3)?,
+                                content: row.get(4)?,
+                                created_at: row.get(5)?,
+                            },
+                            attributes: GraphAttributes {
+                                importance: row.get::<_, f32>(6)?,
+                                accessed_at: row.get::<_, String>(7)?,
+                            },
+                        },
+                    ))
+                },
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut grouped = HashMap::new();
+        for (source_id, candidate) in collect_rows(rows, &self.database_path)? {
+            grouped
+                .entry(source_id)
+                .or_insert_with(Vec::new)
+                .push(candidate);
+        }
+        Ok(grouped)
     }
 
     fn score_graph_memory(
-        &self,
         memory: &StoredMemory,
+        attributes: &GraphAttributes,
         base_score: f64,
-        now: &str,
+        now: &DateTime<Utc>,
     ) -> Result<ScoredMemory, StorageError> {
-        let (importance, accessed_at) = self.graph_attributes(&memory.id)?;
-        let score = base_score * decayed_importance(importance, &accessed_at, now)? as f64;
+        let score = base_score
+            * decayed_importance(attributes.importance, &attributes.accessed_at, now)? as f64;
         Ok(ScoredMemory {
             memory: memory.clone(),
             score,
@@ -3942,6 +4056,62 @@ impl MemoryStore {
         })?;
         Ok(rows > 0)
     }
+}
+
+fn insert_pending_memory_link(
+    connection: &Connection,
+    database_path: &Path,
+    source_id: &str,
+    target_id: &str,
+) -> Result<(), StorageError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO pending_memory_links (source_id, target_id) VALUES (?1, ?2)",
+            params![source_id, target_id],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
+}
+
+fn resolve_pending_memory_links(
+    connection: &Connection,
+    database_path: &Path,
+    memory_id: &str,
+) -> Result<(), StorageError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO memory_links (source_id, target_id)
+             SELECT pending.source_id, pending.target_id
+             FROM pending_memory_links pending
+             JOIN memories source ON source.id = pending.source_id
+             JOIN memories target ON target.id = pending.target_id
+             WHERE pending.source_id = ?1 OR pending.target_id = ?1",
+            params![memory_id],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    connection
+        .execute(
+            "DELETE FROM pending_memory_links
+             WHERE rowid IN (
+                 SELECT pending.rowid
+                 FROM pending_memory_links pending
+                 JOIN memories source ON source.id = pending.source_id
+                 JOIN memories target ON target.id = pending.target_id
+                 WHERE pending.source_id = ?1 OR pending.target_id = ?1
+             )",
+            params![memory_id],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })?;
+    Ok(())
 }
 
 fn memory_unique_suffix() -> u128 {
@@ -7566,10 +7736,51 @@ mod memory_store_tests {
         let decayed = super::decayed_importance(
             original,
             "2026-03-01T00:00:00Z",
-            "2026-03-11T00:00:00Z",
+            &super::parse_timestamp("2026-03-11T00:00:00Z").unwrap(),
         )
         .expect("timestamps should parse");
         assert!(decayed < original);
+    }
+
+    #[test]
+    fn create_note_allows_links_to_notes_inserted_later() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).unwrap();
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "note-a".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis uses Rust".to_owned(),
+                keywords: vec!["genesis".to_owned(), "rust".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["note-b".to_owned()],
+                importance: 0.8,
+            })
+            .unwrap();
+
+        store
+            .create_note(NewMemoryNote {
+                id: "note-b".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust powers Genesis".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.6,
+            })
+            .unwrap();
+
+        let a_links = store.links_for("note-a").unwrap();
+        let b_links = store.links_for("note-b").unwrap();
+        assert_eq!(a_links, vec!["note-b".to_owned()]);
+        assert_eq!(b_links, vec!["note-a".to_owned()]);
     }
 
     fn seed_linked_memory_fixture(dir: &std::path::Path) -> std::path::PathBuf {

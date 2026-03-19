@@ -732,7 +732,7 @@ pub fn default_registry() -> ToolRegistry {
         .register(
             ToolDefinition {
                 name: "memory_recall".to_owned(),
-                description: "Searches stored memories using sqlite full-text search."
+                description: "Searches stored memories using graph-aware recall, which may expand to linked notes and updates access metrics on returned results."
                     .to_owned(),
                 parameters: Some(json!({
                     "type": "object",
