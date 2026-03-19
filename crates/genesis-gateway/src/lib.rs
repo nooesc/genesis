@@ -1846,8 +1846,11 @@ async fn search_memories_handler(
 
     let mode = genesis_core::embedding::SearchMode::from_str_opt(params.mode.as_deref());
 
-    // Build embedding provider if configured and needed
-    let provider = if mode != genesis_core::embedding::SearchMode::Keyword {
+    // Build embedding provider only for embedding-backed modes.
+    let provider = if matches!(
+        mode,
+        genesis_core::embedding::SearchMode::Vector | genesis_core::embedding::SearchMode::Hybrid
+    ) {
         state.embedding_provider()?
     } else {
         None
@@ -1866,6 +1869,7 @@ async fn search_memories_handler(
     let count = results.len();
     let mode_str = match mode {
         genesis_core::embedding::SearchMode::Keyword => "keyword",
+        genesis_core::embedding::SearchMode::Graph => "graph",
         genesis_core::embedding::SearchMode::Vector => "vector",
         genesis_core::embedding::SearchMode::Hybrid => "hybrid",
     };
@@ -4295,6 +4299,13 @@ mod tests {
     }
 
     #[test]
+    fn search_memories_query_accepts_graph_mode() {
+        let json = r#"{"q": "hello world", "mode": "graph"}"#;
+        let q: SearchMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.mode.as_deref(), Some("graph"));
+    }
+
+    #[test]
     fn search_memories_query_custom_limit() {
         let json = r#"{"q": "test", "limit": 5}"#;
         let q: SearchMemoriesQuery = serde_json::from_str(json).expect("should deserialize");
@@ -4896,6 +4907,65 @@ mod tests {
         assert_eq!(json["count"], 1);
         assert_eq!(json["memories"][0]["id"], "mem-local");
         assert_eq!(json["memories"][0]["source"], "vector");
+    }
+
+    #[tokio::test]
+    async fn memories_search_graph_mode_returns_linked_notes() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use genesis_storage::{MemoryStore, NewMemoryNote};
+        use tower::ServiceExt as _;
+
+        let (state, dir) = create_test_state();
+        let db_path = dir.path().join("genesis.db");
+        let store = MemoryStore::new(&db_path);
+        store
+            .create_note(NewMemoryNote {
+                id: "linked-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust ownership model".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .expect("linked note should store");
+        store
+            .create_note(NewMemoryNote {
+                id: "primary-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis architecture memory".to_owned(),
+                keywords: vec!["genesis".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["linked-note".to_owned()],
+                importance: 1.0,
+            })
+            .expect("primary note should store");
+
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/api/memories/search?q=Genesis&mode=graph&limit=5")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["mode"], "graph");
+        assert_eq!(json["count"], 2);
+        let ids = json["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"primary-note".to_owned()));
+        assert!(ids.contains(&"linked-note".to_owned()));
     }
 
     #[cfg(feature = "local-embeddings")]

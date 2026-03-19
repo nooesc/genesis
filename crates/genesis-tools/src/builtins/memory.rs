@@ -85,20 +85,27 @@ impl ToolHandler for MemoryRecallTool {
 
         let database_path = context.db_path();
         let store = MemoryStore::new(&database_path);
-        let memories = store.search(query, limit).map_err(|error| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: format!(
-                "failed to search memories in `{}`: {error}",
-                database_path.display()
-            ),
-        })?;
+        let memories = store
+            .graph_search(query, limit)
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!(
+                    "failed to search memories in `{}`: {error}",
+                    database_path.display()
+                ),
+            })?;
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
         } else {
             memories
                 .into_iter()
-                .map(|memory| format!("[{}] {} ({})", memory.kind, memory.content, memory.created_at))
+                .map(|memory| {
+                    format!(
+                        "[{}] {} ({})",
+                        memory.memory.kind, memory.memory.content, memory.memory.created_at
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -247,6 +254,52 @@ mod tests {
 
         assert!(output.content.contains("[project_goal]"));
         assert!(output.content.contains("build genesis in rust"));
+    }
+
+    #[test]
+    fn memory_recall_returns_linked_memories() {
+        let dir = tempdir().expect("tempdir should exist");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let store = genesis_storage::MemoryStore::new(&db_path);
+
+        store
+            .create_note(genesis_storage::NewMemoryNote {
+                id: "linked-note".to_owned(),
+                session_id: Some("session-42".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust ownership model".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .expect("linked note should store");
+        store
+            .create_note(genesis_storage::NewMemoryNote {
+                id: "primary-note".to_owned(),
+                session_id: Some("session-42".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis architecture memory".to_owned(),
+                keywords: vec!["genesis".to_owned(), "memory".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["linked-note".to_owned()],
+                importance: 1.0,
+            })
+            .expect("primary note should store");
+
+        let output = MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "Genesis".to_owned())]),
+                },
+                &ctx(dir.path().to_string_lossy().as_ref()),
+            )
+            .expect("memory recall should succeed");
+
+        assert!(output.content.contains("Genesis architecture memory"));
+        assert!(output.content.contains("Rust ownership model"));
     }
 
     #[test]
