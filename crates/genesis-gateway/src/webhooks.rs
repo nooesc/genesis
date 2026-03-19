@@ -86,7 +86,10 @@ impl WebhookDispatcher {
             .timeout(std::time::Duration::from_secs(10))
             .user_agent("genesis-webhook")
             .build()
-            .expect("webhook HTTP client should build");
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "webhook HTTP client build failed, falling back to default client");
+                Client::new()
+            });
         Self {
             client,
             configs,
