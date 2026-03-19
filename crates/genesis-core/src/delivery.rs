@@ -1208,12 +1208,19 @@ mod tests {
     #[test]
     fn save_local_output_rejects_path_traversal() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let _ = save_local_output(dir.path(), "../../etc/passwd", "pwned")
+        let path = save_local_output(dir.path(), "../../etc/passwd", "pwned")
             .expect("should save with sanitized path");
-        // Must NOT create files outside the output directory
-        assert!(!dir.path().join("../../etc/passwd").exists());
-        // Should create the sanitized directory instead
-        assert!(dir.path().join("etc_passwd").is_dir());
+        let sanitized_dir = dir.path().join("etc_passwd");
+        let canonical_root = dir.path().canonicalize().expect("root should canonicalize");
+        let canonical_parent = path
+            .parent()
+            .expect("saved file should have parent")
+            .canonicalize()
+            .expect("sanitized path should canonicalize");
+
+        // Must save under the sanitized output directory, not at the traversal target.
+        assert_eq!(canonical_parent, sanitized_dir.canonicalize().unwrap());
+        assert!(canonical_parent.starts_with(&canonical_root));
     }
 
     // ─── is_known_platform ──────────────────────────────────────────────
