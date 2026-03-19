@@ -8,6 +8,7 @@ pub mod tools;
 
 pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
 pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
+pub use personality::{LuaPersonalityRegistry, LuaRegisteredPersonality};
 pub use runtime::{
     LuaRuntime, LuaRuntimeBuilder, LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
@@ -303,6 +304,207 @@ genesis.register_tool({
                 },
                 "required": ["path"]
             }))
+        );
+    }
+
+    #[test]
+    fn runtime_registers_lua_personality_with_owner() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let package_dir = dir.path().join("pirate-pack");
+        fs::create_dir(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "pirate-pack"
+version = "0.1.0"
+"#,
+        )
+        .expect("manifest should write");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_personality({
+    name = "pirate-lua",
+    description = "A lua pirate personality",
+    system_prompt = "Speak like a pirate from lua.",
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let personalities = runtime.registered_personalities();
+
+        assert_eq!(personalities.len(), 1);
+        assert_eq!(personalities[0].name, "pirate-lua");
+        assert_eq!(personalities[0].plugin_name, "pirate-pack");
+        assert_eq!(
+            personalities[0].system_prompt.as_deref(),
+            Some("Speak like a pirate from lua.")
+        );
+    }
+
+    #[test]
+    fn runtime_resolves_registered_personality_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("zen.lua"),
+            r#"
+genesis.register_personality({
+    name = "zen-lua",
+    description = "A calm lua personality",
+    system_prompt = "Respond briefly and calmly from lua.",
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let prompt = runtime
+            .personality_prompt("zen-lua")
+            .expect("personality should be registered");
+
+        assert_eq!(prompt, "Respond briefly and calmly from lua.");
+    }
+
+    #[test]
+    fn runtime_builds_dynamic_personality_prompt_from_context() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("adaptive.lua"),
+            r#"
+genesis.register_personality({
+    name = "adaptive-lua",
+    description = "A dynamic lua personality",
+    system_prompt = "Fallback prompt.",
+    build_prompt = function(ctx)
+        return "Dynamic prompt for " .. ctx.platform
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let prompt = runtime
+            .personality_prompt("adaptive-lua")
+            .expect("personality should be registered");
+
+        assert_eq!(prompt, "Dynamic prompt for cli");
+    }
+
+    #[test]
+    fn runtime_falls_back_to_static_prompt_when_build_prompt_errors() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("broken_adaptive.lua"),
+            r#"
+genesis.register_personality({
+    name = "broken-adaptive",
+    description = "A broken dynamic lua personality",
+    system_prompt = "Fallback prompt.",
+    build_prompt = function(_ctx)
+        error("boom")
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let prompt = runtime
+            .personality_prompt("broken-adaptive")
+            .expect("personality should be registered");
+
+        assert_eq!(prompt, "Fallback prompt.");
+        assert!(
+            runtime
+                .logs()
+                .iter()
+                .any(|entry| entry.contains("build_prompt failed")),
+            "build_prompt failure should be logged: {:?}",
+            runtime.logs()
+        );
+    }
+
+    #[test]
+    fn runtime_rolls_back_personalities_from_failed_plugins() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("broken_personality.lua"),
+            r#"
+genesis.register_personality({
+    name = "broken-lua",
+    description = "Should not survive load failure",
+    system_prompt = "Nope",
+})
+error("boom")
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+
+        assert!(
+            runtime.registered_personalities().is_empty(),
+            "failed plugins must not leave registered personalities behind"
+        );
+        assert!(
+            runtime
+                .plugin_errors()
+                .iter()
+                .any(|entry| entry.contains("boom")),
+            "plugin failure should still be recorded: {:?}",
+            runtime.plugin_errors()
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_personality_registration_after_plugin_load() {
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        fs::write(
+            dir.path().join("late_personality.lua"),
+            r#"
+local late_register = genesis.register_personality
+
+genesis.on("PreTurn", function(ctx)
+    late_register({
+        name = "late-lua",
+        description = "Should not be allowed after load",
+        system_prompt = "late",
+    })
+    return ctx.user_message
+end)
+"#,
+        )
+        .expect("plugin should write");
+
+        let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        assert!(
+            runtime.registered_personalities().is_empty(),
+            "plugin load should not eagerly register the late personality"
+        );
+
+        let outcome = runtime
+            .run_pre_turn("hello")
+            .expect("hook execution should not crash runtime");
+
+        assert_eq!(
+            outcome,
+            crate::hooks::PreHookOutcome::Allow("hello".to_owned())
+        );
+        assert!(
+            runtime.registered_personalities().is_empty(),
+            "personality registration should stay closed after plugin load"
+        );
+        assert!(
+            runtime
+                .logs()
+                .iter()
+                .any(|entry| entry.contains("only available during plugin load")),
+            "late registration failure should be logged: {:?}",
+            runtime.logs()
         );
     }
 
@@ -628,9 +830,7 @@ end)
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         runtime.set_host_tool_executor(Arc::new(TestHostToolExecutor::default()));
 
-        let outcome = runtime
-            .run_pre_turn("hello")
-            .expect("hook should run");
+        let outcome = runtime.run_pre_turn("hello").expect("hook should run");
 
         assert_eq!(
             outcome,

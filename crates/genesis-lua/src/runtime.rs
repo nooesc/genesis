@@ -14,6 +14,7 @@ use crate::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
     },
+    personality::{LuaPersonalityEntry, LuaPersonalityRegistry, LuaRegisteredPersonality},
     tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
 
@@ -42,6 +43,7 @@ pub struct LuaRuntime {
     session_state: Arc<Mutex<LuaSessionContext>>,
     hook_registry: Arc<Mutex<HookRegistry>>,
     tool_registry: Arc<Mutex<LuaToolRegistry>>,
+    personality_registry: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
 }
@@ -112,12 +114,21 @@ pub enum LuaRuntimeError {
         tool_name: String,
         value_type: String,
     },
+    #[error("duplicate lua personality name `{name}`")]
+    DuplicateLuaPersonalityName { name: String },
+    #[error("invalid lua personality definition from plugin `{plugin_name}`: {reason}")]
+    InvalidLuaPersonalityDefinition { plugin_name: String, reason: String },
+    #[error("lua personality registration is only available during plugin load")]
+    PersonalityRegistrationUnavailable,
     #[error("host tool bridge is not configured")]
     HostToolBridgeUnavailable,
     #[error("host tool bridge is unavailable outside plugin callbacks")]
     HostToolContextUnavailable,
     #[error("plugin `{plugin_name}` is not permitted to call host tool `{tool_name}`")]
-    HostToolPermissionDenied { plugin_name: String, tool_name: String },
+    HostToolPermissionDenied {
+        plugin_name: String,
+        tool_name: String,
+    },
     #[error("host tool `{tool_name}` failed: {reason}")]
     HostToolExecutionFailed { tool_name: String, reason: String },
     #[error("lua execution failed: {source}")]
@@ -153,6 +164,7 @@ impl LuaRuntime {
         let session_state = Arc::new(Mutex::new(config.session.clone()));
         let hook_registry = Arc::new(Mutex::new(HookRegistry::default()));
         let tool_registry = Arc::new(Mutex::new(LuaToolRegistry::default()));
+        let personality_registry = Arc::new(Mutex::new(LuaPersonalityRegistry::default()));
         let host_tool_executor = Arc::new(Mutex::new(None));
         let active_plugin = Arc::new(Mutex::new(Vec::new()));
         let genesis = install_genesis_api(
@@ -162,6 +174,7 @@ impl LuaRuntime {
             Arc::clone(&session_state),
             Arc::clone(&hook_registry),
             Arc::clone(&tool_registry),
+            Arc::clone(&personality_registry),
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
             None,
@@ -176,6 +189,7 @@ impl LuaRuntime {
             session_state,
             hook_registry,
             tool_registry,
+            personality_registry,
             host_tool_executor,
             active_plugin,
         };
@@ -229,6 +243,10 @@ impl LuaRuntime {
                     .lock()
                     .expect("tool registry mutex should not be poisoned")
                     .remove_tools_owned_by(&plugin.name);
+                self.personality_registry
+                    .lock()
+                    .expect("personality registry mutex should not be poisoned")
+                    .remove_personalities_owned_by(&plugin.name);
                 self.plugin_errors
                     .push(format!("plugin `{}` failed to load: {err}", plugin.name));
                 continue;
@@ -265,6 +283,23 @@ impl LuaRuntime {
             .registered_tools()
     }
 
+    pub fn registered_personalities(&self) -> Vec<LuaRegisteredPersonality> {
+        self.personality_registry
+            .lock()
+            .expect("personality registry mutex should not be poisoned")
+            .registered_personalities()
+    }
+
+    pub fn personality_prompt(&self, name: &str) -> Option<String> {
+        let entry = self
+            .personality_registry
+            .lock()
+            .expect("personality registry mutex should not be poisoned")
+            .personality_entry(name)?;
+
+        self.resolve_personality_prompt(entry)
+    }
+
     pub fn invoke_tool(
         &self,
         name: &str,
@@ -284,8 +319,7 @@ impl LuaRuntime {
                 })?;
             PluginContext::for_execution(tool.plugin_name, tool.permissions)
         };
-        let _guard =
-            ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+        let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
         self.tool_registry
             .lock()
             .expect("tool registry mutex should not be poisoned")
@@ -394,6 +428,7 @@ impl LuaRuntime {
             Arc::clone(&self.session_state),
             Arc::clone(&self.hook_registry),
             Arc::clone(&self.tool_registry),
+            Arc::clone(&self.personality_registry),
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
@@ -535,6 +570,87 @@ impl LuaRuntime {
             .lock()
             .expect("log sink mutex should not be poisoned");
         logs.push(format!("[hook::{event:?}] {message}"));
+    }
+
+    fn resolve_personality_prompt(&self, entry: LuaPersonalityEntry) -> Option<String> {
+        let fallback = entry.metadata.system_prompt.clone();
+        let Some(build_prompt) = entry.build_prompt else {
+            return fallback;
+        };
+
+        let session = self
+            .session_state
+            .lock()
+            .expect("session state mutex should not be poisoned")
+            .clone();
+        let context = match self.build_personality_context(&session) {
+            Ok(context) => context,
+            Err(error) => {
+                self.push_personality_error(
+                    &entry.metadata.plugin_name,
+                    format!("failed to build prompt context: {error}"),
+                );
+                return fallback;
+            }
+        };
+        let plugin_context = PluginContext::for_execution(
+            entry.metadata.plugin_name.clone(),
+            entry.permissions.clone(),
+        );
+        let _guard = ActivePluginGuard::push(Arc::clone(&self.active_plugin), Some(plugin_context));
+
+        match build_prompt.call::<Value>(context) {
+            Ok(Value::Nil) => fallback,
+            Ok(Value::String(text)) => match text.to_str() {
+                Ok(text) => Some(text.to_owned()),
+                Err(error) => {
+                    self.push_personality_error(
+                        &entry.metadata.plugin_name,
+                        format!("build_prompt returned invalid utf-8: {error}"),
+                    );
+                    fallback
+                }
+            },
+            Ok(other) => match other.to_string() {
+                Ok(text) => Some(text),
+                Err(error) => {
+                    self.push_personality_error(
+                        &entry.metadata.plugin_name,
+                        format!("build_prompt returned unsupported value: {error}"),
+                    );
+                    fallback
+                }
+            },
+            Err(error) => {
+                self.push_personality_error(
+                    &entry.metadata.plugin_name,
+                    format!("build_prompt failed: {error}"),
+                );
+                fallback
+            }
+        }
+    }
+
+    fn build_personality_context(
+        &self,
+        session: &LuaSessionContext,
+    ) -> Result<Table, LuaRuntimeError> {
+        let context = self.lua.create_table()?;
+        context.set("id", session.id.clone())?;
+        context.set("model", session.model.clone())?;
+        context.set("turn_count", session.turn_count)?;
+        context.set("total_tokens", session.total_tokens)?;
+        context.set("platform", session.platform.clone())?;
+        context.set("personality", session.personality.clone())?;
+        Ok(context)
+    }
+
+    fn push_personality_error(&self, plugin_name: &str, message: String) {
+        let mut logs = self
+            .logs
+            .lock()
+            .expect("log sink mutex should not be poisoned");
+        logs.push(format!("[personality::{plugin_name}] {message}"));
     }
 }
 

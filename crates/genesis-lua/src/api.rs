@@ -5,6 +5,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 use crate::{
     hooks::{HookEvent, HookRegistry},
     manifest::PluginPermissions,
+    personality::LuaPersonalityRegistry,
     tools::{LuaHostToolExecutor, LuaToolRegistry},
     LuaRuntimeConfig, LuaRuntimeError, LuaSessionContext,
 };
@@ -18,6 +19,7 @@ pub struct GenesisApi {
     logs: Arc<Mutex<Vec<String>>>,
     hooks: Arc<Mutex<HookRegistry>>,
     tools: Arc<Mutex<LuaToolRegistry>>,
+    personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
@@ -56,7 +58,7 @@ impl PluginContext {
             .expect("plugin load state mutex should not be poisoned") = false;
     }
 
-    fn tool_registration_open(&self) -> bool {
+    fn load_active(&self) -> bool {
         *self
             .load_active
             .lock()
@@ -153,7 +155,7 @@ impl UserData for GenesisApi {
                 let plugin_context = plugin_context.clone().ok_or_else(|| {
                     mlua::Error::external(LuaRuntimeError::ToolRegistrationUnavailable)
                 })?;
-                if !plugin_context.tool_registration_open() {
+                if !plugin_context.load_active() {
                     return Err(mlua::Error::external(
                         LuaRuntimeError::ToolRegistrationUnavailable,
                     ));
@@ -162,6 +164,26 @@ impl UserData for GenesisApi {
                     .lock()
                     .expect("tool registry mutex should not be poisoned")
                     .register(lua, &plugin_context.name, &plugin_context.permissions, spec)
+                    .map_err(mlua::Error::external)?;
+                Ok(())
+            })
+        });
+        fields.add_field_method_get("register_personality", |lua, this| {
+            let personalities = Arc::clone(&this.personalities);
+            let plugin_context = this.plugin_context.clone();
+            lua.create_function(move |_, spec: Table| {
+                let plugin_context = plugin_context.clone().ok_or_else(|| {
+                    mlua::Error::external(LuaRuntimeError::PersonalityRegistrationUnavailable)
+                })?;
+                if !plugin_context.load_active() {
+                    return Err(mlua::Error::external(
+                        LuaRuntimeError::PersonalityRegistrationUnavailable,
+                    ));
+                }
+                personalities
+                    .lock()
+                    .expect("personality registry mutex should not be poisoned")
+                    .register(&plugin_context.name, &plugin_context.permissions, spec)
                     .map_err(mlua::Error::external)?;
                 Ok(())
             })
@@ -176,6 +198,7 @@ pub(crate) fn install_genesis_api(
     session: Arc<Mutex<LuaSessionContext>>,
     hooks: Arc<Mutex<HookRegistry>>,
     tools: Arc<Mutex<LuaToolRegistry>>,
+    personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
@@ -188,6 +211,7 @@ pub(crate) fn install_genesis_api(
         logs,
         hooks,
         tools,
+        personalities,
         host_tools,
         active_plugin,
         plugin_context,
@@ -225,7 +249,9 @@ fn make_tool_bridge(
                 .expect("active plugin mutex should not be poisoned")
                 .last()
                 .cloned()
-                .ok_or_else(|| mlua::Error::external(LuaRuntimeError::HostToolContextUnavailable))?;
+                .ok_or_else(|| {
+                    mlua::Error::external(LuaRuntimeError::HostToolContextUnavailable)
+                })?;
             if !plugin_context.permissions.trusted
                 && !plugin_context
                     .permissions

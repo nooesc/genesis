@@ -693,8 +693,17 @@ impl<'a> SessionExecutionService<'a> {
             self.personality_override
                 .as_deref()
                 .or(self.loaded.config.personality.as_deref());
+        let lua_personality_prompt = effective_personality.and_then(|name| {
+            lua_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.personality_prompt(name))
+        });
         if let Some(p) = effective_personality {
-            prompt_builder = prompt_builder.personality(p);
+            if let Some(prompt) = lua_personality_prompt.as_deref() {
+                prompt_builder = prompt_builder.personality_prompt(prompt);
+            } else {
+                prompt_builder = prompt_builder.personality(p);
+            }
         }
         if let Some(s) = skills_section.as_deref() {
             prompt_builder = prompt_builder.skills(s);
@@ -2101,6 +2110,161 @@ mod tests {
         service.set_personality_override("pirate".to_owned());
         // The personality_override field should be set
         assert_eq!(service.personality_override.as_deref(), Some("pirate"));
+    }
+
+    #[tokio::test]
+    async fn lua_personality_override_is_injected_into_system_prompt() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("lua-pirate.lua"),
+            r#"
+genesis.register_personality({
+    name = "lua-pirate",
+    description = "A lua-powered pirate persona",
+    system_prompt = "Speak like a pirate from lua personality.",
+})
+"#,
+        )
+        .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("lua-pirate".to_owned());
+
+        let agent = service
+            .build_agent_loop(
+                "session-1".to_owned(),
+                DeliveryPlatform::Cli,
+                Vec::new(),
+                Some("hello"),
+            )
+            .await
+            .expect("agent loop should build");
+
+        let system = agent
+            .messages()
+            .first()
+            .expect("system prompt should exist")
+            .content
+            .clone();
+        let system = match system {
+            Some(MessageContent::Text(text)) => text,
+            other => panic!("expected text system prompt, got {other:?}"),
+        };
+        assert!(
+            system.contains("Speak like a pirate from lua personality."),
+            "lua personality should be injected into the system prompt: {system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_personality_override_beats_builtin_personality_prompt() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("pirate.lua"),
+            r#"
+genesis.register_personality({
+    name = "pirate",
+    description = "Override the builtin pirate persona",
+    system_prompt = "Speak like a lua pirate captain.",
+})
+"#,
+        )
+        .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("pirate".to_owned());
+
+        let agent = service
+            .build_agent_loop(
+                "session-1".to_owned(),
+                DeliveryPlatform::Cli,
+                Vec::new(),
+                Some("hello"),
+            )
+            .await
+            .expect("agent loop should build");
+
+        let system = agent
+            .messages()
+            .first()
+            .expect("system prompt should exist")
+            .content
+            .clone();
+        let system = match system {
+            Some(MessageContent::Text(text)) => text,
+            other => panic!("expected text system prompt, got {other:?}"),
+        };
+        assert!(
+            system.contains("Speak like a lua pirate captain."),
+            "lua personality should override builtin personality prompt: {system}"
+        );
+        assert!(
+            !system.contains("Use a rugged seafarer voice with occasional nautical phrasing."),
+            "builtin personality prompt should not win when lua registers the same name: {system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lua_personality_build_prompt_uses_session_context() {
+        let dir = tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        let plugin_dir = data_dir.join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        fs::write(
+            plugin_dir.join("adaptive.lua"),
+            r#"
+genesis.register_personality({
+    name = "adaptive-lua",
+    description = "A dynamic lua personality",
+    system_prompt = "Fallback prompt.",
+    build_prompt = function(ctx)
+        return "Dynamic prompt for " .. ctx.platform
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+        let db_path = data_dir.join("genesis.db");
+        let loaded = test_loaded_config(data_dir, db_path);
+        let mut service = SessionExecutionService::new(&loaded);
+        service.set_personality_override("adaptive-lua".to_owned());
+
+        let agent = service
+            .build_agent_loop(
+                "session-1".to_owned(),
+                DeliveryPlatform::Cli,
+                Vec::new(),
+                Some("hello"),
+            )
+            .await
+            .expect("agent loop should build");
+
+        let system = agent
+            .messages()
+            .first()
+            .expect("system prompt should exist")
+            .content
+            .clone();
+        let system = match system {
+            Some(MessageContent::Text(text)) => text,
+            other => panic!("expected text system prompt, got {other:?}"),
+        };
+        assert!(
+            system.contains("Dynamic prompt for cli"),
+            "lua build_prompt should receive session context: {system}"
+        );
+        assert!(
+            !system.contains("Fallback prompt."),
+            "dynamic prompt should replace the static fallback when build_prompt succeeds: {system}"
+        );
     }
 
     #[tokio::test]

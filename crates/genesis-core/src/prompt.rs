@@ -80,6 +80,7 @@ pub struct SystemPromptBuilder<'a> {
     tools: &'a [ToolDefinition],
     custom_identity: Option<&'a str>,
     personality: Option<&'a str>,
+    personality_prompt: Option<&'a str>,
     skills_section: Option<&'a str>,
     user_model_section: Option<&'a str>,
     context_section: Option<&'a str>,
@@ -94,6 +95,7 @@ impl<'a> SystemPromptBuilder<'a> {
             tools,
             custom_identity: None,
             personality: None,
+            personality_prompt: None,
             skills_section: None,
             user_model_section: None,
             context_section: None,
@@ -111,6 +113,11 @@ impl<'a> SystemPromptBuilder<'a> {
     /// The personality's prompt prefix is prepended to the behavioral instructions.
     pub fn personality(mut self, name: &'a str) -> Self {
         self.personality = Some(name);
+        self
+    }
+
+    pub fn personality_prompt(mut self, prompt: &'a str) -> Self {
+        self.personality_prompt = Some(prompt);
         self
     }
 
@@ -150,7 +157,9 @@ impl<'a> SystemPromptBuilder<'a> {
         );
 
         // Personality prefix (if set and found)
-        if let Some(name) = self.personality {
+        if let Some(prompt) = self.personality_prompt {
+            parts.push(format!("## Personality\n\n{prompt}"));
+        } else if let Some(name) = self.personality {
             if let Some(p) = crate::personality::get_personality(name) {
                 parts.push(format!("## Personality\n\n{}", p.system_prompt_prefix));
             }
@@ -888,6 +897,25 @@ mod tests {
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("## Personality"));
         assert!(prompt.contains("calmly"));
+    }
+
+    #[test]
+    fn builder_can_use_dynamic_personality_prompt() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .personality_prompt("Lua sailor voice.")
+            .build();
+        assert!(prompt.contains("## Personality"));
+        assert!(prompt.contains("Lua sailor voice."));
+    }
+
+    #[test]
+    fn dynamic_personality_prompt_overrides_named_personality() {
+        let prompt = SystemPromptBuilder::new("default", &[])
+            .personality("pirate")
+            .personality_prompt("Custom lua personality.")
+            .build();
+        assert!(prompt.contains("Custom lua personality."));
+        assert!(!prompt.contains("seafarer"));
     }
 
     #[test]
