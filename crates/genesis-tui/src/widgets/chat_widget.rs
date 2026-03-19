@@ -14,8 +14,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget as _, Wrap},
 };
-use unicode_width::UnicodeWidthStr as _;
-
 use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
 use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
@@ -665,26 +663,7 @@ fn render_turn_separator(x: u16, y: u16, width: u16, style: Style, buf: &mut Buf
     }
 }
 
-fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
-    let width = wrap_width.max(1) as usize;
-    let mut rows: usize = 0;
-
-    for line in lines {
-        let line_width = line
-            .spans
-            .iter()
-            .map(|span| span.content.width())
-            .sum::<usize>();
-        let wrapped = if line_width == 0 {
-            1
-        } else {
-            (line_width.saturating_sub(1) / width) + 1
-        };
-        rows = rows.saturating_add(wrapped);
-    }
-
-    rows.try_into().unwrap_or(u16::MAX)
-}
+use crate::history::wrapped_row_count;
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 

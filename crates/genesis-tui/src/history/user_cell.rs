@@ -85,21 +85,7 @@ pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     lines
 }
 
-/// Count the total rows these lines would occupy when wrapped at `wrap_width`.
-fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
-    let width = wrap_width.max(1) as usize;
-    let mut rows: usize = 0;
-    for line in lines {
-        let line_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
-        let wrapped = if line_width == 0 {
-            1
-        } else {
-            (line_width.saturating_sub(1) / width) + 1
-        };
-        rows = rows.saturating_add(wrapped);
-    }
-    rows as u16
-}
+use super::wrapped_row_count;
 
 #[cfg(test)]
 mod tests {

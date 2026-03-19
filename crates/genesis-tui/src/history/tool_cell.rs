@@ -7,8 +7,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget as _;
-use unicode_width::UnicodeWidthStr as _;
-
 use crate::render::diff;
 
 use super::rgb;
@@ -211,8 +209,10 @@ impl ToolCell {
             return;
         }
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = ratatui::widgets::Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false });
+        // Note: tool cells use bordered layouts (│ prefix) that are incompatible
+        // with Paragraph::wrap(). Long lines are truncated, which matches the
+        // height calculation below.
+        let paragraph = ratatui::widgets::Paragraph::new(lines);
         paragraph.render(area, buf);
     }
 
@@ -560,24 +560,7 @@ pub fn tool_group_summary_line(cells: &[&ToolCell]) -> Line<'static> {
     ])
 }
 
-fn wrapped_row_count(lines: &[Line<'static>], wrap_width: u16) -> u16 {
-    let width = wrap_width.max(1) as usize;
-    let mut rows: usize = 0;
-    for line in lines {
-        let line_width = line
-            .spans
-            .iter()
-            .map(|span| span.content.width())
-            .sum::<usize>();
-        let wrapped = if line_width == 0 {
-            1
-        } else {
-            (line_width.saturating_sub(1) / width) + 1
-        };
-        rows = rows.saturating_add(wrapped);
-    }
-    rows.try_into().unwrap_or(u16::MAX)
-}
+use super::wrapped_row_count;
 
 #[cfg(test)]
 mod tests {

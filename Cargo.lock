@@ -1759,6 +1759,7 @@ name = "genesis-tools"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "genesis-config",
  "genesis-provider",
  "genesis-storage",
  "genesis-types",

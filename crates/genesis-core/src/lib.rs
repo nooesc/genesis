@@ -102,6 +102,9 @@ pub struct ExecutionContext {
     /// conditional tool injection (think tool for Anthropic).
     #[serde(default)]
     pub provider_backend: String,
+    /// Tool approval mode propagated from config.
+    #[serde(default)]
+    pub approval_mode: genesis_config::ApprovalMode,
 }
 
 #[derive(Clone)]
@@ -161,6 +164,7 @@ pub fn build_execution_context_from_loaded(
         max_concurrency: loaded.config.runtime.max_concurrency,
         allow_destructive_tools: loaded.config.runtime.allow_destructive_tools,
         provider_backend: loaded.config.provider.backend.clone(),
+        approval_mode: loaded.config.runtime.approval_mode,
     }
 }
 
@@ -244,6 +248,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             terminal_backend: None,
             default_working_dir: None,
             sandbox_manager: None,
+            approval_mode: execution_context.approval_mode,
         },
         mcp: None,
         lua_runtime: None,
@@ -1244,6 +1249,7 @@ pub(crate) mod tests {
                     core_tools: None,
                     batch: None,
                     tool_policy_path: None,
+                    approval_mode: genesis_config::ApprovalMode::default(),
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
@@ -1303,6 +1309,7 @@ pub(crate) mod tests {
                     core_tools: None,
                     batch: None,
                     tool_policy_path: None,
+                    approval_mode: genesis_config::ApprovalMode::default(),
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
