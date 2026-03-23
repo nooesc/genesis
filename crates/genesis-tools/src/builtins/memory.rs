@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use genesis_storage::{MemoryStore, NewMemoryNote};
+use genesis_storage::{EmbeddingStore, MemoryStore, NewMemoryNote};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const DEFAULT_RECALL_LIMIT: usize = 5;
+const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 
 pub struct MemoryStoreTool;
 
@@ -27,33 +28,120 @@ impl ToolHandler for MemoryStoreTool {
 
         let database_path = context.db_path();
         let store = MemoryStore::new(&database_path);
-        store
-            .create_note(NewMemoryNote {
-                id: memory_id(context, key),
-                session_id: Some(context.session_id.clone()),
-                kind: key.clone(),
-                content: value.clone(),
-                keywords: extract_keywords(key, value),
-                tags: Vec::new(),
-                linked_ids: Vec::new(),
-                importance: 0.5,
-            })
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!(
-                    "failed to store memory into `{}`: {error}",
-                    database_path.display()
-                ),
-            })?;
 
-        Ok(ToolOutput {
-            content: format!("stored memory `{key}`"),
-            metadata: BTreeMap::from([
-                ("tool".to_owned(), call.name.clone()),
-                ("key".to_owned(), key.clone()),
-                ("session_id".to_owned(), context.session_id.clone()),
-            ]),
-        })
+        // If an embedding service is available, try to embed + deduplicate.
+        if let Some(ref embedding_service) = context.embedding_service {
+            let embedding = match embedding_service.embed_one(value) {
+                Ok(emb) => emb,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to embed memory, falling back to plain store");
+                    return store_plain(&store, call, context, key, value, &database_path);
+                }
+            };
+
+            // Check for near-duplicates.
+            let duplicates = match store.find_similar(&embedding, DEDUP_SIMILARITY_THRESHOLD, 5) {
+                Ok(dupes) => dupes,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to check for duplicate memories");
+                    Vec::new()
+                }
+            };
+
+            if let Some(best) = duplicates.first() {
+                // Merge into the existing memory.
+                let best_id = best.memory.id.clone();
+                let best_kind = best.memory.kind.clone();
+                let score = best.score;
+
+                store
+                    .merge_into(&best_id, value, 0.5)
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: format!("failed to merge memory into `{best_id}`: {error}"),
+                    })?;
+
+                // Re-embed the merged memory content.
+                if let Ok(Some(merged)) = store.get(&best_id) {
+                    match embedding_service.embed_one(&merged.content) {
+                        Ok(new_embedding) => {
+                            let emb_store = EmbeddingStore::new(&database_path);
+                            if let Err(e) = emb_store.store(
+                                &best_id,
+                                &new_embedding,
+                                embedding_service.model_name(),
+                            ) {
+                                tracing::warn!(error = %e, "failed to store re-embedding for merged memory");
+                            }
+                            if let Err(e) =
+                                store.auto_link_semantic(&best_id, &new_embedding, 0.8, 5)
+                            {
+                                tracing::warn!(error = %e, "failed to auto-link merged memory");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to re-embed merged memory");
+                        }
+                    }
+                }
+
+                return Ok(ToolOutput {
+                    content: format!(
+                        "merged memory into existing `{best_kind}` (similarity: {score:.2})"
+                    ),
+                    metadata: BTreeMap::from([
+                        ("tool".to_owned(), call.name.clone()),
+                        ("key".to_owned(), key.clone()),
+                        ("merged_into".to_owned(), best_id),
+                        ("session_id".to_owned(), context.session_id.clone()),
+                    ]),
+                });
+            }
+
+            // No duplicate — create a new note and embed it.
+            let note_id = memory_id(context, key);
+            store
+                .create_note(NewMemoryNote {
+                    id: note_id.clone(),
+                    session_id: Some(context.session_id.clone()),
+                    kind: key.clone(),
+                    content: value.clone(),
+                    keywords: extract_keywords(key, value),
+                    tags: Vec::new(),
+                    linked_ids: Vec::new(),
+                    importance: 0.5,
+                })
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "failed to store memory into `{}`: {error}",
+                        database_path.display()
+                    ),
+                })?;
+
+            let emb_store = EmbeddingStore::new(&database_path);
+            if let Err(e) = emb_store.store(&note_id, &embedding, embedding_service.model_name()) {
+                tracing::warn!(error = %e, "failed to store embedding for new memory");
+            }
+            if let Err(e) = store.auto_link_semantic(&note_id, &embedding, 0.8, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory semantically");
+            }
+            if let Err(e) = store.auto_link_temporal(&note_id, &context.session_id, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory temporally");
+            }
+
+            return Ok(ToolOutput {
+                content: format!("stored memory `{key}` (embedded)"),
+                metadata: BTreeMap::from([
+                    ("tool".to_owned(), call.name.clone()),
+                    ("key".to_owned(), key.clone()),
+                    ("session_id".to_owned(), context.session_id.clone()),
+                ]),
+            });
+        }
+
+        // No embedding service — plain store.
+        store_plain(&store, call, context, key, value, &database_path)
     }
 }
 
@@ -250,6 +338,44 @@ impl ToolHandler for MemoryPruneTool {
             ]),
         })
     }
+}
+
+/// Create a memory note without embedding (fallback / no-embedding-service path).
+fn store_plain(
+    store: &MemoryStore,
+    call: &ToolCall,
+    context: &ToolContext,
+    key: &str,
+    value: &str,
+    database_path: &std::path::Path,
+) -> Result<ToolOutput, ToolError> {
+    store
+        .create_note(NewMemoryNote {
+            id: memory_id(context, key),
+            session_id: Some(context.session_id.clone()),
+            kind: key.to_owned(),
+            content: value.to_owned(),
+            keywords: extract_keywords(key, value),
+            tags: Vec::new(),
+            linked_ids: Vec::new(),
+            importance: 0.5,
+        })
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!(
+                "failed to store memory into `{}`: {error}",
+                database_path.display()
+            ),
+        })?;
+
+    Ok(ToolOutput {
+        content: format!("stored memory `{key}`"),
+        metadata: BTreeMap::from([
+            ("tool".to_owned(), call.name.clone()),
+            ("key".to_owned(), key.to_owned()),
+            ("session_id".to_owned(), context.session_id.clone()),
+        ]),
+    })
 }
 
 fn memory_id(context: &ToolContext, key: &str) -> String {
