@@ -271,8 +271,8 @@ mod tests {
     fn truncate_output_cuts_at_newline() {
         let long = "a\n".repeat(100_000);
         let result = truncate_output(&long);
-        assert!(result.len() <= MAX_OUTPUT_BYTES + 50); // allow for suffix
-        assert!(result.ends_with("... (output truncated)"));
+        assert!(result.len() <= MAX_OUTPUT_BYTES + 200); // allow for suffix
+        assert!(result.contains("output truncated: showing"));
     }
 
     #[test]
