@@ -260,7 +260,17 @@ impl MarkdownWriter {
                 self.at_list_item_start = true;
             }
             Event::End(TagEnd::Item) => {
-                // Item content is flushed by inner Paragraph end.
+                // Flush the current line. For "tight" lists (no blank lines
+                // between items), pulldown-cmark does NOT wrap each item in
+                // a Paragraph, so we must end the line here to prevent items
+                // from running together on one line.
+                //
+                // Guard: for "loose" lists, End(Paragraph) already flushed
+                // current_spans. Calling finish_line() on empty spans would
+                // produce a spurious blank line after each item.
+                if !self.current_spans.is_empty() {
+                    self.finish_line();
+                }
             }
 
             // ── Code blocks ──────────────────────────────────────────────
@@ -1188,5 +1198,41 @@ mod tests {
         let lines = markdown_to_lines("~~deleted~~");
         let span = find_span(&lines, "deleted").expect("strikethrough span");
         assert!(span.style.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn multi_list_items_each_on_own_line() {
+        let md = "- **Context window** = what I'm looking at\n- **Stored memory** = notes in a notebook\n- **Memory retrieval** = me checking";
+        let lines = markdown_to_lines(md);
+        let bullet_count = lines
+            .iter()
+            .filter(|l| l.spans.iter().any(|s| s.content.contains('•')))
+            .count();
+        for (i, l) in lines.iter().enumerate() {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            eprintln!("  [{i}] {text}");
+        }
+        assert_eq!(
+            bullet_count, 3,
+            "Expected 3 bullet lines, got {bullet_count}"
+        );
+    }
+
+    #[test]
+    fn ordered_list_items_each_on_own_line() {
+        let md = "1. how this differs from session history\n2. when I decide to retrieve memory\n3. what kinds of things are best to store";
+        let lines = markdown_to_lines(md);
+        let num_count = lines
+            .iter()
+            .filter(|l| l.spans.iter().any(|s| s.content.contains('.')))
+            .count();
+        for (i, l) in lines.iter().enumerate() {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            eprintln!("  [{i}] {text}");
+        }
+        assert!(
+            num_count >= 3,
+            "Expected at least 3 numbered lines, got {num_count}"
+        );
     }
 }
