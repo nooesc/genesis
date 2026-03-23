@@ -140,7 +140,7 @@ const ENV_ALLOWED_PREFIXES: &[&str] = &[
     "OPENAI_",
     "ANTHROPIC_",
     "OPENROUTER_",
-    "HOME_ASSISTANT_",
+    "HOMEASSISTANT_",
     "GOOGLE_",
     "ELEVENLABS_",
     "DEEPGRAM_",
@@ -206,23 +206,67 @@ impl UserData for GenesisApi {
             crate::primitives::json::make_json_bridge(lua)
         });
         fields.add_field_method_get("fs", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"fs".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
             crate::primitives::fs::make_fs_bridge(lua, this.path_validator.clone())
+                .map(mlua::Value::Table)
         });
         fields.add_field_method_get("process", |lua, this| {
-            crate::primitives::process::make_process_bridge(lua, this.working_dir.clone())
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"process".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::process::make_process_bridge(
+                lua,
+                this.working_dir.clone(),
+                this.path_validator.clone(),
+            )
+            .map(mlua::Value::Table)
         });
         fields.add_field_method_get("http", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"http".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
             crate::primitives::http::make_http_bridge(lua, this.http_client.clone())
+                .map(mlua::Value::Table)
         });
         fields.add_field_method_get("search", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"search".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
             crate::primitives::search::make_search_bridge(
                 lua,
                 this.path_validator.clone(),
                 this.working_dir.clone(),
             )
+            .map(mlua::Value::Table)
         });
         fields.add_field_method_get("storage", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"storage".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
             crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
+                .map(mlua::Value::Table)
         });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);

@@ -445,6 +445,7 @@ impl<'a> SessionExecutionService<'a> {
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
+            path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
             ..Default::default()
         }
     }
@@ -1421,6 +1422,7 @@ impl ExecutionSubagentSpawner {
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
+            path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
             ..Default::default()
         };
 

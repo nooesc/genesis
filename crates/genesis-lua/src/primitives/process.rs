@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
+use genesis_tools::sandbox::PathValidator;
 use mlua::{Lua, Table, Value};
 
 /// Build the `genesis.process` bridge table.
@@ -13,7 +15,11 @@ use mlua::{Lua, Table, Value};
 /// - `cwd` (string) — working directory override
 /// - `timeout` (number) — timeout in seconds (default 120, currently a TODO)
 /// - `env` (table) — extra environment variables merged into the current env
-pub fn make_process_bridge(lua: &Lua, working_dir: Option<PathBuf>) -> mlua::Result<Table> {
+pub fn make_process_bridge(
+    lua: &Lua,
+    working_dir: Option<PathBuf>,
+    path_validator: Option<Arc<PathValidator>>,
+) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     table.set(
@@ -26,7 +32,16 @@ pub fn make_process_bridge(lua: &Lua, working_dir: Option<PathBuf>) -> mlua::Res
             let cwd: Option<PathBuf> = opts
                 .as_ref()
                 .and_then(|o| o.get::<Option<String>>("cwd").ok().flatten())
-                .map(PathBuf::from)
+                .map(|cwd_str| {
+                    if let Some(ref validator) = path_validator {
+                        validator
+                            .validate(&cwd_str)
+                            .map_err(|e| mlua::Error::external(e.to_string()))
+                    } else {
+                        Ok(PathBuf::from(cwd_str))
+                    }
+                })
+                .transpose()?
                 .or_else(|| working_dir.clone());
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
@@ -78,7 +93,7 @@ mod tests {
     /// Create a bare Lua VM with `genesis.process` installed.
     fn test_lua_with_process(working_dir: Option<std::path::PathBuf>) -> mlua::Lua {
         let lua = mlua::Lua::new();
-        let process_table = super::make_process_bridge(&lua, working_dir)
+        let process_table = super::make_process_bridge(&lua, working_dir, None)
             .expect("make_process_bridge should succeed");
         let genesis = lua.create_table().expect("table should create");
         genesis

@@ -230,7 +230,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             default_working_dir: None,
             sandbox_manager: None,
             embedding_service: None,
-            path_validator: None,
+            path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
