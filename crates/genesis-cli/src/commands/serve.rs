@@ -67,6 +67,19 @@ pub(crate) async fn run_serve(
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
     let api_key_required = resolve_api_key_required(&loaded.config.profile)?;
+
+    // Warn before binding if exposing the server without authentication
+    let is_loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !is_loopback && !api_key_required && api_key.is_none() {
+        eprintln!(
+            "WARNING: Serving on {host} without API key authentication. \
+             Set GENESIS_API_KEY or GENESIS_API_KEY_REQUIRED=true for network deployments."
+        );
+    }
+
     let trusted_proxies = parse_trusted_proxies()?;
     // Env var overrides config file setting
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
@@ -104,13 +117,6 @@ pub(crate) async fn run_serve(
     let scheduler = genesis_core::scheduler::SchedulerRuntime::new(db_path, executor);
     let sched_cancel = scheduler.cancellation_handle();
     let sched_handle = tokio::spawn(scheduler.run());
-
-    if host != "127.0.0.1" && host != "localhost" && host != "::1" && !api_key_required {
-        eprintln!(
-            "WARNING: Serving on {host} without API key authentication. \
-             Set GENESIS_API_KEY or GENESIS_API_KEY_REQUIRED=true for network deployments."
-        );
-    }
 
     println!("genesis gateway listening on {addr}");
     let shutdown_state = std::sync::Arc::clone(&state);
