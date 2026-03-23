@@ -301,7 +301,8 @@ pub enum AgentError {
     #[error("agent loop exceeded maximum of {0} turns")]
     MaxTurnsExceeded(usize),
     #[error("Budget exceeded: ${used:.2} spent of ${limit:.2} limit. \
-             Increase with: genesis config set runtime.budget_limit <amount>")]
+             Adjust with: genesis config set runtime.budget_limit <amount> \
+             (or GENESIS_BUDGET_LIMIT=0 for unlimited)")]
     BudgetExceeded { used: f64, limit: f64 },
     #[error("iteration budget exhausted: {used} / {limit} iterations")]
     IterationsExhausted { used: usize, limit: usize },
@@ -4207,6 +4208,10 @@ tools = [{tools_list}]
         assert!(
             msg.contains("genesis config set runtime.budget_limit"),
             "budget error should include config instructions, got: {msg}"
+        );
+        assert!(
+            msg.contains("GENESIS_BUDGET_LIMIT=0"),
+            "budget error should mention env var for unlimited, got: {msg}"
         );
         assert!(
             msg.contains("$5.50"),
