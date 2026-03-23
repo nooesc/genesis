@@ -180,6 +180,11 @@ pub struct ToolContext {
     /// When set, file-system tools validate paths against this before I/O.
     #[serde(skip)]
     pub path_validator: Option<Arc<sandbox::PathValidator>>,
+    /// IDs of memories recalled in the current turn. Shared across tool calls
+    /// within a turn so that memory_store can create causal edges from
+    /// recalled memories to newly stored ones.
+    #[serde(skip)]
+    pub recalled_memory_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -206,6 +211,16 @@ impl std::fmt::Debug for ToolContext {
                 "path_validator",
                 &self.path_validator.as_ref().map(|_| ".."),
             )
+            .field(
+                "recalled_memory_ids",
+                &format_args!(
+                    "[{} ids]",
+                    self.recalled_memory_ids
+                        .lock()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                ),
+            )
             .field("approval_mode", &self.approval_mode)
             .finish()
     }
@@ -222,6 +237,7 @@ impl PartialEq for ToolContext {
             && self.approval_mode == other.approval_mode
         // sandbox_manager intentionally excluded from equality comparison
         // embedding_service intentionally excluded from equality comparison
+        // recalled_memory_ids intentionally excluded from equality comparison
     }
 }
 
@@ -1911,6 +1927,7 @@ pub mod test_utils {
             sandbox_manager: None,
             embedding_service: None,
             path_validator: None,
+            recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

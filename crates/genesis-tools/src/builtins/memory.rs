@@ -96,6 +96,8 @@ impl ToolHandler for MemoryStoreTool {
                     }
                 }
 
+                create_causal_links(&store, context, &best_id);
+
                 return Ok(ToolOutput {
                     content: format!(
                         "merged memory into existing `{best_kind}` (similarity: {score:.2})"
@@ -144,6 +146,7 @@ impl ToolHandler for MemoryStoreTool {
             if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
                 tracing::warn!(error = %e, "failed to auto-link new memory by entity");
             }
+            create_causal_links(&store, context, &note_id);
 
             return Ok(ToolOutput {
                 content: format!("stored memory `{key}` (embedded)"),
@@ -198,6 +201,13 @@ impl ToolHandler for MemoryRecallTool {
                         database_path.display()
                     ),
                 })?;
+
+        // Track recalled memory IDs for causal linking.
+        if let Ok(mut ids) = context.recalled_memory_ids.lock() {
+            for m in &memories {
+                ids.push(m.memory.id.clone());
+            }
+        }
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
@@ -388,6 +398,7 @@ fn store_plain(
     if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
         tracing::warn!(error = %e, "failed to auto-link memory by entity");
     }
+    create_causal_links(store, context, &note_id);
 
     Ok(ToolOutput {
         content: format!("stored memory `{key}`"),
@@ -397,6 +408,25 @@ fn store_plain(
             ("session_id".to_owned(), context.session_id.clone()),
         ]),
     })
+}
+
+/// Create causal edges from previously recalled memories to the newly stored memory.
+fn create_causal_links(store: &MemoryStore, context: &ToolContext, new_memory_id: &str) {
+    let recalled_ids = match context.recalled_memory_ids.lock() {
+        Ok(mut ids) => {
+            let taken = std::mem::take(&mut *ids);
+            taken
+        }
+        Err(_) => return,
+    };
+    for recalled_id in &recalled_ids {
+        if recalled_id == new_memory_id {
+            continue; // Don't self-link
+        }
+        if let Err(e) = store.create_link(recalled_id, new_memory_id, "causal", 1.0) {
+            tracing::warn!(error = %e, recalled_id, new_memory_id, "failed to create causal link");
+        }
+    }
 }
 
 fn memory_id(context: &ToolContext, key: &str) -> String {
@@ -1410,6 +1440,183 @@ mod tests {
         assert!(
             entity_count > 0,
             "entity links should be created between memories with overlapping keywords"
+        );
+    }
+
+    // ── Causal linking tests ────────────────────────────────────────────
+
+    #[test]
+    fn memory_recall_then_store_creates_causal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Store a memory first.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "Rust is fast".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Recall it.
+        MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "rust".to_owned())]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Store a new memory — should create causal link from recalled -> new.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_b".to_owned()),
+                        ("value".to_owned(), "Rust compiles to native code".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Verify causal edge exists.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            causal_count > 0,
+            "causal links should exist after recall->store"
+        );
+    }
+
+    #[test]
+    fn memory_store_without_prior_recall_creates_no_causal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "standalone fact".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(causal_count, 0, "no causal links without prior recall");
+    }
+
+    #[test]
+    fn causal_links_are_drained_after_first_store() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Store and recall a memory.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "Rust is fast".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "rust".to_owned())]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // First store — should create causal links.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_b".to_owned()),
+                        ("value".to_owned(), "Rust compiles to native code".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_after_first: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Second store — should NOT create additional causal links (IDs drained).
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_c".to_owned()),
+                        ("value".to_owned(), "Rust has no GC".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let causal_after_second: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(causal_after_first > 0, "first store should create causal links");
+        assert_eq!(
+            causal_after_first, causal_after_second,
+            "second store should not create additional causal links (recalled IDs drained)"
         );
     }
 }

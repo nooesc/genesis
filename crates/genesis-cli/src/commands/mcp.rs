@@ -104,6 +104,7 @@ pub(crate) async fn run_mcp(
                 path_validator: Some(std::sync::Arc::new(
                     genesis_tools::sandbox::PathValidator::new(None),
                 )),
+                recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 approval_mode: genesis_config::ApprovalMode::Auto,
             };
 

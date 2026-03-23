@@ -547,6 +547,7 @@ impl AgentLoop {
         // stale failure counts from a previous turn don't cause false positives.
         self.tool_failure_counts.clear();
         self.nudge_sent = false;
+        self.tools.clear_recalled_memory_ids();
 
         // Record turn-level span attributes via tracing events rather than
         // holding a non-Send span guard across await points.

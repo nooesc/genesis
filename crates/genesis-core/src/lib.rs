@@ -231,6 +231,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             sandbox_manager: None,
             embedding_service: None,
             path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
+            recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
@@ -1088,6 +1089,13 @@ impl ToolRuntime {
     /// Set the embedding service for auto-embedding memories at write time.
     pub fn set_embedding_service(&mut self, service: Arc<dyn genesis_tools::EmbeddingService>) {
         self.context.embedding_service = Some(service);
+    }
+
+    /// Clear the recalled memory IDs at the start of each new user turn.
+    pub fn clear_recalled_memory_ids(&self) {
+        if let Ok(mut ids) = self.context.recalled_memory_ids.lock() {
+            ids.clear();
+        }
     }
 
     /// Create a new ToolRuntime with a different session ID.
