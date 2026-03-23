@@ -1430,10 +1430,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         commands::eval::count_eval_duplicate_groups(&dir, recursive)?;
                     // Only prompt if there are actual duplicates to remove
                     if duplicate_count > 0 {
-                        confirm_destructive(
-                            "Remove duplicate trajectory files?",
-                            force,
-                        )?;
+                        confirm_destructive("Remove duplicate trajectory files?", force)?;
                     }
                 }
                 commands::eval::run_eval_deduplicate(&dir, recursive, remove, cli.json)
@@ -1622,14 +1619,10 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         ));
                     }
                     if count == 0 {
-                        return Ok(format!(
-                            "No sessions older than {older_than} days to purge"
-                        ));
+                        return Ok(format!("No sessions older than {older_than} days to purge"));
                     }
                     confirm_destructive(
-                        &format!(
-                            "Purge {count} session(s) older than {older_than} days?"
-                        ),
+                        &format!("Purge {count} session(s) older than {older_than} days?"),
                         force,
                     )?;
                     let deleted = store.purge_older_than(older_than)?;
@@ -1680,10 +1673,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     if store.get(&name)?.is_none() {
                         return Err(CliError::SkillNotFound(name));
                     }
-                    confirm_destructive(
-                        &format!("Delete skill '{name}'?"),
-                        force,
-                    )?;
+                    confirm_destructive(&format!("Delete skill '{name}'?"), force)?;
                     if !store.delete(&name)? {
                         return Err(CliError::SkillNotFound(name));
                     }
@@ -1814,10 +1804,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     if store.get(&id)?.is_none() {
                         return Err(CliError::ScheduleNotFound(id));
                     }
-                    confirm_destructive(
-                        &format!("Delete schedule {id}?"),
-                        force,
-                    )?;
+                    confirm_destructive(&format!("Delete schedule {id}?"), force)?;
                     if !store.delete(&id)? {
                         return Err(CliError::ScheduleNotFound(id));
                     }
@@ -1995,10 +1982,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     if store.get(&id)?.is_none() {
                         return Err(CliError::Other(format!("memory not found: {id}")));
                     }
-                    confirm_destructive(
-                        &format!("Delete memory {id}?"),
-                        force,
-                    )?;
+                    confirm_destructive(&format!("Delete memory {id}?"), force)?;
                     store.delete(&id)?;
                     Ok(format!("deleted memory {id}"))
                 }
@@ -7177,14 +7161,8 @@ trusted = true
 
     #[test]
     fn sessions_delete_parses_force_flag() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "sessions",
-            "delete",
-            "sess-123",
-            "--force",
-        ])
-        .expect("sessions delete --force should parse");
+        let cli = Cli::try_parse_from(["genesis", "sessions", "delete", "sess-123", "--force"])
+            .expect("sessions delete --force should parse");
 
         match cli.command {
             Command::Sessions(SessionsCommand::Delete { id, force }) => {
@@ -7197,9 +7175,8 @@ trusted = true
 
     #[test]
     fn sessions_delete_defaults_force_false() {
-        let cli =
-            Cli::try_parse_from(["genesis", "sessions", "delete", "sess-123"])
-                .expect("sessions delete should parse");
+        let cli = Cli::try_parse_from(["genesis", "sessions", "delete", "sess-123"])
+            .expect("sessions delete should parse");
 
         match cli.command {
             Command::Sessions(SessionsCommand::Delete { force, .. }) => {
@@ -7238,14 +7215,8 @@ trusted = true
 
     #[test]
     fn sessions_purge_defaults_no_force_no_dry_run() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "sessions",
-            "purge",
-            "--older-than",
-            "7",
-        ])
-        .expect("sessions purge should parse");
+        let cli = Cli::try_parse_from(["genesis", "sessions", "purge", "--older-than", "7"])
+            .expect("sessions purge should parse");
 
         match cli.command {
             Command::Sessions(SessionsCommand::Purge {
@@ -7263,14 +7234,8 @@ trusted = true
 
     #[test]
     fn skills_delete_parses_force_flag() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "skills",
-            "delete",
-            "my-skill",
-            "--force",
-        ])
-        .expect("skills delete --force should parse");
+        let cli = Cli::try_parse_from(["genesis", "skills", "delete", "my-skill", "--force"])
+            .expect("skills delete --force should parse");
 
         match cli.command {
             Command::Skills(SkillsCommand::Delete { name, force }) => {
@@ -7283,14 +7248,8 @@ trusted = true
 
     #[test]
     fn memory_delete_parses_force_flag() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "memory",
-            "delete",
-            "mem-42",
-            "--force",
-        ])
-        .expect("memory delete --force should parse");
+        let cli = Cli::try_parse_from(["genesis", "memory", "delete", "mem-42", "--force"])
+            .expect("memory delete --force should parse");
 
         match cli.command {
             Command::Memory(MemoryCommand::Delete { id, force }) => {
@@ -7331,14 +7290,8 @@ trusted = true
 
     #[test]
     fn schedule_delete_parses_force_flag() {
-        let cli = Cli::try_parse_from([
-            "genesis",
-            "schedule",
-            "delete",
-            "sched-1",
-            "--force",
-        ])
-        .expect("schedule delete --force should parse");
+        let cli = Cli::try_parse_from(["genesis", "schedule", "delete", "sched-1", "--force"])
+            .expect("schedule delete --force should parse");
 
         match cli.command {
             Command::Schedule(ScheduleCommand::Delete { id, force }) => {

@@ -2251,10 +2251,7 @@ fn collect_duplicate_groups(
 }
 
 /// Count the number of duplicate groups in the given directory without removing anything.
-pub(crate) fn count_eval_duplicate_groups(
-    dir: &str,
-    recursive: bool,
-) -> Result<usize, CliError> {
+pub(crate) fn count_eval_duplicate_groups(dir: &str, recursive: bool) -> Result<usize, CliError> {
     Ok(collect_duplicate_groups(dir, recursive)?.len())
 }
 
