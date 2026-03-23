@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# pre-commit hook: auto-format staged Rust files with cargo fmt.
+#
+# Setup (run once per clone):
+#   git config core.hooksPath .githooks
+#
+# How it works:
+#   1. Identifies .rs files in the staging area.
+#   2. Runs `cargo fmt` on the whole workspace (fast, <2s).
+#   3. Re-stages any files that were reformatted.
+#   4. The commit proceeds with correctly formatted code.
+#
+# To bypass in exceptional cases:  git commit --no-verify
+
+set -euo pipefail
+
+# Only act if there are staged Rust files.
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+if [ -z "$STAGED_RS" ]; then
+    exit 0
+fi
+
+# Run cargo fmt on the workspace.
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found, skipping format check"
+    exit 0
+fi
+
+echo "pre-commit: formatting staged Rust files..."
+cargo fmt --all 2>&1
+
+# Re-stage any files that cargo fmt modified.
+for file in $STAGED_RS; do
+    if [ -f "$file" ]; then
+        git add "$file"
+    fi
+done
+
+echo "pre-commit: formatting complete"

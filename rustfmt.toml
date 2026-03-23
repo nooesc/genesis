@@ -1,0 +1,7 @@
+# Workspace-wide rustfmt configuration.
+# All options here are stable defaults, pinned explicitly so that
+# formatting never drifts when the toolchain is upgraded.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+use_small_heuristics = "Default"
