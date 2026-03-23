@@ -68,7 +68,11 @@ fn check_destructive(call: &ToolCall, context: &ToolContext) -> Result<(), ToolE
     if !context.allow_destructive_tools {
         return Err(ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason: "destructive tools are disabled in the current runtime".to_owned(),
+            reason: format!(
+                "Tool '{}' requires destructive tool permissions. \
+                 Enable with: genesis config set runtime.allow_destructive_tools true",
+                call.name
+            ),
         });
     }
     Ok(())

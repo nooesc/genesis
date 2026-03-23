@@ -311,13 +311,13 @@ pub struct StorageConfig {
 pub struct RuntimeConfig {
     pub max_concurrency: usize,
     pub allow_destructive_tools: bool,
-    /// Maximum agent loop iterations per user turn (default: 20).
+    /// Maximum agent loop iterations per user turn (default: 10).
     pub max_turns: usize,
     /// Max conversation messages kept in context. Oldest messages are pruned
     /// with a summary when exceeded. `None` means unlimited.
     pub max_context_messages: Option<usize>,
-    /// Optional per-session budget limit in USD. When exceeded, the agent
-    /// loop stops early. `None` means unlimited.
+    /// Per-session budget limit in USD. When exceeded, the agent loop stops
+    /// early. Defaults to $5.00. Set to a higher value or remove to increase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_limit: Option<f64>,
     /// Terminal backend for shell_exec. Defaults to local shell.
@@ -1045,9 +1045,9 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         runtime: RuntimeConfig {
             max_concurrency: 4,
             allow_destructive_tools: false,
-            max_turns: 20,
+            max_turns: 10,
             max_context_messages: None,
-            budget_limit: None,
+            budget_limit: Some(5.0),
             terminal: None,
             thinking_budget: None,
             max_context_tokens: None,
@@ -1211,10 +1211,12 @@ pub fn load_from_map(
         max_turns: parse_env(
             env,
             "GENESIS_MAX_TURNS",
-            rt.and_then(|r| r.max_turns).unwrap_or(20),
+            rt.and_then(|r| r.max_turns).unwrap_or(10),
         )?,
         max_context_messages: rt.and_then(|r| r.max_context_messages),
-        budget_limit: rt.and_then(|r| r.budget_limit),
+        budget_limit: Some(
+            rt.and_then(|r| r.budget_limit).unwrap_or(5.0),
+        ),
         terminal: rt.and_then(|r| r.terminal.clone()),
         thinking_budget: rt.and_then(|r| r.thinking_budget),
         max_context_tokens: rt.and_then(|r| r.max_context_tokens),
@@ -2701,5 +2703,51 @@ runtime:
     fn cache_config_absent_when_not_configured() {
         let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(loaded.config.runtime.cache.is_none());
+    }
+
+    #[test]
+    fn default_budget_limit_is_five_dollars() {
+        let dir = tempdir().expect("tempdir should exist");
+        let absent = dir.path().join("nonexistent.yaml");
+        let loaded =
+            load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(5.0));
+    }
+
+    #[test]
+    fn default_max_turns_is_ten() {
+        let dir = tempdir().expect("tempdir should exist");
+        let absent = dir.path().join("nonexistent.yaml");
+        let loaded =
+            load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.max_turns, 10);
+    }
+
+    #[test]
+    fn config_file_can_override_budget_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "runtime:\n  budget_limit: 25.0\n",
+        )
+        .unwrap();
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(25.0));
+    }
+
+    #[test]
+    fn config_file_can_override_max_turns() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "runtime:\n  max_turns: 30\n",
+        )
+        .unwrap();
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.max_turns, 30);
     }
 }
