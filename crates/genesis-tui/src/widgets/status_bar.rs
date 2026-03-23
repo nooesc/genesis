@@ -117,11 +117,12 @@ pub struct StatusBarWidget {
 }
 
 impl StatusBarWidget {
-    /// Create a new status bar.
+    /// Create a new status bar with a pre-computed right-info string.
     ///
-    /// Git branch detection is deferred to the first `render()` call so the
-    /// constructor never blocks the async runtime with a synchronous subprocess.
-    pub fn new(model: String) -> Self {
+    /// The caller should obtain `right_info` via
+    /// [`detect_right_info`](Self::detect_right_info) on a blocking thread
+    /// (e.g. `tokio::task::spawn_blocking`) to avoid stalling a Tokio worker.
+    pub fn new(model: String, right_info: String) -> Self {
         Self {
             model,
             context_percent: 0,
@@ -130,7 +131,7 @@ impl StatusBarWidget {
             sprite_frame: 0,
             last_tick: Instant::now(),
             last_sprite_tick: Instant::now(),
-            right_info: None,
+            right_info: Some(right_info),
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
@@ -140,16 +141,6 @@ impl StatusBarWidget {
             agent_mode: AgentMode::default(),
             shimmer_phase: 0.0,
             transient_warning: None,
-        }
-    }
-
-    /// Ensure `right_info` is populated, running the git subprocess if needed.
-    ///
-    /// This is intentionally synchronous but called at most once per session,
-    /// from `render()`, which runs in the terminal draw callback.
-    fn ensure_right_info(&mut self) {
-        if self.right_info.is_none() {
-            self.right_info = Some(Self::detect_right_info());
         }
     }
 
@@ -287,7 +278,6 @@ impl StatusBarWidget {
 
     /// Render the status bar into `buf` within `area`.
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        self.ensure_right_info();
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -570,7 +560,7 @@ impl StatusBarWidget {
         // Branch name with icon.
         spans.push(Span::styled("⎇ ", Style::default().fg(BRANCH_COLOR).bg(bg)));
         spans.push(Span::styled(
-            self.right_info.clone().unwrap_or_default(),
+            self.right_info.as_deref().unwrap_or("").to_owned(),
             Style::default().fg(DIM).bg(bg),
         ));
 
@@ -585,7 +575,12 @@ impl StatusBarWidget {
         }
     }
 
-    fn detect_right_info() -> String {
+    /// Detect git branch (or cwd fallback) for the right side of the status bar.
+    ///
+    /// This spawns a `git rev-parse` subprocess and **blocks** the calling
+    /// thread. Call from `tokio::task::spawn_blocking` when used in an async
+    /// context.
+    pub fn detect_right_info() -> String {
         if let Ok(output) = std::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
             .output()
@@ -756,25 +751,9 @@ mod tests {
     use super::*;
 
     fn make_widget() -> StatusBarWidget {
-        StatusBarWidget {
-            model: "gpt-4o".to_string(),
-            context_percent: 42,
-            state: StatusState::Idle,
-            prev_state: None,
-            sprite_frame: 0,
-            last_tick: Instant::now(),
-            last_sprite_tick: Instant::now(),
-            right_info: Some("main".to_string()),
-            tokens_in: 0,
-            tokens_out: 0,
-            turn_elapsed: None,
-            token_history: VecDeque::new(),
-            effects_enabled: false,
-            heartbeat: Pattern::Flatline,
-            agent_mode: AgentMode::default(),
-            shimmer_phase: 0.0,
-            transient_warning: None,
-        }
+        let mut w = StatusBarWidget::new("gpt-4o".to_string(), "main".to_string());
+        w.context_percent = 42;
+        w
     }
 
     // ── Snapshot tests ────────────────────────────────────────────────

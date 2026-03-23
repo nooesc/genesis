@@ -3,6 +3,9 @@
 //! Shows a floating popup above the input with fuzzy-filtered file paths
 //! from the current working directory. Tab/Enter inserts the selected path.
 
+use std::path::PathBuf;
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -29,6 +32,16 @@ pub enum FileCompletionAction {
     Dismiss,
 }
 
+/// How long a cached file scan remains fresh before rescanning.
+const SCAN_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cached result of a directory scan, combining the scanned directory and
+/// the wall-clock time the scan completed.
+struct ScanCache {
+    dir: PathBuf,
+    scanned_at: Instant,
+}
+
 /// Floating file completion popup.
 pub struct FileCompletion {
     /// Characters typed after `@` (the search query).
@@ -41,6 +54,8 @@ pub struct FileCompletion {
     selected: usize,
     /// Whether the popup is visible.
     visible: bool,
+    /// Cached directory scan metadata (directory + timestamp).
+    last_scan: Option<ScanCache>,
 }
 
 impl FileCompletion {
@@ -51,14 +66,38 @@ impl FileCompletion {
             filtered: Vec::new(),
             selected: 0,
             visible: false,
+            last_scan: None,
         }
     }
 
-    /// Show the popup, scanning the cwd for files.
+    /// Show the popup, scanning the cwd for files if the cache is stale.
+    ///
+    /// The file scan is skipped when the working directory has not changed and
+    /// the previous scan is younger than [`SCAN_CACHE_TTL`]. This avoids
+    /// blocking the async runtime with repeated `read_dir` syscalls each time
+    /// the popup is opened.
     pub fn show(&mut self) {
         self.visible = true;
         self.query.clear();
-        self.scan_files();
+
+        let cwd = std::env::current_dir().ok();
+        let cache_fresh = match (&self.last_scan, &cwd) {
+            (Some(cache), Some(cur_dir)) => {
+                cache.dir == *cur_dir && cache.scanned_at.elapsed() < SCAN_CACHE_TTL
+            }
+            _ => false,
+        };
+
+        if !cache_fresh {
+            self.scan_files();
+            if let Some(dir) = cwd {
+                self.last_scan = Some(ScanCache {
+                    dir,
+                    scanned_at: Instant::now(),
+                });
+            }
+        }
+
         self.refilter();
     }
 

@@ -780,7 +780,7 @@ mod tests {
             screen: AppScreen::Chat, // Start in Chat for existing tests
             welcome,
             chat: ChatWidget::new(),
-            status_bar: StatusBarWidget::new("test".to_string()),
+            status_bar: StatusBarWidget::new("test".to_string(), "main".to_string()),
             overlay: None,
             viewport_height: 24,
             command_popup: CommandPopup::new(),
