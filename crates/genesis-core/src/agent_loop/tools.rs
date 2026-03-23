@@ -216,7 +216,11 @@ pub(crate) fn check_tool_policy(
                 reason = reason.as_str(),
                 "tool call blocked by policy"
             );
-            Some(format!("Error: {reason}"))
+            Some(format!(
+                "Error: {reason}\n\n\
+                 This tool call was blocked by the tool policy. \
+                 Review the policy file configured at `runtime.tool_policy_path` to adjust permissions."
+            ))
         }
         crate::tool_policy::PolicyDecision::Allow => None,
     }
