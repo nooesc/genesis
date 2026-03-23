@@ -214,6 +214,13 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("http", |lua, this| {
             crate::primitives::http::make_http_bridge(lua, this.http_client.clone())
         });
+        fields.add_field_method_get("search", |lua, this| {
+            crate::primitives::search::make_search_bridge(
+                lua,
+                this.path_validator.clone(),
+                this.working_dir.clone(),
+            )
+        });
         fields.add_field_method_get("storage", |lua, this| {
             crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
         });
