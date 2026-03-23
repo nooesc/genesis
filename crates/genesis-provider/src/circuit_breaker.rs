@@ -90,7 +90,7 @@ impl CircuitBreaker {
     /// be rejected (circuit is Open and cooldown hasn't expired).
     pub fn allow_request(&self) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("circuit breaker mutex was poisoned, recovering");
+            tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
             poisoned.into_inner()
         });
         match inner.state {
@@ -126,7 +126,7 @@ impl CircuitBreaker {
     /// Record a successful request. Resets failure count and closes circuit.
     pub fn record_success(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("circuit breaker mutex was poisoned, recovering");
+            tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
             poisoned.into_inner()
         });
         if inner.state == CircuitState::HalfOpen {
@@ -140,7 +140,7 @@ impl CircuitBreaker {
     /// Record a failed request. Increments failure count and may open circuit.
     pub fn record_failure(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("circuit breaker mutex was poisoned, recovering");
+            tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
             poisoned.into_inner()
         });
         inner.consecutive_failures += 1;
@@ -177,7 +177,7 @@ impl CircuitBreaker {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| {
-                tracing::warn!("circuit breaker mutex was poisoned, recovering");
+                tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
                 poisoned.into_inner()
             })
             .state
@@ -188,7 +188,7 @@ impl CircuitBreaker {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| {
-                tracing::warn!("circuit breaker mutex was poisoned, recovering");
+                tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
                 poisoned.into_inner()
             })
             .consecutive_failures
@@ -199,7 +199,7 @@ impl CircuitBreaker {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| {
-                tracing::warn!("circuit breaker mutex was poisoned, recovering");
+                tracing::warn!("circuit breaker mutex poisoned (will recover on each access)");
                 poisoned.into_inner()
             })
             .open_count

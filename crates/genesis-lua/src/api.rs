@@ -56,14 +56,14 @@ impl PluginContext {
 
     pub(crate) fn close_tool_registration(&self) {
         *self.load_active.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("lua plugin mutex was poisoned, recovering");
+            tracing::warn!("plugin load state mutex poisoned, recovering");
             poisoned.into_inner()
         }) = false;
     }
 
     fn load_active(&self) -> bool {
         *self.load_active.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("lua plugin mutex was poisoned, recovering");
+            tracing::warn!("plugin load state mutex poisoned, recovering");
             poisoned.into_inner()
         })
     }
@@ -203,7 +203,7 @@ impl UserData for GenesisApi {
                 hooks
                     .lock()
                     .unwrap_or_else(|poisoned| {
-                        tracing::warn!("lua plugin mutex was poisoned, recovering");
+                        tracing::warn!("hook registry mutex poisoned, recovering");
                         poisoned.into_inner()
                     })
                     .register(event, callback, Some(plugin_context));
@@ -225,7 +225,7 @@ impl UserData for GenesisApi {
                 tools
                     .lock()
                     .unwrap_or_else(|poisoned| {
-                        tracing::warn!("lua plugin mutex was poisoned, recovering");
+                        tracing::warn!("tool registry mutex poisoned, recovering");
                         poisoned.into_inner()
                     })
                     .register(lua, &plugin_context.name, &plugin_context.permissions, spec)
@@ -248,7 +248,7 @@ impl UserData for GenesisApi {
                 personalities
                     .lock()
                     .unwrap_or_else(|poisoned| {
-                        tracing::warn!("lua plugin mutex was poisoned, recovering");
+                        tracing::warn!("personality registry mutex poisoned, recovering");
                         poisoned.into_inner()
                     })
                     .register(&plugin_context.name, &plugin_context.permissions, spec)
@@ -330,7 +330,7 @@ fn make_memory_bridge(
             let session_id = session
                 .lock()
                 .unwrap_or_else(|poisoned| {
-                    tracing::warn!("lua plugin mutex was poisoned, recovering");
+                    tracing::warn!("session state mutex poisoned, recovering");
                     poisoned.into_inner()
                 })
                 .id
@@ -373,7 +373,7 @@ fn make_logger(
 ) -> mlua::Result<mlua::Function> {
     lua.create_function(move |_, message: String| {
         let mut stored = logs.lock().unwrap_or_else(|poisoned| {
-            tracing::warn!("lua plugin mutex was poisoned, recovering");
+            tracing::warn!("log sink mutex poisoned, recovering");
             poisoned.into_inner()
         });
         stored.push(match prefix {
@@ -398,7 +398,7 @@ fn make_tool_bridge(
             let plugin_context = active_plugin
                 .lock()
                 .unwrap_or_else(|poisoned| {
-                    tracing::warn!("lua plugin mutex was poisoned, recovering");
+                    tracing::warn!("active plugin mutex poisoned, recovering");
                     poisoned.into_inner()
                 })
                 .last()
@@ -424,7 +424,7 @@ fn make_tool_bridge(
             let executor = host_tools
                 .lock()
                 .unwrap_or_else(|poisoned| {
-                    tracing::warn!("lua plugin mutex was poisoned, recovering");
+                    tracing::warn!("host tools mutex poisoned, recovering");
                     poisoned.into_inner()
                 })
                 .clone()
