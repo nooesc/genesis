@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::StorageError;
 use crate::stores::embedding::embedding_to_blob;
 use crate::util::{
-    collect_rows, decayed_importance, exec_migration, memory_vec_declared_dimensions,
-    memory_vec_table_exists, sql_placeholders, sqlite_table_exists,
+    collect_rows, decayed_importance, edge_type_weight, exec_migration,
+    memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders,
+    sqlite_table_exists,
 };
 use crate::Database;
 
@@ -43,6 +44,8 @@ struct GraphAttributes {
 struct GraphCandidate {
     memory: StoredMemory,
     attributes: GraphAttributes,
+    edge_type: String,
+    edge_weight: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -306,7 +309,10 @@ impl MemoryStore {
                 .enumerate()
             {
                 if seen.insert(linked.memory.id.clone()) {
-                    let link_score = base_score * (0.5 / (link_rank as f64 + 1.0));
+                    let link_score = base_score
+                        * (0.5 / (link_rank as f64 + 1.0))
+                        * edge_type_weight(&linked.edge_type)
+                        * linked.edge_weight;
                     expanded.push(Self::score_graph_memory(
                         &linked.memory,
                         &linked.attributes,
@@ -465,6 +471,30 @@ impl MemoryStore {
         collect_rows(rows, self.db.path())
     }
 
+    /// Insert or update a typed, weighted edge between two memories.
+    pub fn create_link(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        edge_type: &str,
+        weight: f64,
+    ) -> Result<(), StorageError> {
+        let connection = self.db.conn()?;
+        connection
+            .execute(
+                "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_id, target_id) DO UPDATE
+                 SET edge_type = excluded.edge_type, weight = excluded.weight",
+                params![source_id, target_id, edge_type, weight],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    }
+
     fn graph_attributes_for_ids(
         &self,
         connection: &Connection,
@@ -517,7 +547,7 @@ impl MemoryStore {
         let mut stmt = connection
             .prepare(&format!(
                 "SELECT ml.source_id, m.id, m.session_id, m.kind, m.content, m.created_at,
-                        m.importance, m.accessed_at
+                        m.importance, m.accessed_at, ml.edge_type, ml.weight
                  FROM memory_links ml
                  JOIN memories m ON m.id = ml.target_id
                  WHERE ml.source_id IN ({})
@@ -546,6 +576,8 @@ impl MemoryStore {
                                 importance: row.get::<_, f32>(6)?,
                                 accessed_at: row.get::<_, String>(7)?,
                             },
+                            edge_type: row.get::<_, String>(8)?,
+                            edge_weight: row.get::<_, f64>(9)?,
                         },
                     ))
                 },
@@ -1237,5 +1269,141 @@ mod memory_store_tests {
 
         let (page3, _) = store.list_paginated(10, 5).expect("beyond end");
         assert!(page3.is_empty());
+    }
+
+    #[test]
+    fn create_link_with_edge_type_stores_type_and_weight() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "src".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "source note".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+        store
+            .create_note(NewMemoryNote {
+                id: "tgt".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "target note".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        store
+            .create_link("src", "tgt", "causal", 0.9)
+            .expect("create_link should succeed");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (edge_type, weight): (String, f64) = conn
+            .query_row(
+                "SELECT edge_type, weight FROM memory_links
+                 WHERE source_id = 'src' AND target_id = 'tgt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("link row should exist");
+        assert_eq!(edge_type, "causal");
+        assert!((weight - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn graph_search_weights_causal_edges_higher_than_entity() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create FTS index so search works.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )
+        .unwrap();
+
+        // Primary memory — will be the FTS hit.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('primary', 's1', 'fact', 'genesis architecture overview', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        let primary_rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, 'fact', 'genesis architecture overview')",
+            rusqlite::params![primary_rowid],
+        )
+        .unwrap();
+
+        // Causal linked memory.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('causal-linked', 's1', 'fact', 'causal consequence', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // Entity linked memory.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('entity-linked', 's1', 'fact', 'entity relation', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // Insert links with typed edges.
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+             VALUES ('primary', 'causal-linked', 'causal', 1.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+             VALUES ('primary', 'entity-linked', 'entity', 1.0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let results = store.graph_search("genesis architecture", 10).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        assert!(ids.contains(&"causal-linked"), "causal-linked should appear in results");
+        assert!(ids.contains(&"entity-linked"), "entity-linked should appear in results");
+
+        // Causal (0.9 multiplier) should score higher than entity (0.6 multiplier).
+        let causal_score = results
+            .iter()
+            .find(|r| r.memory.id == "causal-linked")
+            .unwrap()
+            .score;
+        let entity_score = results
+            .iter()
+            .find(|r| r.memory.id == "entity-linked")
+            .unwrap()
+            .score;
+        assert!(
+            causal_score > entity_score,
+            "causal ({causal_score}) should score higher than entity ({entity_score})"
+        );
     }
 }
