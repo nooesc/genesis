@@ -193,7 +193,10 @@ impl std::fmt::Debug for ToolContext {
                 "sandbox_manager",
                 &self.sandbox_manager.as_ref().map(|_| ".."),
             )
-            .field("embedding_service", &self.embedding_service.as_ref().map(|_| ".."))
+            .field(
+                "embedding_service",
+                &self.embedding_service.as_ref().map(|_| ".."),
+            )
             .field("approval_mode", &self.approval_mode)
             .finish()
     }
