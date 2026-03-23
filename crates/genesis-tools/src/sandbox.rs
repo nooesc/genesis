@@ -2,6 +2,22 @@ use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 
+/// Single-component directory names that are always sensitive (e.g. `.ssh`).
+const SENSITIVE_DIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".docker"];
+
+/// Multi-component relative paths that are sensitive (e.g. `.config/gcloud`).
+const SENSITIVE_DIR_PATHS: &[&str] = &[".config/gcloud"];
+
+/// Absolute paths that are sensitive (exact match or parent-of).
+const SENSITIVE_ABSOLUTE: &[&str] = &[
+    "/etc/shadow",
+    "/etc/passwd",
+    "/etc/sudoers",
+    "/private/etc/shadow",
+    "/private/etc/passwd",
+    "/private/etc/sudoers",
+];
+
 /// Errors produced by the filesystem sandbox.
 #[derive(Debug, Error)]
 pub enum SandboxError {
@@ -30,6 +46,63 @@ impl PathValidator {
             working_dir,
             home_dir,
         }
+    }
+
+    /// Returns `true` if `path` refers to a known sensitive location.
+    ///
+    /// When `working_dir` is provided and `path` starts with it, the path is
+    /// considered project-internal and is **not** treated as sensitive — e.g. a
+    /// `.ssh/` directory inside the project root is legitimate.
+    ///
+    /// All matching is done at the **component level** so that paths like
+    /// `not.aws/credentials` do not produce false positives.
+    pub fn is_sensitive_path(path: &Path, working_dir: Option<&Path>) -> bool {
+        // If the path lives inside the working directory, it is project-internal.
+        if let Some(wd) = working_dir {
+            if path.starts_with(wd) {
+                return false;
+            }
+        }
+
+        // --- Absolute sensitive paths (exact or starts_with with `/` boundary) ---
+        let path_str = path.to_string_lossy();
+        for &sensitive in SENSITIVE_ABSOLUTE {
+            if path_str == sensitive
+                || path_str.starts_with(&format!("{sensitive}/"))
+            {
+                return true;
+            }
+        }
+
+        // Collect Normal components as strings for the remaining checks.
+        let components: Vec<&str> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => s.to_str(),
+                _ => None,
+            })
+            .collect();
+
+        // --- Single-component sensitive directories ---
+        for &dir in SENSITIVE_DIRS {
+            if components.contains(&dir) {
+                return true;
+            }
+        }
+
+        // --- Multi-component sensitive directory paths ---
+        for &dir_path in SENSITIVE_DIR_PATHS {
+            let parts: Vec<&str> = dir_path.split('/').collect();
+            if parts.len() <= components.len() {
+                for window in components.windows(parts.len()) {
+                    if window == parts.as_slice() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Performs purely lexical normalization of a path (no filesystem access).
@@ -137,5 +210,63 @@ mod tests {
         // A clean absolute path should pass through unchanged.
         let result = v.normalize_lexical(Path::new("/usr/local/bin/tool"));
         assert_eq!(result, PathBuf::from("/usr/local/bin/tool"));
+    }
+
+    // ---- Sensitive path tests ----
+
+    #[test]
+    fn blocks_ssh_directory() {
+        assert!(PathValidator::is_sensitive_path(
+            Path::new("/home/user/.ssh/id_rsa"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn blocks_aws_directory() {
+        assert!(PathValidator::is_sensitive_path(
+            Path::new("/home/user/.aws/sso/cache/token.json"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn blocks_etc_shadow() {
+        assert!(PathValidator::is_sensitive_path(
+            Path::new("/etc/shadow"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn blocks_private_etc_shadow_macos() {
+        assert!(PathValidator::is_sensitive_path(
+            Path::new("/private/etc/shadow"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn allows_normal_path() {
+        assert!(!PathValidator::is_sensitive_path(
+            Path::new("/workspace/src/main.rs"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn allows_ssh_inside_working_dir() {
+        assert!(!PathValidator::is_sensitive_path(
+            Path::new("/workspace/.ssh/config"),
+            Some(Path::new("/workspace")),
+        ));
+    }
+
+    #[test]
+    fn no_false_positive_on_not_aws() {
+        assert!(!PathValidator::is_sensitive_path(
+            Path::new("/home/user/not.aws/credentials"),
+            None,
+        ));
     }
 }
