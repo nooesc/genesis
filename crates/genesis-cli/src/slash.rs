@@ -6,7 +6,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
-use crate::commands::misc::estimate_token_cost;
+use crate::commands::model::estimate_token_cost;
 use crate::format::{export_session_markdown, format_session_messages};
 
 /// Slash-command completer for the interactive chat TUI.

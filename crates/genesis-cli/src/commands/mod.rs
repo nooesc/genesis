@@ -1,5 +1,14 @@
 pub(crate) mod batch;
+pub(crate) mod benchmark;
+pub(crate) mod compress;
+pub(crate) mod context;
 pub(crate) mod eval;
+pub(crate) mod info;
 pub(crate) mod init;
-pub(crate) mod misc;
+pub(crate) mod mcp;
+pub(crate) mod model;
+pub(crate) mod pairing;
+pub(crate) mod personality;
+pub(crate) mod plugins;
 pub(crate) mod serve;
+pub(crate) mod toolset;
