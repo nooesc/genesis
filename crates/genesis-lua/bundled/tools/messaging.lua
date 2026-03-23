@@ -23,6 +23,17 @@ local function split_message(text, max_len)
                 cut = space
             end
         end
+        -- Retreat to a UTF-8 character boundary so we never split a
+        -- multi-byte codepoint (Lua 5.4 utf8 library).
+        local safe_cut = cut
+        while safe_cut > 0 do
+            local byte = remaining:byte(safe_cut)
+            if byte and (byte < 0x80 or byte >= 0xC0) then
+                break -- start of a character or ASCII
+            end
+            safe_cut = safe_cut - 1
+        end
+        if safe_cut > 0 then cut = safe_cut end
         table.insert(chunks, remaining:sub(1, cut))
         remaining = remaining:sub(cut + 1)
     end
@@ -71,13 +82,12 @@ local function send_telegram(chat_id, message, thread_id)
     local chunks = split_message(message, 4096)
     local last_message_id = nil
 
-    for _, chunk in ipairs(chunks) do
+    for i, chunk in ipairs(chunks) do
         local body = {
             chat_id = chat_id,
             text = chunk,
-            parse_mode = "Markdown",
         }
-        if thread_id and #thread_id > 0 then
+        if i == 1 and thread_id and #thread_id > 0 then
             body.reply_to_message_id = tonumber(thread_id)
         end
 

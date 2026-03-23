@@ -61,7 +61,10 @@ genesis.register_tool({
             if not target_id then
                 error("'id' must be a number")
             end
-            local new_status = args.status or "done"
+            if not args.status then
+                error("'status' is required for 'update' action")
+            end
+            local new_status = args.status
             if new_status ~= "pending" and new_status ~= "in_progress" and new_status ~= "done" then
                 error("'status' must be one of: pending, in_progress, done")
             end
