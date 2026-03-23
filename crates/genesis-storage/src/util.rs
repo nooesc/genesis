@@ -72,8 +72,16 @@ pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> boo
             .all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "column_exists: column name must be alphanumeric, got {column:?}"
     );
-    conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
-        .is_ok()
+    // Use PRAGMA table_info instead of SELECT to avoid SQLite's DQS misfeature
+    // where double-quoted identifiers for missing columns are silently treated
+    // as string literals, causing column_exists to incorrectly return true.
+    conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map(|cols| cols.iter().any(|c| c == column))
+        .unwrap_or(false)
 }
 
 /// Run a batch of SQL statements as a migration step.
