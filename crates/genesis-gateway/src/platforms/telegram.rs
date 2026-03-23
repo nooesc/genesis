@@ -17,12 +17,12 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use base64::Engine;
-use genesis_core::execution::SessionTurnInput;
-use genesis_storage::{SessionStore, StickerCacheStore};
+use genesis_storage::StickerCacheStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
+use super::{PlatformMessage, ProcessOutcome};
 use crate::verify::verify_secret_token;
 use crate::AppState;
 
@@ -553,6 +553,11 @@ pub async fn webhook_handler(
 
     // Session ID: stable per chat so conversation persists
     let session_id = format!("tg-{chat_id}");
+    let user_id_str = message
+        .from
+        .as_ref()
+        .map(|u| u.id.to_string())
+        .unwrap_or_else(|| chat_id.to_string());
 
     let span = info_span!(
         "telegram.webhook",
@@ -562,80 +567,6 @@ pub async fn webhook_handler(
     );
 
     info!(parent: &span, "received telegram message");
-
-    // DM pairing check — gate unknown users
-    let user_id_str = message
-        .from
-        .as_ref()
-        .map(|u| u.id.to_string())
-        .unwrap_or_else(|| chat_id.to_string());
-
-    match super::check_pairing(
-        &state.loaded.config.storage.database_path,
-        "telegram",
-        &user_id_str,
-        &user_name,
-    ) {
-        Ok(super::PairingCheck::Approved) => {} // proceed
-        Ok(super::PairingCheck::NeedsPairing(code)) => {
-            let reply = super::pairing_reply(&code);
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
-                {
-                    error!(error = %e, "failed to send pairing reply");
-                }
-            });
-            return StatusCode::OK;
-        }
-        Ok(super::PairingCheck::AtCapacity) => {
-            let reply = super::pairing_capacity_reply().to_owned();
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
-                {
-                    error!(error = %e, "failed to send capacity reply");
-                }
-            });
-            return StatusCode::OK;
-        }
-        Err(_) => {
-            return StatusCode::SERVICE_UNAVAILABLE;
-        }
-    }
-
-    // Handle gateway slash commands (only for text messages).
-    if let MessageInput::Text(ref text) = input {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(text, &session_id, &store, &state.loaded.config)
-        {
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    send_reply(&client2, &token2, chat_id, &reply, Some(message_id)).await
-                {
-                    error!(error = %e, "failed to send command reply");
-                }
-            });
-            return StatusCode::OK;
-        }
-    }
-
-    // Auto-reset expired sessions before processing.
-    {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        crate::commands::check_session_expiry(
-            &session_id,
-            &store,
-            state.loaded.config.gateway.as_ref(),
-        );
-    }
 
     // Spawn background task so we return 200 immediately
     let state = Arc::clone(&state);
@@ -687,33 +618,35 @@ pub async fn webhook_handler(
                 }
             };
 
-            let service = state.session_service();
+            let chat_id_str = chat_id.to_string();
+            let msg = PlatformMessage {
+                user_id: &user_id_str,
+                user_name: &user_name,
+                text: &prompt,
+                session_id: &session_id,
+                chat_id: &chat_id_str,
+                platform_name: "telegram",
+                delivery_platform: DeliveryPlatform::Telegram,
+            };
 
-            let result = service
-                .run_turn(SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: "telegram",
-                    delivery_platform: DeliveryPlatform::Telegram,
-                    prompt: &prompt,
-                    title: Some(&format!("Telegram: {user_name}")),
-                    images: Vec::new(),
-                })
-                .await;
+            let reply = match super::process_platform_message(&state, &msg).await {
+                ProcessOutcome::AgentReply(r)
+                | ProcessOutcome::NeedsPairing(r)
+                | ProcessOutcome::CommandReply(r) => r,
+                ProcessOutcome::AtCapacity => super::pairing_capacity_reply().to_owned(),
+                ProcessOutcome::PairingError => {
+                    error!("telegram pairing check failed");
+                    return;
+                }
+                ProcessOutcome::ExecutionError(e) => {
+                    error!(error = %e, "telegram execution error");
+                    return;
+                }
+            };
 
-            let reply_text = super::extract_reply(result, "telegram");
-
-            if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply_text, Some(message_id)).await {
+            if let Err(e) = send_reply(&state.http_client, &token, chat_id, &reply, Some(message_id)).await {
                 error!(error = %e, "failed to send telegram reply");
             }
-
-            // Append delivery mirror for cross-platform visibility.
-            crate::mirror::append_delivery_mirror(
-                &state.loaded.config.storage.database_path,
-                "telegram",
-                &chat_id.to_string(),
-                &reply_text,
-                "telegram",
-            );
         }
         .instrument(span),
     );
@@ -733,7 +666,7 @@ async fn send_reply(
 
     // Telegram messages have a 4096 character limit.
     // Split long responses into chunks.
-    let chunks = split_message(text, 4096);
+    let chunks = super::split_message(text, 4096);
 
     let url = format!("https://api.telegram.org/bot{token}/sendMessage");
 
@@ -774,46 +707,6 @@ async fn send_reply(
     Ok(())
 }
 
-/// Split a message into chunks respecting a max length.
-/// Tries to split on newlines first, then word boundaries.
-fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
-        return vec![text.to_owned()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= max_len {
-            chunks.push(remaining.to_owned());
-            break;
-        }
-
-        // Walk back to a char boundary so we never slice inside a multi-byte
-        // character (e.g. emoji). `floor_char_boundary` returns the largest
-        // byte index <= max_len that sits on a UTF-8 char boundary.
-        let safe_end = remaining.floor_char_boundary(max_len);
-
-        // Try to find a newline within the limit, then a space
-        let mut split_at = remaining[..safe_end]
-            .rfind('\n')
-            .or_else(|| remaining[..safe_end].rfind(' '))
-            .unwrap_or(safe_end);
-
-        // Guard: if remaining starts with a delimiter, rfind returns 0 which
-        // would push an empty chunk. Fall back to the full safe window.
-        if split_at == 0 {
-            split_at = safe_end;
-        }
-
-        chunks.push(remaining[..split_at].to_owned());
-        remaining = remaining[split_at..].trim_start();
-    }
-
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,14 +739,14 @@ mod tests {
 
     #[test]
     fn split_message_short_text() {
-        let chunks = split_message("hello", 4096);
+        let chunks = super::super::split_message("hello", 4096);
         assert_eq!(chunks, vec!["hello"]);
     }
 
     #[test]
     fn split_message_long_text_on_newlines() {
         let text = format!("{}\n{}", "a".repeat(100), "b".repeat(100));
-        let chunks = split_message(&text, 150);
+        let chunks = super::super::split_message(&text, 150);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].len() <= 150);
     }
@@ -861,7 +754,7 @@ mod tests {
     #[test]
     fn split_message_long_text_on_spaces() {
         let text = format!("{} {}", "word".repeat(30), "more".repeat(30));
-        let chunks = split_message(&text, 100);
+        let chunks = super::super::split_message(&text, 100);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 100);
@@ -870,12 +763,9 @@ mod tests {
 
     #[test]
     fn split_message_multibyte_utf8_does_not_panic() {
-        // Each emoji is 4 bytes. Build a string that forces a split in the
-        // middle of a multi-byte character when using naive byte indexing.
         let emoji = "\u{1F600}"; // 4 bytes
         let text = emoji.repeat(30); // 120 bytes total
-                                     // max_len=50 would land inside an emoji at byte 50 if not handled.
-        let chunks = split_message(&text, 50);
+        let chunks = super::super::split_message(&text, 50);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 50);
@@ -885,10 +775,8 @@ mod tests {
 
     #[test]
     fn split_message_leading_delimiter_does_not_produce_empty_chunk() {
-        // When remaining starts with '\n' or ' ', rfind returns Some(0).
-        // The guard must prevent pushing an empty chunk.
         let text = format!("\n{}", "a".repeat(100));
-        let chunks = split_message(&text, 50);
+        let chunks = super::super::split_message(&text, 50);
         for chunk in &chunks {
             assert!(!chunk.is_empty(), "empty chunk produced");
         }
@@ -1023,7 +911,7 @@ mod tests {
 
     #[test]
     fn telegram_sticker_message_deserializes() {
-        let json = r#"{
+        let json = serde_json::json!({
             "update_id": 200,
             "message": {
                 "message_id": 10,
@@ -1034,25 +922,25 @@ mod tests {
                     "file_unique_id": "AgADuQAD1234",
                     "is_animated": false,
                     "is_video": false,
-                    "emoji": "😀",
+                    "emoji": "\u{1F600}",
                     "set_name": "TestPack"
                 }
             }
-        }"#;
-        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        });
+        let update: TelegramUpdate = serde_json::from_value(json).expect("should parse");
         let msg = update.message.expect("should have message");
         let sticker = msg.sticker.expect("should have sticker");
         assert_eq!(sticker.file_id, "CAACAgIAAxkBAAIBe2abc");
         assert_eq!(sticker.file_unique_id, "AgADuQAD1234");
         assert!(!sticker.is_animated);
         assert!(!sticker.is_video);
-        assert_eq!(sticker.emoji.as_deref(), Some("😀"));
+        assert_eq!(sticker.emoji.as_deref(), Some("\u{1F600}"));
         assert_eq!(sticker.set_name.as_deref(), Some("TestPack"));
     }
 
     #[test]
     fn telegram_animated_sticker_deserializes() {
-        let json = r#"{
+        let json = serde_json::json!({
             "update_id": 201,
             "message": {
                 "message_id": 11,
@@ -1062,12 +950,12 @@ mod tests {
                     "file_unique_id": "AgADuQAD5678",
                     "is_animated": true,
                     "is_video": false,
-                    "emoji": "🎉",
+                    "emoji": "\u{1F389}",
                     "set_name": "AnimatedPack"
                 }
             }
-        }"#;
-        let update: TelegramUpdate = serde_json::from_str(json).expect("should parse");
+        });
+        let update: TelegramUpdate = serde_json::from_value(json).expect("should parse");
         let msg = update.message.expect("should have message");
         let sticker = msg.sticker.expect("should have sticker");
         assert!(sticker.is_animated);
@@ -1104,23 +992,23 @@ mod tests {
             file_unique_id: "AgADuQAD1234".to_owned(),
             is_animated: false,
             is_video: false,
-            emoji: Some("😺".to_owned()),
+            emoji: Some("\u{1F63A}".to_owned()),
             set_name: Some("CatPack".to_owned()),
         };
         assert_eq!(sticker.file_id, "CAACAgIAAxkBAAIBe2abc");
         assert_eq!(sticker.file_unique_id, "AgADuQAD1234");
         assert!(!sticker.is_animated);
         assert!(!sticker.is_video);
-        assert_eq!(sticker.emoji.as_deref(), Some("😺"));
+        assert_eq!(sticker.emoji.as_deref(), Some("\u{1F63A}"));
         assert_eq!(sticker.set_name.as_deref(), Some("CatPack"));
     }
 
     #[test]
     fn format_sticker_context_produces_expected_output() {
-        let result = format_sticker_context("😀", "MyPack", "A cat waving");
+        let result = format_sticker_context("\u{1F600}", "MyPack", "A cat waving");
         assert_eq!(
             result,
-            "[The user sent a sticker 😀 from \"MyPack\". It shows: \"A cat waving\"]"
+            "[The user sent a sticker \u{1F600} from \"MyPack\". It shows: \"A cat waving\"]"
         );
     }
 
@@ -1142,7 +1030,7 @@ mod tests {
 
         let cache = StickerCacheStore::new(&db_path);
         cache
-            .set("unique-123", "A happy frog jumping", "🐸", "FrogPack")
+            .set("unique-123", "A happy frog jumping", "\u{1F438}", "FrogPack")
             .expect("cache set");
 
         let cached = cache.get("unique-123").unwrap().unwrap();
@@ -1150,7 +1038,7 @@ mod tests {
             format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
         assert_eq!(
             context,
-            "[The user sent a sticker 🐸 from \"FrogPack\". It shows: \"A happy frog jumping\"]"
+            "[The user sent a sticker \u{1F438} from \"FrogPack\". It shows: \"A happy frog jumping\"]"
         );
     }
 }

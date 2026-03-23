@@ -7,15 +7,15 @@
 //! 1. Run signal-cli in daemon/HTTP mode (`signal-cli daemon --http`)
 //! 2. Set `SIGNAL_ACCOUNT` to your registered phone number (e.g. `+15551234567`)
 //! 3. Optionally set `SIGNAL_HTTP_URL` (default: `http://127.0.0.1:8080`)
-//! 4. Optionally set `SIGNAL_WEBHOOK_SECRET` — when set, incoming webhook
+//! 4. Optionally set `SIGNAL_WEBHOOK_SECRET` -- when set, incoming webhook
 //!    requests must include an `X-Signal-Secret` header matching this value
 //! 5. Optionally set `SIGNAL_GROUP_ALLOWED_USERS` to a comma-separated list of
 //!    phone numbers allowed to interact in group chats
 //!
 //! ## Endpoints
-//! - `POST /signal/webhook` — receives incoming messages (called by signal-cli
+//! - `POST /signal/webhook` -- receives incoming messages (called by signal-cli
 //!   or a polling proxy)
-//! - `POST /signal/poll` — one-shot poll: fetches pending messages from
+//! - `POST /signal/poll` -- one-shot poll: fetches pending messages from
 //!   signal-cli's `/v1/receive/{account}` endpoint and processes them
 
 use std::sync::Arc;
@@ -23,12 +23,11 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use genesis_core::execution::SessionTurnInput;
-use genesis_storage::SessionStore;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use super::{PlatformMessage, ProcessOutcome};
 use crate::verify::verify_secret_token;
 use crate::AppState;
 
@@ -209,11 +208,8 @@ pub async fn webhook_handler(
         }
     };
 
-    match process_envelope(&state, &account, envelope).await {
-        ProcessResult::Ok => StatusCode::OK,
-        ProcessResult::Ignored => StatusCode::OK,
-        ProcessResult::Error => StatusCode::INTERNAL_SERVER_ERROR,
-    }
+    process_envelope(&state, &account, envelope).await;
+    StatusCode::OK
 }
 
 /// Poll handler: fetches pending messages from signal-cli's REST endpoint.
@@ -280,7 +276,6 @@ pub async fn poll_handler(State(state): State<Arc<AppState>>) -> StatusCode {
 enum ProcessResult {
     Ok,
     Ignored,
-    Error,
 }
 
 /// Process a single signal envelope.
@@ -312,10 +307,6 @@ async fn process_envelope(
     let is_group = group_id.is_some();
 
     // Group authorization check.
-    // When `SIGNAL_GROUP_ALLOWED_USERS` is unset (or empty), all senders are
-    // allowed to interact in group chats — the group is effectively open.
-    // Set the env var to a comma-separated list of phone numbers to restrict
-    // access.
     if is_group {
         let allowed = group_allowed_users();
         if !allowed.is_empty() && !allowed.iter().any(|a| a == &source) {
@@ -359,101 +350,12 @@ async fn process_envelope(
 
     info!(parent: &span, "received signal message");
 
-    // DM pairing check (skip for group messages — use group allowlist instead).
-    if !is_group {
-        match super::check_pairing(
-            &state.loaded.config.storage.database_path,
-            "signal",
-            &source,
-            &user_name,
-        ) {
-            Ok(super::PairingCheck::Approved) => {} // proceed
-            Ok(super::PairingCheck::NeedsPairing(code)) => {
-                let reply = super::pairing_reply(&code);
-                let base_url = signal_http_url();
-                let client = state.http_client.clone();
-                let account_clone = account.to_owned();
-                let source_clone = source.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = send_message(
-                        &client,
-                        &base_url,
-                        &account_clone,
-                        &source_clone,
-                        &reply,
-                        None,
-                    )
-                    .await
-                    {
-                        error!(error = %e, "failed to send signal pairing reply");
-                    }
-                });
-                return ProcessResult::Ok;
-            }
-            Ok(super::PairingCheck::AtCapacity) => {
-                let reply = super::pairing_capacity_reply().to_owned();
-                let base_url = signal_http_url();
-                let client = state.http_client.clone();
-                let account_clone = account.to_owned();
-                let source_clone = source.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = send_message(
-                        &client,
-                        &base_url,
-                        &account_clone,
-                        &source_clone,
-                        &reply,
-                        None,
-                    )
-                    .await
-                    {
-                        error!(error = %e, "failed to send signal capacity reply");
-                    }
-                });
-                return ProcessResult::Ok;
-            }
-            Err(_) => {
-                return ProcessResult::Error;
-            }
-        }
-    }
+    // For group messages, skip the DM pairing check (use group allowlist instead).
+    // For DMs, use the shared pipeline which includes pairing.
+    // Signal has extra complexity: typing indicators and group vs DM routing.
+    // We handle the pairing inline for DMs to match the shared pipeline,
+    // but keep the send logic separate due to group/DM routing and typing.
 
-    // Handle gateway slash commands.
-    {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(&prompt, &session_id, &store, &state.loaded.config)
-        {
-            let base_url = signal_http_url();
-            let client = state.http_client.clone();
-            let account_clone = account.to_owned();
-            let recipient = group_id.clone().unwrap_or_else(|| source.clone());
-            let is_group_clone = is_group;
-            tokio::spawn(async move {
-                let result = if is_group_clone {
-                    send_group_message(&client, &base_url, &account_clone, &recipient, &reply).await
-                } else {
-                    send_message(&client, &base_url, &account_clone, &recipient, &reply, None).await
-                };
-                if let Err(e) = result {
-                    error!(error = %e, "failed to send signal command reply");
-                }
-            });
-            return ProcessResult::Ok;
-        }
-    }
-
-    // Auto-reset expired sessions.
-    {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        crate::commands::check_session_expiry(
-            &session_id,
-            &store,
-            state.loaded.config.gateway.as_ref(),
-        );
-    }
-
-    // Spawn agent execution in background.
     let state = Arc::clone(state);
     let account_owned = account.to_owned();
     let timestamp = data_message.timestamp;
@@ -471,20 +373,92 @@ async fn process_envelope(
             )
             .await;
 
-            let service = state.session_service();
+            let msg = PlatformMessage {
+                user_id: &source,
+                user_name: &user_name,
+                text: &prompt,
+                session_id: &session_id,
+                chat_id: &chat_id,
+                platform_name: "signal",
+                delivery_platform: DeliveryPlatform::Signal,
+            };
 
-            let result = service
-                .run_turn(SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: "signal",
-                    delivery_platform: DeliveryPlatform::Signal,
-                    prompt: &prompt,
-                    title: Some(&format!("Signal: {user_name}")),
-                    images: Vec::new(),
-                })
-                .await;
-
-            let reply_text = super::extract_reply(result, "signal");
+            // For group messages, skip pairing (handled by group allowlist above).
+            // For DMs, use the shared pipeline.
+            let reply = if is_group {
+                // Groups bypass pairing -- run commands/agent directly.
+                let store = genesis_storage::SessionStore::new(
+                    &state.loaded.config.storage.database_path,
+                );
+                if let crate::commands::CommandResult::Reply(r) =
+                    crate::commands::handle_command(
+                        &prompt,
+                        &session_id,
+                        &store,
+                        &state.loaded.config,
+                    )
+                {
+                    r
+                } else {
+                    crate::commands::check_session_expiry(
+                        &session_id,
+                        &store,
+                        state.loaded.config.gateway.as_ref(),
+                    );
+                    let service = state.session_service();
+                    let title = format!("Signal: {user_name}");
+                    let result = service
+                        .run_turn(genesis_core::execution::SessionTurnInput {
+                            session_id: &session_id,
+                            session_platform: "signal",
+                            delivery_platform: DeliveryPlatform::Signal,
+                            prompt: &prompt,
+                            title: Some(&title),
+                            images: Vec::new(),
+                        })
+                        .await;
+                    let reply_text = super::extract_reply(result, "signal");
+                    crate::mirror::append_delivery_mirror(
+                        &state.loaded.config.storage.database_path,
+                        "signal",
+                        &chat_id,
+                        &reply_text,
+                        "signal",
+                    );
+                    reply_text
+                }
+            } else {
+                match super::process_platform_message(&state, &msg).await {
+                    ProcessOutcome::AgentReply(r)
+                    | ProcessOutcome::NeedsPairing(r)
+                    | ProcessOutcome::CommandReply(r) => r,
+                    ProcessOutcome::AtCapacity => super::pairing_capacity_reply().to_owned(),
+                    ProcessOutcome::PairingError => {
+                        error!("signal pairing check failed");
+                        let _ = send_typing_stop(
+                            &state.http_client,
+                            &base_url,
+                            &account_owned,
+                            &recipient,
+                            is_group,
+                        )
+                        .await;
+                        return;
+                    }
+                    ProcessOutcome::ExecutionError(e) => {
+                        error!(error = %e, "signal execution error");
+                        let _ = send_typing_stop(
+                            &state.http_client,
+                            &base_url,
+                            &account_owned,
+                            &recipient,
+                            is_group,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            };
 
             // Stop typing indicator.
             let _ = send_typing_stop(
@@ -502,7 +476,7 @@ async fn process_envelope(
                     &base_url,
                     &account_owned,
                     &recipient,
-                    &reply_text,
+                    &reply,
                 )
                 .await
             } else {
@@ -511,7 +485,7 @@ async fn process_envelope(
                     &base_url,
                     &account_owned,
                     &recipient,
-                    &reply_text,
+                    &reply,
                     timestamp,
                 )
                 .await
@@ -520,15 +494,6 @@ async fn process_envelope(
             if let Err(e) = send_result {
                 error!(error = %e, "failed to send signal reply");
             }
-
-            // Cross-platform delivery mirror.
-            crate::mirror::append_delivery_mirror(
-                &state.loaded.config.storage.database_path,
-                "signal",
-                &chat_id,
-                &reply_text,
-                "signal",
-            );
         }
         .instrument(span),
     );
@@ -578,7 +543,7 @@ async fn send_message(
     text: &str,
     quote_timestamp: Option<u64>,
 ) -> Result<(), super::PlatformError> {
-    let chunks = split_message(text, MAX_SIGNAL_MESSAGE_LEN);
+    let chunks = super::split_message(text, MAX_SIGNAL_MESSAGE_LEN);
 
     for (i, chunk) in chunks.iter().enumerate() {
         // Only quote on the first chunk.
@@ -616,7 +581,7 @@ async fn send_group_message(
     group_id: &str,
     text: &str,
 ) -> Result<(), super::PlatformError> {
-    let chunks = split_message(text, MAX_SIGNAL_MESSAGE_LEN);
+    let chunks = super::split_message(text, MAX_SIGNAL_MESSAGE_LEN);
 
     for chunk in &chunks {
         let params = serde_json::json!({
@@ -745,40 +710,6 @@ async fn send_rpc(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Split a message into chunks respecting a max byte length.
-/// Tries to split on newlines first, then word boundaries.
-/// Uses char-boundary-safe indexing to avoid panics on multi-byte UTF-8.
-fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
-        return vec![text.to_owned()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= max_len {
-            chunks.push(remaining.to_owned());
-            break;
-        }
-
-        // Walk back to a char boundary so we never slice inside a multi-byte
-        // character. `floor_char_boundary` returns the largest byte index
-        // <= max_len that is on a char boundary.
-        let safe_end = remaining.floor_char_boundary(max_len);
-
-        let split_at = remaining[..safe_end]
-            .rfind('\n')
-            .or_else(|| remaining[..safe_end].rfind(' '))
-            .unwrap_or(safe_end);
-
-        chunks.push(remaining[..split_at].to_owned());
-        remaining = remaining[split_at..].trim_start();
-    }
-
-    chunks
-}
-
 /// Generate a unique request ID for JSON-RPC correlation.
 fn request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -904,14 +835,14 @@ mod tests {
 
     #[test]
     fn split_message_short_text() {
-        let chunks = split_message("hello", 6000);
+        let chunks = super::super::split_message("hello", 6000);
         assert_eq!(chunks, vec!["hello"]);
     }
 
     #[test]
     fn split_message_long_text_on_newlines() {
         let text = format!("{}\n{}", "a".repeat(100), "b".repeat(100));
-        let chunks = split_message(&text, 150);
+        let chunks = super::super::split_message(&text, 150);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].len() <= 150);
     }
@@ -919,7 +850,7 @@ mod tests {
     #[test]
     fn split_message_long_text_on_spaces() {
         let text = format!("{} {}", "word".repeat(30), "more".repeat(30));
-        let chunks = split_message(&text, 100);
+        let chunks = super::super::split_message(&text, 100);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 100);
@@ -928,17 +859,12 @@ mod tests {
 
     #[test]
     fn split_message_multibyte_utf8_does_not_panic() {
-        // Each emoji is 4 bytes. Build a string that forces a split in the
-        // middle of a multi-byte character when using naive byte indexing.
         let emoji = "\u{1F600}"; // 4 bytes
         let text = emoji.repeat(30); // 120 bytes total
-                                     // max_len=50 would land inside an emoji at byte 50 if not handled.
-        let chunks = split_message(&text, 50);
+        let chunks = super::super::split_message(&text, 50);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
             assert!(chunk.len() <= 50);
-            // Verify the chunk is valid UTF-8 (String guarantees this, but
-            // confirm no panic occurred during construction).
             assert!(!chunk.is_empty());
         }
     }
@@ -1062,7 +988,6 @@ mod tests {
     fn request_id_generates_unique_ids() {
         let id1 = request_id();
         let id2 = request_id();
-        // They should be non-empty and probably different (time-based).
         assert!(!id1.is_empty());
         assert!(!id2.is_empty());
     }
@@ -1076,7 +1001,6 @@ mod tests {
 
     #[test]
     fn group_allowed_users_parsing() {
-        // Simulates parsing logic without setting env vars
         let raw = "+15551111111, +15552222222 , +15553333333";
         let parsed: Vec<String> = raw
             .split(',')
