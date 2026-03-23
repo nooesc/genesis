@@ -2476,7 +2476,7 @@ storage:
 
         match cli.command {
             Command::Serve { host, port } => {
-                assert_eq!(host, "0.0.0.0");
+                assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, 3000);
             }
             other => panic!("unexpected command parsed: {other:?}"),

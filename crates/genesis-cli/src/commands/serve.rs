@@ -76,7 +76,7 @@ pub(crate) async fn run_serve(
     if !is_loopback && !api_key_required && api_key.is_none() {
         eprintln!(
             "WARNING: Serving on {host} without API key authentication. \
-             Set GENESIS_API_KEY or GENESIS_API_KEY_REQUIRED=true for network deployments."
+             Set GENESIS_API_KEY to secure network deployments."
         );
     }
 
