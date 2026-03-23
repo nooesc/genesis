@@ -1711,6 +1711,7 @@ version = "0.1.0"
 dependencies = [
  "genesis-config",
  "genesis-storage",
+ "genesis-tools",
  "genesis-types",
  "mlua",
  "serde",

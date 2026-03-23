@@ -320,6 +320,7 @@ impl LuaRuntime {
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
             None,
+            None,
         )?;
         lua.globals().set("genesis", genesis)?;
         strip_unsafe_globals(&lua)?;
@@ -750,6 +751,7 @@ impl LuaRuntime {
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
+            None,
         )?;
         env.set("genesis", plugin_genesis)?;
         env.set("_G", env.clone())?;

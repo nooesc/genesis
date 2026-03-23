@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use genesis_storage::MemoryStore;
+use genesis_tools::sandbox::PathValidator;
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
@@ -26,6 +27,7 @@ pub struct GenesisApi {
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
+    pub path_validator: Option<Arc<PathValidator>>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +173,9 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("json", |lua, _this| {
             crate::primitives::json::make_json_bridge(lua)
         });
+        fields.add_field_method_get("fs", |lua, this| {
+            crate::primitives::fs::make_fs_bridge(lua, this.path_validator.clone())
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -274,6 +279,7 @@ pub(crate) fn install_genesis_api(
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
+    path_validator: Option<Arc<PathValidator>>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -292,6 +298,7 @@ pub(crate) fn install_genesis_api(
         host_tools,
         active_plugin,
         plugin_context,
+        path_validator,
     })?)
 }
 
