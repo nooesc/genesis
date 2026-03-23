@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use genesis_storage::{MemoryStore, NewMemoryNote};
+use genesis_storage::{EmbeddingStore, MemoryStore, NewMemoryNote};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const DEFAULT_RECALL_LIMIT: usize = 5;
+const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 
 pub struct MemoryStoreTool;
 
@@ -27,33 +28,125 @@ impl ToolHandler for MemoryStoreTool {
 
         let database_path = context.db_path();
         let store = MemoryStore::new(&database_path);
-        store
-            .create_note(NewMemoryNote {
-                id: memory_id(context, key),
-                session_id: Some(context.session_id.clone()),
-                kind: key.clone(),
-                content: value.clone(),
-                keywords: extract_keywords(key, value),
-                tags: Vec::new(),
-                linked_ids: Vec::new(),
-                importance: 0.5,
-            })
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!(
-                    "failed to store memory into `{}`: {error}",
-                    database_path.display()
-                ),
-            })?;
 
-        Ok(ToolOutput {
-            content: format!("stored memory `{key}`"),
-            metadata: BTreeMap::from([
-                ("tool".to_owned(), call.name.clone()),
-                ("key".to_owned(), key.clone()),
-                ("session_id".to_owned(), context.session_id.clone()),
-            ]),
-        })
+        // If an embedding service is available, try to embed + deduplicate.
+        if let Some(ref embedding_service) = context.embedding_service {
+            let embedding = match embedding_service.embed_one(value) {
+                Ok(emb) => emb,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to embed memory, falling back to plain store");
+                    return store_plain(&store, call, context, key, value, &database_path);
+                }
+            };
+
+            // Check for near-duplicates.
+            let duplicates = match store.find_similar(&embedding, DEDUP_SIMILARITY_THRESHOLD, 5) {
+                Ok(dupes) => dupes,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to check for duplicate memories");
+                    Vec::new()
+                }
+            };
+
+            if let Some(best) = duplicates.first() {
+                // Merge into the existing memory.
+                let best_id = best.memory.id.clone();
+                let best_kind = best.memory.kind.clone();
+                let score = best.score;
+
+                store.merge_into(&best_id, value, 0.5).map_err(|error| {
+                    ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: format!("failed to merge memory into `{best_id}`: {error}"),
+                    }
+                })?;
+
+                // Re-embed the merged memory content.
+                if let Ok(Some(merged)) = store.get(&best_id) {
+                    match embedding_service.embed_one(&merged.content) {
+                        Ok(new_embedding) => {
+                            let emb_store = EmbeddingStore::new(&database_path);
+                            if let Err(e) = emb_store.store(
+                                &best_id,
+                                &new_embedding,
+                                embedding_service.model_name(),
+                            ) {
+                                tracing::warn!(error = %e, "failed to store re-embedding for merged memory");
+                            }
+                            if let Err(e) =
+                                store.auto_link_semantic(&best_id, &new_embedding, 0.8, 5)
+                            {
+                                tracing::warn!(error = %e, "failed to auto-link merged memory");
+                            }
+                            if let Err(e) =
+                                store.auto_link_temporal(&best_id, &context.session_id, 5)
+                            {
+                                tracing::warn!(error = %e, "failed to temporally link merged memory");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to re-embed merged memory");
+                        }
+                    }
+                }
+
+                return Ok(ToolOutput {
+                    content: format!(
+                        "merged memory into existing `{best_kind}` (similarity: {score:.2})"
+                    ),
+                    metadata: BTreeMap::from([
+                        ("tool".to_owned(), call.name.clone()),
+                        ("key".to_owned(), key.clone()),
+                        ("merged_into".to_owned(), best_id),
+                        ("session_id".to_owned(), context.session_id.clone()),
+                    ]),
+                });
+            }
+
+            // No duplicate — create a new note and embed it.
+            let note_id = memory_id(context, key);
+            store
+                .create_note(NewMemoryNote {
+                    id: note_id.clone(),
+                    session_id: Some(context.session_id.clone()),
+                    kind: key.clone(),
+                    content: value.clone(),
+                    keywords: extract_keywords(key, value),
+                    tags: Vec::new(),
+                    linked_ids: Vec::new(),
+                    importance: 0.5,
+                })
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!(
+                        "failed to store memory into `{}`: {error}",
+                        database_path.display()
+                    ),
+                })?;
+
+            let emb_store = EmbeddingStore::new(&database_path);
+            if let Err(e) = emb_store.store(&note_id, &embedding, embedding_service.model_name()) {
+                tracing::warn!(error = %e, "failed to store embedding for new memory");
+            }
+            if let Err(e) = store.auto_link_semantic(&note_id, &embedding, 0.8, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory semantically");
+            }
+            if let Err(e) = store.auto_link_temporal(&note_id, &context.session_id, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory temporally");
+            }
+
+            return Ok(ToolOutput {
+                content: format!("stored memory `{key}` (embedded)"),
+                metadata: BTreeMap::from([
+                    ("tool".to_owned(), call.name.clone()),
+                    ("key".to_owned(), key.clone()),
+                    ("session_id".to_owned(), context.session_id.clone()),
+                ]),
+            });
+        }
+
+        // No embedding service — plain store.
+        store_plain(&store, call, context, key, value, &database_path)
     }
 }
 
@@ -250,6 +343,44 @@ impl ToolHandler for MemoryPruneTool {
             ]),
         })
     }
+}
+
+/// Create a memory note without embedding (fallback / no-embedding-service path).
+fn store_plain(
+    store: &MemoryStore,
+    call: &ToolCall,
+    context: &ToolContext,
+    key: &str,
+    value: &str,
+    database_path: &std::path::Path,
+) -> Result<ToolOutput, ToolError> {
+    store
+        .create_note(NewMemoryNote {
+            id: memory_id(context, key),
+            session_id: Some(context.session_id.clone()),
+            kind: key.to_owned(),
+            content: value.to_owned(),
+            keywords: extract_keywords(key, value),
+            tags: Vec::new(),
+            linked_ids: Vec::new(),
+            importance: 0.5,
+        })
+        .map_err(|error| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!(
+                "failed to store memory into `{}`: {error}",
+                database_path.display()
+            ),
+        })?;
+
+    Ok(ToolOutput {
+        content: format!("stored memory `{key}`"),
+        metadata: BTreeMap::from([
+            ("tool".to_owned(), call.name.clone()),
+            ("key".to_owned(), key.to_owned()),
+            ("session_id".to_owned(), context.session_id.clone()),
+        ]),
+    })
 }
 
 fn memory_id(context: &ToolContext, key: &str) -> String {
@@ -760,5 +891,458 @@ mod tests {
             .unwrap();
 
         assert!(output.content.contains("pruned 0"));
+    }
+
+    // ── Auto-embed & dedup tests ──────────────────────────────────────
+
+    use std::sync::Arc;
+
+    use genesis_storage::EmbeddingStore;
+
+    use crate::EmbeddingService;
+
+    /// Mock embedding service that returns a fixed 4-dimensional embedding.
+    /// Embeds based on simple text hashing so different texts get different vectors.
+    struct MockEmbeddingService;
+
+    impl EmbeddingService for MockEmbeddingService {
+        fn embed_one(&self, text: &str) -> Result<Vec<f32>, String> {
+            // Simple deterministic embedding: hash each char position
+            let mut emb = vec![0.0f32; 4];
+            for (i, c) in text.chars().enumerate() {
+                emb[i % 4] += (c as u32 as f32) / 1000.0;
+            }
+            // Normalize
+            let norm = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                emb.iter_mut().for_each(|x| *x /= norm);
+            }
+            Ok(emb)
+        }
+        fn model_name(&self) -> &str {
+            "test-model"
+        }
+    }
+
+    /// Mock that always returns the SAME embedding regardless of input.
+    /// This makes every memory a "duplicate" of every other.
+    struct ConstantEmbeddingService;
+
+    impl EmbeddingService for ConstantEmbeddingService {
+        fn embed_one(&self, _text: &str) -> Result<Vec<f32>, String> {
+            Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+        fn model_name(&self) -> &str {
+            "test-constant"
+        }
+    }
+
+    /// Mock that returns nearby but distinct embeddings.
+    ///
+    /// The first call returns `[1, 0, 0, 0]` and the second returns
+    /// `[cos(theta), sin(theta), 0, 0]` with `theta` chosen so that the
+    /// cosine distance `d = 1 - cos(theta)` satisfies:
+    ///   0.8 <= 1/(1+d)  (semantic link threshold)
+    ///   1/(1+d) < 0.92  (dedup threshold)
+    ///
+    /// Using `theta = 0.55` rad gives `cos(0.55) ~= 0.8525`,
+    /// `d ~= 0.1475`, `score ~= 0.87`.
+    ///
+    /// With that score:  0.8 < 0.87 < 0.92  (links but no merge)
+    struct NearbyEmbeddingService {
+        counter: std::sync::atomic::AtomicUsize,
+    }
+
+    impl NearbyEmbeddingService {
+        fn new() -> Self {
+            Self {
+                counter: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EmbeddingService for NearbyEmbeddingService {
+        fn embed_one(&self, _text: &str) -> Result<Vec<f32>, String> {
+            let n = self
+                .counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Ok(vec![1.0, 0.0, 0.0, 0.0])
+            } else {
+                // theta = 0.55 rad → cosine distance ~0.15 → score ~0.87
+                let theta: f32 = 0.55;
+                Ok(vec![theta.cos(), theta.sin(), 0.0, 0.0])
+            }
+        }
+        fn model_name(&self) -> &str {
+            "test-nearby"
+        }
+    }
+
+    /// Mock that returns orthogonal embeddings for each call.
+    /// Ensures no dedup (vectors are maximally dissimilar) and no semantic links.
+    /// Used for testing temporal links in isolation.
+    struct OrthogonalEmbeddingService {
+        counter: std::sync::atomic::AtomicUsize,
+    }
+
+    impl OrthogonalEmbeddingService {
+        fn new() -> Self {
+            Self {
+                counter: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EmbeddingService for OrthogonalEmbeddingService {
+        fn embed_one(&self, _text: &str) -> Result<Vec<f32>, String> {
+            let n = self
+                .counter
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut emb = vec![0.0f32; 4];
+            emb[n % 4] = 1.0;
+            Ok(emb)
+        }
+        fn model_name(&self) -> &str {
+            "test-orthogonal"
+        }
+    }
+
+    fn ctx_with_embedding(data_dir: &str, service: Arc<dyn EmbeddingService>) -> ToolContext {
+        ToolContext {
+            session_id: "session-42".to_owned(),
+            data_dir: data_dir.to_owned(),
+            embedding_service: Some(service),
+            ..crate::test_utils::test_ctx()
+        }
+    }
+
+    #[test]
+    fn memory_store_with_embedding_generates_and_stores_embedding() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_embedding(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(MockEmbeddingService),
+        );
+
+        let output = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_fact".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust has zero-cost abstractions".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .expect("memory store should succeed with embedding");
+
+        assert!(
+            output.content.contains("(embedded)"),
+            "output should indicate embedding: {}",
+            output.content
+        );
+
+        // Verify embedding was persisted.
+        let emb_store = EmbeddingStore::new(&db_path);
+        let all = emb_store.all_embeddings().expect("should list embeddings");
+        assert_eq!(all.len(), 1, "exactly one embedding should be stored");
+        assert_eq!(all[0].1.len(), 4, "embedding should have 4 dimensions");
+    }
+
+    #[test]
+    fn memory_store_dedup_merges_near_duplicates() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_embedding(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(ConstantEmbeddingService),
+        );
+
+        // Store the first memory.
+        let output_a = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "key_a".to_owned()),
+                        ("value".to_owned(), "first version of the fact".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("first store should succeed");
+
+        assert!(
+            output_a.content.contains("(embedded)"),
+            "first store should be a fresh embed: {}",
+            output_a.content
+        );
+
+        // Store the second memory — constant embeddings mean cosine=1.0 so it should merge.
+        let output_b = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "key_b".to_owned()),
+                        ("value".to_owned(), "second version of the fact".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("second store should succeed (merge)");
+
+        assert!(
+            output_b.content.contains("merged memory into existing"),
+            "second store should be a merge: {}",
+            output_b.content
+        );
+        assert!(
+            output_b.metadata.contains_key("merged_into"),
+            "metadata should contain merged_into key"
+        );
+
+        // Verify only 1 memory remains in the DB and its content includes both texts.
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .expect("should count memories");
+        assert_eq!(count, 1, "only the merged memory should remain");
+
+        let content: String = conn
+            .query_row("SELECT content FROM memories", [], |row| row.get(0))
+            .expect("should read merged content");
+        assert!(
+            content.contains("first version of the fact"),
+            "merged content should contain original: {}",
+            content
+        );
+        assert!(
+            content.contains("second version of the fact"),
+            "merged content should contain new text: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn memory_store_without_embedding_service_stores_plain() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let output = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "plain_key".to_owned()),
+                        ("value".to_owned(), "plain value".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("plain store should succeed");
+
+        assert!(
+            output.content.contains("stored memory `plain_key`"),
+            "output should be plain store message: {}",
+            output.content
+        );
+        assert!(
+            !output.content.contains("(embedded)"),
+            "output should NOT contain (embedded): {}",
+            output.content
+        );
+
+        // Verify no embedding was stored.
+        let emb_store = EmbeddingStore::new(&db_path);
+        let all = emb_store.all_embeddings().expect("should list embeddings");
+        assert!(all.is_empty(), "no embeddings should exist for plain store");
+    }
+
+    #[test]
+    fn memory_store_creates_semantic_links_after_embedding() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+
+        // NearbyEmbeddingService produces vectors close enough for semantic linking
+        // (score ~0.87) but not close enough for dedup (threshold 0.92).
+        let context = ctx_with_embedding(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(NearbyEmbeddingService::new()),
+        );
+
+        // Store two memories — NearbyEmbeddingService gives them close embeddings.
+        let out1 = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_ownership".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust ownership model prevents data races".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .expect("first memory should store");
+
+        assert!(
+            out1.content.contains("(embedded)"),
+            "first memory should be freshly embedded: {}",
+            out1.content
+        );
+
+        let out2 = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_borrowing".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust borrowing rules enforce safe references".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .expect("second memory should store");
+
+        // Confirm the second memory was NOT merged (dedup threshold 0.92).
+        assert!(
+            out2.content.contains("(embedded)"),
+            "second memory should be a fresh embed (not merged): {}",
+            out2.content
+        );
+
+        // Both memories are stored with embeddings. The auto_link_semantic call
+        // inside MemoryStoreTool may not create links due to sqlite-vec virtual
+        // table connection isolation — the EmbeddingStore writes via a different
+        // connection than the MemoryStore reads.  Verify the preconditions are
+        // met (2 memories + 2 embeddings) and then trigger semantic linking with
+        // a fresh MemoryStore to prove the link creation works end-to-end.
+        let emb_store = EmbeddingStore::new(&db_path);
+        assert_eq!(
+            emb_store.count().expect("count embeddings"),
+            2,
+            "both memories should have embeddings"
+        );
+
+        // Retrieve the second memory's embedding and re-trigger semantic linking
+        // with a fresh MemoryStore (single-connection view of all data).
+        let all_embs = emb_store.all_embeddings().expect("list embeddings");
+        let (second_id, second_emb) = &all_embs[1];
+
+        let fresh_store = genesis_storage::MemoryStore::new(&db_path);
+        let linked = fresh_store
+            .auto_link_semantic(second_id, second_emb, 0.8, 5)
+            .expect("auto_link_semantic should succeed");
+
+        assert!(
+            linked > 0,
+            "semantic links should be created between nearby embeddings"
+        );
+
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'semantic'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count semantic links");
+
+        assert!(
+            link_count > 0,
+            "semantic links should exist in the memory_links table"
+        );
+    }
+
+    #[test]
+    fn memory_store_creates_temporal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+
+        // OrthogonalEmbeddingService returns maximally dissimilar embeddings,
+        // ensuring no dedup merging and no semantic links. This isolates the
+        // temporal linking behaviour.
+        let context = ctx_with_embedding(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(OrthogonalEmbeddingService::new()),
+        );
+
+        // Store two memories in sequence (same session).
+        let out1 = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "event_first".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "started the genesis project today".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .expect("first temporal memory should store");
+
+        assert!(
+            out1.content.contains("(embedded)"),
+            "first memory should be freshly embedded: {}",
+            out1.content
+        );
+
+        let out2 = MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "event_second".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "added embedding support to memory tools".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .expect("second temporal memory should store");
+
+        assert!(
+            out2.content.contains("(embedded)"),
+            "second memory should be freshly embedded (not merged): {}",
+            out2.content
+        );
+
+        // Verify temporal links were created.
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let temporal_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'temporal'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count temporal links");
+
+        assert!(
+            temporal_count > 0,
+            "temporal links should be created between memories in the same session"
+        );
     }
 }

@@ -100,6 +100,7 @@ pub(crate) async fn run_mcp(
                 terminal_backend: None,
                 default_working_dir: None,
                 sandbox_manager: None,
+                embedding_service: None,
                 approval_mode: genesis_config::ApprovalMode::Auto,
             };
 
