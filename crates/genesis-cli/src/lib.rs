@@ -1425,11 +1425,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 force,
             } => {
                 if remove {
-                    // Preview duplicate count before confirming
-                    let preview =
-                        commands::eval::run_eval_deduplicate(&dir, recursive, false, false)?;
+                    // Count duplicate groups before confirming
+                    let duplicate_count =
+                        commands::eval::count_eval_duplicate_groups(&dir, recursive)?;
                     // Only prompt if there are actual duplicates to remove
-                    if !preview.contains("No duplicate") {
+                    if duplicate_count > 0 {
                         confirm_destructive(
                             "Remove duplicate trajectory files?",
                             force,
@@ -1991,15 +1991,16 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     }
                 }
                 MemoryCommand::Delete { id, force } => {
+                    // Verify the memory exists before prompting
+                    if store.get(&id)?.is_none() {
+                        return Err(CliError::Other(format!("memory not found: {id}")));
+                    }
                     confirm_destructive(
                         &format!("Delete memory {id}?"),
                         force,
                     )?;
-                    if store.delete(&id)? {
-                        Ok(format!("deleted memory {id}"))
-                    } else {
-                        Err(CliError::Other(format!("memory not found: {id}")))
-                    }
+                    store.delete(&id)?;
+                    Ok(format!("deleted memory {id}"))
                 }
             }
         }

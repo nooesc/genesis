@@ -2209,12 +2209,14 @@ pub(crate) fn run_eval_validate(
     Ok(lines.join("\n"))
 }
 
-pub(crate) fn run_eval_deduplicate(
+/// Collect duplicate groups from trajectory files in the given directory.
+///
+/// Returns a sorted list of `(dedup_key, sorted_file_paths)` where each group
+/// contains at least two files that share the same deduplication key.
+fn collect_duplicate_groups(
     dir: &str,
     recursive: bool,
-    remove: bool,
-    json: bool,
-) -> Result<String, CliError> {
+) -> Result<Vec<(String, Vec<PathBuf>)>, CliError> {
     let files = collect_eval_files(PathBuf::from(dir), recursive)?;
     let mut grouped = BTreeMap::<String, Vec<PathBuf>>::new();
 
@@ -2245,6 +2247,24 @@ pub(crate) fn run_eval_deduplicate(
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(groups)
+}
+
+/// Count the number of duplicate groups in the given directory without removing anything.
+pub(crate) fn count_eval_duplicate_groups(
+    dir: &str,
+    recursive: bool,
+) -> Result<usize, CliError> {
+    Ok(collect_duplicate_groups(dir, recursive)?.len())
+}
+
+pub(crate) fn run_eval_deduplicate(
+    dir: &str,
+    recursive: bool,
+    remove: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let groups = collect_duplicate_groups(dir, recursive)?;
 
     let mut removed_files = 0usize;
     if remove {
