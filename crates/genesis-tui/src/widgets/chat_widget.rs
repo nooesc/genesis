@@ -93,9 +93,15 @@ impl ChatWidget {
 
     // ── Scroll ────────────────────────────────────────────────────────────
 
-    /// Scroll the chat view up by `rows` rows.
-    pub fn scroll_up(&mut self, rows: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(rows);
+    /// Scroll the chat view up by `rows` rows, clamped to the total
+    /// committed content height so the offset never grows unbounded.
+    pub fn scroll_up(&mut self, rows: usize, viewport_width: u16) {
+        let max: usize = self
+            .committed_cells
+            .iter()
+            .map(|c| c.height(viewport_width).max(1) as usize)
+            .sum();
+        self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
         self.scroll_locked = true;
     }
 
@@ -610,36 +616,38 @@ impl ChatWidget {
         }
 
         // ── Apply scroll offset ────────────────────────────────────────
-        // When the user has scrolled up, skip rows from the bottom of the
-        // entries list (which is ordered newest-first at this point).
-        // Entries are newest-first, so removing from the front removes
-        // the most recent content.
-        let mut rows_to_skip = self.scroll_offset as u16;
-        while rows_to_skip > 0 && !entries.is_empty() {
-            let entry_cost = entries[0].height + if entries[0].separator_after { 1 } else { 0 };
+        // When the user has scrolled up, skip entries from the front
+        // (newest-first). Use an index to avoid O(n²) Vec::remove(0).
+        let mut skip_idx: usize = 0;
+        let mut rows_to_skip = self.scroll_offset;
+        while rows_to_skip > 0 && skip_idx < entries.len() {
+            let entry_cost = entries[skip_idx].height as usize
+                + if entries[skip_idx].separator_after {
+                    1
+                } else {
+                    0
+                };
             if entry_cost <= rows_to_skip {
                 rows_to_skip -= entry_cost;
-                used -= entry_cost;
-                entries.remove(0);
+                used -= entry_cost as u16;
+                skip_idx += 1;
             } else {
-                // Partial skip — just reduce scroll_offset overshoot
                 break;
             }
         }
-        // Clamp scroll_offset to avoid scrolling past all content.
-        let total_committed_rows: u16 = self
-            .committed_cells
-            .iter()
-            .map(|c| c.height(area.width).max(1))
-            .sum();
-        if self.scroll_offset > total_committed_rows as usize {
-            // Note: can't mutate self.scroll_offset during render, so we
-            // just display what we can.
+        // Remove skipped entries in one drain.
+        if skip_idx > 0 {
+            entries.drain(..skip_idx);
         }
 
+        let total_committed_rows: usize = self
+            .committed_cells
+            .iter()
+            .map(|c| c.height(area.width).max(1) as usize)
+            .sum();
+
         let below_count = if self.scroll_locked {
-            // Count entries that were skipped at the bottom
-            self.scroll_offset.min(total_committed_rows as usize)
+            self.scroll_offset.min(total_committed_rows)
         } else {
             0
         };

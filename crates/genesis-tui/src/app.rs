@@ -536,7 +536,7 @@ impl App {
         match key.code {
             KeyCode::PageUp => {
                 let half = (self.viewport_height / 2).max(1) as usize;
-                self.chat.scroll_up(half);
+                self.chat.scroll_up(half, self.viewport_width);
                 self.frame_requester.schedule_frame();
                 return;
             }
@@ -557,7 +557,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up => {
-                    self.chat.scroll_up(3);
+                    self.chat.scroll_up(3, self.viewport_width);
                     self.frame_requester.schedule_frame();
                     return;
                 }
@@ -569,14 +569,20 @@ impl App {
                 _ => {}
             }
         }
-        // Auto-scroll to bottom when user starts typing.
+        // Auto-scroll to bottom when user starts typing or presses Enter.
         if self.chat.is_scrolled_up() {
-            if let KeyCode::Char(_) = key.code {
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
+            let should_snap = match key.code {
+                KeyCode::Char(_)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
-                    self.chat.scroll_to_bottom();
+                    true
                 }
+                KeyCode::Enter => true,
+                _ => false,
+            };
+            if should_snap {
+                self.chat.scroll_to_bottom();
             }
         }
 
