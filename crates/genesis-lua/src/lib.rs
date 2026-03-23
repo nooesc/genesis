@@ -1,5 +1,6 @@
 pub mod api;
 mod bundled;
+pub mod context_registry;
 pub mod discovery;
 pub mod hooks;
 pub mod manifest;
@@ -9,6 +10,7 @@ pub mod runtime;
 pub mod tools;
 
 pub use bundled::{bundled_personalities, bundled_tools, BundledPersonality, BundledTool};
+pub use context_registry::PluginContextRegistry;
 pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
 pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
 pub use personality::{LuaPersonalityRegistry, LuaRegisteredPersonality};
@@ -2140,5 +2142,36 @@ trusted = true
             err.contains("TELEGRAM_BOT_TOKEN"),
             "error should mention TELEGRAM_BOT_TOKEN: {err}"
         );
+    }
+
+    #[test]
+    fn plugin_context_add_works() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("weather.lua"),
+            r#"genesis.context.add("Current weather: sunny, 72F")"#,
+        )
+        .unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let entries = runtime.context_registry().entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].plugin_name, "weather");
+        assert!(entries[0].content.contains("sunny"));
     }
 }
