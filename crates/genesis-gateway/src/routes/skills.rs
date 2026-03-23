@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::Json;
 use genesis_storage::{SkillStore, SkillUsageStore};
 use serde::Deserialize;
@@ -58,7 +57,7 @@ fn default_usage_limit() -> usize {
 pub(crate) async fn list_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSkillsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
@@ -75,37 +74,29 @@ pub(crate) async fn list_skills_handler(
             offset,
             has_more,
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?,
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn get_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skill = store.get(&name).map_err(storage_err)?;
 
     match skill {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
+            ApiError::internal(format!("serialization error: {e}"))
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
+        None => Err(ApiError::not_found(format!("skill '{name}' not found"))),
     }
 }
 
 pub(crate) async fn upsert_skill_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UpsertSkillRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
     let skill = store
@@ -119,31 +110,28 @@ pub(crate) async fn upsert_skill_handler(
         .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(skill).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization error: {e}"))
     })?))
 }
 
 pub(crate) async fn delete_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete(&name).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "name": name})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found")))
+        Err(ApiError::not_found(format!("skill '{name}' not found")))
     }
 }
 
 pub(crate) async fn search_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
 
@@ -157,15 +145,12 @@ pub(crate) async fn search_skills_handler(
 pub(crate) async fn skill_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats(&name).map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization error: {e}"))
     })?))
 }
 
@@ -173,7 +158,7 @@ pub(crate) async fn skill_usage_recent_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<SkillUsageRecentQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let usages = store
         .recent_usages(&name, params.limit)

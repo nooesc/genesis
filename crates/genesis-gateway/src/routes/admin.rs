@@ -25,7 +25,7 @@ pub(crate) struct AuditQueryParams {
 pub(crate) async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(50);
     let entries = if let Some(ref event_type) = params.event_type {
@@ -43,7 +43,7 @@ pub(crate) async fn audit_recent_handler(
 
 pub(crate) async fn audit_stats_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats().map_err(storage_err)?;
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
@@ -59,7 +59,7 @@ pub(crate) async fn audit_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(100);
     let entries = store.by_session(&id, limit).map_err(storage_err)?;
@@ -78,7 +78,7 @@ pub(crate) struct AuditPurgeRequest {
 pub(crate) async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = request.older_than_days.unwrap_or(90);
     let deleted = store.purge_older_than(days).map_err(storage_err)?;
@@ -100,7 +100,7 @@ pub(crate) struct AnalyticsQuery {
 pub(crate) async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.tool_analytics(days).map_err(storage_err)?;
@@ -113,7 +113,7 @@ pub(crate) async fn tool_analytics_handler(
 pub(crate) async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.llm_analytics(days).map_err(storage_err)?;
@@ -213,7 +213,7 @@ pub(crate) struct ListTemplatesQuery {
 
 pub(crate) async fn list_templates_handler(
     axum::extract::Query(params): axum::extract::Query<ListTemplatesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let all_templates = genesis_core::templates::list_templates();
@@ -234,18 +234,13 @@ pub(crate) async fn list_templates_handler(
             offset,
             has_more,
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?,
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn get_template_handler(
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     match genesis_core::templates::get_template(&name) {
         Some(t) => {
             let prompt = genesis_core::templates::format_template_prompt(t);
@@ -254,10 +249,7 @@ pub(crate) async fn get_template_handler(
                 "formatted_prompt": prompt,
             })))
         }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            format!("Template '{name}' not found"),
-        )),
+        None => Err(ApiError::not_found(format!("Template '{name}' not found"))),
     }
 }
 
@@ -267,20 +259,14 @@ pub(crate) async fn get_template_handler(
 
 pub(crate) async fn workflow_validate_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Missing 'yaml' field in request body".to_owned(),
-        )
-    })?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Missing 'yaml' field in request body"))?;
 
-    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse workflow: {e}"),
-        )
-    })?;
+    let workflow = genesis_core::workflow::parse_workflow(yaml)
+        .map_err(|e| ApiError::bad_request(format!("Failed to parse workflow: {e}")))?;
 
     let issues = genesis_core::workflow::validate_workflow(&workflow);
     Ok(Json(serde_json::json!({
@@ -294,32 +280,26 @@ pub(crate) async fn workflow_validate_handler(
 pub(crate) async fn workflow_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Missing 'yaml' field in request body".to_owned(),
-        )
-    })?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Missing 'yaml' field in request body"))?;
     let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
     let session_id = body
         .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or("workflow-api");
 
-    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse workflow: {e}"),
-        )
-    })?;
+    let workflow = genesis_core::workflow::parse_workflow(yaml)
+        .map_err(|e| ApiError::bad_request(format!("Failed to parse workflow: {e}")))?;
 
     let issues = genesis_core::workflow::validate_workflow(&workflow);
     if !issues.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Workflow validation failed: {}", issues.join("; ")),
-        ));
+        return Err(ApiError::bad_request(format!(
+            "Workflow validation failed: {}",
+            issues.join("; ")
+        )));
     }
 
     let service = state.session_service();
@@ -327,7 +307,7 @@ pub(crate) async fn workflow_run_handler(
         .run_workflow(&workflow, input, session_id)
         .await
         .map_err(|e| {
-            (
+            ApiError::with_status(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Workflow execution failed: {e}"),
             )
@@ -353,26 +333,16 @@ pub(crate) async fn bus_channels_handler(
 pub(crate) async fn bus_publish_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let channel = body
         .get("channel")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'channel' field".to_owned(),
-            )
-        })?;
+        .ok_or_else(|| ApiError::bad_request("Missing 'channel' field"))?;
     let sender = body.get("sender").and_then(|v| v.as_str()).unwrap_or("api");
     let payload = body
         .get("payload")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'payload' field".to_owned(),
-            )
-        })?;
+        .ok_or_else(|| ApiError::bad_request("Missing 'payload' field"))?;
     let kind_str = body.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     let kind: genesis_core::agent_bus::MessageKind =
         serde_json::from_str(&format!("\"{kind_str}\""))
@@ -453,18 +423,14 @@ pub(crate) async fn bus_stats_handler(
 
 pub(crate) async fn eval_validate_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let yaml = body
         .get("yaml")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
+        .ok_or_else(|| ApiError::bad_request("Missing 'yaml' field"))?;
 
-    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse suite: {e}"),
-        )
-    })?;
+    let suite = genesis_core::eval::parse_suite(yaml)
+        .map_err(|e| ApiError::bad_request(format!("Failed to parse suite: {e}")))?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
     Ok(Json(serde_json::json!({
@@ -478,30 +444,26 @@ pub(crate) async fn eval_validate_handler(
 pub(crate) async fn eval_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let yaml = body
         .get("yaml")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
+        .ok_or_else(|| ApiError::bad_request("Missing 'yaml' field"))?;
 
-    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse suite: {e}"),
-        )
-    })?;
+    let suite = genesis_core::eval::parse_suite(yaml)
+        .map_err(|e| ApiError::bad_request(format!("Failed to parse suite: {e}")))?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
     if !issues.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Suite validation failed: {}", issues.join("; ")),
-        ));
+        return Err(ApiError::bad_request(format!(
+            "Suite validation failed: {}",
+            issues.join("; ")
+        )));
     }
 
     let service = state.session_service();
     let report = service.run_eval(&suite).await.map_err(|e| {
-        (
+        ApiError::with_status(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Eval run failed: {e}"),
         )
@@ -516,11 +478,11 @@ pub(crate) async fn eval_run_handler(
 
 pub(crate) async fn guardrails_check_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let text = body
         .get("text")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'text' field".to_owned()))?;
+        .ok_or_else(|| ApiError::bad_request("Missing 'text' field"))?;
     let direction = body
         .get("direction")
         .and_then(|v| v.as_str())

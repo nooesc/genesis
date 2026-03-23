@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use genesis_storage::PairingStore;
 use serde::Deserialize;
@@ -48,7 +47,7 @@ pub(crate) struct ClearPendingRequest {
 pub(crate) async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
@@ -65,19 +64,14 @@ pub(crate) async fn list_approved_handler(
             offset,
             has_more,
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?,
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn list_pending_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
@@ -94,19 +88,14 @@ pub(crate) async fn list_pending_handler(
             offset,
             has_more,
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?,
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn approve_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApprovePairingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let approved = store
         .approve_code(&request.platform, &request.code)
@@ -117,17 +106,14 @@ pub(crate) async fn approve_pairing_handler(
             "approved": true,
             "user": user,
         }))),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            "invalid or expired pairing code".to_owned(),
-        )),
+        None => Err(ApiError::not_found("invalid or expired pairing code")),
     }
 }
 
 pub(crate) async fn revoke_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RevokePairingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let revoked = store
         .revoke(&request.platform, &request.user_id)
@@ -140,20 +126,17 @@ pub(crate) async fn revoke_pairing_handler(
             "user_id": request.user_id,
         })))
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!(
-                "no approved user '{}' on platform '{}'",
-                request.user_id, request.platform
-            ),
-        ))
+        Err(ApiError::not_found(format!(
+            "no approved user '{}' on platform '{}'",
+            request.user_id, request.platform
+        )))
     }
 }
 
 pub(crate) async fn clear_pending_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ClearPendingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let cleared = store
         .clear_pending(request.platform.as_deref())

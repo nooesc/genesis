@@ -38,6 +38,8 @@ pub(crate) mod helpers {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::Json;
     use serde::Serialize;
     use tracing::error;
 
@@ -70,13 +72,107 @@ pub(crate) mod helpers {
         format!("req-{next}")
     }
 
-    /// Map a storage error into an HTTP 500 response pair.
-    pub(crate) fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-        error!(error = %e, "storage operation failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("storage error: {e}"),
-        )
+    // -----------------------------------------------------------------------
+    // ApiError — structured JSON error response
+    // -----------------------------------------------------------------------
+
+    /// Structured JSON error response returned by all gateway endpoints.
+    ///
+    /// Serializes as `{"error": "<message>"}` with the appropriate HTTP status.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct ApiError {
+        pub error: String,
+        #[serde(skip)]
+        pub status: StatusCode,
+    }
+
+    impl ApiError {
+        /// 400 Bad Request — the caller made a malformed or invalid request.
+        pub(crate) fn bad_request(message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status: StatusCode::BAD_REQUEST,
+            }
+        }
+
+        /// 404 Not Found — the requested resource does not exist.
+        pub(crate) fn not_found(message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status: StatusCode::NOT_FOUND,
+            }
+        }
+
+        /// 500 Internal Server Error — log the real cause server-side but return
+        /// a generic message to clients so that implementation details do not leak.
+        pub(crate) fn internal(cause: impl std::fmt::Display) -> Self {
+            error!(error = %cause, "internal server error");
+            Self {
+                error: "internal server error".to_owned(),
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        }
+
+        /// Build an `ApiError` with an arbitrary status code and message.
+        pub(crate) fn with_status(status: StatusCode, message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status,
+            }
+        }
+    }
+
+    impl std::fmt::Display for ApiError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} {}: {}",
+                self.status.as_u16(),
+                self.status.canonical_reason().unwrap_or(""),
+                self.error
+            )
+        }
+    }
+
+    impl IntoResponse for ApiError {
+        fn into_response(self) -> Response {
+            (self.status, Json(serde_json::json!({"error": self.error}))).into_response()
+        }
+    }
+
+    /// Convert from the legacy `(StatusCode, String)` error tuple.
+    impl From<(StatusCode, String)> for ApiError {
+        fn from((status, message): (StatusCode, String)) -> Self {
+            Self {
+                error: message,
+                status,
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage error helpers
+    // -----------------------------------------------------------------------
+
+    /// Heuristic: FTS5 query-syntax errors are caused by bad user input and
+    /// should be returned as 400 Bad Request rather than 500.
+    fn is_fts5_query_error(msg: &str) -> bool {
+        let lower = msg.to_lowercase();
+        lower.contains("fts5") && (lower.contains("syntax") || lower.contains("parse"))
+    }
+
+    /// Map a storage error into an [`ApiError`].
+    ///
+    /// FTS5 query-syntax errors are returned as 400 Bad Request; all other
+    /// storage errors are treated as internal errors (logged server-side,
+    /// generic message returned to clients).
+    pub(crate) fn storage_err(e: impl std::fmt::Display) -> ApiError {
+        let msg = e.to_string();
+        if is_fts5_query_error(&msg) {
+            ApiError::bad_request(format!("invalid search query: {msg}"))
+        } else {
+            ApiError::internal(format!("storage error: {msg}"))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -102,12 +198,11 @@ pub(crate) mod helpers {
     pub(crate) const MAX_OFFSET: usize = i64::MAX as usize;
 
     /// Validate that the caller-supplied offset is within safe bounds.
-    pub(crate) fn validate_offset(offset: usize) -> Result<usize, (StatusCode, String)> {
+    pub(crate) fn validate_offset(offset: usize) -> Result<usize, ApiError> {
         if offset > MAX_OFFSET {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"),
-            ));
+            return Err(ApiError::bad_request(format!(
+                "offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"
+            )));
         }
         Ok(offset)
     }
@@ -414,6 +509,8 @@ mod tests {
     use crate::helpers::*;
     use crate::middleware::RateLimiter;
     use crate::state::{get_or_try_init_arc, HistogramBuckets};
+    use axum::http::StatusCode;
+    use genesis_storage::{MemoryStore, SessionStore, SkillStore, SkillUsageStore};
     use std::net::IpAddr;
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
@@ -1690,8 +1787,9 @@ mod tests {
         {
             let result = validate_offset(usize::MAX);
             assert!(result.is_err());
-            let (status, _msg) = result.unwrap_err();
-            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            let err = result.unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert!(err.error.contains("offset"));
         }
     }
 
@@ -3537,5 +3635,139 @@ steps:
             assert!(tool["description"].is_string());
             assert_eq!(tool["source"], "builtin");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ApiError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn api_error_bad_request_has_correct_status() {
+        let err = ApiError::bad_request("invalid input");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "invalid input");
+    }
+
+    #[test]
+    fn api_error_not_found_has_correct_status() {
+        let err = ApiError::not_found("session 'x' not found");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "session 'x' not found");
+    }
+
+    #[test]
+    fn api_error_internal_hides_cause_from_client() {
+        let err = ApiError::internal("sql error: disk full at /data/genesis.db");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // The client-facing message must NOT contain the internal cause.
+        assert_eq!(err.error, "internal server error");
+        assert!(!err.error.contains("sql"));
+        assert!(!err.error.contains("disk"));
+    }
+
+    #[test]
+    fn api_error_with_status_preserves_message() {
+        let err = ApiError::with_status(StatusCode::SERVICE_UNAVAILABLE, "provider down");
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.error, "provider down");
+    }
+
+    #[test]
+    fn api_error_serializes_as_json_with_error_field() {
+        let err = ApiError::bad_request("bad offset");
+        let json = serde_json::to_value(&err).expect("should serialize");
+        assert_eq!(json["error"], "bad offset");
+        // The `status` field should NOT appear in the JSON body (skip_serializing).
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn api_error_into_response_produces_json_content_type() {
+        use axum::response::IntoResponse;
+
+        let err = ApiError::not_found("missing");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("should have content-type")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("application/json"),
+            "expected JSON content type, got: {content_type}"
+        );
+    }
+
+    #[test]
+    fn api_error_from_status_string_tuple() {
+        let tuple = (StatusCode::CONFLICT, "duplicate key".to_owned());
+        let err: ApiError = tuple.into();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.error, "duplicate key");
+    }
+
+    #[test]
+    fn api_error_display_includes_status_and_message() {
+        let err = ApiError::bad_request("missing field 'name'");
+        let display = format!("{err}");
+        assert!(display.contains("400"));
+        assert!(display.contains("missing field 'name'"));
+    }
+
+    #[test]
+    fn storage_err_returns_internal_for_generic_errors() {
+        let err = storage_err("connection refused");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Generic storage errors should not leak details to client.
+        assert_eq!(err.error, "internal server error");
+    }
+
+    #[test]
+    fn storage_err_returns_bad_request_for_fts5_syntax_error() {
+        let err = storage_err("sqlite error at /data/genesis.db: fts5 syntax error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.error.contains("invalid search query"));
+    }
+
+    #[test]
+    fn storage_err_returns_bad_request_for_fts5_parse_error() {
+        let err = storage_err("fts5: parse error near 'OR OR'");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.error.contains("invalid search query"));
+    }
+
+    #[tokio::test]
+    async fn error_endpoints_return_json_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+
+        let loaded = genesis_config::load(None).expect("config");
+        let mut loaded = loaded;
+        loaded.config.storage.database_path = db;
+
+        let state = Arc::new(AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        ));
+        let app = build_router(state);
+
+        // Request a non-existent session — should get JSON 404
+        let resp = get(&app, "/api/sessions/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = body_json(resp).await;
+        // The response body must have an "error" field (JSON, not plain text)
+        assert!(
+            body.get("error").is_some(),
+            "expected JSON error body with 'error' field, got: {body}"
+        );
     }
 }

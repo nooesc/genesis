@@ -183,7 +183,7 @@ const MAX_BATCH_SIZE: usize = 100;
 pub(crate) async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, (StatusCode, String)> {
+) -> Result<Json<ChatResponse>, ApiError> {
     let loaded = &state.loaded;
     let mut service = state.session_service();
     if let Some(system_prompt) = request.system_prompt {
@@ -252,7 +252,9 @@ pub(crate) async fn chat_handler(
                     error = %e,
                     "chat request failed"
                 );
-                (
+                // Preserve actionable provider errors (e.g. auth, rate-limit)
+                // so callers can diagnose issues without reading server logs.
+                ApiError::with_status(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("execution error: {e}"),
                 )
@@ -325,7 +327,7 @@ pub(crate) async fn chat_handler(
 pub(crate) async fn openai_chat_completions_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<OpenAiCompletionsRequest>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     // Extract the last user message as the prompt
     let prompt = request
         .messages
@@ -333,12 +335,7 @@ pub(crate) async fn openai_chat_completions_handler(
         .rev()
         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
         .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no user message found in messages array".to_owned(),
-            )
-        })?
+        .ok_or_else(|| ApiError::bad_request("no user message found in messages array"))?
         .to_owned();
 
     // Extract optional system prompt
@@ -377,7 +374,7 @@ async fn openai_blocking_response(
     session_id: String,
     model: String,
     span: tracing::Span,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     state.requests_total.fetch_add(1, Ordering::Relaxed);
 
     let mut service = state.session_service();
@@ -400,7 +397,8 @@ async fn openai_blocking_response(
             .await
             .map_err(|e| {
                 error!(error = %e, "OpenAI-compat request failed");
-                (
+                // Preserve actionable provider errors for callers.
+                ApiError::with_status(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("execution error: {e}"),
                 )
@@ -447,7 +445,7 @@ async fn openai_streaming_response(
     session_id: String,
     model: String,
     span: tracing::Span,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     state.requests_total.fetch_add(1, Ordering::Relaxed);
     state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
 
@@ -663,10 +661,8 @@ pub(crate) async fn openai_models_handler(
 pub(crate) async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<
-    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    (StatusCode, String),
-> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     info!(
@@ -1048,18 +1044,16 @@ async fn websocket_session(state: Arc<AppState>, mut socket: axum::extract::ws::
 pub(crate) async fn chat_batch_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<BatchRequest>,
-) -> Result<Json<BatchResponse>, (StatusCode, String)> {
+) -> Result<Json<BatchResponse>, ApiError> {
     if request.items.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "batch must contain at least one item".to_owned(),
+        return Err(ApiError::bad_request(
+            "batch must contain at least one item",
         ));
     }
     if request.items.len() > MAX_BATCH_SIZE {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("batch exceeds maximum size of {MAX_BATCH_SIZE} items"),
-        ));
+        return Err(ApiError::bad_request(format!(
+            "batch exceeds maximum size of {MAX_BATCH_SIZE} items"
+        )));
     }
 
     let concurrency = request.concurrency.clamp(1, MAX_BATCH_CONCURRENCY);

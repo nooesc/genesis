@@ -40,7 +40,7 @@ pub(crate) struct ListTraitsQuery {
 pub(crate) async fn list_user_traits_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
@@ -62,37 +62,29 @@ pub(crate) async fn list_user_traits_handler(
             offset,
             has_more,
         })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?,
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn get_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let user_trait = store.get(&key).map_err(storage_err)?;
 
     match user_trait {
         Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
+            ApiError::internal(format!("serialization error: {e}"))
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
+        None => Err(ApiError::not_found(format!("trait '{key}' not found"))),
     }
 }
 
 pub(crate) async fn observe_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ObserveTraitRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let observed = store
         .observe(
@@ -105,25 +97,23 @@ pub(crate) async fn observe_user_trait_handler(
 
     Ok((
         StatusCode::OK,
-        Json(serde_json::to_value(observed).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?),
+        Json(
+            serde_json::to_value(observed)
+                .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ),
     ))
 }
 
 pub(crate) async fn delete_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete(&key).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found")))
+        Err(ApiError::not_found(format!("trait '{key}' not found")))
     }
 }
