@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
@@ -156,6 +157,108 @@ impl PathValidator {
             components.iter().collect()
         }
     }
+
+    /// Validates a raw path string against the sandbox policy.
+    ///
+    /// Steps:
+    /// 1. Lexically normalize the path.
+    /// 2. Detect and follow symlinks (reject dangling ones).
+    /// 3. Canonicalize (walking up to the first existing ancestor if needed).
+    /// 4. If `working_dir` is set, enforce containment — paths inside it are
+    ///    always allowed, paths outside are blocked.
+    /// 5. If no `working_dir`, check against the sensitive-path list.
+    pub fn validate(&self, raw: &str) -> Result<PathBuf, SandboxError> {
+        // 1. Lexical normalization.
+        let normalized = self.normalize_lexical(Path::new(raw));
+
+        // 2. Symlink check.
+        if let Ok(meta) = fs::symlink_metadata(&normalized) {
+            if meta.file_type().is_symlink() {
+                let target = fs::read_link(&normalized).map_err(|e| {
+                    SandboxError::ResolutionFailed {
+                        path: raw.to_string(),
+                        reason: format!("could not read symlink: {e}"),
+                    }
+                })?;
+                // Resolve relative symlink targets against the link's parent.
+                let resolved = if target.is_relative() {
+                    normalized
+                        .parent()
+                        .unwrap_or(Path::new("/"))
+                        .join(&target)
+                } else {
+                    target
+                };
+                if !resolved.exists() {
+                    return Err(SandboxError::Blocked {
+                        path: raw.to_string(),
+                        reason: "dangling symlink".to_string(),
+                    });
+                }
+            }
+        }
+
+        // 3. Canonicalize.
+        let canonical = if normalized.exists() {
+            normalized.canonicalize().map_err(|e| {
+                SandboxError::ResolutionFailed {
+                    path: raw.to_string(),
+                    reason: format!("canonicalize failed: {e}"),
+                }
+            })?
+        } else {
+            // Walk up to the first existing ancestor and canonicalize that,
+            // then re-append the remaining components.
+            let mut existing = normalized.as_path();
+            let mut tail_components: Vec<&std::ffi::OsStr> = Vec::new();
+            loop {
+                if existing.exists() {
+                    break;
+                }
+                if let Some(name) = existing.file_name() {
+                    tail_components.push(name);
+                    existing = existing.parent().unwrap_or(Path::new("/"));
+                } else {
+                    break;
+                }
+            }
+            let mut canonical_base = existing.canonicalize().map_err(|e| {
+                SandboxError::ResolutionFailed {
+                    path: raw.to_string(),
+                    reason: format!("canonicalize ancestor failed: {e}"),
+                }
+            })?;
+            for component in tail_components.into_iter().rev() {
+                canonical_base.push(component);
+            }
+            canonical_base
+        };
+
+        // 4. Working-dir containment.
+        if let Some(ref wd) = self.working_dir {
+            let wd_canonical = wd.canonicalize().unwrap_or_else(|_| wd.clone());
+            if canonical.starts_with(&wd_canonical) {
+                return Ok(canonical);
+            }
+            return Err(SandboxError::Blocked {
+                path: raw.to_string(),
+                reason: format!(
+                    "path is outside working directory `{}`",
+                    wd_canonical.display()
+                ),
+            });
+        }
+
+        // 5. Sensitive-path check (only when no working_dir).
+        if Self::is_sensitive_path(&canonical, None) {
+            return Err(SandboxError::Blocked {
+                path: raw.to_string(),
+                reason: "path refers to a sensitive location".to_string(),
+            });
+        }
+
+        Ok(canonical)
+    }
 }
 
 #[cfg(test)]
@@ -268,5 +371,72 @@ mod tests {
             Path::new("/home/user/not.aws/credentials"),
             None,
         ));
+    }
+
+    // ---- validate() tests ----
+
+    #[test]
+    fn validate_allows_path_inside_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v.validate(file.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn validate_blocks_path_outside_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v.validate("/etc/hosts").is_err());
+    }
+
+    #[test]
+    fn validate_blocks_traversal_outside_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v.validate("../../etc/hosts").is_err());
+    }
+
+    #[test]
+    fn validate_handles_nonexistent_path_inside_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v
+            .validate(dir.path().join("new_file.txt").to_str().unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_blocks_sensitive_path_without_working_dir() {
+        let v = PathValidator::new(None, PathBuf::from("/home/user"));
+        let result = v.validate("/home/user/.ssh/id_rsa");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink("/nonexistent/target", &link).unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v.validate(link.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn validate_follows_symlink_to_check_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_file = dir.path().join("real.txt");
+        std::fs::write(&real_file, "data").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+        let v =
+            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        assert!(v.validate(link.to_str().unwrap()).is_ok());
     }
 }
