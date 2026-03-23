@@ -652,6 +652,26 @@ impl LuaRuntime {
         self.run_observe_hook(HookEvent::OnComplete, context)
     }
 
+    pub fn run_on_session_start(
+        &self,
+        session_id: &str,
+        is_new: bool,
+    ) -> Result<(), LuaRuntimeError> {
+        let context = self.lua.create_table()?;
+        context.set("session_id", session_id)?;
+        context.set("is_new", is_new)?;
+        self.run_observe_hook(HookEvent::OnSessionStart, context)
+    }
+
+    pub fn run_on_session_resume(
+        &self,
+        session_id: &str,
+    ) -> Result<(), LuaRuntimeError> {
+        let context = self.lua.create_table()?;
+        context.set("session_id", session_id)?;
+        self.run_observe_hook(HookEvent::OnSessionResume, context)
+    }
+
     pub fn run_on_plugin_load(
         &self,
         plugin_name: &str,
