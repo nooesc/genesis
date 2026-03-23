@@ -81,6 +81,7 @@ fn extract_provided_token(headers: &HeaderMap) -> Option<&str> {
 ///
 /// Unlike platform bots, we return the response synchronously since
 /// Home Assistant automations expect the result in the HTTP response.
+/// Home Assistant is exempt from DM pairing (trusted local network).
 pub async fn webhook_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,

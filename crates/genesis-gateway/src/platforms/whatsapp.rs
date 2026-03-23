@@ -15,11 +15,11 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use genesis_core::execution::SessionTurnInput;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use super::{PlatformMessage, ProcessOutcome};
 use crate::verify::verify_whatsapp_signature;
 use crate::AppState;
 
@@ -215,9 +215,6 @@ pub async fn webhook_handler(
                 .map(|c| c.profile.name.clone())
                 .unwrap_or_else(|| "Unknown".to_owned());
 
-            let store =
-                genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-
             for message in &change.value.messages {
                 if message.msg_type != "text" {
                     continue;
@@ -239,79 +236,6 @@ pub async fn webhook_handler(
 
                 info!(parent: &span, "received whatsapp message");
 
-                // DM pairing check
-                match super::check_pairing(
-                    &state.loaded.config.storage.database_path,
-                    "whatsapp",
-                    &from,
-                    &contact_name,
-                ) {
-                    Ok(super::PairingCheck::Approved) => {}
-                    Ok(super::PairingCheck::NeedsPairing(code)) => {
-                        let reply = super::pairing_reply(&code);
-                        let client2 = state.http_client.clone();
-                        let token2 = token.clone();
-                        let phone2 = phone_id.clone();
-                        let from2 = from.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
-                            {
-                                error!(error = %e, "failed to send pairing reply");
-                            }
-                        });
-                        continue;
-                    }
-                    Ok(super::PairingCheck::AtCapacity) => {
-                        let reply = super::pairing_capacity_reply().to_owned();
-                        let client2 = state.http_client.clone();
-                        let token2 = token.clone();
-                        let phone2 = phone_id.clone();
-                        let from2 = from.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
-                            {
-                                error!(error = %e, "failed to send capacity reply");
-                            }
-                        });
-                        continue;
-                    }
-                    Err(_) => {
-                        return StatusCode::SERVICE_UNAVAILABLE;
-                    }
-                }
-
-                match crate::commands::handle_command(
-                    &text,
-                    &session_id,
-                    &store,
-                    &state.loaded.config,
-                ) {
-                    crate::commands::CommandResult::Reply(reply) => {
-                        let client2 = state.http_client.clone();
-                        let token2 = token.clone();
-                        let phone2 = phone_id.clone();
-                        let from2 = from.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
-                            {
-                                error!(error = %e, "failed to send command reply");
-                            }
-                        });
-                        continue;
-                    }
-                    crate::commands::CommandResult::PassThrough => {}
-                }
-
-                // Auto-reset expired sessions before processing.
-                crate::commands::check_session_expiry(
-                    &session_id,
-                    &store,
-                    state.loaded.config.gateway.as_ref(),
-                );
-
                 let state = Arc::clone(&state);
                 let token = token.clone();
                 let phone_id = phone_id.clone();
@@ -319,36 +243,38 @@ pub async fn webhook_handler(
 
                 tokio::spawn(
                     async move {
-                        let service = state.session_service();
+                        let msg = PlatformMessage {
+                            user_id: &from,
+                            user_name: &contact,
+                            text: &text,
+                            session_id: &session_id,
+                            chat_id: &from,
+                            platform_name: "whatsapp",
+                            delivery_platform: DeliveryPlatform::WhatsApp,
+                        };
 
-                        let result = service
-                            .run_turn(SessionTurnInput {
-                                session_id: &session_id,
-                                session_platform: "whatsapp",
-                                delivery_platform: DeliveryPlatform::WhatsApp,
-                                prompt: &text,
-                                title: Some(&format!("WhatsApp: {contact}")),
-                                images: Vec::new(),
-                            })
-                            .await;
-
-                        let reply_text = super::extract_reply(result, "whatsapp");
+                        let reply = match super::process_platform_message(&state, &msg).await {
+                            ProcessOutcome::AgentReply(r)
+                            | ProcessOutcome::NeedsPairing(r)
+                            | ProcessOutcome::CommandReply(r) => r,
+                            ProcessOutcome::AtCapacity => {
+                                super::pairing_capacity_reply().to_owned()
+                            }
+                            ProcessOutcome::PairingError => {
+                                error!("whatsapp pairing check failed");
+                                return;
+                            }
+                            ProcessOutcome::ExecutionError(e) => {
+                                error!(error = %e, "whatsapp execution error");
+                                return;
+                            }
+                        };
 
                         if let Err(e) =
-                            send_reply(&state.http_client, &token, &phone_id, &from, &reply_text)
-                                .await
+                            send_reply(&state.http_client, &token, &phone_id, &from, &reply).await
                         {
                             error!(error = %e, "failed to send whatsapp reply");
                         }
-
-                        // Append delivery mirror for cross-platform visibility.
-                        crate::mirror::append_delivery_mirror(
-                            &state.loaded.config.storage.database_path,
-                            "whatsapp",
-                            &from,
-                            &reply_text,
-                            "whatsapp",
-                        );
                     }
                     .instrument(span),
                 );

@@ -5,11 +5,196 @@ pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
 
-use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
-use genesis_storage::PairingStore;
-use genesis_types::DeliveryPlatform;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
+
+use genesis_core::execution::{SessionExecutionError, SessionTurnInput, SessionTurnOutcome};
+use genesis_storage::{PairingStore, SessionStore};
+use genesis_types::DeliveryPlatform;
+
+use crate::AppState;
+
+// ---------------------------------------------------------------------------
+// Shared platform message abstraction
+// ---------------------------------------------------------------------------
+
+/// Normalized incoming message from any platform.
+///
+/// Platform handlers extract their platform-specific payload into this struct,
+/// which is then processed by [`process_platform_message`].
+pub struct PlatformMessage<'a> {
+    /// The platform's identifier for the user (e.g. Telegram user ID, phone number).
+    pub user_id: &'a str,
+    /// Display name for the user.
+    pub user_name: &'a str,
+    /// The text content of the message (may include transcription markers, etc.).
+    pub text: &'a str,
+    /// Session ID for this conversation (e.g. `tg-12345`, `slack-C67890`).
+    pub session_id: &'a str,
+    /// Chat/channel identifier for delivery mirror logging.
+    pub chat_id: &'a str,
+    /// Platform name for logging and pairing (e.g. `"telegram"`, `"slack"`).
+    pub platform_name: &'a str,
+    /// Delivery platform enum variant.
+    pub delivery_platform: DeliveryPlatform,
+}
+
+/// Result of processing a platform message through the shared pipeline.
+pub enum ProcessOutcome {
+    /// Pairing is needed; the handler should send this reply to the user.
+    NeedsPairing(String),
+    /// Too many pending pairing requests; send this reply.
+    AtCapacity,
+    /// Pairing check failed; handler should return SERVICE_UNAVAILABLE.
+    PairingError,
+    /// A gateway command was handled; send this reply to the user.
+    CommandReply(String),
+    /// The agent processed the message; send this reply to the user.
+    AgentReply(String),
+    /// The agent processing failed at the execution level.
+    ExecutionError(String),
+}
+
+/// Shared processing pipeline for platform messages.
+///
+/// This encapsulates the common flow that every platform handler repeats:
+/// 1. Pairing check
+/// 2. Gateway slash command handling
+/// 3. Session expiry auto-reset
+/// 4. Agent turn execution
+/// 5. Reply extraction
+/// 6. Delivery mirror logging
+///
+/// Platform handlers call this after extracting the message from their
+/// platform-specific payload and verifying the webhook signature.
+pub async fn process_platform_message(
+    state: &Arc<AppState>,
+    msg: &PlatformMessage<'_>,
+) -> ProcessOutcome {
+    // 1. DM pairing check
+    match check_pairing(
+        &state.loaded.config.storage.database_path,
+        msg.platform_name,
+        msg.user_id,
+        msg.user_name,
+    ) {
+        Ok(PairingCheck::Approved) => {}
+        Ok(PairingCheck::NeedsPairing(code)) => {
+            return ProcessOutcome::NeedsPairing(pairing_reply(&code));
+        }
+        Ok(PairingCheck::AtCapacity) => {
+            return ProcessOutcome::AtCapacity;
+        }
+        Err(_) => {
+            return ProcessOutcome::PairingError;
+        }
+    }
+
+    // 2. Handle gateway slash commands
+    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    if let crate::commands::CommandResult::Reply(reply) =
+        crate::commands::handle_command(msg.text, msg.session_id, &store, &state.loaded.config)
+    {
+        return ProcessOutcome::CommandReply(reply);
+    }
+
+    // 3. Auto-reset expired sessions
+    crate::commands::check_session_expiry(
+        msg.session_id,
+        &store,
+        state.loaded.config.gateway.as_ref(),
+    );
+
+    // 4. Run the agent turn
+    let service = state.session_service();
+    let title = format!("{}: {}", capitalize_platform(msg.platform_name), msg.user_name);
+    let result = service
+        .run_turn(SessionTurnInput {
+            session_id: msg.session_id,
+            session_platform: msg.platform_name,
+            delivery_platform: msg.delivery_platform.clone(),
+            prompt: msg.text,
+            title: Some(&title),
+            images: Vec::new(),
+        })
+        .await;
+
+    // 5. Extract the reply
+    let reply_text = extract_reply(result, msg.platform_name);
+
+    // 6. Delivery mirror
+    crate::mirror::append_delivery_mirror(
+        &state.loaded.config.storage.database_path,
+        msg.platform_name,
+        msg.chat_id,
+        &reply_text,
+        msg.platform_name,
+    );
+
+    ProcessOutcome::AgentReply(reply_text)
+}
+
+/// Capitalize the first letter of a platform name for session titles.
+fn capitalize_platform(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared message splitting
+// ---------------------------------------------------------------------------
+
+/// Split a message into chunks respecting a max byte length.
+///
+/// Tries to split on newlines first, then word boundaries. Uses
+/// char-boundary-safe indexing to avoid panics on multi-byte UTF-8.
+///
+/// This is used by Telegram (4096 char limit) and Signal (6000 byte limit).
+pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_owned()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_owned());
+            break;
+        }
+
+        // Walk back to a char boundary so we never slice inside a multi-byte
+        // character. `floor_char_boundary` returns the largest byte index
+        // <= max_len that sits on a UTF-8 char boundary.
+        let safe_end = remaining.floor_char_boundary(max_len);
+
+        // Try to find a newline within the limit, then a space
+        let mut split_at = remaining[..safe_end]
+            .rfind('\n')
+            .or_else(|| remaining[..safe_end].rfind(' '))
+            .unwrap_or(safe_end);
+
+        // Guard: if remaining starts with a delimiter, rfind returns 0 which
+        // would push an empty chunk. Fall back to the full safe window.
+        if split_at == 0 {
+            split_at = safe_end;
+        }
+
+        chunks.push(remaining[..split_at].to_owned());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks
+}
+
+// ---------------------------------------------------------------------------
+// Reply extraction
+// ---------------------------------------------------------------------------
 
 /// Structured error type for platform webhook handler operations.
 ///
@@ -242,6 +427,66 @@ pub fn pairing_capacity_reply() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_message_short_text_returns_single_chunk() {
+        let chunks = split_message("hello", 4096);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn split_message_splits_on_newlines() {
+        let text = format!("{}\n{}", "a".repeat(100), "b".repeat(100));
+        let chunks = split_message(&text, 150);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= 150);
+    }
+
+    #[test]
+    fn split_message_splits_on_spaces() {
+        let text = format!("{} {}", "word".repeat(30), "more".repeat(30));
+        let chunks = split_message(&text, 100);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 100);
+        }
+    }
+
+    #[test]
+    fn split_message_multibyte_utf8_does_not_panic() {
+        let emoji = "\u{1F600}"; // 4 bytes
+        let text = emoji.repeat(30); // 120 bytes total
+        let chunks = split_message(&text, 50);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.len() <= 50);
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn split_message_leading_delimiter_does_not_produce_empty_chunk() {
+        let text = format!("\n{}", "a".repeat(100));
+        let chunks = split_message(&text, 50);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty(), "empty chunk produced");
+        }
+    }
+
+    #[test]
+    fn capitalize_platform_capitalizes_first_letter() {
+        assert_eq!(capitalize_platform("telegram"), "Telegram");
+        assert_eq!(capitalize_platform("discord"), "Discord");
+        assert_eq!(capitalize_platform("slack"), "Slack");
+        assert_eq!(capitalize_platform("whatsapp"), "Whatsapp");
+        assert_eq!(capitalize_platform("signal"), "Signal");
+        assert_eq!(capitalize_platform(""), "");
+    }
+
+    #[test]
+    fn pairing_capacity_reply_is_non_empty() {
+        assert!(!pairing_capacity_reply().is_empty());
+    }
 
     #[test]
     fn is_truthy_env_recognizes_true_values() {

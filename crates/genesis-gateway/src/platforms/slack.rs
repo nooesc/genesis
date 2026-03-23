@@ -15,11 +15,11 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use genesis_core::execution::SessionTurnInput;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use super::{PlatformMessage, ProcessOutcome};
 use crate::verify::verify_slack_signature;
 use crate::AppState;
 
@@ -153,114 +153,45 @@ pub async fn events_handler(
 
     info!(parent: &span, event_type = event.event_type.as_str(), "received slack event");
 
-    // DM pairing check
-    match super::check_pairing(
-        &state.loaded.config.storage.database_path,
-        "slack",
-        &user,
-        &user, // Slack user IDs are opaque; username isn't available without API call
-    ) {
-        Ok(super::PairingCheck::Approved) => {}
-        Ok(super::PairingCheck::NeedsPairing(code)) => {
-            let reply = super::pairing_reply(&code);
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            let channel2 = channel.clone();
-            let ts = thread_ts.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
-                {
-                    error!(error = %e, "failed to send pairing reply");
-                }
-            });
-            return Ok(Json(serde_json::json!({ "ok": true })));
-        }
-        Ok(super::PairingCheck::AtCapacity) => {
-            let reply = super::pairing_capacity_reply().to_owned();
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            let channel2 = channel.clone();
-            let ts = thread_ts.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
-                {
-                    error!(error = %e, "failed to send capacity reply");
-                }
-            });
-            return Ok(Json(serde_json::json!({ "ok": true })));
-        }
-        Err(_) => {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    }
-
-    // Handle gateway slash commands before reaching the agent.
-    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-    match crate::commands::handle_command(&text, &session_id, &store, &state.loaded.config) {
-        crate::commands::CommandResult::Reply(reply) => {
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            let channel2 = channel.clone();
-            let ts = thread_ts.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
-                {
-                    error!(error = %e, "failed to send command reply");
-                }
-            });
-            return Ok(Json(serde_json::json!({ "ok": true })));
-        }
-        crate::commands::CommandResult::PassThrough => {}
-    }
-
-    // Auto-reset expired sessions before processing.
-    crate::commands::check_session_expiry(
-        &session_id,
-        &store,
-        state.loaded.config.gateway.as_ref(),
-    );
-
-    // Process in background
+    // Process in background using the shared pipeline
     tokio::spawn(
         async move {
-            let service = state.session_service();
+            let msg = PlatformMessage {
+                user_id: &user,
+                user_name: &user, // Slack user IDs are opaque; username isn't available without API call
+                text: &text,
+                session_id: &session_id,
+                chat_id: &channel,
+                platform_name: "slack",
+                delivery_platform: DeliveryPlatform::Slack,
+            };
 
-            let result = service
-                .run_turn(SessionTurnInput {
-                    session_id: &session_id,
-                    session_platform: "slack",
-                    delivery_platform: DeliveryPlatform::Slack,
-                    prompt: &text,
-                    title: Some(&format!("Slack: {user}")),
-                    images: Vec::new(),
-                })
-                .await;
-
-            let reply_text = super::extract_reply(result, "slack");
+            let reply = match super::process_platform_message(&state, &msg).await {
+                ProcessOutcome::AgentReply(r)
+                | ProcessOutcome::NeedsPairing(r)
+                | ProcessOutcome::CommandReply(r) => r,
+                ProcessOutcome::AtCapacity => super::pairing_capacity_reply().to_owned(),
+                ProcessOutcome::PairingError => {
+                    error!("slack pairing check failed");
+                    return;
+                }
+                ProcessOutcome::ExecutionError(e) => {
+                    error!(error = %e, "slack execution error");
+                    return;
+                }
+            };
 
             if let Err(e) = post_message(
                 &state.http_client,
                 &token,
                 &channel,
-                &reply_text,
+                &reply,
                 thread_ts.as_deref(),
             )
             .await
             {
                 error!(error = %e, "failed to post slack message");
             }
-
-            // Append delivery mirror for cross-platform visibility.
-            crate::mirror::append_delivery_mirror(
-                &state.loaded.config.storage.database_path,
-                "slack",
-                &channel,
-                &reply_text,
-                "slack",
-            );
         }
         .instrument(span),
     );

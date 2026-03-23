@@ -15,11 +15,11 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use genesis_core::execution::SessionTurnInput;
 use genesis_types::DeliveryPlatform;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, info_span, warn, Instrument};
 
+use super::{PlatformMessage, ProcessOutcome};
 use crate::verify::verify_discord_signature;
 use crate::AppState;
 
@@ -181,6 +181,7 @@ pub async fn interactions_handler(
         let user_name = extract_username(&interaction);
         let channel_id = interaction.channel_id.clone().unwrap_or_default();
         let session_id = format!("discord-{channel_id}");
+        let discord_user_id = extract_user_id(&interaction).unwrap_or_default();
 
         let span = info_span!(
             "discord.interaction",
@@ -191,107 +192,45 @@ pub async fn interactions_handler(
 
         info!(parent: &span, "received discord interaction");
 
-        // DM pairing check
-        let discord_user_id = extract_user_id(&interaction).unwrap_or_default();
-        match super::check_pairing(
-            &state.loaded.config.storage.database_path,
-            "discord",
-            &discord_user_id,
-            &user_name,
-        ) {
-            Ok(super::PairingCheck::Approved) => {}
-            Ok(super::PairingCheck::NeedsPairing(code)) => {
-                let reply = super::pairing_reply(&code);
-                return Ok(Json(
-                    serde_json::to_value(InteractionResponse {
-                        response_type: RESPONSE_CHANNEL_MESSAGE,
-                        data: Some(InteractionResponseData { content: reply }),
-                    })
-                    .map_err(|e| {
-                        error!(error = %e, "failed to serialize interaction response");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                ));
-            }
-            Ok(super::PairingCheck::AtCapacity) => {
-                return Ok(Json(
-                    serde_json::to_value(InteractionResponse {
-                        response_type: RESPONSE_CHANNEL_MESSAGE,
-                        data: Some(InteractionResponseData {
-                            content: super::pairing_capacity_reply().to_owned(),
-                        }),
-                    })
-                    .map_err(|e| {
-                        error!(error = %e, "failed to serialize interaction response");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                ));
-            }
-            Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
-        }
-
-        // Handle gateway slash commands.
-        let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-        if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(&message, &session_id, &store, &state.loaded.config)
-        {
-            return Ok(Json(
-                serde_json::to_value(InteractionResponse {
-                    response_type: RESPONSE_CHANNEL_MESSAGE,
-                    data: Some(InteractionResponseData { content: reply }),
-                })
-                .map_err(|e| {
-                    error!(error = %e, "failed to serialize interaction response");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
-            ));
-        }
-
-        // Auto-reset expired sessions before processing.
-        crate::commands::check_session_expiry(
-            &session_id,
-            &store,
-            state.loaded.config.gateway.as_ref(),
-        );
-
         // Spawn background task to process and follow up
         tokio::spawn(
             async move {
-                let service = state.session_service();
+                let msg = PlatformMessage {
+                    user_id: &discord_user_id,
+                    user_name: &user_name,
+                    text: &message,
+                    session_id: &session_id,
+                    chat_id: &channel_id,
+                    platform_name: "discord",
+                    delivery_platform: DeliveryPlatform::Discord,
+                };
 
-                let result = service
-                    .run_turn(SessionTurnInput {
-                        session_id: &session_id,
-                        session_platform: "discord",
-                        delivery_platform: DeliveryPlatform::Discord,
-                        prompt: &message,
-                        title: Some(&format!("Discord: {user_name}")),
-                        images: Vec::new(),
-                    })
-                    .await;
-
-                let reply_text = super::extract_reply(result, "discord");
+                let reply = match super::process_platform_message(&state, &msg).await {
+                    ProcessOutcome::AgentReply(r)
+                    | ProcessOutcome::NeedsPairing(r)
+                    | ProcessOutcome::CommandReply(r) => r,
+                    ProcessOutcome::AtCapacity => super::pairing_capacity_reply().to_owned(),
+                    ProcessOutcome::PairingError => {
+                        error!("discord pairing check failed");
+                        return;
+                    }
+                    ProcessOutcome::ExecutionError(e) => {
+                        error!(error = %e, "discord execution error");
+                        return;
+                    }
+                };
 
                 // Edit the deferred response with the actual reply
                 if let Err(e) = edit_followup(
                     &state.http_client,
                     &application_id,
                     &interaction_token,
-                    &reply_text,
+                    &reply,
                 )
                 .await
                 {
                     error!(error = %e, "failed to send discord followup");
                 }
-
-                // Append delivery mirror for cross-platform visibility.
-                crate::mirror::append_delivery_mirror(
-                    &state.loaded.config.storage.database_path,
-                    "discord",
-                    &channel_id,
-                    &reply_text,
-                    "discord",
-                );
             }
             .instrument(span),
         );
