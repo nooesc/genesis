@@ -114,12 +114,11 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         source: include_str!("../bundled/tools/utilities.lua"),
         primitives: &[],
     },
-    // Phase 2 (upcoming):
-    // BundledTool {
-    //     name: "messaging",
-    //     source: include_str!("../bundled/tools/messaging/init.lua"),
-    //     primitives: &["http", "config"],
-    // },
+    BundledTool {
+        name: "todo",
+        source: include_str!("../bundled/tools/todo.lua"),
+        primitives: &[],
+    },
 ];
 
 pub fn bundled_tools() -> &'static [BundledTool] {

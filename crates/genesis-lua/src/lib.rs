@@ -1955,4 +1955,107 @@ trusted = true
             other => panic!("expected TextWithMetadata output, got {other:?}"),
         }
     }
+
+    #[test]
+    fn bundled_todo_add_and_list() {
+        let rt = build_bundled_test_runtime();
+        // Add an item
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([
+                    ("action".to_owned(), "add".to_owned()),
+                    ("text".to_owned(), "Write tests".to_owned()),
+                ]),
+            )
+            .expect("todo add should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(text.contains("Added item #1"), "should confirm add: {text}");
+
+        // List items
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+            )
+            .expect("todo list should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("[ ] #1: Write tests"),
+            "should show pending item: {text}"
+        );
+        assert!(text.contains("1 pending"), "should show summary: {text}");
+    }
+
+    #[test]
+    fn bundled_todo_update_status() {
+        let rt = build_bundled_test_runtime();
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "Task A".to_owned()),
+            ]),
+        )
+        .expect("todo add should succeed");
+
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([
+                    ("action".to_owned(), "update".to_owned()),
+                    ("id".to_owned(), "1".to_owned()),
+                    ("status".to_owned(), "done".to_owned()),
+                ]),
+            )
+            .expect("todo update should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("Updated item #1 to done"),
+            "should confirm update: {text}"
+        );
+    }
+
+    #[test]
+    fn bundled_todo_clear() {
+        let rt = build_bundled_test_runtime();
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "Task".to_owned()),
+            ]),
+        )
+        .expect("todo add should succeed");
+
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([("action".to_owned(), "clear".to_owned())]),
+        )
+        .expect("todo clear should succeed");
+
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+            )
+            .expect("todo list should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("No items"),
+            "should show empty list after clear: {text}"
+        );
+    }
 }
