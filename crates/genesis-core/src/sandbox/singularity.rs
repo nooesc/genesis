@@ -1,3 +1,6 @@
+// NOTE: Singularity/Apptainer sandbox backend. Works today where the binary
+// is installed. No external SDK dependency — drives the CLI directly.
+
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 

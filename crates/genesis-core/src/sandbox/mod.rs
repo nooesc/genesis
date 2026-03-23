@@ -1,3 +1,7 @@
+// NOTE: Sandbox backends await official Rust SDKs from Daytona/Modal.
+// The Singularity backend works today where apptainer/singularity is installed.
+// The manager module is wired in via ToolContext::sandbox_manager.
+
 pub mod daytona;
 pub mod manager;
 pub mod modal;

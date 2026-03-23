@@ -1,3 +1,6 @@
+// NOTE: Modal sandbox backend awaits an official Rust SDK.
+// Currently uses a Python sidecar script (modal_sandbox.py) invoked via `uv`.
+
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 

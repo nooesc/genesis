@@ -1,3 +1,6 @@
+// NOTE: Daytona sandbox backend awaits an official Rust SDK.
+// Currently implemented against Daytona's HTTP API directly.
+
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 

@@ -1,3 +1,7 @@
+// NOTE: Future multi-agent infrastructure, currently unused.
+// This module provides the foundation for agent-to-agent communication
+// and will be wired in when multi-agent orchestration is implemented.
+
 //! Agent-to-agent message bus for multi-agent communication.
 //!
 //! Provides a publish-subscribe message bus that enables agents to send

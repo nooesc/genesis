@@ -1,3 +1,6 @@
+// NOTE: SandboxManager is wired in via ToolContext::sandbox_manager.
+// It provides caching, persistence, and lifecycle management for sandbox instances.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
