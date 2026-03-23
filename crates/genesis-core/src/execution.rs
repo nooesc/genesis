@@ -435,10 +435,10 @@ impl<'a> SessionExecutionService<'a> {
 
         let cache_key = self.lua_runtime_cache_key(session_id, &platform);
         let slot = {
-            let mut cache = self
-                .lua_runtime_cache
-                .lock()
-                .expect("lua runtime cache mutex should not be poisoned");
+            let mut cache = self.lua_runtime_cache.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("lua runtime cache mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             Arc::clone(
                 cache
                     .entry(cache_key.clone())

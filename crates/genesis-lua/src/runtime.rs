@@ -305,7 +305,10 @@ impl LuaRuntime {
         lua.set_interrupt(move |_| {
             let active = interrupt_control
                 .lock()
-                .expect("plugin execution control mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("plugin execution control mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .active
                 .clone();
             let Some(active) = active else {
@@ -388,7 +391,10 @@ impl LuaRuntime {
             if configured_disabled.contains(&plugin.name) {
                 self.disabled_plugins
                     .lock()
-                    .expect("disabled plugins mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("disabled plugins mutex poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .insert(plugin.name.clone());
                 continue;
             }
@@ -423,7 +429,10 @@ impl LuaRuntime {
     pub fn logs(&self) -> Vec<String> {
         self.logs
             .lock()
-            .expect("log sink mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("log sink mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .clone()
     }
 
@@ -435,7 +444,10 @@ impl LuaRuntime {
         let disabled = self.disabled_plugin_names();
         self.tool_registry
             .lock()
-            .expect("tool registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("tool registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .registered_tools()
             .into_iter()
             .filter(|tool| !disabled.contains(&tool.plugin_name))
@@ -446,7 +458,10 @@ impl LuaRuntime {
         let disabled = self.disabled_plugin_names();
         self.personality_registry
             .lock()
-            .expect("personality registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("personality registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .registered_personalities()
             .into_iter()
             .filter(|personality| !disabled.contains(&personality.plugin_name))
@@ -457,7 +472,10 @@ impl LuaRuntime {
         let entry = self
             .personality_registry
             .lock()
-            .expect("personality registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("personality registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .personality_entry(name)?;
         if self.plugin_disabled(&entry.metadata.plugin_name) {
             return None;
@@ -470,7 +488,10 @@ impl LuaRuntime {
         let entry = self
             .personality_registry
             .lock()
-            .expect("personality registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("personality registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .personality_entry(name)
             .ok_or_else(|| LuaRuntimeError::UnknownLuaPersonality {
                 name: name.to_owned(),
@@ -488,7 +509,10 @@ impl LuaRuntime {
         let selected = self
             .session_state
             .lock()
-            .expect("session state mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("session state mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .personality
             .clone();
         let Some(selected) = selected else {
@@ -497,7 +521,10 @@ impl LuaRuntime {
         let entry = self
             .personality_registry
             .lock()
-            .expect("personality registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("personality registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .personality_entry(&selected);
         let Some(entry) = entry else {
             return response.to_owned();
@@ -511,10 +538,10 @@ impl LuaRuntime {
         arguments: BTreeMap<String, String>,
     ) -> Result<LuaToolOutput, LuaRuntimeError> {
         let plugin_context = {
-            let registry = self
-                .tool_registry
-                .lock()
-                .expect("tool registry mutex should not be poisoned");
+            let registry = self.tool_registry.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("tool registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             let tool = registry
                 .registered_tools()
                 .into_iter()
@@ -537,7 +564,10 @@ impl LuaRuntime {
         let result = self
             .tool_registry
             .lock()
-            .expect("tool registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("tool registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .invoke(&self.lua, name, arguments);
         if let Err(err) = &result {
             self.record_plugin_failure(&plugin_name, &err.to_string());
@@ -549,7 +579,10 @@ impl LuaRuntime {
         *self
             .host_tool_executor
             .lock()
-            .expect("host tool executor mutex should not be poisoned") = Some(executor);
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("host tool executor mutex poisoned, recovering");
+                poisoned.into_inner()
+            }) = Some(executor);
     }
 
     pub fn register_hook(
@@ -564,16 +597,19 @@ impl LuaRuntime {
         })?;
         self.hook_registry
             .lock()
-            .expect("hook registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("hook registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .register(event, callback, None);
         Ok(())
     }
 
     pub fn record_completed_turn(&self, tokens: u32) {
-        let mut state = self
-            .session_state
-            .lock()
-            .expect("session state mutex should not be poisoned");
+        let mut state = self.session_state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("session state mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
         state.turn_count = state.turn_count.saturating_add(1);
         state.total_tokens = state.total_tokens.saturating_add(tokens);
     }
@@ -628,7 +664,10 @@ impl LuaRuntime {
         let session_id = self
             .session_state
             .lock()
-            .expect("session state mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("session state mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .id
             .clone();
         let context = self.lua.create_table()?;
@@ -672,14 +711,20 @@ impl LuaRuntime {
             if configured_disabled.contains(bundled.name) {
                 self.disabled_plugins
                     .lock()
-                    .expect("disabled plugins mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("disabled plugins mutex poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .insert(bundled.name.to_owned());
                 continue;
             }
             if self
                 .personality_registry
                 .lock()
-                .expect("personality registry mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("personality registry mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .personality_entry(bundled.name)
                 .is_some()
             {
@@ -723,11 +768,17 @@ impl LuaRuntime {
         if let Err(err) = load_result {
             self.tool_registry
                 .lock()
-                .expect("tool registry mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("tool registry mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .remove_tools_owned_by(&plugin.name);
             self.personality_registry
                 .lock()
-                .expect("personality registry mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("personality registry mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .remove_personalities_owned_by(&plugin.name);
             self.plugin_errors
                 .push(format!("plugin `{}` failed to load: {err}", plugin.name));
@@ -815,7 +866,10 @@ impl LuaRuntime {
         let callbacks = self
             .hook_registry
             .lock()
-            .expect("hook registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("hook registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .callbacks(event);
         for callback in callbacks {
             if callback
@@ -891,7 +945,10 @@ impl LuaRuntime {
         let callbacks = self
             .hook_registry
             .lock()
-            .expect("hook registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("hook registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .callbacks(event);
         for callback in callbacks {
             if callback
@@ -966,7 +1023,10 @@ impl LuaRuntime {
         let callbacks = self
             .hook_registry
             .lock()
-            .expect("hook registry mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("hook registry mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .callbacks(event);
         for callback in callbacks {
             if callback
@@ -1010,10 +1070,10 @@ impl LuaRuntime {
     }
 
     fn push_hook_error(&self, event: HookEvent, message: String) {
-        let mut logs = self
-            .logs
-            .lock()
-            .expect("log sink mutex should not be poisoned");
+        let mut logs = self.logs.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("log sink mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
         logs.push(format!("[hook::{event:?}] {message}"));
     }
 
@@ -1021,10 +1081,10 @@ impl LuaRuntime {
         if !self.plugin_verbose {
             return;
         }
-        let mut logs = self
-            .logs
-            .lock()
-            .expect("log sink mutex should not be poisoned");
+        let mut logs = self.logs.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("log sink mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
         logs.push(format!("[hook::{event:?}::{plugin_name}] {message}"));
     }
 
@@ -1037,7 +1097,10 @@ impl LuaRuntime {
         let session = self
             .session_state
             .lock()
-            .expect("session state mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("session state mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .clone();
         let context = match self.build_personality_context(&session) {
             Ok(context) => context,
@@ -1109,7 +1172,10 @@ impl LuaRuntime {
         let session = self
             .session_state
             .lock()
-            .expect("session state mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("session state mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .clone();
         let context = self.build_personality_context(&session).map_err(|error| {
             LuaRuntimeError::LuaPersonalityPromptFailed {
@@ -1226,10 +1292,10 @@ impl LuaRuntime {
     }
 
     fn push_personality_error(&self, plugin_name: &str, message: String) {
-        let mut logs = self
-            .logs
-            .lock()
-            .expect("log sink mutex should not be poisoned");
+        let mut logs = self.logs.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("log sink mutex poisoned, recovering");
+            poisoned.into_inner()
+        });
         logs.push(format!("[personality::{plugin_name}] {message}"));
     }
 
@@ -1252,7 +1318,10 @@ impl LuaRuntime {
         let previous = self
             .execution_control
             .lock()
-            .expect("plugin execution control mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("plugin execution control mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .active
             .replace(active);
         PluginExecutionGuard {
@@ -1268,14 +1337,20 @@ impl LuaRuntime {
     fn plugin_disabled(&self, plugin_name: &str) -> bool {
         self.disabled_plugins
             .lock()
-            .expect("disabled plugins mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("disabled plugins mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .contains(plugin_name)
     }
 
     fn disabled_plugin_names(&self) -> HashSet<String> {
         self.disabled_plugins
             .lock()
-            .expect("disabled plugins mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("disabled plugins mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .clone()
     }
 
@@ -1288,10 +1363,10 @@ impl LuaRuntime {
         }
 
         let failures = {
-            let mut failures = self
-                .plugin_failures
-                .lock()
-                .expect("plugin failures mutex should not be poisoned");
+            let mut failures = self.plugin_failures.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("plugin failures mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             let count = failures.entry(plugin_name.to_owned()).or_insert(0);
             *count += 1;
             *count
@@ -1304,13 +1379,16 @@ impl LuaRuntime {
         let newly_disabled = self
             .disabled_plugins
             .lock()
-            .expect("disabled plugins mutex should not be poisoned")
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("disabled plugins mutex poisoned, recovering");
+                poisoned.into_inner()
+            })
             .insert(plugin_name.to_owned());
         if newly_disabled {
-            let mut logs = self
-                .logs
-                .lock()
-                .expect("log sink mutex should not be poisoned");
+            let mut logs = self.logs.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("log sink mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             logs.push(format!(
                 "[plugin::{plugin_name}] disabled for this session after {failures} failures"
             ));
@@ -1356,7 +1434,10 @@ impl ActivePluginGuard {
         let pushed = if let Some(plugin_context) = plugin_context {
             stack
                 .lock()
-                .expect("active plugin mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("active plugin mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .push(plugin_context);
             true
         } else {
@@ -1371,7 +1452,10 @@ impl Drop for ActivePluginGuard {
         if self.pushed {
             self.stack
                 .lock()
-                .expect("active plugin mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("active plugin mutex poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .pop();
         }
     }
@@ -1381,10 +1465,10 @@ impl Drop for PluginExecutionGuard {
     fn drop(&mut self) {
         let finished = Instant::now();
         let previous = {
-            let mut control = self
-                .control
-                .lock()
-                .expect("plugin execution control mutex should not be poisoned");
+            let mut control = self.control.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("plugin execution control mutex poisoned, recovering");
+                poisoned.into_inner()
+            });
             let current = control.active.take();
             control.active = self.previous.take();
             current
@@ -1397,7 +1481,10 @@ impl Drop for PluginExecutionGuard {
                     .as_millis();
                 self.logs
                     .lock()
-                    .expect("log sink mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("log sink mutex poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .push(format!(
                         "[plugin::{}] {} completed in {}ms",
                         self.plugin_name, self.operation, elapsed_ms

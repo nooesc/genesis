@@ -279,6 +279,7 @@ fn compute_hmac(secret: &str, body: &str) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
+    // Safety: HMAC-SHA256 accepts keys of any length, so this cannot fail.
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body.as_bytes());

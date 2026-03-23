@@ -213,9 +213,10 @@ where
         return Ok(Arc::clone(value));
     }
 
-    let _guard = init_lock
-        .lock()
-        .expect("embedding provider init lock poisoned");
+    let _guard = init_lock.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("embedding provider init lock poisoned, recovering");
+        poisoned.into_inner()
+    });
     if let Some(value) = cache.get() {
         return Ok(Arc::clone(value));
     }
