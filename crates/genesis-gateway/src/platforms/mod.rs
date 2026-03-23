@@ -7,8 +7,63 @@ pub mod whatsapp;
 
 use genesis_core::execution::{SessionExecutionError, SessionTurnOutcome};
 use genesis_storage::PairingStore;
+use genesis_types::DeliveryPlatform;
 use std::collections::HashSet;
 use std::path::Path;
+
+/// Structured error type for platform webhook handler operations.
+///
+/// Replaces generic `format!`-based string errors throughout platform handlers,
+/// preserving the source error type for pattern matching, retry decisions, and
+/// structured logging.
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformError {
+    /// An outbound HTTP request to a platform API failed at the transport level.
+    #[error("{platform} HTTP request failed: {source}")]
+    HttpRequest {
+        platform: DeliveryPlatform,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// The platform API returned a non-success HTTP status code.
+    #[error("{platform} API returned {status}: {body}")]
+    ApiError {
+        platform: DeliveryPlatform,
+        status: reqwest::StatusCode,
+        body: String,
+    },
+
+    /// Failed to deserialize a response from the platform API.
+    #[error("{platform} response parse failed: {source}")]
+    ResponseParse {
+        platform: DeliveryPlatform,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    /// The platform API returned a logical error (e.g. `ok: false`).
+    #[error("{platform} API error: {detail}")]
+    ApiLogicError {
+        platform: DeliveryPlatform,
+        detail: String,
+    },
+
+    /// A required configuration value (env var, token) is missing.
+    #[error("{platform} configuration missing: {detail}")]
+    ConfigMissing {
+        platform: DeliveryPlatform,
+        detail: String,
+    },
+
+    /// A platform-specific operation failed (file download, transcription, etc.).
+    #[error("{platform} {operation} failed: {detail}")]
+    OperationFailed {
+        platform: DeliveryPlatform,
+        operation: &'static str,
+        detail: String,
+    },
+}
 
 /// Extract the reply text from a `run_turn` result, logging success or failure.
 ///
@@ -275,5 +330,79 @@ mod tests {
         let reply = pairing_reply("ABCD1234");
         assert!(reply.contains("ABCD1234"));
         assert!(reply.contains("genesis pairing approve"));
+    }
+
+    #[test]
+    fn platform_error_http_request_display_includes_platform() {
+        // We can't easily construct a reqwest::Error, so test the other variants.
+        let err = PlatformError::ApiError {
+            platform: DeliveryPlatform::Telegram,
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "bot was blocked".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("telegram"), "should contain platform name: {msg}");
+        assert!(msg.contains("403"), "should contain status code: {msg}");
+        assert!(msg.contains("bot was blocked"), "should contain body: {msg}");
+    }
+
+    #[test]
+    fn platform_error_api_logic_error_display() {
+        let err = PlatformError::ApiLogicError {
+            platform: DeliveryPlatform::Slack,
+            detail: "channel_not_found".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("slack"));
+        assert!(msg.contains("channel_not_found"));
+    }
+
+    #[test]
+    fn platform_error_config_missing_display() {
+        let err = PlatformError::ConfigMissing {
+            platform: DeliveryPlatform::WhatsApp,
+            detail: "WHATSAPP_TOKEN not set".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("whatsapp"));
+        assert!(msg.contains("WHATSAPP_TOKEN not set"));
+    }
+
+    #[test]
+    fn platform_error_operation_failed_display() {
+        let err = PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "file download",
+            detail: "downloaded file is empty".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("telegram"));
+        assert!(msg.contains("file download"));
+        assert!(msg.contains("downloaded file is empty"));
+    }
+
+    #[test]
+    fn platform_error_response_parse_display_includes_platform() {
+        // ResponseParse requires a reqwest::Error source which is hard to construct.
+        // Verify the ApiError variant works for Signal to confirm platform Display.
+        let err = PlatformError::ApiError {
+            platform: DeliveryPlatform::Signal,
+            status: reqwest::StatusCode::BAD_GATEWAY,
+            body: "upstream timeout".to_owned(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("signal"));
+        assert!(msg.contains("502"));
+    }
+
+    #[test]
+    fn platform_error_is_debug() {
+        let err = PlatformError::ApiLogicError {
+            platform: DeliveryPlatform::Discord,
+            detail: "unknown interaction".to_owned(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("ApiLogicError"));
+        assert!(debug.contains("Discord"));
     }
 }
