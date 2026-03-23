@@ -35,6 +35,34 @@ const DANGEROUS_PATTERNS: &[(&str, &str)] = &[
     ("shred", "secure file deletion"),
 ];
 
+/// Truncate a command string to at most `max_len` characters, using
+/// `char_indices()` so we never split a multi-byte UTF-8 codepoint.
+pub fn truncate_command(command: &str, max_len: usize) -> String {
+    if command.len() <= max_len {
+        return command.to_owned();
+    }
+    // Find the byte offset just past the last full character within `max_len - 3`
+    // chars (leaving room for the "..." suffix).
+    let limit = max_len.saturating_sub(3);
+    let end = command
+        .char_indices()
+        .nth(limit)
+        .map(|(i, _)| i)
+        .unwrap_or(command.len());
+    format!("{}...", &command[..end])
+}
+
+/// Build a `ToolError::ApprovalDenied` for a blocked dangerous command.
+pub fn dangerous_command_error(tool_name: &str, command: &str, danger: &str) -> ToolError {
+    ToolError::ApprovalDenied {
+        tool: tool_name.to_owned(),
+        reason: format!(
+            "command blocked: {danger}. Command: `{}`",
+            truncate_command(command, 80),
+        ),
+    }
+}
+
 /// Check if a command contains dangerous patterns.
 /// Returns a description of the danger if found, or None if safe.
 pub fn check_dangerous(command: &str) -> Option<&'static str> {
@@ -224,17 +252,7 @@ impl ToolHandler for ShellExecTool {
         // Skip dangerous command checks for sandboxed backends — the container is the security boundary
         if !is_sandboxed_backend(&context.terminal_backend) {
             if let Some(danger) = check_dangerous(command) {
-                return Err(ToolError::ApprovalDenied {
-                    tool: call.name.clone(),
-                    reason: format!(
-                        "command blocked: {danger}. Command: `{}`",
-                        if command.len() > 80 {
-                            format!("{}...", &command[..77])
-                        } else {
-                            command.clone()
-                        }
-                    ),
-                });
+                return Err(dangerous_command_error(&call.name, command, danger));
             }
         }
 
@@ -796,6 +814,37 @@ mod tests {
         let args: Vec<_> = cmd.get_args().collect();
         // The explicit working dir should be used
         assert!(args.contains(&std::ffi::OsStr::new("explicit")));
+    }
+
+    #[test]
+    fn truncate_command_short_string_unchanged() {
+        assert_eq!(truncate_command("echo hi", 80), "echo hi");
+    }
+
+    #[test]
+    fn truncate_command_exact_boundary() {
+        let cmd = "a".repeat(80);
+        assert_eq!(truncate_command(&cmd, 80), cmd);
+    }
+
+    #[test]
+    fn truncate_command_long_string_truncated() {
+        let cmd = "a".repeat(100);
+        let result = truncate_command(&cmd, 80);
+        assert!(result.ends_with("..."));
+        // 77 'a's + "..." = 80 chars
+        assert_eq!(result.len(), 80);
+    }
+
+    #[test]
+    fn truncate_command_multibyte_utf8_safe() {
+        // Each char is 4 bytes; 20 chars = 80 bytes. Asking for max_len=10
+        // should yield 7 chars + "..." without panicking on a codepoint boundary.
+        let cmd: String = std::iter::repeat('\u{1F600}').take(20).collect();
+        let result = truncate_command(&cmd, 10);
+        assert!(result.ends_with("..."));
+        // Should be exactly 7 emoji chars + "..."
+        assert_eq!(result.chars().count(), 10);
     }
 
     #[test]
