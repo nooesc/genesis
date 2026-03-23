@@ -612,6 +612,21 @@ impl MemoryStore {
         })
     }
 
+    fn score_advanced_memory(
+        memory: &StoredMemory,
+        attributes: &GraphAttributes,
+        base_score: f64,
+        now: &DateTime<Utc>,
+    ) -> Result<ScoredMemory, StorageError> {
+        let score = base_score
+            * decayed_importance(attributes.importance, &attributes.accessed_at, now)? as f64;
+        Ok(ScoredMemory {
+            memory: memory.clone(),
+            score,
+            source: "advanced".to_owned(),
+        })
+    }
+
     fn bump_access_metrics(&self, memory_ids: &[String]) -> Result<(), StorageError> {
         if memory_ids.is_empty() {
             return Ok(());
@@ -727,6 +742,111 @@ impl MemoryStore {
             }
         }
         Ok(linked)
+    }
+
+    /// Advanced memory retrieval with multi-hop graph traversal and edge-weighted scoring.
+    ///
+    /// 1. Runs FTS5 search for primary results
+    /// 2. Expands to `max_depth` hops along typed edges
+    /// 3. Applies edge_type_weight multipliers at each hop
+    /// 4. Score decays by 0.5 per hop to prioritize closer memories
+    /// 5. Consolidated summaries score via their consolidation edge weight (1.2x)
+    pub fn advanced_search(
+        &self,
+        query: &str,
+        limit: usize,
+        max_depth: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let primary = self.search(query, limit)?;
+        if primary.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let connection = self.db.conn()?;
+        let now = Utc::now();
+        let mut seen = HashSet::new();
+        let mut scored = Vec::new();
+
+        // Score primary results
+        let primary_ids: Vec<String> = primary.iter().map(|m| m.id.clone()).collect();
+        let attributes = self.graph_attributes_for_ids(&connection, &primary_ids)?;
+
+        for (rank, memory) in primary.iter().enumerate() {
+            if seen.insert(memory.id.clone()) {
+                let base_score = 1.0 / (60.0 + rank as f64);
+                if let Some(attrs) = attributes.get(&memory.id) {
+                    scored.push(Self::score_advanced_memory(
+                        memory, attrs, base_score, &now,
+                    )?);
+                }
+            }
+        }
+
+        // Build frontier from primary results with their scores
+        let mut frontier: Vec<(String, f64)> = scored
+            .iter()
+            .map(|s| (s.memory.id.clone(), s.score))
+            .collect();
+
+        // Multi-hop BFS expansion
+        for _depth in 0..max_depth {
+            let source_ids: Vec<String> = frontier.iter().map(|(id, _)| id.clone()).collect();
+            if source_ids.is_empty() {
+                break;
+            }
+            let linked = self.linked_memories_for_sources(&connection, &source_ids)?;
+
+            let mut next_frontier = Vec::new();
+            for (source_id, source_score) in &frontier {
+                if let Some(neighbors) = linked.get(source_id) {
+                    for (link_rank, neighbor) in neighbors.iter().enumerate() {
+                        if seen.insert(neighbor.memory.id.clone()) {
+                            let hop_decay = 0.5;
+                            let link_position_decay = 1.0 / (link_rank as f64 + 1.0);
+                            let type_weight = edge_type_weight(&neighbor.edge_type);
+                            let neighbor_score =
+                                source_score * hop_decay * link_position_decay * type_weight;
+                            let final_score = neighbor_score
+                                * decayed_importance(
+                                    neighbor.attributes.importance,
+                                    &neighbor.attributes.accessed_at,
+                                    &now,
+                                )
+                                .unwrap_or(neighbor.attributes.importance) as f64;
+
+                            scored.push(ScoredMemory {
+                                memory: neighbor.memory.clone(),
+                                score: final_score,
+                                source: "advanced".to_owned(),
+                            });
+                            next_frontier.push((neighbor.memory.id.clone(), final_score));
+                        }
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+
+        drop(connection);
+        self.bump_access_metrics(
+            &scored
+                .iter()
+                .map(|s| s.memory.id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+
+        Ok(scored)
     }
 
     /// Create temporal edges to the N most recent memories from the same session.
@@ -2173,5 +2293,114 @@ mod memory_store_tests {
             .unwrap();
         // 2 from members→summary + 2 from summary→members = 4
         assert_eq!(edge_count, 4);
+    }
+
+    #[test]
+    fn advanced_search_follows_multi_hop_edges() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("advanced.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create primary memory via create_note so FTS is populated
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "hello world".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 1.0,
+            })
+            .unwrap();
+
+        // Chain: mem1 → mem-hop1 → mem-hop2
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop1', 's1', 'fact', 'middle node', CURRENT_TIMESTAMP, 0.8)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop2', 's1', 'fact', 'two hops away', CURRENT_TIMESTAMP, 0.5)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .create_link("mem1", "mem-hop1", "semantic", 0.9)
+            .unwrap();
+        store
+            .create_link("mem-hop1", "mem-hop2", "causal", 0.85)
+            .unwrap();
+
+        let results = store.advanced_search("hello", 10, 2).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+
+        assert!(ids.contains(&"mem1"), "primary match");
+        assert!(ids.contains(&"mem-hop1"), "1-hop");
+        assert!(ids.contains(&"mem-hop2"), "2-hop");
+    }
+
+    #[test]
+    fn advanced_search_respects_max_depth() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("advanced_depth.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create primary memory via create_note so FTS is populated
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "hello world".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 1.0,
+            })
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop1', 's1', 'fact', 'one hop', CURRENT_TIMESTAMP, 0.8)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop2', 's1', 'fact', 'two hops', CURRENT_TIMESTAMP, 0.5)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .create_link("mem1", "mem-hop1", "semantic", 0.9)
+            .unwrap();
+        store
+            .create_link("mem-hop1", "mem-hop2", "semantic", 0.9)
+            .unwrap();
+
+        // depth=1 should NOT reach mem-hop2
+        let results = store.advanced_search("hello", 10, 1).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        assert!(ids.contains(&"mem-hop1"), "1-hop reachable");
+        assert!(
+            !ids.contains(&"mem-hop2"),
+            "2-hop NOT reachable at depth 1"
+        );
     }
 }
