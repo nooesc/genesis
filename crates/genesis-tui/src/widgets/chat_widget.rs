@@ -70,6 +70,10 @@ pub struct ChatWidget {
     /// A tool group is identified by the index of its first cell in `committed_cells`.
     /// Groups not present in this set are rendered as a single collapsed summary line.
     pub expanded_tool_groups: HashSet<usize>,
+    /// Theme-derived accent color (for cursor, active indicators).
+    theme_accent: ratatui::style::Color,
+    /// Theme-derived dim color (for separators, hints).
+    theme_dim: ratatui::style::Color,
     /// Number of rows scrolled back from the bottom (0 = pinned to bottom).
     scroll_offset: usize,
     /// True when the user has scrolled up and auto-scroll is disabled.
@@ -86,9 +90,19 @@ impl ChatWidget {
             input: InputWidget::new(),
             active_cell_cache: None,
             expanded_tool_groups: HashSet::new(),
+            theme_accent: crate::history::rgb(genesis_ui::colors::EVE_LAVENDER),
+            theme_dim: crate::history::rgb(genesis_ui::colors::UI_DIM),
             scroll_offset: 0,
             scroll_locked: false,
         }
+    }
+
+    // ── Theme ─────────────────────────────────────────────────────────────
+
+    /// Update theme-derived colors for the chat view.
+    pub fn set_theme(&mut self, theme: &dyn crate::theme::Theme) {
+        self.theme_accent = theme.primary();
+        self.theme_dim = theme.text_dim();
     }
 
     // ── Scroll ────────────────────────────────────────────────────────────
@@ -433,8 +447,7 @@ impl ChatWidget {
             let mut lines = self.active_cell_cache.as_ref().unwrap().lines.clone();
 
             // Append a block cursor to the last line to indicate streaming.
-            let cursor_style =
-                Style::default().fg(crate::history::rgb(genesis_ui::colors::EVE_LAVENDER));
+            let cursor_style = Style::default().fg(self.theme_accent);
             if let Some(last_line) = lines.last_mut() {
                 last_line.spans.push(Span::styled("\u{258D}", cursor_style));
             }
@@ -655,7 +668,7 @@ impl ChatWidget {
 
         // ── Determine hint rows ────────────────────────────────────────
         // Reserve rows for overflow hints so they don't overwrite content.
-        let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+        let dim_style = Style::default().fg(self.theme_dim);
         let show_top_hint = skipped_message_count > 0;
         let show_bottom_hint = self.scroll_locked && below_count > 0;
 
@@ -672,7 +685,7 @@ impl ChatWidget {
         let clamped_used = used.min(content_height);
         let mut row_cursor = content_y + content_height - clamped_used;
 
-        let sep_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+        let sep_style = Style::default().fg(self.theme_dim);
 
         for entry in &entries {
             if row_cursor >= content_y + content_height {
