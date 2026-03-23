@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod hooks;
 pub mod manifest;
 pub mod personality;
+pub mod primitives;
 pub mod runtime;
 pub mod tools;
 

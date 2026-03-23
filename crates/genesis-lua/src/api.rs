@@ -168,6 +168,9 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("memory", |lua, this| {
             make_memory_bridge(lua, this.database_path.clone(), Arc::clone(&this.session))
         });
+        fields.add_field_method_get("json", |lua, _this| {
+            crate::primitives::json::make_json_bridge(lua)
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
