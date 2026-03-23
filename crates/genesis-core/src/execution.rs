@@ -845,6 +845,12 @@ impl<'a> SessionExecutionService<'a> {
         if let Some(c) = context_section.as_deref() {
             prompt_builder = prompt_builder.context(c);
         }
+        let plugin_context_section = lua_runtime
+            .as_ref()
+            .and_then(|rt| rt.context_registry().build_section());
+        if let Some(pc) = plugin_context_section.as_deref() {
+            prompt_builder = prompt_builder.plugin_context(pc);
+        }
         if let Some(m) = memories_section.as_deref() {
             prompt_builder = prompt_builder.memories(m);
         }
