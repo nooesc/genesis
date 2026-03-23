@@ -405,10 +405,7 @@ mod tests {
 
         let call = ToolCall {
             name: "spawn_subagent".to_owned(),
-            arguments: BTreeMap::from([(
-                "task".to_owned(),
-                "Do something".to_owned(),
-            )]),
+            arguments: BTreeMap::from([("task".to_owned(), "Do something".to_owned())]),
         };
 
         let output = SpawnSubagentTool.run(&call, &ctx).expect("spawn");
@@ -431,7 +428,13 @@ mod tests {
 
         let store = SubagentStore::new(&db_path);
         store
-            .create("sub-err", "parent-session", "child-err", "worker", "fail task")
+            .create(
+                "sub-err",
+                "parent-session",
+                "child-err",
+                "worker",
+                "fail task",
+            )
             .expect("create");
         store
             .set_failed("sub-err", "something went wrong")
@@ -463,7 +466,13 @@ mod tests {
 
         let store = SubagentStore::new(&db_path);
         store
-            .create("sub-done", "parent-session", "child-done", "worker", "big task")
+            .create(
+                "sub-done",
+                "parent-session",
+                "child-done",
+                "worker",
+                "big task",
+            )
             .expect("create");
         store
             .set_completed("sub-done", "Result of the big task")

@@ -138,10 +138,7 @@ mod tests {
         let tool = ClarifyTool;
         let call = ToolCall {
             name: "clarify".to_owned(),
-            arguments: BTreeMap::from([(
-                "question".to_owned(),
-                "Are you sure?".to_owned(),
-            )]),
+            arguments: BTreeMap::from([("question".to_owned(), "Are you sure?".to_owned())]),
         };
 
         let output = tool.run(&call, &ctx()).expect("should succeed");

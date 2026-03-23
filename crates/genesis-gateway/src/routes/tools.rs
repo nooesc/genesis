@@ -63,13 +63,20 @@ pub(crate) async fn list_tools_handler(
     let mcp_count = mcp_tools.len();
     let total = builtin_count + mcp_count;
 
-    Ok(Json(serde_json::to_value(ToolListResponse {
-        builtin_tools,
-        builtin_count,
-        mcp_tools,
-        mcp_count,
-        total,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ToolListResponse {
+            builtin_tools,
+            builtin_count,
+            mcp_tools,
+            mcp_count,
+            total,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

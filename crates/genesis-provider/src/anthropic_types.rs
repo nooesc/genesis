@@ -811,7 +811,10 @@ mod tests {
                         cache_control,
                     } => {
                         assert_eq!(text, "You are helpful.");
-                        assert!(cache_control.is_some(), "system block should have cache_control");
+                        assert!(
+                            cache_control.is_some(),
+                            "system block should have cache_control"
+                        );
                     }
                     other => panic!("expected Text block, got {:?}", other),
                 }
@@ -1164,7 +1167,10 @@ mod tests {
         inject_conversation_cache_breakpoints(&mut messages);
 
         for msg in &messages {
-            assert!(!has_cache_control(msg), "short conversation should have no breakpoints");
+            assert!(
+                !has_cache_control(msg),
+                "short conversation should have no breakpoints"
+            );
         }
     }
 
@@ -1195,7 +1201,11 @@ mod tests {
             .filter(|(_, m)| has_cache_control(m))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(cached_indices.len(), 1, "should place exactly one breakpoint");
+        assert_eq!(
+            cached_indices.len(),
+            1,
+            "should place exactly one breakpoint"
+        );
         // The boundary should be at index 5 (raw_boundary when quantized == 0).
         assert_eq!(cached_indices[0], 5);
     }
@@ -1241,7 +1251,10 @@ mod tests {
             .collect();
 
         // Both should have the breakpoint at the same position (8).
-        assert_eq!(idx_16, idx_18, "breakpoint should be stable across consecutive turns");
+        assert_eq!(
+            idx_16, idx_18,
+            "breakpoint should be stable across consecutive turns"
+        );
         assert_eq!(idx_16[0], 8);
     }
 
@@ -1279,7 +1292,10 @@ mod tests {
         if let AnthropicMessageContent::Blocks(blocks) = &messages[3].content {
             match &blocks[0] {
                 AnthropicContentBlock::ToolResult { cache_control, .. } => {
-                    assert!(cache_control.is_some(), "tool_result should have cache_control");
+                    assert!(
+                        cache_control.is_some(),
+                        "tool_result should have cache_control"
+                    );
                 }
                 other => panic!("expected ToolResult, got {:?}", other),
             }

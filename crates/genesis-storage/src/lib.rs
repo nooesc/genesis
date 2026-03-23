@@ -31,7 +31,7 @@ pub use crate::stores::response_cache::{CachedResponse, ResponseCacheStore};
 pub use crate::stores::sandbox::{SandboxRow, SandboxStore};
 pub use crate::stores::schedule::{ScheduleExecution, ScheduleStore, StoredSchedule};
 pub use crate::stores::session::{
-    InsightsData, MessageSearchResult, SessionStore, StoredMessage, SessionSummary, UsageStats,
+    InsightsData, MessageSearchResult, SessionStore, SessionSummary, StoredMessage, UsageStats,
 };
 pub use crate::stores::skill::{SkillStore, StoredSkill};
 pub use crate::stores::skill_file::SkillFileStore;
@@ -103,11 +103,13 @@ impl Database {
     /// when dropped.  For mutable access (e.g. transactions), bind the
     /// result as `let mut conn = db.conn()?;`.
     pub fn conn(&self) -> Result<DatabaseGuard<'_>, StorageError> {
-        let mut guard = self.inner.conn.lock().map_err(|_| {
-            StorageError::ConnectionPoolPoisoned {
-                path: self.inner.path.clone(),
-            }
-        })?;
+        let mut guard =
+            self.inner
+                .conn
+                .lock()
+                .map_err(|_| StorageError::ConnectionPoolPoisoned {
+                    path: self.inner.path.clone(),
+                })?;
 
         if guard.is_none() {
             *guard = Some(open(&self.inner.path)?);
@@ -868,7 +870,13 @@ mod tests {
         let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
 
         let schedule = store
-            .create_with_timezone("tz-1", "0 9 * * *", "cli", "morning", Some("America/New_York"))
+            .create_with_timezone(
+                "tz-1",
+                "0 9 * * *",
+                "cli",
+                "morning",
+                Some("America/New_York"),
+            )
             .expect("create should work");
 
         assert_eq!(schedule.id, "tz-1");
@@ -895,7 +903,9 @@ mod tests {
         let (_dir, _session_store) = bootstrapped_store();
         let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
 
-        store.create("exec-test", "*/5 * * * *", "cli", "job").unwrap();
+        store
+            .create("exec-test", "*/5 * * * *", "cli", "job")
+            .unwrap();
 
         store
             .record_execution("exec-test", "success", None, Some(150))
@@ -2404,4 +2414,3 @@ mod tests {
         assert!(messages[0].provider_metadata.is_none());
     }
 }
-

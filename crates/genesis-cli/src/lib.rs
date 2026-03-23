@@ -1977,7 +1977,9 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         Command::Pairing(pairing_command) => {
             commands::pairing::run_pairing(cli.config, pairing_command, cli.json).await
         }
-        Command::Toolset(toolset_command) => commands::toolset::run_toolset(toolset_command, cli.json),
+        Command::Toolset(toolset_command) => {
+            commands::toolset::run_toolset(toolset_command, cli.json)
+        }
         Command::Plugins(plugins_command) => {
             commands::plugins::run_plugins(cli.config, plugins_command, cli.json)
         }
@@ -2151,16 +2153,18 @@ mod tests {
 
     use crate::chat::default_session_id;
     use crate::commands::batch::{batch_output_path, parse_batch_input_line, sha256_hex};
+    use crate::commands::compress::{
+        parse_compression_format, parse_compression_level, run_compress,
+    };
     use crate::commands::eval::run_eval_export_chatml;
     use crate::commands::eval::run_eval_quality;
-    use crate::commands::compress::{parse_compression_format, parse_compression_level, run_compress};
     use crate::commands::model::known_models;
     use crate::commands::personality::run_personality;
     use crate::commands::plugins::run_plugins;
-    use crate::commands::toolset::run_toolset;
     use crate::commands::serve::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
     };
+    use crate::commands::toolset::run_toolset;
     use crate::format::{
         context_template, export_session_markdown, format_insights, format_memory_list,
         format_schedule_list, format_session_list, format_session_messages, format_skill,

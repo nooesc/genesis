@@ -676,7 +676,10 @@ mod tests {
             arguments: BTreeMap::from([
                 ("name".to_owned(), "evolving".to_owned()),
                 ("description".to_owned(), format!("Version {version_hint}")),
-                ("instructions".to_owned(), format!("Steps for v{version_hint}")),
+                (
+                    "instructions".to_owned(),
+                    format!("Steps for v{version_hint}"),
+                ),
             ]),
         };
 

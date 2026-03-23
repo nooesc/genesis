@@ -376,6 +376,14 @@ pub struct RuntimeConfig {
     /// interactive confirmation before execution.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Number of consecutive same-tool failures before injecting a stuck-loop
+    /// nudge. Higher values reduce false positives for flaky tools. Default: 5.
+    #[serde(default = "default_stuck_loop_threshold")]
+    pub stuck_loop_threshold: usize,
+}
+
+fn default_stuck_loop_threshold() -> usize {
+    defaults::retry::STUCK_LOOP_THRESHOLD
 }
 
 /// Batch API routing configuration.
@@ -972,6 +980,8 @@ struct FileRuntimeConfig {
     tool_policy_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_mode: Option<ApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stuck_loop_threshold: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -1061,6 +1071,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             batch: None,
             tool_policy_path: None,
             approval_mode: ApprovalMode::default(),
+            stuck_loop_threshold: defaults::retry::STUCK_LOOP_THRESHOLD,
         },
         plugins: PluginsConfig::default(),
         gateway: None,
@@ -1231,6 +1242,12 @@ pub fn load_from_map(
         batch: rt.and_then(|r| r.batch.clone()),
         tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
         approval_mode: rt.and_then(|r| r.approval_mode).unwrap_or_default(),
+        stuck_loop_threshold: parse_env(
+            env,
+            "GENESIS_STUCK_LOOP_THRESHOLD",
+            rt.and_then(|r| r.stuck_loop_threshold)
+                .unwrap_or(defaults::retry::STUCK_LOOP_THRESHOLD),
+        )?,
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();
@@ -1417,7 +1434,7 @@ macro_rules! parse_and_set {
 ///   runtime.max_turns, runtime.max_concurrency,
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
 ///   runtime.thinking_budget, runtime.max_context_tokens, runtime.max_iterations,
-///   runtime.budget_limit, runtime.reasoning_effort,
+///   runtime.budget_limit, runtime.stuck_loop_threshold, runtime.reasoning_effort,
 ///   gateway.idle_timeout_minutes, gateway.daily_reset_hour, gateway.rate_limit_rpm,
 ///   tui.theme
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -1531,6 +1548,15 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .budget_limit = if v <= 0.0 { None } else { Some(v) };
         }
+        "runtime.stuck_loop_threshold" => parse_and_set!(
+            value,
+            "runtime.stuck_loop_threshold",
+            usize,
+            file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default)
+                .stuck_loop_threshold
+        ),
         "runtime.reasoning_effort" => {
             let effort: ReasoningEffort = match value.to_ascii_lowercase().as_str() {
                 "high" => ReasoningEffort::High,
@@ -1607,7 +1633,8 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      runtime.max_turns, runtime.max_concurrency, \
                      runtime.allow_destructive_tools, runtime.max_context_messages, \
                      runtime.thinking_budget, runtime.max_context_tokens, \
-                     runtime.max_iterations, runtime.budget_limit, runtime.reasoning_effort, \
+                     runtime.max_iterations, runtime.budget_limit, \
+                     runtime.stuck_loop_threshold, runtime.reasoning_effort, \
                      gateway.idle_timeout_minutes, gateway.daily_reset_hour, \
                      gateway.rate_limit_rpm, gateway.stream_timeout_secs, tui.theme"
                 ),

@@ -6,7 +6,10 @@ use crate::error::StorageError;
 use crate::util::{column_exists, exec_migration, rebuild_memory_vec_index};
 
 /// Migrate v1 → v2: add token tracking columns to sessions table.
-pub(crate) fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v2(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if column_exists(connection, "sessions", "total_input_tokens") {
         return Ok(());
     }
@@ -20,7 +23,10 @@ pub(crate) fn migrate_to_v2(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v2 → v3: add parent_session_id for conversation forking.
-pub(crate) fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v3(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if column_exists(connection, "sessions", "parent_session_id") {
         return Ok(());
     }
@@ -33,7 +39,10 @@ pub(crate) fn migrate_to_v3(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v3 → v4: add tags column to sessions for categorization.
-pub(crate) fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v4(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if column_exists(connection, "sessions", "tags") {
         return Ok(());
     }
@@ -46,7 +55,10 @@ pub(crate) fn migrate_to_v4(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v4 → v5: add mirror columns to messages for delivery mirroring.
-pub(crate) fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v5(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if column_exists(connection, "messages", "mirror") {
         return Ok(());
     }
@@ -60,7 +72,10 @@ pub(crate) fn migrate_to_v5(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v5 → v6: add response_cache and audit_log tables.
-pub(crate) fn migrate_to_v6(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v6(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     exec_migration(
         connection,
         database_path,
@@ -92,7 +107,10 @@ pub(crate) fn migrate_to_v6(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v6 → v7: add channels table for platform channel caching.
-pub(crate) fn migrate_to_v7(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v7(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     exec_migration(
         connection,
         database_path,
@@ -109,7 +127,10 @@ pub(crate) fn migrate_to_v7(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v7 → v8: add sticker_cache table for Telegram sticker descriptions.
-pub(crate) fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v8(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     exec_migration(
         connection,
         database_path,
@@ -124,7 +145,10 @@ pub(crate) fn migrate_to_v8(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v8 → v9: add provider_metadata column and sandboxes table.
-pub(crate) fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v9(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     // Add provider_metadata column (idempotent).
     let has_column: bool = connection
         .prepare("SELECT provider_metadata FROM messages LIMIT 0")
@@ -161,12 +185,18 @@ pub(crate) fn migrate_to_v9(connection: &Connection, database_path: &Path) -> Re
 }
 
 /// Migrate v9 → v10: create and backfill the sqlite-vec memory index when dimensions are uniform.
-pub(crate) fn migrate_to_v10(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v10(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     rebuild_memory_vec_index(connection, database_path)
 }
 
 /// Migrate v10 → v11: add structured memory metadata columns and note-link edges.
-pub(crate) fn migrate_to_v11(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v11(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if !column_exists(connection, "memories", "keywords_json") {
         exec_migration(
             connection,
@@ -218,7 +248,10 @@ pub(crate) fn migrate_to_v11(connection: &Connection, database_path: &Path) -> R
 }
 
 /// Migrate v11 → v12: store unresolved memory links until both notes exist.
-pub(crate) fn migrate_to_v12(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v12(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     exec_migration(
         connection,
         database_path,
@@ -232,7 +265,10 @@ pub(crate) fn migrate_to_v12(connection: &Connection, database_path: &Path) -> R
 }
 
 /// Migrate v12 → v13: add timezone to schedules and schedule execution history.
-pub(crate) fn migrate_to_v13(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn migrate_to_v13(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     if !column_exists(connection, "schedules", "timezone") {
         exec_migration(
             connection,

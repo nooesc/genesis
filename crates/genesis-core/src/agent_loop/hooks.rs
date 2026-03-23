@@ -1,5 +1,5 @@
-use genesis_provider::{ChatMessage, ContentPart, MessageContent};
 use genesis_lua::hooks::{PostHookOutcome, PreHookOutcome};
+use genesis_provider::{ChatMessage, ContentPart, MessageContent};
 use tracing::warn;
 
 use super::{AgentError, AgentLoop, AgentResult};

@@ -54,13 +54,20 @@ pub(crate) async fn list_user_traits_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + traits_list.len()) < total as usize;
-    Ok(Json(serde_json::to_value(TraitListResponse {
-        traits: traits_list,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TraitListResponse {
+            traits: traits_list,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
