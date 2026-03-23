@@ -57,16 +57,14 @@ pub fn make_fs_bridge(lua: &Lua, validator: Option<Arc<PathValidator>>) -> mlua:
         "write",
         lua.create_function(move |_, (path, content): (String, String)| {
             let resolved = resolve_path(&path, &write_validator)?;
-            // Create parent directories if they don't exist.
+            // Create parent directories (no-op if they already exist).
             if let Some(parent) = resolved.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        mlua::Error::external(format!(
-                            "fs.write create parent dirs `{}`: {e}",
-                            parent.display()
-                        ))
-                    })?;
-                }
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    mlua::Error::external(format!(
+                        "fs.write create parent dirs `{}`: {e}",
+                        parent.display()
+                    ))
+                })?;
             }
             std::fs::write(&resolved, content).map_err(|e| {
                 mlua::Error::external(format!("fs.write `{}`: {e}", resolved.display()))

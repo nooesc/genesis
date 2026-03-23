@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -31,16 +31,8 @@ impl ToolHandler for SearchFilesTool {
             .map(|p| p.as_str())
             .unwrap_or(".");
 
-        let validated_path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
+        let validated_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
 
         let path = validated_path.to_string_lossy().into_owned();
         let path = path.as_str();

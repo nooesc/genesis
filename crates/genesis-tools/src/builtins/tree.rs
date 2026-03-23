@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput, NOISE_DIRS};
 
@@ -19,16 +19,8 @@ impl ToolHandler for ListTreeTool {
                 argument: "path",
             })?;
 
-        let validated_path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
+        let validated_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
 
         let path = &validated_path.to_string_lossy().into_owned();
 

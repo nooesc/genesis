@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -253,6 +254,26 @@ impl PathValidator {
         }
 
         Ok(canonical)
+    }
+}
+
+/// Validate a path argument using the optional [`PathValidator`] from [`crate::ToolContext`].
+///
+/// Returns the canonical `PathBuf` if a validator is present, or the raw path
+/// converted to a `PathBuf` when no validator is configured.
+pub fn validate_tool_path(
+    raw: &str,
+    tool_name: &str,
+    validator: &Option<Arc<PathValidator>>,
+) -> Result<PathBuf, crate::ToolError> {
+    match validator {
+        Some(v) => v
+            .validate(raw)
+            .map_err(|e| crate::ToolError::ExecutionFailed {
+                tool: tool_name.to_owned(),
+                reason: e.to_string(),
+            }),
+        None => Ok(PathBuf::from(raw)),
     }
 }
 

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -25,18 +24,9 @@ impl ToolHandler for PatchTool {
                 argument: "path",
             })?;
 
-        let file_path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
-
-        let path = path_arg;
+        let file_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+        let display_path = file_path.display().to_string();
 
         let old_text =
             call.arguments
@@ -56,7 +46,7 @@ impl ToolHandler for PatchTool {
 
         let content = fs::read_to_string(&file_path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason: format!("failed to read `{path}`: {e}"),
+            reason: format!("failed to read `{display_path}`: {e}"),
         })?;
 
         let replace_all = call
@@ -73,20 +63,20 @@ impl ToolHandler for PatchTool {
             let updated = content.replace(old_text.as_str(), new_text.as_str());
             fs::write(file_path, &updated).map_err(|e| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!("failed to write `{path}`: {e}"),
+                reason: format!("failed to write `{display_path}`: {e}"),
             })?;
 
             let replacements = if replace_all { count } else { 1 };
-            let diff_section = format_patch_diff(path, old_text, new_text);
+            let diff_section = format_patch_diff(&display_path, old_text, new_text);
             return Ok(ToolOutput {
                 content: format!(
-                    "patched `{path}`: {replacements} replacement(s) applied ({} bytes → {} bytes)\n\n{diff_section}",
+                    "patched `{display_path}`: {replacements} replacement(s) applied ({} bytes → {} bytes)\n\n{diff_section}",
                     content.len(),
                     updated.len()
                 ),
                 metadata: BTreeMap::from([
                     ("tool".to_owned(), call.name.clone()),
-                    ("path".to_owned(), path.clone()),
+                    ("path".to_owned(), display_path.clone()),
                     ("replacements".to_owned(), replacements.to_string()),
                     ("match_type".to_owned(), "exact".to_owned()),
                 ]),
@@ -97,7 +87,7 @@ impl ToolHandler for PatchTool {
             return Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!(
-                    "old_text found {count} times in `{path}`. Provide more surrounding \
+                    "old_text found {count} times in `{display_path}`. Provide more surrounding \
                      context to make the match unique, or set replace_all to \"true\" to \
                      replace every occurrence."
                 ),
@@ -121,7 +111,7 @@ impl ToolHandler for PatchTool {
 
                 fs::write(file_path, &updated).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
-                    reason: format!("failed to write `{path}`: {e}"),
+                    reason: format!("failed to write `{display_path}`: {e}"),
                 })?;
 
                 // Build a diff hint showing what was actually matched vs what was requested.
@@ -130,7 +120,7 @@ impl ToolHandler for PatchTool {
 
                 Ok(ToolOutput {
                     content: format!(
-                        "patched `{path}` via fuzzy match ({similarity_pct}% similarity, \
+                        "patched `{display_path}` via fuzzy match ({similarity_pct}% similarity, \
                          {} bytes → {} bytes).\n\n\
                          The exact old_text was not found, but a similar block was matched \
                          and replaced.\n{diff_hint}",
@@ -139,7 +129,7 @@ impl ToolHandler for PatchTool {
                     ),
                     metadata: BTreeMap::from([
                         ("tool".to_owned(), call.name.clone()),
-                        ("path".to_owned(), path.clone()),
+                        ("path".to_owned(), display_path.clone()),
                         ("replacements".to_owned(), "1".to_owned()),
                         ("match_type".to_owned(), "fuzzy".to_owned()),
                         ("similarity".to_owned(), format!("{similarity_pct}")),
@@ -149,7 +139,7 @@ impl ToolHandler for PatchTool {
             None => Err(ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: format!(
-                    "old_text not found in `{path}` (exact match failed, fuzzy match \
+                    "old_text not found in `{display_path}` (exact match failed, fuzzy match \
                      below {:.0}% threshold). Make sure the text is close to what actually \
                      appears in the file.",
                     FUZZY_THRESHOLD * 100.0

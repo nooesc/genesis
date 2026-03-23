@@ -1,109 +1,37 @@
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 
-/// Convert a Lua [`Value`] into a [`serde_json::Value`].
+/// Build the `genesis.json` bridge table with `encode`, `decode`, and
+/// `encode_pretty` functions.
 ///
-/// Tables are inspected via `raw_len()`: if the raw length is > 0 the table is
-/// treated as an array (sequential integer keys starting at 1), otherwise as an
-/// object (string keys).
-pub fn lua_value_to_json(value: Value) -> mlua::Result<serde_json::Value> {
-    match value {
-        Value::Nil => Ok(serde_json::Value::Null),
-        Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
-        Value::Integer(n) => Ok(serde_json::json!(n)),
-        Value::Number(n) => serde_json::Number::from_f64(n)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| mlua::Error::external(format!("cannot represent {n} as JSON number"))),
-        Value::String(s) => Ok(serde_json::Value::String(s.to_str()?.to_owned())),
-        Value::Table(table) => {
-            let raw_len = table.raw_len();
-            if raw_len > 0 {
-                // Array path — sequential integer keys 1..=raw_len.
-                let mut arr = Vec::with_capacity(raw_len);
-                for i in 1..=raw_len {
-                    let v: Value = table.raw_get(i)?;
-                    arr.push(lua_value_to_json(v)?);
-                }
-                Ok(serde_json::Value::Array(arr))
-            } else {
-                // Object path — iterate all pairs and keep string keys.
-                let mut map = serde_json::Map::new();
-                for pair in table.pairs::<String, Value>() {
-                    let (k, v) = pair?;
-                    map.insert(k, lua_value_to_json(v)?);
-                }
-                Ok(serde_json::Value::Object(map))
-            }
-        }
-        other => Err(mlua::Error::external(format!(
-            "cannot convert {} to JSON",
-            other.type_name()
-        ))),
-    }
-}
-
-/// Convert a [`serde_json::Value`] into a Lua [`Value`].
-pub fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> {
-    match value {
-        serde_json::Value::Null => Ok(Value::Nil),
-        serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(Value::Number(f))
-            } else {
-                Err(mlua::Error::external(format!(
-                    "cannot represent JSON number {n} in Lua"
-                )))
-            }
-        }
-        serde_json::Value::String(s) => Ok(Value::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let table = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                table.raw_set(i + 1, json_to_lua_value(lua, v)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-        serde_json::Value::Object(map) => {
-            let table = lua.create_table()?;
-            for (k, v) in map {
-                table.raw_set(k.as_str(), json_to_lua_value(lua, v)?)?;
-            }
-            Ok(Value::Table(table))
-        }
-    }
-}
-
-/// Build the `genesis.json` bridge table with `encode` and `decode` functions.
+/// Conversion between Lua values and JSON is handled by [`mlua::LuaSerdeExt`],
+/// which correctly maps sequential-integer-keyed tables to JSON arrays and
+/// string-keyed tables to JSON objects.
 pub fn make_json_bridge(lua: &Lua) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     table.set(
         "encode",
-        lua.create_function(|_lua, value: Value| {
-            let json_value = lua_value_to_json(value)?;
-            serde_json::to_string(&json_value)
-                .map_err(|e| mlua::Error::external(format!("JSON encode error: {e}")))
+        lua.create_function(|lua, value: Value| {
+            let json: serde_json::Value = lua.from_value(value)?;
+            serde_json::to_string(&json).map_err(mlua::Error::external)
         })?,
     )?;
 
     table.set(
         "decode",
         lua.create_function(|lua, s: String| {
-            let json_value: serde_json::Value = serde_json::from_str(&s)
-                .map_err(|e| mlua::Error::external(format!("JSON decode error: {e}")))?;
-            json_to_lua_value(lua, &json_value)
+            let json: serde_json::Value =
+                serde_json::from_str(&s).map_err(mlua::Error::external)?;
+            lua.to_value(&json)
         })?,
     )?;
 
     // Pretty-print variant of encode.
     table.set(
         "encode_pretty",
-        lua.create_function(|_lua, value: Value| {
-            let json_value = lua_value_to_json(value)?;
-            serde_json::to_string_pretty(&json_value)
-                .map_err(|e| mlua::Error::external(format!("JSON encode error: {e}")))
+        lua.create_function(|lua, value: Value| {
+            let json: serde_json::Value = lua.from_value(value)?;
+            serde_json::to_string_pretty(&json).map_err(mlua::Error::external)
         })?,
     )?;
 
@@ -245,8 +173,8 @@ mod tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("JSON decode error"),
-            "error should mention JSON decode: {msg}"
+            msg.contains("expected") || msg.contains("JSON"),
+            "error should mention the parse failure: {msg}"
         );
     }
 

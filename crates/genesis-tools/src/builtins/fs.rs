@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -18,16 +17,8 @@ impl ToolHandler for ReadFileTool {
                 argument: "path",
             })?;
 
-        let path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
 
         let content = fs::read_to_string(&path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
@@ -67,16 +58,8 @@ impl ToolHandler for WriteFileTool {
             })?;
 
         // Validate path BEFORE creating directories (sandbox escape prevention).
-        let path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
 
         // Create parent directories if needed.
         if let Some(parent) = path.parent() {
@@ -116,16 +99,8 @@ impl ToolHandler for ListDirTool {
                 argument: "path",
             })?;
 
-        let path = if let Some(ref validator) = context.path_validator {
-            validator
-                .validate(path_arg)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: e.to_string(),
-                })?
-        } else {
-            PathBuf::from(path_arg)
-        };
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
 
         let entries = fs::read_dir(&path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
@@ -170,6 +145,8 @@ impl ToolHandler for ListDirTool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::ToolContext;
     use std::fs;

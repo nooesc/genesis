@@ -27,8 +27,8 @@ pub struct GenesisApi {
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
-    pub path_validator: Option<Arc<PathValidator>>,
-    pub working_dir: Option<String>,
+    pub(crate) path_validator: Option<Arc<PathValidator>>,
+    pub(crate) working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
