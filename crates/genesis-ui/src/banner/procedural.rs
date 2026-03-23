@@ -54,43 +54,41 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
     let t_f32 = t as f32;
 
     // ── Layer 1: Hex grid ────────────────────────────────────────────
-    // Dimmer grid so it doesn't overpower the silhouette.
+    // Very faint — just a hint of structure behind the silhouette.
     let hex_spacing = if is_compact {
         HEX_SPACING_COMPACT
     } else {
         HEX_SPACING_FULL
     };
-    let dimmed_dark = geometry::dim_color(RgbColor::from_tuple(EVE_DARK), 0.7);
+    let faint_dark = geometry::dim_color(RgbColor::from_tuple(EVE_DARK), 0.35);
     let hex_grid = geometry::render_hex_grid(
         px_w,
         px_h,
         hex_spacing,
-        dimmed_dark,
+        faint_dark,
         0.5,
         0.35,
         t_f32,
     );
 
     // ── Layer 2: Cruciform ───────────────────────────────────────────
-    // Positioned at y=0.12 — above/behind the head like a halo, not
-    // cutting through the body. Thin and dimmed.
+    // Very subtle — positioned behind the head area as a halo.
     let cruciform_t = t_f32 + 0.5;
-    let dimmed_amber = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.6);
+    let faint_amber = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.4);
     let cruciform = geometry::render_cruciform(
         px_w,
         px_h,
         0.5,
-        0.12,
-        0.010,
-        dimmed_amber,
+        0.10,
+        0.008,
+        faint_amber,
         cruciform_t,
     );
 
     // ── Layer 3: Arcs (skip for compact) ─────────────────────────────
-    // Concentric arcs around the halo center.
     let arcs = if !is_compact {
-        let arc_color = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.35);
-        geometry::render_arcs(px_w, px_h, 0.5, 0.12, ARC_RADII, arc_color)
+        let arc_color = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.25);
+        geometry::render_arcs(px_w, px_h, 0.5, 0.10, ARC_RADII, arc_color)
     } else {
         geometry::new_pixel_grid(px_w, px_h)
     };
@@ -101,8 +99,7 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
     blend_layers(&mut background, &arcs);
 
     // ── Layer 4: Silhouette ──────────────────────────────────────────
-    let sil_path = silhouette::default_silhouette();
-    let mask = silhouette::rasterize(&sil_path, px_w, px_h);
+    let mask = silhouette::rasterize(px_w, px_h);
     let mut sil_pixels = silhouette::fill_gradient(
         &mask,
         px_w,
