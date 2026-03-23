@@ -397,6 +397,7 @@ mod tests {
                 extra_body: None,
                 tool_call_parser: None,
                 circuit_breaker: None,
+                timeout_secs: None,
             },
             tool_provider: None,
             fallback_providers: Vec::new(),

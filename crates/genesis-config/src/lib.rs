@@ -265,6 +265,11 @@ pub struct ProviderConfig {
     /// Circuit breaker configuration for this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Per-provider timeout in seconds for fallback providers. When used as a
+    /// fallback, this caps how long we wait before moving on to the next
+    /// provider. Defaults to 30 seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Circuit breaker configuration for a provider.
@@ -916,6 +921,8 @@ struct FileProviderConfig {
     tool_call_parser: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     circuit_breaker: Option<CircuitBreakerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1025,6 +1032,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             extra_body: None,
             tool_call_parser: None,
             circuit_breaker: None,
+            timeout_secs: None,
         },
         tool_provider: None,
         fallback_providers: Vec::new(),
@@ -1129,6 +1137,7 @@ pub fn load_from_map(
         extra_body: prov.and_then(|p| p.extra_body.clone()),
         tool_call_parser: prov.and_then(|p| p.tool_call_parser.clone()),
         circuit_breaker: prov.and_then(|p| p.circuit_breaker.clone()),
+        timeout_secs: prov.and_then(|p| p.timeout_secs),
     };
 
     // Optional tool provider — inherits primary provider defaults when partially specified.
@@ -1156,6 +1165,7 @@ pub fn load_from_map(
         extra_body: tp.extra_body.clone(),
         tool_call_parser: tp.tool_call_parser.clone(),
         circuit_breaker: tp.circuit_breaker.clone(),
+        timeout_secs: tp.timeout_secs,
     });
 
     // Fallback providers — each inherits primary provider defaults when partially specified.
@@ -1180,6 +1190,7 @@ pub fn load_from_map(
                 .circuit_breaker
                 .clone()
                 .or_else(|| provider.circuit_breaker.clone()),
+            timeout_secs: fp.timeout_secs,
         })
         .collect::<Vec<_>>();
 
