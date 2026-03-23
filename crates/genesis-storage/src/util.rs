@@ -345,3 +345,18 @@ where
 {
     candidates.find(|path| path.is_dir())
 }
+
+/// Cosine similarity between two vectors. Returns 0.0 on empty/mismatched inputs.
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut norm_a, mut norm_b) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < f32::EPSILON { 0.0 } else { dot / denom }
+}

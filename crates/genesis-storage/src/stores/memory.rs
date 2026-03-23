@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::StorageError;
 use crate::stores::embedding::{embedding_to_blob, EmbeddingStore};
 use crate::util::{
-    collect_rows, decayed_importance, edge_type_weight, exec_migration,
+    collect_rows, cosine_similarity, decayed_importance, edge_type_weight, exec_migration,
     memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders,
     sqlite_table_exists,
 };
@@ -296,8 +296,8 @@ impl MemoryStore {
             let base_score = 1.0 / (60.0 + rank as f64);
             if seen.insert(memory.id.clone()) {
                 if let Some(attributes) = attributes.get(&memory.id) {
-                    expanded.push(Self::score_graph_memory(
-                        memory, attributes, base_score, &now,
+                    expanded.push(Self::score_memory(
+                        memory, attributes, base_score, &now, "graph",
                     )?);
                 }
             }
@@ -313,11 +313,12 @@ impl MemoryStore {
                         * (0.5 / (link_rank as f64 + 1.0))
                         * edge_type_weight(&linked.edge_type)
                         * linked.edge_weight;
-                    expanded.push(Self::score_graph_memory(
+                    expanded.push(Self::score_memory(
                         &linked.memory,
                         &linked.attributes,
                         link_score,
                         &now,
+                        "graph",
                     )?);
                 }
             }
@@ -597,33 +598,19 @@ impl MemoryStore {
         Ok(grouped)
     }
 
-    fn score_graph_memory(
+    fn score_memory(
         memory: &StoredMemory,
         attributes: &GraphAttributes,
         base_score: f64,
         now: &DateTime<Utc>,
+        source: &str,
     ) -> Result<ScoredMemory, StorageError> {
         let score = base_score
             * decayed_importance(attributes.importance, &attributes.accessed_at, now)? as f64;
         Ok(ScoredMemory {
             memory: memory.clone(),
             score,
-            source: "graph".to_owned(),
-        })
-    }
-
-    fn score_advanced_memory(
-        memory: &StoredMemory,
-        attributes: &GraphAttributes,
-        base_score: f64,
-        now: &DateTime<Utc>,
-    ) -> Result<ScoredMemory, StorageError> {
-        let score = base_score
-            * decayed_importance(attributes.importance, &attributes.accessed_at, now)? as f64;
-        Ok(ScoredMemory {
-            memory: memory.clone(),
-            score,
-            source: "advanced".to_owned(),
+            source: source.to_owned(),
         })
     }
 
@@ -667,8 +654,9 @@ impl MemoryStore {
         &self,
         query_embedding: &[f32],
         threshold: f64,
+        max_candidates: usize,
     ) -> Result<Vec<ScoredMemory>, StorageError> {
-        let candidates = self.vector_search(query_embedding, 5)?;
+        let candidates = self.vector_search(query_embedding, max_candidates)?;
         Ok(candidates
             .into_iter()
             .filter(|s| s.score >= threshold)
@@ -682,20 +670,25 @@ impl MemoryStore {
         additional_content: &str,
         new_importance: f32,
     ) -> Result<(), StorageError> {
-        let connection = self.db.conn()?;
-        connection
-            .execute(
-                "UPDATE memories SET content = content || ?2, importance = MAX(importance, ?3), accessed_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                params![memory_id, additional_content, new_importance],
-            )
+        let mut connection = self.db.conn()?;
+        let tx = connection
+            .transaction()
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        // Update FTS index
-        if sqlite_table_exists(&connection, self.db.path(), "memory_search")? {
-            let (rowid, kind, content): (i64, String, String) = connection
+        tx.execute(
+            "UPDATE memories SET content = content || ?2, importance = MAX(importance, ?3), accessed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![memory_id, additional_content, new_importance],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })?;
+
+        if sqlite_table_exists(&tx, self.db.path(), "memory_search")? {
+            let (rowid, kind, content): (i64, String, String) = tx
                 .query_row(
                     "SELECT rowid, kind, content FROM memories WHERE id = ?1",
                     params![memory_id],
@@ -705,16 +698,28 @@ impl MemoryStore {
                     path: self.db.path().to_path_buf(),
                     source,
                 })?;
-            let _ = connection.execute(
+            tx.execute(
                 "DELETE FROM memory_search WHERE memory_row_id = ?1",
                 params![rowid],
-            );
-            let _ = connection.execute(
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+            tx.execute(
                 "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
                 params![rowid, kind, content],
-            );
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
         }
-        Ok(())
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })
     }
 
     /// Find top-N similar memories (above threshold) and create bidirectional semantic edges.
@@ -779,8 +784,8 @@ impl MemoryStore {
             if seen.insert(memory.id.clone()) {
                 let base_score = 1.0 / (60.0 + rank as f64);
                 if let Some(attrs) = attributes.get(&memory.id) {
-                    scored.push(Self::score_advanced_memory(
-                        memory, attrs, base_score, &now,
+                    scored.push(Self::score_memory(
+                        memory, attrs, base_score, &now, "advanced",
                     )?);
                 }
             }
@@ -808,8 +813,11 @@ impl MemoryStore {
                             let hop_decay = 0.5;
                             let link_position_decay = 1.0 / (link_rank as f64 + 1.0);
                             let type_weight = edge_type_weight(&neighbor.edge_type);
-                            let neighbor_score =
-                                source_score * hop_decay * link_position_decay * type_weight;
+                            let neighbor_score = source_score
+                                * hop_decay
+                                * link_position_decay
+                                * type_weight
+                                * neighbor.edge_weight;
                             let final_score = neighbor_score
                                 * decayed_importance(
                                     neighbor.attributes.importance,
@@ -829,6 +837,13 @@ impl MemoryStore {
                 }
             }
             frontier = next_frontier;
+
+            // Cap frontier to prevent unbounded expansion on dense graphs.
+            frontier.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            frontier.truncate(limit * 4);
         }
 
         scored.sort_by(|a, b| {
@@ -865,17 +880,17 @@ impl MemoryStore {
                 path: self.db.path().to_path_buf(),
                 source,
             })?;
-        let recent_ids: Vec<String> = stmt
-            .query_map(
+        let recent_ids: Vec<String> = collect_rows(
+            stmt.query_map(
                 params![session_id, memory_id, max_links as i64],
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+            })?,
+            self.db.path(),
+        )?;
         drop(stmt);
         drop(connection);
 
@@ -991,7 +1006,8 @@ impl MemoryStore {
             .prepare(
                 "SELECT id, session_id, kind, content, created_at FROM memories
                  WHERE importance < ?1 AND consolidated = 0
-                 AND julianday('now') - julianday(accessed_at) > ?2
+                   AND kind != 'consolidated_summary'
+                   AND julianday('now') - julianday(accessed_at) > ?2
                  ORDER BY importance ASC",
             )
             .map_err(|source| StorageError::Sqlite {
@@ -1043,6 +1059,11 @@ impl MemoryStore {
             .into_iter()
             .filter(|(id, _)| unconsolidated.contains(id))
             .collect();
+
+        const MAX_CLUSTER_CANDIDATES: usize = 5000;
+        if embeddings.len() > MAX_CLUSTER_CANDIDATES {
+            return Ok(Vec::new());
+        }
 
         if embeddings.len() < min_cluster_size {
             return Ok(Vec::new());
@@ -1125,25 +1146,6 @@ impl MemoryStore {
             self.create_link(&summary_id, member_id, "consolidation", 0.5)?;
         }
         Ok(summary)
-    }
-}
-
-/// Cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    let d = na.sqrt() * nb.sqrt();
-    if d == 0.0 {
-        0.0
-    } else {
-        dot / d
     }
 }
 
@@ -1856,7 +1858,7 @@ mod memory_store_tests {
         embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
 
         let store = MemoryStore::new(&db_path);
-        let results = store.find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92).unwrap();
+        let results = store.find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92, 10).unwrap();
         assert!(
             !results.is_empty(),
             "near-duplicate embedding should be found above threshold"
@@ -1872,7 +1874,7 @@ mod memory_store_tests {
         embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
 
         let store = MemoryStore::new(&db_path);
-        let results = store.find_similar(&[0.0, 1.0, 0.0, 0.0], 0.92).unwrap();
+        let results = store.find_similar(&[0.0, 1.0, 0.0, 0.0], 0.92, 10).unwrap();
         assert!(
             results.is_empty(),
             "orthogonal embedding should not match above threshold"

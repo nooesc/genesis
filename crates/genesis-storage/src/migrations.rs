@@ -292,6 +292,32 @@ pub(crate) fn migrate_to_v13(
     )
 }
 
+/// Migrate v13 → v14: add edge_type and weight to memory_links for typed graph edges.
+pub(crate) fn migrate_to_v14(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
+    if !column_exists(connection, "memory_links", "edge_type") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memory_links ADD COLUMN edge_type TEXT NOT NULL DEFAULT 'semantic';",
+        )?;
+    }
+    if !column_exists(connection, "memory_links", "weight") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memory_links ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;",
+        )?;
+    }
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE INDEX IF NOT EXISTS idx_memory_links_edge_type ON memory_links(edge_type);",
+    )
+}
+
 /// Migrate v14 → v15: add consolidation support columns.
 pub(crate) fn migrate_to_v15(
     connection: &Connection,
@@ -320,32 +346,6 @@ pub(crate) fn migrate_to_v15(
         connection,
         database_path,
         "CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);",
-    )
-}
-
-/// Migrate v13 → v14: add edge_type and weight to memory_links for typed graph edges.
-pub(crate) fn migrate_to_v14(
-    connection: &Connection,
-    database_path: &Path,
-) -> Result<(), StorageError> {
-    if !column_exists(connection, "memory_links", "edge_type") {
-        exec_migration(
-            connection,
-            database_path,
-            "ALTER TABLE memory_links ADD COLUMN edge_type TEXT NOT NULL DEFAULT 'semantic';",
-        )?;
-    }
-    if !column_exists(connection, "memory_links", "weight") {
-        exec_migration(
-            connection,
-            database_path,
-            "ALTER TABLE memory_links ADD COLUMN weight REAL NOT NULL DEFAULT 1.0;",
-        )?;
-    }
-    exec_migration(
-        connection,
-        database_path,
-        "CREATE INDEX IF NOT EXISTS idx_memory_links_edge_type ON memory_links(edge_type);",
     )
 }
 
