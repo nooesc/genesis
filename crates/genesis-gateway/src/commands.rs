@@ -447,6 +447,7 @@ mod tests {
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
             routing: None,
+            memory: genesis_config::MemoryConfig::default(),
         }
     }
 

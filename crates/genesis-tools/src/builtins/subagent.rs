@@ -220,6 +220,7 @@ mod tests {
             embedding_service: None,
             path_validator: None,
             recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            keyword_enricher: None,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

@@ -66,6 +66,9 @@ pub struct GenesisConfig {
     /// Adaptive model routing configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingConfig>,
+    /// Memory system settings (keyword enrichment, auto-consolidation).
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 /// Display and UI settings for the CLI.
@@ -820,6 +823,32 @@ impl Default for RoutingConfig {
     }
 }
 
+/// Memory system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryConfig {
+    /// Use LLM to extract richer keywords on memory creation (default: false).
+    /// Adds latency to memory_store calls but produces better keyword quality.
+    #[serde(default)]
+    pub enrich_keywords: bool,
+    /// Auto-consolidation threshold: trigger consolidation after this many
+    /// unconsolidated memories accumulate (default: 100, 0 = disabled).
+    #[serde(default = "default_auto_consolidation_threshold")]
+    pub auto_consolidation_threshold: u64,
+}
+
+fn default_auto_consolidation_threshold() -> u64 {
+    100
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enrich_keywords: false,
+            auto_consolidation_threshold: default_auto_consolidation_threshold(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_path: PathBuf,
@@ -870,6 +899,8 @@ struct FileConfig {
     telemetry: Option<TelemetryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     routing: Option<RoutingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<MemoryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1037,6 +1068,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         tui: TuiConfig::default(),
         telemetry: None,
         routing: None,
+        memory: MemoryConfig::default(),
     })
 }
 
@@ -1228,6 +1260,7 @@ pub fn load_from_map(
             tui: file_config.tui.unwrap_or_default(),
             telemetry: file_config.telemetry,
             routing: file_config.routing,
+            memory: file_config.memory.unwrap_or_default(),
         },
         paths: AppPaths {
             config_path: paths.config_path,

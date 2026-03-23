@@ -105,6 +105,7 @@ pub(crate) async fn run_mcp(
                     genesis_tools::sandbox::PathValidator::new(None),
                 )),
                 recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                keyword_enricher: None,
                 approval_mode: genesis_config::ApprovalMode::Auto,
             };
 

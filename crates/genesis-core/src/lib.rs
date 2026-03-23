@@ -232,6 +232,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             embedding_service: None,
             path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
             recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            keyword_enricher: None,
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
@@ -1091,6 +1092,11 @@ impl ToolRuntime {
         self.context.embedding_service = Some(service);
     }
 
+    /// Set the keyword enricher for LLM-powered keyword extraction.
+    pub fn set_keyword_enricher(&mut self, enricher: Arc<dyn genesis_tools::KeywordEnricher>) {
+        self.context.keyword_enricher = Some(enricher);
+    }
+
     /// Clear the recalled memory IDs at the start of each new user turn.
     pub fn clear_recalled_memory_ids(&self) {
         if let Ok(mut ids) = self.context.recalled_memory_ids.lock() {
@@ -1244,6 +1250,7 @@ pub(crate) mod tests {
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
                 routing: None,
+                memory: genesis_config::MemoryConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1305,6 +1312,7 @@ pub(crate) mod tests {
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
                 routing: None,
+                memory: genesis_config::MemoryConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

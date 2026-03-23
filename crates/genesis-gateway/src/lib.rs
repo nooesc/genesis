@@ -1124,6 +1124,7 @@ mod tests {
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
             routing: None,
+            memory: genesis_config::MemoryConfig::default(),
         };
         let loaded = genesis_config::LoadedConfig {
             config,
@@ -1243,6 +1244,7 @@ mod tests {
             tui: genesis_config::TuiConfig::default(),
             telemetry: None,
             routing: None,
+            memory: genesis_config::MemoryConfig::default(),
         };
         let loaded = genesis_config::LoadedConfig {
             config,

@@ -121,6 +121,73 @@ impl genesis_tools::EmbeddingService for EmbeddingServiceBridge {
     }
 }
 
+/// Bridges the async `ChatClient` into the sync `KeywordEnricher` trait
+/// defined in genesis-tools. Uses `block_in_place` + `Handle::block_on`
+/// to call the async `ChatClient` from sync tool handlers.
+struct KeywordEnricherBridge {
+    client: genesis_provider::ChatClient,
+}
+
+impl genesis_tools::KeywordEnricher for KeywordEnricherBridge {
+    fn enrich(&self, content: &str) -> Result<Vec<String>, String> {
+        // block_in_place is safe: it's a no-op on blocking threads and
+        // moves the task off the worker when on a Tokio worker thread.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let system = "Extract keywords, entities, and concepts from the following text. \
+                    Return a JSON array of lowercase strings. Include proper nouns (keep original case), \
+                    technical terms, concepts, and relationships. Be concise — aim for 5-15 keywords. \
+                    Return ONLY the JSON array, no other text.";
+
+                let messages = vec![
+                    genesis_provider::ChatMessage::system(system),
+                    genesis_provider::ChatMessage::user(content),
+                ];
+
+                let request = genesis_provider::ChatCompletionRequest {
+                    model: String::new(), // filled in by the client
+                    messages,
+                    tools: Vec::new(),
+                    temperature: Some(0.0),
+                    max_tokens: Some(256),
+                    stream: None,
+                    stream_options: None,
+                    response_format: None,
+                    tool_choice: None,
+                    thinking: None,
+                    extra_body: None,
+                };
+
+                let response = self.client.complete(request).await.map_err(|e| e.to_string())?;
+
+                let text = response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content_text())
+                    .unwrap_or_default()
+                    .to_owned();
+
+                parse_keyword_json(&text)
+            })
+        })
+    }
+}
+
+/// Parse a JSON array of strings from LLM response text.
+/// Handles cases where the LLM wraps the array in markdown code fences.
+fn parse_keyword_json(text: &str) -> Result<Vec<String>, String> {
+    let cleaned = text.trim();
+    let cleaned = cleaned
+        .strip_prefix("```json")
+        .or_else(|| cleaned.strip_prefix("```"))
+        .unwrap_or(cleaned);
+    let cleaned = cleaned.strip_suffix("```").unwrap_or(cleaned).trim();
+
+    serde_json::from_str::<Vec<String>>(cleaned).map_err(|e| {
+        format!("failed to parse keyword JSON from LLM response: {e} (response: {text})")
+    })
+}
+
 impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
     fn execute_in_sandbox(
         &self,
@@ -746,6 +813,27 @@ impl<'a> SessionExecutionService<'a> {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to initialise embedding provider; memory dedup disabled");
+                }
+            }
+        }
+
+        // Wire LLM keyword enricher for richer memory keyword extraction
+        if self.loaded.config.memory.enrich_keywords {
+            match genesis_provider::client_from_config(
+                &self.loaded.config.provider.backend,
+                &self.loaded.config.provider.model,
+                self.loaded.config.provider.base_url.as_deref(),
+                self.loaded.config.provider.api_key_env.as_deref(),
+            )
+            .await
+            {
+                Ok(client) => {
+                    let enricher: Arc<dyn genesis_tools::KeywordEnricher> =
+                        Arc::new(KeywordEnricherBridge { client });
+                    tool_runtime.set_keyword_enricher(enricher);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to initialise keyword enricher; using simple extraction");
                 }
             }
         }
@@ -2328,6 +2416,7 @@ tools = [{tools_list}]
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
                 routing: None,
+                memory: genesis_config::MemoryConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -3088,5 +3177,34 @@ end)
             backend,
             genesis_tools::TerminalBackend::Daytona { .. }
         ));
+    }
+
+    // ---- parse_keyword_json tests ----
+
+    #[test]
+    fn parse_keyword_json_plain_array() {
+        let result = super::parse_keyword_json(r#"["rust", "memory", "keywords"]"#);
+        assert_eq!(
+            result.unwrap(),
+            vec!["rust", "memory", "keywords"]
+        );
+    }
+
+    #[test]
+    fn parse_keyword_json_with_code_fences() {
+        let result = super::parse_keyword_json("```json\n[\"rust\", \"llm\"]\n```");
+        assert_eq!(result.unwrap(), vec!["rust", "llm"]);
+    }
+
+    #[test]
+    fn parse_keyword_json_with_plain_fences() {
+        let result = super::parse_keyword_json("```\n[\"hello\"]\n```");
+        assert_eq!(result.unwrap(), vec!["hello"]);
+    }
+
+    #[test]
+    fn parse_keyword_json_invalid_returns_error() {
+        let result = super::parse_keyword_json("not json at all");
+        assert!(result.is_err());
     }
 }

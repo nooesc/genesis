@@ -83,7 +83,7 @@ impl ToolHandler for MemoryStoreTool {
                             {
                                 tracing::warn!(error = %e, "failed to temporally link merged memory");
                             }
-                            let merged_keywords = extract_keywords(&best_kind, &merged.content);
+                            let merged_keywords = extract_or_enrich_keywords(context, &best_kind, &merged.content);
                             if let Err(e) =
                                 store.auto_link_entity(&best_id, &merged_keywords, 5)
                             {
@@ -113,7 +113,7 @@ impl ToolHandler for MemoryStoreTool {
 
             // No duplicate — create a new note and embed it.
             let note_id = memory_id(context, key);
-            let keywords = extract_keywords(key, value);
+            let keywords = extract_or_enrich_keywords(context, key, value);
             store
                 .create_note(NewMemoryNote {
                     id: note_id.clone(),
@@ -375,7 +375,7 @@ fn store_plain(
     database_path: &std::path::Path,
 ) -> Result<ToolOutput, ToolError> {
     let note_id = memory_id(context, key);
-    let keywords = extract_keywords(key, value);
+    let keywords = extract_or_enrich_keywords(context, key, value);
     store
         .create_note(NewMemoryNote {
             id: note_id.clone(),
@@ -446,6 +446,27 @@ fn extract_keywords(key: &str, value: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Extract keywords, using the LLM enricher if available, falling back to simple extraction.
+fn extract_or_enrich_keywords(context: &ToolContext, key: &str, value: &str) -> Vec<String> {
+    if let Some(ref enricher) = context.keyword_enricher {
+        match enricher.enrich(value) {
+            Ok(keywords) if !keywords.is_empty() => return keywords,
+            Ok(_) => {
+                tracing::warn!(
+                    "keyword enricher returned empty result, falling back to simple extraction"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "keyword enricher failed, falling back to simple extraction"
+                );
+            }
+        }
+    }
+    extract_keywords(key, value)
 }
 
 fn unique_suffix() -> u128 {
@@ -1617,6 +1638,108 @@ mod tests {
         assert_eq!(
             causal_after_first, causal_after_second,
             "second store should not create additional causal links (recalled IDs drained)"
+        );
+    }
+
+    // ---- keyword enricher tests ----
+
+    /// Mock keyword enricher that returns fixed keywords.
+    struct MockKeywordEnricher;
+    impl crate::KeywordEnricher for MockKeywordEnricher {
+        fn enrich(&self, _content: &str) -> Result<Vec<String>, String> {
+            Ok(vec!["enriched_keyword".to_owned(), "concept".to_owned()])
+        }
+    }
+
+    /// Mock keyword enricher that always fails.
+    struct FailingKeywordEnricher;
+    impl crate::KeywordEnricher for FailingKeywordEnricher {
+        fn enrich(&self, _content: &str) -> Result<Vec<String>, String> {
+            Err("LLM unavailable".to_owned())
+        }
+    }
+
+    fn ctx_with_enricher(data_dir: &str, enricher: Arc<dyn crate::KeywordEnricher>) -> ToolContext {
+        ToolContext {
+            session_id: "session-42".to_owned(),
+            data_dir: data_dir.to_owned(),
+            keyword_enricher: Some(enricher),
+            ..crate::test_utils::test_ctx()
+        }
+    }
+
+    #[test]
+    fn memory_store_uses_keyword_enricher_when_available() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_enricher(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(MockKeywordEnricher),
+        );
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "test_key".to_owned()),
+                        ("value".to_owned(), "some content".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let keywords_json: String = conn
+            .query_row(
+                "SELECT keywords_json FROM memories WHERE kind = 'test_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            keywords_json.contains("enriched_keyword"),
+            "should use enricher keywords: {keywords_json}"
+        );
+    }
+
+    #[test]
+    fn memory_store_falls_back_when_enricher_fails() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_enricher(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(FailingKeywordEnricher),
+        );
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fallback_key".to_owned()),
+                        ("value".to_owned(), "fallback content".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let keywords_json: String = conn
+            .query_row(
+                "SELECT keywords_json FROM memories WHERE kind = 'fallback_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Should fall back to extract_keywords which would produce "fallback", "key", "content"
+        assert!(
+            keywords_json.contains("fallback"),
+            "should use fallback keywords: {keywords_json}"
         );
     }
 }
