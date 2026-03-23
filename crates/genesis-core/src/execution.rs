@@ -2268,7 +2268,6 @@ tools = [{tools_list}]
                     tool_filter: None,
                     guardrails: None,
                     core_tools: None,
-                    batch: None,
                     tool_policy_path: None,
                     approval_mode: genesis_config::ApprovalMode::default(),
                     stuck_loop_threshold: genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD,
