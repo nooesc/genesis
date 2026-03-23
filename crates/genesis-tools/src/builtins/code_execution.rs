@@ -435,7 +435,9 @@ fn rpc_server_loop(
         Some(s) => s,
         None => return,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS))).ok();
+    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS))) {
+        tracing::warn!(error = %e, "failed to set read timeout on code execution socket");
+    }
 
     let mut reader = std::io::BufReader::new(&stream);
     let mut writer = &stream;
@@ -526,7 +528,9 @@ fn accept_with_timeout(
     listener: &std::os::unix::net::UnixListener,
     timeout: Duration,
 ) -> Option<std::os::unix::net::UnixStream> {
-    listener.set_nonblocking(true).ok();
+    if let Err(e) = listener.set_nonblocking(true) {
+        tracing::warn!(error = %e, "failed to set non-blocking mode on code execution listener");
+    }
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match listener.accept() {

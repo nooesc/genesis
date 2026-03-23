@@ -310,12 +310,13 @@ fn format_section(title: &str, body: &str) -> String {
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> String {
-    Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_else(|| "(command failed)".to_owned())
+    match Command::new(program).args(args).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) => {
+            tracing::debug!(program = %program, error = %e, "system info command failed");
+            "(command failed)".to_owned()
+        }
+    }
 }
 
 fn get_cpu_info() -> String {

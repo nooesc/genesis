@@ -956,7 +956,13 @@ pub(crate) async fn run_benchmark(
                 let stream_start = std::time::Instant::now();
                 if let Ok(mut stream) = client.complete_stream(request).await {
                     use futures_util::TryStreamExt;
-                    if let Some(_chunk) = stream.try_next().await.ok().flatten() {
+                    if let Some(_chunk) = match stream.try_next().await {
+                        Ok(chunk) => chunk,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "TTFT stream read failed");
+                            None
+                        }
+                    } {
                         ttft_times.push(stream_start.elapsed());
                     }
                 }
@@ -1211,7 +1217,13 @@ pub(crate) async fn run_model(
                     .collect();
                 Ok(serde_json::to_string_pretty(&json_models)?)
             } else {
-                let loaded = load(config_path.as_deref()).ok();
+                let loaded = match load(config_path.as_deref()) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "failed to load config for model listing");
+                        None
+                    }
+                };
                 let active_model = loaded.as_ref().map(|l| l.config.provider.model.as_str());
                 let mut current_provider = String::new();
                 let mut lines = Vec::new();

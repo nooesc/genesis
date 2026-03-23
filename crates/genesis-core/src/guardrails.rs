@@ -182,39 +182,52 @@ pub struct CompiledGuardrails {
 impl CompiledGuardrails {
     /// Compile all regex patterns from the given configuration.
     ///
-    /// Invalid patterns are silently skipped (matching the previous behaviour).
+    /// Invalid patterns are logged and skipped so the remaining guardrails
+    /// still apply.
     pub fn new(config: &GuardrailConfig) -> Self {
         let forbidden_input = config
             .forbidden_input_patterns
             .iter()
-            .filter_map(|p| {
-                Regex::new(p).ok().map(|r| CompiledPattern {
+            .filter_map(|p| match Regex::new(p) {
+                Ok(r) => Some(CompiledPattern {
                     source: p.clone(),
                     regex: r,
-                })
+                }),
+                Err(e) => {
+                    tracing::warn!(pattern = %p, error = %e, "skipping invalid forbidden_input guardrail pattern");
+                    None
+                }
             })
             .collect();
         let forbidden_output = config
             .forbidden_output_patterns
             .iter()
-            .filter_map(|p| {
-                Regex::new(p).ok().map(|r| CompiledPattern {
+            .filter_map(|p| match Regex::new(p) {
+                Ok(r) => Some(CompiledPattern {
                     source: p.clone(),
                     regex: r,
-                })
+                }),
+                Err(e) => {
+                    tracing::warn!(pattern = %p, error = %e, "skipping invalid forbidden_output guardrail pattern");
+                    None
+                }
             })
             .collect();
         let custom_rules = config
             .custom_rules
             .iter()
-            .filter_map(|rule| {
-                Regex::new(&rule.pattern).ok().map(|r| CompiledCustomRule {
+            .filter_map(|rule| match Regex::new(&rule.pattern) {
+                Ok(r) => Some(CompiledCustomRule {
                     name: rule.name.clone(),
                     regex: r,
                     applies_to: rule.applies_to.clone(),
                     action: rule.action.clone(),
                     message: rule.message.clone(),
-                })
+                }),
+                Err(e) => {
+                    tracing::warn!(rule = %rule.name, pattern = %rule.pattern, error = %e, "skipping invalid custom guardrail rule");
+                    None
+                }
             })
             .collect();
         Self {

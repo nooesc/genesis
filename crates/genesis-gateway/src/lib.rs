@@ -637,7 +637,16 @@ const LOCALHOST_ORIGINS: &[&str] = &[
 ];
 
 fn parse_origin_values(origins: &[&str]) -> Vec<axum::http::HeaderValue> {
-    origins.iter().filter_map(|o| o.parse().ok()).collect()
+    origins
+        .iter()
+        .filter_map(|o| match o.parse() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!(origin = %o, error = %e, "skipping invalid CORS origin");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Build CORS layer from gateway config.
@@ -1469,7 +1478,13 @@ async fn export_session_handler(
 ) -> Result<Response, (StatusCode, String)> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
-    let session_title = store.get_session(&id).ok().flatten().and_then(|s| s.title);
+    let session_title = match store.get_session(&id) {
+        Ok(s) => s.and_then(|s| s.title),
+        Err(e) => {
+            warn!(error = %e, session_id = %id, "failed to load session title for export");
+            None
+        }
+    };
 
     let stored = store.load_messages(&id).map_err(storage_err)?;
 
@@ -2975,7 +2990,13 @@ async fn bus_publish_handler(
 
     let metadata: std::collections::HashMap<String, String> = body
         .get("metadata")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .and_then(|v| match serde_json::from_value(v.clone()) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                warn!(error = %e, "invalid metadata in bus publish request, ignoring");
+                None
+            }
+        })
         .unwrap_or_default();
 
     let msg = genesis_core::agent_bus::AgentMessage {
@@ -3116,7 +3137,13 @@ async fn guardrails_check_handler(
     // Parse config from request body, or use a sensible default
     let config: genesis_core::guardrails::GuardrailConfig = body
         .get("config")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .and_then(|v| match serde_json::from_value(v.clone()) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                warn!(error = %e, "invalid guardrail config in request body, using defaults");
+                None
+            }
+        })
         .unwrap_or_else(|| genesis_core::guardrails::GuardrailConfig {
             detect_pii: true,
             pii_action: genesis_core::guardrails::ViolationAction::Warn,

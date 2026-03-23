@@ -69,7 +69,13 @@ pub fn format_skills_for_prompt_with_stats(
 /// since skill loading should not block agent startup).
 pub fn load_skills_prompt(database_path: &std::path::Path) -> Option<String> {
     let store = SkillStore::new(database_path);
-    let skills = store.list_all().ok()?;
+    let skills = match store.list_all() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load skills for prompt");
+            return None;
+        }
+    };
     let usage_store = SkillUsageStore::new(database_path);
     format_skills_for_prompt_with_stats(&skills, Some(&usage_store))
 }
@@ -85,7 +91,13 @@ pub fn load_skills_prompt_for_prompt(
     user_prompt: &str,
 ) -> Option<String> {
     let store = SkillStore::new(database_path);
-    let all_skills = store.list_all().ok()?;
+    let all_skills = match store.list_all() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load skills for prompt filtering");
+            return None;
+        }
+    };
     if all_skills.is_empty() {
         return None;
     }
@@ -97,7 +109,13 @@ pub fn load_skills_prompt_for_prompt(
     }
 
     // Many skills: brief listing of all + full instructions for matched ones.
-    let matched = store.find_matching(user_prompt, 5).ok()?;
+    let matched = match store.find_matching(user_prompt, 5) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to find matching skills");
+            return None;
+        }
+    };
     let matched_names: std::collections::HashSet<&str> =
         matched.iter().map(|s| s.name.as_str()).collect();
 

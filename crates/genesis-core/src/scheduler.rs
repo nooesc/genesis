@@ -120,7 +120,18 @@ pub fn check_due_schedules_at(
         .iter()
         .filter(|s| s.enabled)
         .filter_map(|s| {
-            let expr = CronExpr::parse(&s.cron_expression).ok()?;
+            let expr = match CronExpr::parse(&s.cron_expression) {
+                Ok(expr) => expr,
+                Err(e) => {
+                    tracing::warn!(
+                        schedule_id = %s.id,
+                        cron = %s.cron_expression,
+                        error = %e,
+                        "skipping schedule with invalid cron expression"
+                    );
+                    return None;
+                }
+            };
             if now.matches_expr(&expr) {
                 Some(DueSchedule {
                     id: s.id.clone(),

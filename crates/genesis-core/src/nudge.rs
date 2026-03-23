@@ -112,25 +112,38 @@ pub async fn run_nudge(
 }
 
 fn load_memories_section(db_path: &std::path::Path) -> Option<String> {
-    let connection = rusqlite::Connection::open(db_path).ok()?;
-    let mut stmt = connection
-        .prepare(
-            "SELECT kind, content, created_at FROM memories
+    let connection = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to open database for nudge memories");
+            return None;
+        }
+    };
+    let mut stmt = match connection.prepare(
+        "SELECT kind, content, created_at FROM memories
              ORDER BY created_at DESC LIMIT 50",
-        )
-        .ok()?;
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to prepare memories query for nudge");
+            return None;
+        }
+    };
 
-    let memories: Vec<(String, String, String)> = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to query memories for nudge");
+            return None;
+        }
+    };
+    let memories: Vec<(String, String, String)> = rows.filter_map(|r| r.ok()).collect();
 
     if memories.is_empty() {
         return None;
@@ -146,7 +159,13 @@ fn load_memories_section(db_path: &std::path::Path) -> Option<String> {
 
 fn load_user_model_section(db_path: &std::path::Path) -> Option<String> {
     let store = UserModelStore::new(db_path);
-    let traits = store.list_all().ok()?;
+    let traits = match store.list_all() {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load user model traits for nudge");
+            return None;
+        }
+    };
     format_user_traits(&traits)
 }
 
@@ -157,14 +176,26 @@ fn load_user_model_section(db_path: &std::path::Path) -> Option<String> {
 fn load_skills_performance_section(db_path: &std::path::Path) -> Option<String> {
     let skill_store = SkillStore::new(db_path);
     let usage_store = SkillUsageStore::new(db_path);
-    let skills = skill_store.list_all().ok()?;
+    let skills = match skill_store.list_all() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load skills for nudge");
+            return None;
+        }
+    };
     if skills.is_empty() {
         return None;
     }
 
     let mut lines = Vec::new();
     for skill in &skills {
-        let stats = usage_store.stats(&skill.name).ok();
+        let stats = match usage_store.stats(&skill.name) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::debug!(skill = %skill.name, error = %e, "failed to load skill usage stats");
+                None
+            }
+        };
         let (uses, successes, failures) = match stats {
             Some(ref s) if s.total_uses > 0 => (s.total_uses, s.successes, s.failures),
             _ => {
@@ -195,7 +226,13 @@ fn load_skills_performance_section(db_path: &std::path::Path) -> Option<String> 
 
 fn load_recent_sessions_section(db_path: &std::path::Path) -> Option<String> {
     let store = SessionStore::new(db_path);
-    let sessions = store.list_recent_sessions(10).ok()?;
+    let sessions = match store.list_recent_sessions(10) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load recent sessions for nudge");
+            return None;
+        }
+    };
     if sessions.is_empty() {
         return None;
     }

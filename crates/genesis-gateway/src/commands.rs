@@ -74,7 +74,13 @@ pub(crate) fn handle_command(
         "/id" => CommandResult::Reply(format!("Session ID: `{session_id}`")),
 
         "/config" => {
-            let session = store.get_session(session_id).ok().flatten();
+            let session = match store.get_session(session_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "failed to load session for /config");
+                    None
+                }
+            };
             let message_count = store
                 .load_messages(session_id)
                 .map(|m| m.len())
@@ -105,7 +111,13 @@ pub(crate) fn handle_command(
         )),
 
         "/cost" => {
-            let session = store.get_session(session_id).ok().flatten();
+            let session = match store.get_session(session_id) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "failed to load session for /cost");
+                    None
+                }
+            };
             match session {
                 Some(s) => {
                     let model = &config.provider.model;

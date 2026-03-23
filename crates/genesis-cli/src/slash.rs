@@ -144,7 +144,13 @@ pub(crate) fn handle_chat_command(
                 .to_owned(),
         ),
         "history" => {
-            let messages = store.load_messages(session_id).ok()?;
+            let messages = match store.load_messages(session_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load messages for /history");
+                    return Some(format!("Error loading messages: {e}"));
+                }
+            };
             let recent = if messages.len() > 10 {
                 &messages[messages.len() - 10..]
             } else {
@@ -153,11 +159,24 @@ pub(crate) fn handle_chat_command(
             Some(format_session_messages(session_id, recent))
         }
         "export" => {
-            let messages = store.load_messages(session_id).ok()?;
+            let messages = match store.load_messages(session_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load messages for /export");
+                    return Some(format!("Error loading messages: {e}"));
+                }
+            };
             Some(export_session_markdown(session_id, &messages))
         }
         "tokens" | "usage" => {
-            let session = store.get_session(session_id).ok()??;
+            let session = match store.get_session(session_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => return Some("Session not found.".to_owned()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load session for /tokens");
+                    return Some(format!("Error loading session: {e}"));
+                }
+            };
             let total = session.total_input_tokens + session.total_output_tokens;
             // Rough cost estimate based on common pricing
             let cost_estimate = estimate_token_cost(
@@ -175,7 +194,13 @@ pub(crate) fn handle_chat_command(
         }
         "session" => Some(format!("Current session: {session_id}")),
         "compress" => {
-            let messages = store.load_messages(session_id).ok()?;
+            let messages = match store.load_messages(session_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load messages for /compress");
+                    return Some(format!("Error loading messages: {e}"));
+                }
+            };
             let total = messages.len();
             if total <= 10 {
                 return Some(format!(
@@ -247,7 +272,14 @@ pub(crate) fn handle_chat_command(
         }
         "tree" => {
             // Show the conversation tree rooted at the current session
-            let _session = store.get_session(session_id).ok()??;
+            let _session = match store.get_session(session_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => return Some("Session not found.".to_owned()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load session for /tree");
+                    return Some(format!("Error loading session: {e}"));
+                }
+            };
             // Walk up to the root
             let mut root_id = session_id.to_owned();
             let mut visited = std::collections::HashSet::new();
@@ -272,12 +304,10 @@ pub(crate) fn handle_chat_command(
                 lines: &mut Vec<String>,
             ) {
                 let connector = if prefix.is_empty() { "" } else if is_last { "└── " } else { "├── " };
-                let title = store
-                    .get_session(id)
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.title)
-                    .unwrap_or_else(|| "(untitled)".to_owned());
+                let title = match store.get_session(id) {
+                    Ok(s) => s.and_then(|s| s.title).unwrap_or_else(|| "(untitled)".to_owned()),
+                    Err(_) => "(untitled)".to_owned(),
+                };
                 let marker = if id == current { " ← you" } else { "" };
                 lines.push(format!("{prefix}{connector}{id} — {title}{marker}"));
                 if let Ok(children) = store.list_children(id) {
@@ -341,8 +371,21 @@ pub(crate) fn handle_chat_command(
             }
         }
         "stats" => {
-            let messages = store.load_messages(session_id).ok()?;
-            let session = store.get_session(session_id).ok()??;
+            let messages = match store.load_messages(session_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load messages for /stats");
+                    return Some(format!("Error loading messages: {e}"));
+                }
+            };
+            let session = match store.get_session(session_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => return Some("Session not found.".to_owned()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load session for /stats");
+                    return Some(format!("Error loading session: {e}"));
+                }
+            };
             let user_msgs = messages.iter().filter(|m| m.role == "user").count();
             let assistant_msgs = messages.iter().filter(|m| m.role == "assistant").count();
             let tool_msgs = messages.iter().filter(|m| m.role == "tool").count();
@@ -574,7 +617,13 @@ pub(crate) fn handle_chat_command(
         "undo" => {
             // Remove the last user-assistant exchange (user message + all
             // subsequent assistant/tool messages until the next user or start).
-            let messages = store.load_messages(session_id).ok()?;
+            let messages = match store.load_messages(session_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load messages for /undo");
+                    return Some(format!("Error loading messages: {e}"));
+                }
+            };
             if messages.is_empty() {
                 return Some("Nothing to undo.".to_owned());
             }

@@ -541,12 +541,16 @@ pub(crate) async fn run_update() -> Result<String, CliError> {
     steps.push("[ok] Build succeeded.".to_owned());
 
     // Step 3: Report new version
-    let version_out = StdCommand::new(repo_dir.join("target/release/genesis"))
+    let version_out = match StdCommand::new(repo_dir.join("target/release/genesis"))
         .arg("--version")
         .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_else(|| "unknown".to_owned());
+    {
+        Ok(o) => String::from_utf8(o.stdout).unwrap_or_else(|_| "unknown".to_owned()),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to get version from new binary");
+            "unknown".to_owned()
+        }
+    };
     steps.push(format!("[ok] Updated to: {}", version_out.trim()));
 
     Ok(steps.join("\n"))
