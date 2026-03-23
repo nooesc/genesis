@@ -170,7 +170,21 @@ impl ToolContext {
 /// Implemented in genesis-core to bridge the async `SandboxManager` into the
 /// sync `ToolHandler` interface. When present in `ToolContext`, the shell tool
 /// delegates to this instead of spawning CLI processes directly.
+///
+/// # Panics
+///
+/// Implementations use `tokio::task::block_in_place` + `Handle::block_on` to
+/// bridge sync to async. Callers must be on either a blocking thread
+/// (`spawn_blocking`) or a Tokio multi-threaded worker thread. Calling from
+/// a nested `block_on` (e.g., inside another `Handle::block_on`) will panic.
 pub trait SandboxExecutor: Send + Sync {
+    /// Execute a command in the managed sandbox.
+    ///
+    /// # Panics
+    ///
+    /// May panic if called from a context where `block_in_place` is not
+    /// supported (e.g., a `current_thread` runtime). Safe to call from
+    /// `spawn_blocking` tasks and multi-threaded Tokio worker threads.
     fn execute_in_sandbox(
         &self,
         command: &str,

@@ -109,20 +109,24 @@ impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
         timeout_secs: u64,
     ) -> Result<(String, i32), String> {
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        // This runs inside spawn_blocking (via ToolRegistry), so we can
-        // block_on the async manager directly without block_in_place.
-        tokio::runtime::Handle::current().block_on(async {
-            self.manager
-                .execute(
-                    self.backend.clone(),
-                    &self.config,
-                    command,
-                    working_dir,
-                    Some(timeout),
-                )
-                .await
-                .map(|r| (r.output, r.exit_code))
-                .map_err(|e| e.to_string())
+        // This may be called from spawn_blocking (ToolRegistry) or a Tokio
+        // worker thread (MCP server path via RegistryMcpBackend::call_tool).
+        // block_in_place is safe in both cases: it's a no-op on blocking
+        // threads and moves the task off the worker when on a Tokio worker.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.manager
+                    .execute(
+                        self.backend.clone(),
+                        &self.config,
+                        command,
+                        working_dir,
+                        Some(timeout),
+                    )
+                    .await
+                    .map(|r| (r.output, r.exit_code))
+                    .map_err(|e| e.to_string())
+            })
         })
     }
 }

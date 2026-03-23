@@ -69,10 +69,13 @@ impl ToolHandler for ReasonWithModelTool {
         request.temperature = temperature;
         request.max_tokens = max_tokens;
 
-        // Execute the request synchronously. This runs inside spawn_blocking
-        // (via ToolRegistry), so we can block_on the async client directly.
-        let response = tokio::runtime::Handle::current()
-            .block_on(client.complete(request))
+        // Execute the request synchronously. This may be called from either
+        // spawn_blocking (ToolRegistry) or a Tokio worker thread (MCP server).
+        // block_in_place is safe in both cases: it's a no-op on blocking threads
+        // and moves the task off the worker thread when on a Tokio worker.
+        let response = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(client.complete(request))
+        })
         .map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: format!("model query failed: {e}"),

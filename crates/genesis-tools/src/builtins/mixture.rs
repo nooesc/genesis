@@ -163,6 +163,15 @@ impl ToolHandler for MixtureOfAgentsTool {
     }
 }
 
+/// Query a single LLM model synchronously using the provided Tokio handle.
+///
+/// # Panics
+///
+/// Panics if called from a Tokio worker thread, because `handle.block_on()`
+/// cannot be invoked from within an async context. This function must be called
+/// from an OS thread (e.g., `std::thread::scope`) or a `spawn_blocking` task.
+/// The `MixtureOfAgentsTool::run` method satisfies this by calling from scoped
+/// OS threads, which are not Tokio worker threads.
 fn query_model(
     handle: &tokio::runtime::Handle,
     env: &BTreeMap<String, String>,
