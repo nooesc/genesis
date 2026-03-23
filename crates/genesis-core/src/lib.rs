@@ -467,7 +467,7 @@ fn check_database_integrity(db_path: &Path) -> DoctorCheck {
         Err(e) => DoctorCheck {
             name: "db_integrity".to_owned(),
             status: CheckStatus::Fail,
-            detail: format!("integrity check failed: {e}"),
+            detail: format!("database check failed: {e}"),
         },
     }
 }

@@ -383,42 +383,6 @@ mod tests {
         assert_eq!(stats[1], ("beta".to_owned(), 3));
     }
 
-    #[test]
-    fn bus_store_sender_messages() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("bus.db");
-
-        let store = AgentBusStore::new(&db_path);
-        store.ensure_table().expect("ensure_table");
-
-        store
-            .store_message(&AgentMessage {
-                id: "s1".into(),
-                channel: "ch".into(),
-                sender: "agent-a".into(),
-                kind: MessageKind::Text,
-                payload: "from a".into(),
-                metadata: HashMap::new(),
-                timestamp: now_iso8601(),
-            })
-            .unwrap();
-        store
-            .store_message(&AgentMessage {
-                id: "s2".into(),
-                channel: "ch".into(),
-                sender: "agent-b".into(),
-                kind: MessageKind::TaskResult,
-                payload: "from b".into(),
-                metadata: HashMap::new(),
-                timestamp: now_iso8601(),
-            })
-            .unwrap();
-
-        let msgs = store.sender_messages("agent-a", 10).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload, "from a");
-    }
-
     #[tokio::test]
     async fn bus_with_persistence() {
         let dir = tempfile::tempdir().expect("tempdir");

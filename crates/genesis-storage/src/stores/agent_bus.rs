@@ -4,9 +4,9 @@ use std::path::Path;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A message on the agent bus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +201,26 @@ impl AgentBusStore {
             })
     }
 
-    /// Get all messages from a sender.
+    /// Purge messages older than N days.
+    pub fn purge_older_than(&self, days: u32) -> Result<usize, StorageError> {
+        let connection = self.db.conn()?;
+        let rows = connection
+            .execute(
+                "DELETE FROM agent_bus_messages
+                 WHERE created_at < datetime('now', ?1)",
+                params![format!("-{days} days")],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+impl AgentBusStore {
+    /// Get all messages from a sender (test-only helper).
     pub fn sender_messages(
         &self,
         sender: &str,
@@ -229,22 +248,6 @@ impl AgentBusStore {
             })?;
 
         collect_rows(rows, self.db.path())
-    }
-
-    /// Purge messages older than N days.
-    pub fn purge_older_than(&self, days: u32) -> Result<usize, StorageError> {
-        let connection = self.db.conn()?;
-        let rows = connection
-            .execute(
-                "DELETE FROM agent_bus_messages
-                 WHERE created_at < datetime('now', ?1)",
-                params![format!("-{days} days")],
-            )
-            .map_err(|source| StorageError::Sqlite {
-                path: self.db.path().to_path_buf(),
-                source,
-            })?;
-        Ok(rows)
     }
 }
 
