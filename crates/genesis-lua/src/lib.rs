@@ -74,7 +74,10 @@ mod tests {
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["logger".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"logger".to_owned()),
+            "user plugin should be loaded"
+        );
     }
 
     #[test]
@@ -550,7 +553,10 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["logger".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"logger".to_owned()),
+            "user plugin should be loaded"
+        );
         assert_eq!(
             runtime.logs(),
             vec!["plugin booted".to_owned()],
@@ -598,14 +604,21 @@ genesis.register_tool({
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         let tools = runtime.registered_tools();
+        let user_tools: Vec<_> = tools
+            .iter()
+            .filter(|t| t.plugin_name == "word-tools")
+            .collect();
 
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].definition.name, "word_count");
-        assert_eq!(tools[0].definition.description, "Count words in a path");
-        assert_eq!(tools[0].plugin_name, "word-tools");
-        assert_eq!(tools[0].permissions.tools, vec!["read_file"]);
+        assert_eq!(user_tools.len(), 1);
+        assert_eq!(user_tools[0].definition.name, "word_count");
         assert_eq!(
-            tools[0].definition.parameters,
+            user_tools[0].definition.description,
+            "Count words in a path"
+        );
+        assert_eq!(user_tools[0].plugin_name, "word-tools");
+        assert_eq!(user_tools[0].permissions.tools, vec!["read_file"]);
+        assert_eq!(
+            user_tools[0].definition.parameters,
             Some(json!({
                 "type": "object",
                 "properties": {
@@ -986,9 +999,14 @@ genesis.register_tool({
         .expect("plugin should write");
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let echoer_tools: Vec<_> = runtime
+            .registered_tools()
+            .into_iter()
+            .filter(|t| t.definition.name == "echoer")
+            .collect();
 
-        assert_eq!(runtime.registered_tools().len(), 1);
-        assert_eq!(runtime.registered_tools()[0].plugin_name, "first");
+        assert_eq!(echoer_tools.len(), 1);
+        assert_eq!(echoer_tools[0].plugin_name, "first");
         assert!(
             runtime
                 .plugin_errors()
@@ -1020,7 +1038,10 @@ error("boom")
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "broken_tool"),
             "failed plugins must not leave registered tools behind"
         );
         assert!(
@@ -1058,7 +1079,10 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "late_tool"),
             "plugin load should not eagerly register the late tool"
         );
 
@@ -1071,7 +1095,10 @@ end)
             crate::hooks::PreHookOutcome::Allow("hello".to_owned())
         );
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "late_tool"),
             "tool registration should stay closed after plugin load"
         );
         assert!(
@@ -1307,7 +1334,11 @@ end)
         )
         .expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["enabled".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"enabled".to_owned()),
+            "enabled plugin should be loaded"
+        );
+        assert!(!runtime.plugin_names().contains(&"disabled".to_owned()));
         assert_eq!(runtime.logs(), vec!["enabled loaded".to_owned()]);
     }
 
@@ -1322,7 +1353,11 @@ end)
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"good".to_owned()),
+            "good plugin should be loaded"
+        );
+        assert!(!runtime.plugin_names().contains(&"broken".to_owned()));
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1353,7 +1388,10 @@ name = "broken"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"good".to_owned()),
+            "good plugin should be loaded"
+        );
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1387,9 +1425,14 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["alpha".to_owned(), "gamma".to_owned()],
+        let names = runtime.plugin_names();
+        assert!(
+            names.contains(&"alpha".to_owned()),
+            "alpha should be loaded"
+        );
+        assert!(
+            names.contains(&"gamma".to_owned()),
+            "gamma should be loaded"
         );
         assert_eq!(
             runtime.logs(),
@@ -1417,10 +1460,9 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["first".to_owned(), "second".to_owned()]
-        );
+        let names = runtime.plugin_names();
+        assert!(names.contains(&"first".to_owned()));
+        assert!(names.contains(&"second".to_owned()));
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -1446,10 +1488,9 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["first".to_owned(), "second".to_owned()]
-        );
+        let names = runtime.plugin_names();
+        assert!(names.contains(&"first".to_owned()));
+        assert!(names.contains(&"second".to_owned()));
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -1475,7 +1516,8 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["observer".to_owned()]);
+        assert!(runtime.plugin_names().contains(&"observer".to_owned()));
+        assert!(!runtime.plugin_names().contains(&"mutator".to_owned()));
         assert_eq!(runtime.logs(), vec!["observer loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1827,5 +1869,90 @@ trusted = true
             serde_json::from_str(&text).expect("output should be valid JSON");
         assert_eq!(parsed["content"], json!("Hello from Genesis!"));
         assert_eq!(parsed["length"], json!(19));
+    }
+
+    fn build_bundled_test_runtime() -> crate::LuaRuntime {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-bundled".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build")
+    }
+
+    #[test]
+    fn bundled_echo_tool_returns_message() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "echo",
+                BTreeMap::from([("message".to_owned(), "hello world".to_owned())]),
+            )
+            .expect("echo tool should succeed");
+        match result {
+            crate::LuaToolOutput::Text(text) => assert_eq!(text, "hello world"),
+            other => panic!("expected Text output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_think_tool_returns_empty() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "think",
+                BTreeMap::from([("thought".to_owned(), "analyzing the problem...".to_owned())]),
+            )
+            .expect("think tool should succeed");
+        match result {
+            crate::LuaToolOutput::Text(text) => assert!(text.is_empty()),
+            other => panic!("expected empty Text output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_clarify_tool_formats_question() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "clarify",
+                BTreeMap::from([
+                    ("question".to_owned(), "Which database?".to_owned()),
+                    ("choices".to_owned(), "PostgreSQL, MySQL, SQLite".to_owned()),
+                ]),
+            )
+            .expect("clarify tool should succeed");
+        match result {
+            crate::LuaToolOutput::TextWithMetadata { content, metadata } => {
+                assert!(
+                    content.contains("[Clarification needed]"),
+                    "should contain header"
+                );
+                assert!(
+                    content.contains("Which database?"),
+                    "should contain question"
+                );
+                assert!(content.contains("1. PostgreSQL"), "should list option 1");
+                assert!(content.contains("2. MySQL"), "should list option 2");
+                assert!(content.contains("3. SQLite"), "should list option 3");
+                assert_eq!(
+                    metadata.get("requires_input").map(|s| s.as_str()),
+                    Some("true"),
+                    "should have requires_input metadata"
+                );
+            }
+            other => panic!("expected TextWithMetadata output, got {other:?}"),
+        }
     }
 }

@@ -109,7 +109,12 @@ pub struct BundledTool {
 
 /// Bundled tool plugins — populated in Phase 2-4 as tools migrate from Rust to Lua.
 pub const BUNDLED_TOOLS: &[BundledTool] = &[
-    // Phase 2:
+    BundledTool {
+        name: "utilities",
+        source: include_str!("../bundled/tools/utilities.lua"),
+        primitives: &[],
+    },
+    // Phase 2 (upcoming):
     // BundledTool {
     //     name: "messaging",
     //     source: include_str!("../bundled/tools/messaging/init.lua"),
