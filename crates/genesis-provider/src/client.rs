@@ -6,6 +6,8 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
 
+use genesis_config::defaults::{limits, retry, timeouts};
+
 use crate::api_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatUsage,
 };
@@ -13,12 +15,12 @@ use crate::error::ProviderError;
 use crate::resolve::ResolvedProvider;
 
 /// Maximum number of retry attempts for transient errors.
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = retry::MAX_RETRIES;
 /// Base delay for exponential backoff (doubles each attempt).
-const BASE_DELAY: Duration = Duration::from_secs(1);
+const BASE_DELAY: Duration = Duration::from_secs(retry::BASE_DELAY_SECS);
 /// Maximum delay cap.
-const MAX_DELAY: Duration = Duration::from_secs(8);
-const MAX_NON_STREAMING_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DELAY: Duration = Duration::from_secs(retry::MAX_DELAY_SECS);
+const MAX_NON_STREAMING_RESPONSE_BYTES: usize = limits::MAX_NON_STREAMING_RESPONSE_BYTES;
 
 pub type ChatCompletionChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, ProviderError>> + Send>>;
@@ -89,8 +91,8 @@ impl ChatClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300)) // 5 min for long completions
+            .connect_timeout(Duration::from_secs(timeouts::PROVIDER_CONNECT_SECS))
+            .timeout(Duration::from_secs(timeouts::PROVIDER_RESPONSE_SECS)) // 5 min for long completions
             .build()?;
 
         let is_codex = provider.backend.trim().eq_ignore_ascii_case("openai-codex");

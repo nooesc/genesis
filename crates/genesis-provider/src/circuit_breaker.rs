@@ -78,7 +78,10 @@ impl CircuitBreaker {
 
     /// Create a circuit breaker with default settings (5 failures, 30s cooldown).
     pub fn with_defaults() -> Self {
-        Self::new(5, Duration::from_secs(30))
+        Self::new(
+            genesis_config::defaults::retry::CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+            Duration::from_secs(genesis_config::defaults::retry::CIRCUIT_BREAKER_COOLDOWN_SECS),
+        )
     }
 
     /// Check whether a request should be allowed through.

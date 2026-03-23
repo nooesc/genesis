@@ -9,6 +9,7 @@ base64.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 fd-lock.workspace = true
+genesis-config = { path = "../genesis-config" }
 open.workspace = true
 reqwest.workspace = true
 serde.workspace = true

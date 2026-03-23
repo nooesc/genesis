@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
+use genesis_config::defaults::timeouts;
+
 use crate::{truncate_output_bytes, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_TIMEOUT_SECS: u64 = timeouts::SHELL_COMMAND_SECS;
 
 /// Patterns that indicate potentially dangerous commands.
 /// Each entry is (pattern, description) for clear reporting.

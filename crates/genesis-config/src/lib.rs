@@ -1,3 +1,5 @@
+pub mod defaults;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -277,11 +279,11 @@ pub struct CircuitBreakerConfig {
 }
 
 fn default_failure_threshold() -> u32 {
-    5
+    defaults::retry::CIRCUIT_BREAKER_FAILURE_THRESHOLD
 }
 
 fn default_cooldown_secs() -> u64 {
-    30
+    defaults::retry::CIRCUIT_BREAKER_COOLDOWN_SECS
 }
 
 impl Default for CircuitBreakerConfig {

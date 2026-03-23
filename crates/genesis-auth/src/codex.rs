@@ -12,11 +12,18 @@ use crate::provider::{
 };
 use crate::store::{self, CodexTokens};
 
-const DEVICE_CODE_POLL_INTERVAL_SECS: u64 = 5;
-const DEVICE_CODE_TIMEOUT_MINS: u64 = 15;
-const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
-const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
-const CACHE_TTL_SECS: u64 = 60;
+const DEVICE_CODE_POLL_INTERVAL_SECS: u64 =
+    genesis_config::defaults::timeouts::DEVICE_CODE_POLL_INTERVAL_SECS;
+const DEVICE_CODE_TIMEOUT_MINS: u64 =
+    genesis_config::defaults::timeouts::DEVICE_CODE_TIMEOUT_MINS;
+const TOKEN_REFRESH_SKEW_SECS: i64 =
+    genesis_config::defaults::timeouts::TOKEN_REFRESH_SKEW_SECS;
+const TOKEN_REFRESH_TIMEOUT_SECS: u64 =
+    genesis_config::defaults::timeouts::TOKEN_REFRESH_TIMEOUT_SECS;
+const DEVICE_CODE_HTTP_CLIENT_TIMEOUT_SECS: u64 =
+    genesis_config::defaults::timeouts::DEVICE_CODE_HTTP_CLIENT_TIMEOUT_SECS;
+const CACHE_TTL_SECS: u64 =
+    genesis_config::defaults::timeouts::CREDENTIAL_CACHE_TTL_SECS;
 
 struct CachedEntry {
     creds: ResolvedCredentials,
@@ -428,7 +435,7 @@ async fn resolve_credentials_inner(
 /// Run the full interactive device code login flow.
 pub async fn login(auth_store_path: &Path) -> Result<ResolvedCredentials, AuthError> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(DEVICE_CODE_HTTP_CLIENT_TIMEOUT_SECS))
         .build()
         .map_err(AuthError::Http)?;
 

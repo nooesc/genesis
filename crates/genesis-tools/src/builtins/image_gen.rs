@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use genesis_config::defaults::timeouts;
+
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const TIMEOUT_SECS: u64 = 120;
+const TIMEOUT_SECS: u64 = timeouts::IMAGE_GENERATION_SECS;
 
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();

@@ -54,7 +54,7 @@ pub const NOISE_DIRS: &[&str] = &[
 ];
 
 /// Maximum output size for tool results (64 KiB).
-pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = genesis_config::defaults::limits::MAX_TOOL_OUTPUT_BYTES;
 
 /// Format a byte count into a human-readable string (B, KB, MB, GB).
 pub fn format_bytes(bytes: usize) -> String {

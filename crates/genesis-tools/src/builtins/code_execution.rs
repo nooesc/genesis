@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
+use genesis_config::defaults::timeouts;
+
 use crate::{truncate_output_bytes, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_TIMEOUT_SECS: u64 = timeouts::CODE_EXEC_COMMAND_SECS;
 
 /// Tools allowed inside the PTC sandbox. Maps Python function name to Genesis tool name.
 const SANDBOX_TOOLS: &[(&str, &str)] = &[
@@ -429,11 +431,11 @@ fn rpc_server_loop(
     use std::io::{BufRead, Write};
 
     // Accept one connection with a timeout
-    let stream = match accept_with_timeout(&listener, Duration::from_secs(10)) {
+    let stream = match accept_with_timeout(&listener, Duration::from_secs(timeouts::CODE_EXEC_ACCEPT_SECS)) {
         Some(s) => s,
         None => return,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(300))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS))).ok();
 
     let mut reader = std::io::BufReader::new(&stream);
     let mut writer = &stream;
