@@ -14,6 +14,7 @@ use crossterm::{
 };
 use std::io::{self, stdout, IsTerminal};
 use std::panic;
+use std::sync::Once;
 
 /// Enable raw mode, keyboard enhancements, and bracketed paste.
 ///
@@ -61,13 +62,22 @@ pub fn restore() -> io::Result<()> {
     Ok(())
 }
 
+/// Guard ensuring the panic hook is installed at most once.
+static PANIC_HOOK_ONCE: Once = Once::new();
+
 /// Set panic hook that restores terminal before printing panic info.
+///
+/// Guarded by `Once` so that repeated `init()` calls (e.g. after
+/// suspend/resume cycles) do not nest hooks, which would cause
+/// `restore()` to be invoked N+1 times on a single panic.
 fn set_panic_hook() {
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        let _ = restore();
-        original_hook(panic_info);
-    }));
+    PANIC_HOOK_ONCE.call_once(|| {
+        let original_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |panic_info| {
+            let _ = restore();
+            original_hook(panic_info);
+        }));
+    });
 }
 
 /// Flush any buffered stdin bytes (prevents stale input after mode switch).
@@ -84,6 +94,14 @@ fn flush_stdin() {
 
 // Re-export terminal detection from genesis-ui to avoid duplication.
 pub use genesis_ui::terminal::{is_tmux, is_zellij};
+
+/// Returns `true` if we are running inside a terminal multiplexer (tmux or Zellij).
+///
+/// Multiplexers handle Ctrl+Z / SIGTSTP themselves, so sending `kill(0, SIGTSTP)`
+/// from the application can cause unexpected behavior (double-suspend, detach, etc.).
+pub fn is_multiplexer() -> bool {
+    is_tmux() || is_zellij()
+}
 
 #[cfg(test)]
 mod tests {
@@ -106,5 +124,12 @@ mod tests {
     fn detect_tmux_from_env() {
         std::env::remove_var("TMUX");
         assert!(!is_tmux());
+    }
+
+    #[test]
+    fn is_multiplexer_false_outside_mux() {
+        std::env::remove_var("TMUX");
+        std::env::remove_var("ZELLIJ_SESSION_NAME");
+        assert!(!is_multiplexer());
     }
 }

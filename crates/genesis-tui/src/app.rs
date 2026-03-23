@@ -52,6 +52,11 @@ pub struct App {
     pub frame_requester: FrameRequester,
     pub turn_running: bool,
     pub should_exit: bool,
+    /// Set to `true` by Ctrl+Z to request suspension. The main event loop in
+    /// `lib.rs` checks this *after* `select!` returns and performs the actual
+    /// terminal restore / SIGTSTP / terminal re-init sequence outside the
+    /// async context.
+    pub should_suspend: bool,
     /// When the current turn started (for elapsed time display).
     pub turn_start: Option<std::time::Instant>,
     /// Which screen is currently active.
@@ -646,6 +651,16 @@ impl App {
             return;
         }
 
+        // Ctrl+Z — request process suspension (unix only).
+        // The actual SIGTSTP is sent by the main loop in lib.rs after
+        // cleaning up terminal state. On non-unix platforms this is a no-op.
+        #[cfg(unix)]
+        if key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_suspend = true;
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
         // For Ctrl+C and Ctrl+D we check the app-level concern first, then
         // also delegate to the input widget so it can handle its own
         // Ctrl+D (delete) / Ctrl+C (interrupt) behaviour.
@@ -799,6 +814,7 @@ mod tests {
             frame_requester,
             turn_running: false,
             should_exit: false,
+            should_suspend: false,
             turn_start: None,
             screen: AppScreen::Chat, // Start in Chat for existing tests
             welcome,
@@ -1084,6 +1100,15 @@ mod tests {
         assert_eq!(app.agent_mode, AgentMode::Plan);
         app.handle_app_event(AppEvent::SlashCommand("/plan".into()));
         assert_eq!(app.agent_mode, AgentMode::Act);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_z_sets_should_suspend() {
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        app.handle_tui_event(TuiEvent::Key(key));
+        assert!(app.should_suspend, "Ctrl+Z should set should_suspend flag");
     }
 
     #[tokio::test]
