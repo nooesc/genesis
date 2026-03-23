@@ -23,16 +23,16 @@ impl PluginContextRegistry {
         Self::default()
     }
 
-    /// Add a context snippet. Silently drops entries that would exceed the
-    /// entry-count or total-size cap.
-    pub fn add(&self, plugin_name: &str, content: String) {
+    /// Add a context snippet. Returns `true` if the entry was accepted, `false`
+    /// if it was dropped due to the entry-count or total-size cap.
+    pub fn add(&self, plugin_name: &str, content: String) -> bool {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if entries.len() >= MAX_CONTEXT_ENTRIES {
             tracing::warn!(
                 plugin = plugin_name,
                 "plugin context entry dropped — limit of {MAX_CONTEXT_ENTRIES} reached"
             );
-            return;
+            return false;
         }
         let total_bytes: usize = entries.iter().map(|e| e.content.len()).sum();
         if total_bytes + content.len() > MAX_CONTEXT_BYTES {
@@ -40,12 +40,13 @@ impl PluginContextRegistry {
                 plugin = plugin_name,
                 "plugin context entry dropped — total size would exceed {MAX_CONTEXT_BYTES} bytes"
             );
-            return;
+            return false;
         }
         entries.push(PluginContextEntry {
             plugin_name: plugin_name.to_owned(),
             content,
         });
+        true
     }
 
     pub fn clear_for_plugin(&self, plugin_name: &str) {

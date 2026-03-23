@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,7 @@ pub struct LuaRuntime {
     host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     context_registry: PluginContextRegistry,
+    session_hooks_fired: AtomicBool,
     execution_control: Arc<Mutex<PluginExecutionControl>>,
     disabled_plugins: Arc<Mutex<HashSet<String>>>,
     plugin_failures: Arc<Mutex<HashMap<String, u32>>>,
@@ -352,6 +354,7 @@ impl LuaRuntime {
             host_tool_executor,
             active_plugin,
             context_registry,
+            session_hooks_fired: AtomicBool::new(false),
             execution_control,
             disabled_plugins,
             plugin_failures,
@@ -666,21 +669,29 @@ impl LuaRuntime {
         self.run_observe_hook(HookEvent::OnComplete, context)
     }
 
+    /// Fire `OnSessionStart`. Fires at most once per runtime lifetime.
     pub fn run_on_session_start(
         &self,
         session_id: &str,
         is_new: bool,
     ) -> Result<(), LuaRuntimeError> {
+        if self.session_hooks_fired.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
         let context = self.lua.create_table()?;
         context.set("session_id", session_id)?;
         context.set("is_new", is_new)?;
         self.run_observe_hook(HookEvent::OnSessionStart, context)
     }
 
+    /// Fire `OnSessionResume`. Fires at most once per runtime lifetime.
     pub fn run_on_session_resume(
         &self,
         session_id: &str,
     ) -> Result<(), LuaRuntimeError> {
+        if self.session_hooks_fired.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
         let context = self.lua.create_table()?;
         context.set("session_id", session_id)?;
         self.run_observe_hook(HookEvent::OnSessionResume, context)

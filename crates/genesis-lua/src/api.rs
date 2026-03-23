@@ -277,8 +277,8 @@ impl UserData for GenesisApi {
                 "add",
                 lua.create_function(move |_, content: String| {
                     let name = add_plugin.as_deref().unwrap_or("unknown");
-                    add_registry.add(name, content);
-                    Ok(())
+                    let accepted = add_registry.add(name, content);
+                    Ok(accepted)
                 })?,
             )?;
 

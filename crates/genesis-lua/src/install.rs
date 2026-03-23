@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -174,9 +174,6 @@ pub enum InstallError {
     #[error("plugin `{name}` is not installed")]
     NotInstalled { name: String },
 
-    #[error("cannot uninstall bundled plugin `{name}`")]
-    CannotUninstallBundled { name: String },
-
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 }
@@ -256,7 +253,7 @@ fn install_from_github(
         });
     }
 
-    // Reject downloads that exceed the size limit.
+    // Reject obviously-too-large downloads early via Content-Length.
     if let Some(len) = response.content_length() {
         if len > MAX_DOWNLOAD_BYTES {
             return Err(InstallError::DownloadFailed {
@@ -267,22 +264,16 @@ fn install_from_github(
         }
     }
 
-    let bytes = response.bytes().map_err(|err| InstallError::DownloadFailed {
-        reason: err.to_string(),
-    })?;
-
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err(InstallError::DownloadFailed {
-            reason: format!(
-                "tarball too large ({} bytes, max {MAX_DOWNLOAD_BYTES})",
-                bytes.len()
-            ),
-        });
-    }
+    // Stream through a size-limited reader so we abort as soon as the limit is
+    // crossed, rather than buffering the entire response into memory first.
+    let limited = LimitedReader {
+        inner: response,
+        remaining: MAX_DOWNLOAD_BYTES,
+    };
 
     // Extract to a temp directory.
     let tmp_dir = tempfile::tempdir().map_err(|err| InstallError::Io(err.into()))?;
-    let decoder = flate2::read::GzDecoder::new(io::Cursor::new(&bytes));
+    let decoder = flate2::read::GzDecoder::new(limited);
     let mut archive = tar::Archive::new(decoder);
     archive
         .unpack(tmp_dir.path())
@@ -307,11 +298,19 @@ fn install_from_github(
         top_level
     };
 
+    // If the source is a directory with a single .lua file and no proper
+    // package structure, treat the .lua file as the effective source.
+    let source_root = resolve_effective_source(&source_root);
+
     // Determine plugin name and validate.
     let plugin_name = detect_plugin_name(&source_root)?;
 
-    // Check for conflicts.
-    let dest = plugin_dir.join(&plugin_name);
+    // Check for conflicts.  Single .lua files need the extension.
+    let dest = if source_root.is_file() {
+        plugin_dir.join(format!("{plugin_name}.lua"))
+    } else {
+        plugin_dir.join(&plugin_name)
+    };
     if dest.exists() && !force {
         return Err(InstallError::AlreadyExists {
             name: plugin_name,
@@ -351,7 +350,10 @@ fn install_from_local(
         });
     }
 
-    let plugin_name = detect_plugin_name(local_path)?;
+    // Resolve single-.lua-in-directory to the file itself.
+    let local_path = resolve_effective_source(local_path);
+
+    let plugin_name = detect_plugin_name(&local_path)?;
 
     // Determine destination.
     let dest = if local_path.is_file() {
@@ -374,12 +376,12 @@ fn install_from_local(
         if dest.exists() {
             fs::remove_file(&dest)?;
         }
-        fs::copy(local_path, &dest)?;
+        fs::copy(&local_path, &dest)?;
     } else {
         if dest.exists() {
             fs::remove_dir_all(&dest)?;
         }
-        copy_dir_recursive(local_path, &dest)?;
+        copy_dir_recursive(&local_path, &dest)?;
     }
 
     // Write source metadata for package plugins.
@@ -389,6 +391,56 @@ fn install_from_local(
     }
 
     Ok(plugin_name)
+}
+
+/// An `io::Read` wrapper that aborts once `remaining` bytes have been consumed,
+/// preventing unbounded memory allocation when the server omits Content-Length.
+struct LimitedReader<R: Read> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("download exceeded {MAX_DOWNLOAD_BYTES} byte limit"),
+            ));
+        }
+        let to_read = buf.len().min(self.remaining as usize);
+        let n = self.inner.read(&mut buf[..to_read])?;
+        self.remaining = self.remaining.saturating_sub(n as u64);
+        Ok(n)
+    }
+}
+
+/// When `path` is a directory that contains exactly one `.lua` file and no
+/// `init.lua` / `plugin.toml`, return the path to that single file so
+/// installers treat it as a single-file plugin rather than an undiscoverable
+/// package directory.
+fn resolve_effective_source(path: &Path) -> PathBuf {
+    if path.is_file() {
+        return path.to_path_buf();
+    }
+    // Directories with plugin.toml or init.lua are proper packages — keep as-is.
+    if path.join("plugin.toml").is_file() || path.join("init.lua").is_file() {
+        return path.to_path_buf();
+    }
+    // Single .lua file in a directory → treat as single-file plugin.
+    let mut lua_files = Vec::new();
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let ep = entry.path();
+            if ep.is_file() && ep.extension().is_some_and(|ext| ext == "lua") {
+                lua_files.push(ep);
+            }
+        }
+    }
+    if lua_files.len() == 1 {
+        return lua_files.into_iter().next().unwrap();
+    }
+    path.to_path_buf()
 }
 
 /// Detect the plugin name from a path.
@@ -478,14 +530,20 @@ fn find_single_child_dir(path: &Path) -> Result<PathBuf, InstallError> {
     }
 }
 
-/// Recursively copy a directory and its contents.
+/// Recursively copy a directory and its contents, skipping symlinks to prevent
+/// traversal attacks from extracted tarballs.
 fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), InstallError> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            tracing::warn!(path = %entry.path().display(), "skipping symlink during plugin install");
+            continue;
+        }
         let src_path = entry.path();
         let dest_path = dest.join(entry.file_name());
-        if src_path.is_dir() {
+        if ft.is_dir() {
             copy_dir_recursive(&src_path, &dest_path)?;
         } else {
             fs::copy(&src_path, &dest_path)?;
