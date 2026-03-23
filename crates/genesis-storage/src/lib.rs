@@ -1,4 +1,8 @@
 pub mod cron;
+pub mod edge_type {
+    //! Edge type constants for the memory graph.
+    pub use crate::util::edge_type::*;
+}
 pub mod error;
 mod migrations;
 mod stores;

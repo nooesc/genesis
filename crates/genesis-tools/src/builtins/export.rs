@@ -354,18 +354,8 @@ mod tests {
         };
         let ctx = ToolContext {
             session_id: "test-session".to_owned(),
-            profile: "test".to_owned(),
             data_dir: "/nonexistent".to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-            embedding_service: None,
-            path_validator: None,
-            recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            keyword_enricher: None,
-            auto_consolidation_threshold: 0,
-            approval_mode: genesis_config::ApprovalMode::Auto,
+            ..crate::test_utils::test_ctx()
         };
 
         // Will fail on DB open but validates argument handling

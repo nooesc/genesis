@@ -273,35 +273,12 @@ impl ToolHandler for MemoryConsolidateTool {
 
         let mut summaries = Vec::new();
         for cluster in &clusters {
-            let members: Vec<_> = cluster
-                .iter()
-                .filter_map(|id| store.get(id).ok().flatten())
-                .collect();
-            let combined_content: String = members
-                .iter()
-                .map(|m| format!("- [{}] {}", m.kind, m.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let keywords: Vec<String> = members
-                .iter()
-                .flat_map(|m| extract_keywords(&m.kind, &m.content))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-
-            let summary_content = format!(
-                "Consolidated from {} memories:\n{}",
-                members.len(),
-                combined_content
-            );
-            let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
-            store
-                .consolidate_cluster(&member_refs, &summary_content, keywords)
+            let count = consolidate_single_cluster(&store, cluster)
                 .map_err(|error| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("failed to consolidate: {error}"),
                 })?;
-            summaries.push(format!("- {} memories consolidated", members.len()));
+            summaries.push(format!("- {count} memories consolidated"));
         }
 
         Ok(ToolOutput {
@@ -414,19 +391,17 @@ fn store_plain(
 }
 
 /// Create causal edges from previously recalled memories to the newly stored memory.
+/// Reads recalled IDs without draining — all stores in the same turn get causal edges.
+/// The agent loop clears recalled IDs at the start of each new turn.
 fn create_causal_links(store: &MemoryStore, context: &ToolContext, new_memory_id: &str) {
-    let recalled_ids = match context.recalled_memory_ids.lock() {
-        Ok(mut ids) => {
-            let taken = std::mem::take(&mut *ids);
-            taken
-        }
-        Err(_) => return,
+    let Ok(ids) = context.recalled_memory_ids.lock() else {
+        return;
     };
-    for recalled_id in &recalled_ids {
+    for recalled_id in ids.iter() {
         if recalled_id == new_memory_id {
-            continue; // Don't self-link
+            continue;
         }
-        if let Err(e) = store.create_link(recalled_id, new_memory_id, "causal", 1.0) {
+        if let Err(e) = store.create_link(recalled_id, new_memory_id, genesis_storage::edge_type::CAUSAL, 1.0) {
             tracing::warn!(error = %e, recalled_id, new_memory_id, "failed to create causal link");
         }
     }
@@ -472,8 +447,47 @@ fn extract_or_enrich_keywords(context: &ToolContext, key: &str, value: &str) -> 
     extract_keywords(key, value)
 }
 
+/// Consolidate a single cluster of memory IDs into a summary.
+/// Returns the number of members consolidated.
+fn consolidate_single_cluster(
+    store: &MemoryStore,
+    cluster: &[String],
+) -> Result<usize, genesis_storage::StorageError> {
+    let members: Vec<_> = cluster
+        .iter()
+        .filter_map(|id| store.get(id).ok().flatten())
+        .collect();
+    let combined_content: String = members
+        .iter()
+        .map(|m| format!("- [{}] {}", m.kind, m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let keywords: Vec<String> = members
+        .iter()
+        .flat_map(|m| extract_keywords(&m.kind, &m.content))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let summary_content = format!(
+        "Consolidated from {} memories:\n{}",
+        members.len(),
+        combined_content
+    );
+    let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
+    store.consolidate_cluster(&member_refs, &summary_content, keywords)?;
+    Ok(members.len())
+}
+
 /// Check if auto-consolidation should trigger and run it if so.
+/// Skips re-triggering if the last attempt found no clusters (avoids repeated
+/// full scans when embeddings are unavailable).
 fn try_auto_consolidate(store: &MemoryStore, context: &ToolContext) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Track the count at which we last attempted consolidation. If the count
+    // hasn't changed since the last fruitless attempt, skip the expensive scan.
+    static LAST_ATTEMPTED_COUNT: AtomicU64 = AtomicU64::new(0);
+
     if context.auto_consolidation_threshold == 0 {
         return;
     }
@@ -485,6 +499,11 @@ fn try_auto_consolidate(store: &MemoryStore, context: &ToolContext) {
         }
     };
     if count < context.auto_consolidation_threshold {
+        return;
+    }
+    // Skip if we already attempted at this count and found nothing.
+    let last = LAST_ATTEMPTED_COUNT.load(Ordering::Relaxed);
+    if last == count {
         return;
     }
     tracing::info!(
@@ -500,34 +519,16 @@ fn try_auto_consolidate(store: &MemoryStore, context: &ToolContext) {
         }
     };
     if clusters.is_empty() {
+        LAST_ATTEMPTED_COUNT.store(count, Ordering::Relaxed);
         return;
     }
     for cluster in &clusters {
-        let members: Vec<_> = cluster
-            .iter()
-            .filter_map(|id| store.get(id).ok().flatten())
-            .collect();
-        let combined_content: String = members
-            .iter()
-            .map(|m| format!("- [{}] {}", m.kind, m.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let keywords: Vec<String> = members
-            .iter()
-            .flat_map(|m| extract_keywords(&m.kind, &m.content))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let summary_content = format!(
-            "Consolidated from {} memories:\n{}",
-            members.len(),
-            combined_content
-        );
-        let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = store.consolidate_cluster(&member_refs, &summary_content, keywords) {
+        if let Err(e) = consolidate_single_cluster(store, cluster) {
             tracing::warn!(error = %e, "auto-consolidation: failed to consolidate cluster");
         }
     }
+    // Reset so future stores can re-trigger after new memories accumulate.
+    LAST_ATTEMPTED_COUNT.store(0, Ordering::Relaxed);
     tracing::info!(clusters = clusters.len(), "auto-consolidation complete");
 }
 
@@ -1621,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn causal_links_are_drained_after_first_store() {
+    fn all_stores_in_same_turn_get_causal_links() {
         let dir = tempdir().expect("tempdir");
         setup_db(dir.path());
         let db_path = dir.path().join("genesis.db");
@@ -1674,7 +1675,7 @@ mod tests {
             )
             .unwrap();
 
-        // Second store — should NOT create additional causal links (IDs drained).
+        // Second store — should ALSO create causal links (recalled IDs persist within a turn).
         MemoryStoreTool
             .run(
                 &ToolCall {
@@ -1697,9 +1698,9 @@ mod tests {
             .unwrap();
 
         assert!(causal_after_first > 0, "first store should create causal links");
-        assert_eq!(
-            causal_after_first, causal_after_second,
-            "second store should not create additional causal links (recalled IDs drained)"
+        assert!(
+            causal_after_second > causal_after_first,
+            "second store should also create causal links (recalled IDs persist within a turn)"
         );
     }
 

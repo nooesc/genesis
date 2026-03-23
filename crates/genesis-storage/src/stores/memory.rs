@@ -738,8 +738,8 @@ impl MemoryStore {
             if candidate.score < threshold {
                 break;
             }
-            self.create_link(memory_id, &candidate.memory.id, "semantic", candidate.score)?;
-            self.create_link(&candidate.memory.id, memory_id, "semantic", candidate.score)?;
+            self.create_link(memory_id, &candidate.memory.id, crate::util::edge_type::SEMANTIC, candidate.score)?;
+            self.create_link(&candidate.memory.id, memory_id, crate::util::edge_type::SEMANTIC, candidate.score)?;
             linked += 1;
             if linked >= max_links {
                 break;
@@ -893,8 +893,8 @@ impl MemoryStore {
         let mut linked = 0;
         for (rank, target_id) in recent_ids.iter().enumerate() {
             let weight = 1.0 / (rank as f64 + 1.0);
-            self.create_link(memory_id, target_id, "temporal", weight)?;
-            self.create_link(target_id, memory_id, "temporal", weight)?;
+            self.create_link(memory_id, target_id, crate::util::edge_type::TEMPORAL, weight)?;
+            self.create_link(target_id, memory_id, crate::util::edge_type::TEMPORAL, weight)?;
             linked += 1;
         }
         Ok(linked)
@@ -951,8 +951,8 @@ impl MemoryStore {
 
         let mut linked = 0;
         for (target_id, overlap) in &matches {
-            self.create_link(memory_id, target_id, "entity", *overlap as f64)?;
-            self.create_link(target_id, memory_id, "entity", *overlap as f64)?;
+            self.create_link(memory_id, target_id, crate::util::edge_type::ENTITY, *overlap as f64)?;
+            self.create_link(target_id, memory_id, crate::util::edge_type::ENTITY, *overlap as f64)?;
             linked += 1;
         }
         Ok(linked)
@@ -1210,8 +1210,8 @@ impl MemoryStore {
 
         self.mark_consolidated(member_ids, &summary_id)?;
         for member_id in member_ids {
-            self.create_link(member_id, &summary_id, "consolidation", 1.0)?;
-            self.create_link(&summary_id, member_id, "consolidation", 0.5)?;
+            self.create_link(member_id, &summary_id, crate::util::edge_type::CONSOLIDATION, 1.0)?;
+            self.create_link(&summary_id, member_id, crate::util::edge_type::CONSOLIDATION, 0.5)?;
         }
         Ok(summary)
     }

@@ -28,14 +28,23 @@ pub(crate) fn decayed_importance(
     Ok(importance * 0.99_f32.powf(days))
 }
 
+/// Edge type constants for the memory graph.
+pub mod edge_type {
+    pub const CONSOLIDATION: &str = "consolidation";
+    pub const SEMANTIC: &str = "semantic";
+    pub const CAUSAL: &str = "causal";
+    pub const TEMPORAL: &str = "temporal";
+    pub const ENTITY: &str = "entity";
+}
+
 /// Return the retrieval weight multiplier for a given edge type.
 pub(crate) fn edge_type_weight(edge_type: &str) -> f64 {
     match edge_type {
-        "consolidation" => 1.2,
-        "semantic" => 1.0,
-        "causal" => 0.9,
-        "temporal" => 0.7,
-        "entity" => 0.6,
+        edge_type::CONSOLIDATION => 1.2,
+        edge_type::SEMANTIC => 1.0,
+        edge_type::CAUSAL => 0.9,
+        edge_type::TEMPORAL => 0.7,
+        edge_type::ENTITY => 0.6,
         _ => 0.5,
     }
 }
