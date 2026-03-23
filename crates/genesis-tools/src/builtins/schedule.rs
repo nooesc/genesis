@@ -57,13 +57,12 @@ impl ToolHandler for ScheduleCreateTool {
 
         let id = format!("sched-{}", &uuid_v4()[..8]);
         let store = ScheduleStore::new(&context.db_path());
-        let schedule =
-            store
-                .create_with_timezone(&id, cron, destination, prompt, timezone)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool: call.name.clone(),
-                    reason: format!("failed to create schedule: {e}"),
-                })?;
+        let schedule = store
+            .create_with_timezone(&id, cron, destination, prompt, timezone)
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to create schedule: {e}"),
+            })?;
 
         let tz_display = schedule.timezone.as_deref().unwrap_or("UTC");
         Ok(ToolOutput {

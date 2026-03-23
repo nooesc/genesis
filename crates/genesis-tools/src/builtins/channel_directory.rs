@@ -129,9 +129,11 @@ fn fetch_channels(platform: &str, tool_name: &str) -> Result<Vec<CachedChannel>,
 
 /// Fetch Slack channels via conversations.list, paginating through all results.
 fn fetch_slack_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::SLACK_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "SLACK_BOT_TOKEN environment variable not set".to_owned(),
+    let token = genesis_config::env::get(genesis_config::env::SLACK_BOT_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "SLACK_BOT_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
     let mut all_channels = Vec::new();
@@ -212,9 +214,11 @@ fn fetch_slack_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError
 
 /// Fetch Discord channels: first get guilds the bot is in, then channels per guild.
 fn fetch_discord_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::DISCORD_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+    let token = genesis_config::env::get(genesis_config::env::DISCORD_BOT_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
     let auth = format!("Bot {token}");
@@ -301,13 +305,15 @@ fn fetch_discord_channels(tool_name: &str) -> Result<Vec<CachedChannel>, ToolErr
 /// WhatsApp Cloud API doesn't support listing contacts, but we can show the
 /// configured phone number ID so the agent knows the platform is available.
 fn fetch_whatsapp_info(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
-    let _token = genesis_config::env::get(genesis_config::env::WHATSAPP_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+    let _token = genesis_config::env::get(genesis_config::env::WHATSAPP_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
-    let phone_id =
-        genesis_config::env::get(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID).map_err(|_| ToolError::ExecutionFailed {
+    let phone_id = genesis_config::env::get(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID)
+        .map_err(|_| ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
         })?;
@@ -326,17 +332,19 @@ fn fetch_whatsapp_info(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError>
 
 /// Fetch available notification services from Home Assistant REST API.
 fn fetch_homeassistant_services(tool_name: &str) -> Result<Vec<CachedChannel>, ToolError> {
-    let ha_url = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_URL).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
-    })?;
+    let ha_url =
+        genesis_config::env::get(genesis_config::env::HOMEASSISTANT_URL).map_err(|_| {
+            ToolError::ExecutionFailed {
+                tool: tool_name.to_owned(),
+                reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
+            }
+        })?;
 
-    let ha_token = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_LONG_LIVED_TOKEN).map_err(|_| {
-        ToolError::ExecutionFailed {
+    let ha_token = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_LONG_LIVED_TOKEN)
+        .map_err(|_| ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: "HOMEASSISTANT_LONG_LIVED_TOKEN environment variable not set".to_owned(),
-        }
-    })?;
+        })?;
 
     let base = ha_url.trim_end_matches('/');
     let url = format!("{base}/api/services");

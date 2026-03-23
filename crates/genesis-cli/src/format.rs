@@ -840,10 +840,7 @@ pub(crate) fn format_subagent(sub: &genesis_storage::StoredSubagent) -> String {
 }
 
 pub(crate) fn format_created_schedule(schedule: &StoredSchedule) -> String {
-    let tz_display = schedule
-        .timezone
-        .as_deref()
-        .unwrap_or("UTC");
+    let tz_display = schedule.timezone.as_deref().unwrap_or("UTC");
     format!(
         "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ntimezone: {}\ncreated_at: {}",
         schedule.id,
