@@ -362,6 +362,39 @@ fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Shared pagination types
+// ---------------------------------------------------------------------------
+
+/// Maximum value accepted for `limit`.  Requests with a larger value are
+/// silently clamped to this ceiling.
+const MAX_PAGE_LIMIT: usize = 1000;
+
+/// Default page size when the caller does not supply one.
+const DEFAULT_PAGE_LIMIT: usize = 50;
+
+fn default_page_limit() -> usize {
+    DEFAULT_PAGE_LIMIT
+}
+
+/// Clamp a caller-supplied limit to the valid range `[1, MAX_PAGE_LIMIT]`.
+fn clamp_limit(limit: usize) -> usize {
+    limit.clamp(1, MAX_PAGE_LIMIT)
+}
+
+/// Standard paginated response wrapper returned by all list endpoints.
+///
+/// Wraps any serializable item type and includes total count, current page
+/// window, and a `has_more` flag for simple forward-pagination.
+#[derive(Debug, Serialize)]
+pub(crate) struct PaginatedResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: u64,
+    pub limit: usize,
+    pub offset: usize,
+    pub has_more: bool,
+}
+
 /// Response body from the `/chat` endpoint.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatResponse {
@@ -1139,31 +1172,40 @@ async fn metrics_json_handler(State(state): State<Arc<AppState>>) -> Json<Metric
 /// Query parameters for listing sessions.
 #[derive(Debug, Deserialize)]
 struct ListSessionsQuery {
-    #[serde(default = "default_session_limit")]
+    #[serde(default = "default_page_limit")]
     limit: usize,
+    #[serde(default)]
+    offset: usize,
     search: Option<String>,
-}
-
-fn default_session_limit() -> usize {
-    50
 }
 
 async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let sessions = if let Some(query) = &params.search {
-        store.search_sessions(query)
-    } else {
-        store.list_recent_sessions(params.limit)
-    }
-    .map_err(storage_err)?;
 
-    Ok(Json(serde_json::json!({
-        "sessions": sessions,
-        "count": sessions.len(),
-    })))
+    let (sessions, total) = if let Some(query) = &params.search {
+        store
+            .search_sessions_paginated(query, limit, offset)
+            .map_err(storage_err)?
+    } else {
+        store
+            .list_recent_sessions_paginated(limit, offset)
+            .map_err(storage_err)?
+    };
+
+    let has_more = (offset + sessions.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: sessions,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn get_session_handler(
@@ -1644,17 +1686,32 @@ struct SearchSkillsQuery {
     tag: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListSkillsQuery {
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
 async fn list_skills_handler(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListSkillsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store.list_all().map_err(storage_err)?;
+    let (skills, total) = store.list_all_paginated(limit, offset).map_err(storage_err)?;
 
-    let count = skills.len();
-    Ok(Json(serde_json::json!({
-        "skills": skills,
-        "count": count,
-    })))
+    let has_more = (offset + skills.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: skills,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn get_skill_handler(
@@ -1734,12 +1791,10 @@ async fn search_skills_handler(
 /// Query parameters for listing memories.
 #[derive(Debug, Deserialize)]
 struct ListMemoriesQuery {
-    #[serde(default = "default_memory_limit")]
+    #[serde(default = "default_page_limit")]
     limit: usize,
-}
-
-fn default_memory_limit() -> usize {
-    50
+    #[serde(default)]
+    offset: usize,
 }
 
 /// Query parameters for searching memories.
@@ -1830,14 +1885,20 @@ async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
-    let memories = store.list(params.limit).map_err(storage_err)?;
+    let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
-    let count = memories.len();
-    Ok(Json(serde_json::json!({
-        "memories": memories,
-        "count": count,
-    })))
+    let has_more = (offset + memories.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: memories,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn search_memories_handler(
@@ -2080,25 +2141,32 @@ struct SetEnabledRequest {
 struct ListSchedulesQuery {
     #[serde(default)]
     pub enabled_only: bool,
+    #[serde(default = "default_page_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
 }
 
 async fn list_schedules_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSchedulesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedules = if params.enabled_only {
-        store.list_enabled()
-    } else {
-        store.list_all()
-    }
-    .map_err(storage_err)?;
+    let (schedules, total) = store
+        .list_paginated(params.enabled_only, limit, offset)
+        .map_err(storage_err)?;
 
-    let count = schedules.len();
-    Ok(Json(serde_json::json!({
-        "schedules": schedules,
-        "count": count,
-    })))
+    let has_more = (offset + schedules.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: schedules,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn get_schedule_handler(
@@ -2193,27 +2261,37 @@ struct ObserveTraitRequest {
 struct ListTraitsQuery {
     pub category: Option<String>,
     pub min_confidence: Option<f64>,
+    #[serde(default = "default_page_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
 }
 
 async fn list_user_traits_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let traits = if let Some(category) = &params.category {
-        store.list_by_category(category)
-    } else if let Some(threshold) = params.min_confidence {
-        store.confident_traits(threshold)
-    } else {
-        store.list_all()
-    }
-    .map_err(storage_err)?;
+    let (traits, total) = store
+        .list_paginated(
+            params.category.as_deref(),
+            params.min_confidence,
+            limit,
+            offset,
+        )
+        .map_err(storage_err)?;
 
-    let count = traits.len();
-    Ok(Json(serde_json::json!({
-        "traits": traits,
-        "count": count,
-    })))
+    let has_more = (offset + traits.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: traits,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn get_user_trait_handler(
@@ -2355,51 +2433,59 @@ async fn skill_usage_recent_handler(
 
 // ── Tool introspection ───────────────────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+struct ListToolsQuery {
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
 async fn list_tools_handler(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<ListToolsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
+
     let registry = genesis_tools::default_registry();
     let definitions = registry.definitions();
 
-    let tools: Vec<serde_json::Value> = definitions
+    let mut all_tools: Vec<serde_json::Value> = definitions
         .iter()
         .map(|def| {
             serde_json::json!({
                 "name": def.name,
                 "description": def.description,
                 "parameters": def.parameters,
+                "source": "builtin",
             })
         })
         .collect();
 
-    let count = tools.len();
-
     // Also include MCP tools if available
-    let mcp_tools: Vec<serde_json::Value> = if let Some(mcp) = &state.mcp {
-        mcp.tool_definitions()
-            .await
-            .into_iter()
-            .map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "source": "mcp",
-                })
-            })
-            .collect()
-    } else {
-        vec![]
-    };
+    if let Some(mcp) = &state.mcp {
+        for t in mcp.tool_definitions().await {
+            all_tools.push(serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "source": "mcp",
+            }));
+        }
+    }
 
-    let mcp_count = mcp_tools.len();
+    let total = all_tools.len() as u64;
+    let page: Vec<serde_json::Value> = all_tools.into_iter().skip(offset).take(limit).collect();
+    let has_more = (offset + page.len()) < total as usize;
 
-    Ok(Json(serde_json::json!({
-        "builtin_tools": tools,
-        "builtin_count": count,
-        "mcp_tools": mcp_tools,
-        "mcp_count": mcp_count,
-        "total": count + mcp_count,
-    })))
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: page,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn config_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -2587,12 +2673,32 @@ async fn llm_analytics_handler(
 // Agent template endpoints
 // ---------------------------------------------------------------------------
 
-async fn list_templates_handler() -> Json<serde_json::Value> {
-    let templates = genesis_core::templates::list_templates();
-    Json(serde_json::json!({
-        "templates": templates,
-        "count": templates.len(),
-    }))
+#[derive(Debug, Deserialize)]
+struct ListTemplatesQuery {
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+async fn list_templates_handler(
+    axum::extract::Query(params): axum::extract::Query<ListTemplatesQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
+    let all_templates = genesis_core::templates::list_templates();
+    let total = all_templates.len() as u64;
+    let page: Vec<_> = all_templates.iter().skip(offset).take(limit).collect();
+    let has_more = (offset + page.len()) < total as usize;
+
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: page,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn get_template_handler(
@@ -3905,6 +4011,10 @@ async fn chat_batch_handler(
 #[derive(Debug, Deserialize)]
 struct PairingPlatformQuery {
     platform: Option<String>,
+    #[serde(default = "default_page_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3928,30 +4038,44 @@ async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let users = store
-        .list_approved(params.platform.as_deref())
+    let (users, total) = store
+        .list_approved_paginated(params.platform.as_deref(), limit, offset)
         .map_err(storage_err)?;
 
-    Ok(Json(serde_json::json!({
-        "approved": users,
-        "count": users.len(),
-    })))
+    let has_more = (offset + users.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: users,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn list_pending_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = clamp_limit(params.limit);
+    let offset = params.offset;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let pending = store
-        .list_pending(params.platform.as_deref())
+    let (pending, total) = store
+        .list_pending_paginated(params.platform.as_deref(), limit, offset)
         .map_err(storage_err)?;
 
-    Ok(Json(serde_json::json!({
-        "pending": pending,
-        "count": pending.len(),
-    })))
+    let has_more = (offset + pending.len()) < total as usize;
+    Ok(Json(serde_json::to_value(PaginatedResponse {
+        items: pending,
+        total,
+        limit,
+        offset,
+        has_more,
+    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    ))
 }
 
 async fn approve_pairing_handler(
@@ -5308,5 +5432,262 @@ mod tests {
         assert!(json.get("errors_total").is_some());
         assert!(json.get("input_tokens_total").is_some());
         assert!(json.get("output_tokens_total").is_some());
+    }
+
+    // --- Pagination tests ---
+
+    #[test]
+    fn paginated_response_serializes_correctly() {
+        let resp = PaginatedResponse {
+            items: vec!["a", "b"],
+            total: 5,
+            limit: 2,
+            offset: 0,
+            has_more: true,
+        };
+        let json = serde_json::to_value(&resp).expect("should serialize");
+        assert_eq!(json["items"], serde_json::json!(["a", "b"]));
+        assert_eq!(json["total"], 5);
+        assert_eq!(json["limit"], 2);
+        assert_eq!(json["offset"], 0);
+        assert_eq!(json["has_more"], true);
+    }
+
+    #[test]
+    fn paginated_response_has_more_false_at_end() {
+        let resp = PaginatedResponse {
+            items: vec![1, 2],
+            total: 4,
+            limit: 2,
+            offset: 2,
+            has_more: false,
+        };
+        let json = serde_json::to_value(&resp).expect("should serialize");
+        assert_eq!(json["has_more"], false);
+    }
+
+    #[test]
+    fn clamp_limit_enforces_bounds() {
+        assert_eq!(clamp_limit(0), 1);
+        assert_eq!(clamp_limit(50), 50);
+        assert_eq!(clamp_limit(2000), MAX_PAGE_LIMIT);
+        assert_eq!(clamp_limit(1000), 1000);
+    }
+
+    #[test]
+    fn list_sessions_query_defaults_match_pagination() {
+        let json = r#"{}"#;
+        let q: ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.limit, DEFAULT_PAGE_LIMIT);
+        assert_eq!(q.offset, 0);
+        assert!(q.search.is_none());
+    }
+
+    #[test]
+    fn list_sessions_query_accepts_offset() {
+        let json = r#"{"limit": 10, "offset": 20}"#;
+        let q: ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.limit, 10);
+        assert_eq!(q.offset, 20);
+    }
+
+    #[test]
+    fn list_schedules_query_accepts_pagination() {
+        let json = r#"{"enabled_only": true, "limit": 25, "offset": 5}"#;
+        let q: ListSchedulesQuery = serde_json::from_str(json).expect("should deserialize");
+        assert!(q.enabled_only);
+        assert_eq!(q.limit, 25);
+        assert_eq!(q.offset, 5);
+    }
+
+    #[test]
+    fn list_traits_query_accepts_pagination() {
+        let json = r#"{"category": "pref", "limit": 10, "offset": 0}"#;
+        let q: ListTraitsQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.category.as_deref(), Some("pref"));
+        assert_eq!(q.limit, 10);
+        assert_eq!(q.offset, 0);
+    }
+
+    #[test]
+    fn pairing_platform_query_accepts_pagination() {
+        let json = r#"{"platform": "telegram", "limit": 10, "offset": 5}"#;
+        let q: PairingPlatformQuery = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(q.platform.as_deref(), Some("telegram"));
+        assert_eq!(q.limit, 10);
+        assert_eq!(q.offset, 5);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_paginated_response() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/sessions?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("items").is_some(), "response must have 'items' field");
+        assert!(json.get("total").is_some(), "response must have 'total' field");
+        assert!(json.get("limit").is_some(), "response must have 'limit' field");
+        assert!(json.get("offset").is_some(), "response must have 'offset' field");
+        assert!(json.get("has_more").is_some(), "response must have 'has_more' field");
+    }
+
+    #[tokio::test]
+    async fn list_skills_returns_paginated_response() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/skills?limit=5")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("items").is_some());
+        assert!(json.get("total").is_some());
+        assert!(json.get("has_more").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_memories_returns_paginated_response() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/memories?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("items").is_some());
+        assert!(json.get("total").is_some());
+        assert!(json.get("has_more").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_tools_returns_paginated_response() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/tools?limit=5&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("items").is_some());
+        assert!(json.get("total").is_some());
+        assert!(json.get("has_more").is_some());
+        // With 60+ builtin tools and limit=5, there should be more
+        assert_eq!(json["has_more"], true);
+        assert_eq!(json["items"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn list_templates_returns_paginated_response() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/templates?limit=50")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("items").is_some());
+        assert!(json.get("total").is_some());
+        assert!(json.get("has_more").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_endpoints_default_params_are_backwards_compatible() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        // Verify that calling endpoints with NO pagination params still works
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        for uri in &[
+            "/api/sessions",
+            "/api/skills",
+            "/api/memories",
+            "/api/schedules",
+            "/api/user/traits",
+            "/api/tools",
+            "/api/templates",
+            "/api/pairing/approved",
+            "/api/pairing/pending",
+        ] {
+            let req = Request::builder()
+                .uri(*uri)
+                .body(Body::empty())
+                .expect("request should build");
+            let resp = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("request should succeed");
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} should return 200 with default params"
+            );
+        }
     }
 }
