@@ -99,6 +99,11 @@ impl AgentLoop {
     {
         use genesis_lua::hooks::PreHookOutcome;
 
+        // Reset stuck-loop state at the start of each new user turn so
+        // stale failure counts from a previous turn don't cause false positives.
+        self.tool_failure_counts.clear();
+        self.nudge_sent = false;
+
         let hook_session = self.session_id_str().to_owned();
         let lua_pre_turn = self.run_lua_pre_turn(user_message);
         let user_message = match lua_pre_turn {

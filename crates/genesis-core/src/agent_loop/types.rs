@@ -148,6 +148,9 @@ pub struct AgentLoopConfig {
     /// Compiled tool policy for permission scoping. When set, tool calls
     /// are checked against allow/deny rules before execution.
     pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
+    /// Number of consecutive same-tool failures before injecting a stuck-loop
+    /// nudge. Higher values reduce false positives. Default: 5.
+    pub stuck_loop_threshold: usize,
 }
 
 impl Default for AgentLoopConfig {
@@ -176,6 +179,7 @@ impl Default for AgentLoopConfig {
             core_tools: None,
             routing: None,
             tool_policy: None,
+            stuck_loop_threshold: STUCK_LOOP_THRESHOLD,
         }
     }
 }

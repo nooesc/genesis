@@ -133,5 +133,5 @@ pub mod retry {
     pub const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 
     /// Consecutive same-tool failures before injecting a stuck-loop nudge.
-    pub const STUCK_LOOP_THRESHOLD: usize = 3;
+    pub const STUCK_LOOP_THRESHOLD: usize = 5;
 }
