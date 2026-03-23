@@ -129,36 +129,28 @@ impl Default for GuardrailConfig {
     }
 }
 
-// PII detection patterns
-static PII_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    vec![
-        (
-            "phone_number",
-            Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
-                .expect("PII regex pattern is a compile-time constant"),
-        ),
-        (
-            "email",
-            Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-                .expect("PII regex pattern is a compile-time constant"),
-        ),
-        (
-            "ssn",
-            Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b")
-                .expect("PII regex pattern is a compile-time constant"),
-        ),
-        (
-            "credit_card",
-            Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b")
-                .expect("PII regex pattern is a compile-time constant"),
-        ),
-        (
-            "ip_address",
-            Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-                .expect("PII regex pattern is a compile-time constant"),
-        ),
-    ]
+// PII detection patterns — each compiled once via LazyLock.
+static PII_PHONE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap()
 });
+static PII_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").unwrap()
+});
+static PII_SSN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").unwrap());
+static PII_CREDIT_CARD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b").unwrap());
+static PII_IP_ADDRESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap());
+
+/// All PII patterns paired with their human-readable kind label.
+static PII_PATTERNS: [(&str, &LazyLock<Regex>); 5] = [
+    ("phone_number", &PII_PHONE),
+    ("email", &PII_EMAIL),
+    ("ssn", &PII_SSN),
+    ("credit_card", &PII_CREDIT_CARD),
+    ("ip_address", &PII_IP_ADDRESS),
+];
 
 /// A compiled regex paired with the original pattern string.
 struct CompiledPattern {
