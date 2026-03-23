@@ -38,21 +38,34 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Buffer size for bounded SSE channels.  Provides backpressure: when a slow
-/// consumer lets the buffer fill up, new events are dropped rather than
-/// accumulating unbounded memory.
+/// Buffer size for bounded SSE channels.  Provides backpressure: when the
+/// buffer fills up, the sender blocks (up to [`SSE_SEND_TIMEOUT`]) rather
+/// than silently dropping events.
 const SSE_CHANNEL_BUFFER: usize = 64;
 
 /// Default timeout for SSE streaming requests (5 minutes).  Overridable via
 /// `gateway.stream_timeout_secs` in the config file.
 const DEFAULT_STREAM_TIMEOUT_SECS: u64 = 300;
 
-/// Try to send an SSE event on a bounded channel.  If the receiver has been
-/// dropped (client disconnected) the cancellation flag is set so the agent
-/// loop exits at the next opportunity.  If the channel is merely full, the
-/// event is dropped with a warning — this applies backpressure without
-/// blocking the synchronous callback.
-fn try_send_sse(
+/// Maximum time to wait when the SSE channel buffer is full before aborting
+/// the stream.  This prevents silent data loss: instead of dropping events
+/// when a slow consumer falls behind, we apply backpressure and only abort
+/// (with cancellation) if the consumer cannot keep up for this duration.
+const SSE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Send an SSE event on a bounded channel with backpressure.
+///
+/// If the receiver has been dropped (client disconnected) the cancellation
+/// flag is set so the agent loop exits at the next opportunity.  If the
+/// channel buffer is full, this blocks for up to [`SSE_SEND_TIMEOUT`]
+/// waiting for capacity.  If the timeout elapses the stream is aborted via
+/// cancellation — this is preferable to silently dropping events which would
+/// cause invisible data loss in OpenAI-compatible streaming responses.
+///
+/// This function is called from synchronous streaming callbacks, so it uses
+/// [`tokio::task::block_in_place`] to safely block the current thread while
+/// awaiting the async send.
+fn send_sse(
     tx: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
     event: Result<Event, std::convert::Infallible>,
     cancelled: &AtomicBool,
@@ -60,16 +73,26 @@ fn try_send_sse(
     if cancelled.load(Ordering::Relaxed) {
         return;
     }
-    match tx.try_send(event) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            debug!("SSE client disconnected, signalling cancellation");
-            cancelled.store(true, Ordering::Relaxed);
-        }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            warn!("SSE channel full, dropping event (slow consumer)");
-        }
-    }
+    // block_in_place moves the current task off the tokio worker thread,
+    // allowing us to block on an async send without deadlocking the runtime.
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            match tokio::time::timeout(SSE_SEND_TIMEOUT, tx.send(event)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_closed)) => {
+                    debug!("SSE client disconnected, signalling cancellation");
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                Err(_elapsed) => {
+                    error!(
+                        timeout_secs = SSE_SEND_TIMEOUT.as_secs(),
+                        "SSE send timed out (slow consumer), aborting stream"
+                    );
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+    });
 }
 
 /// Guard that sets a cancellation flag on drop.  Used to ensure the agent
@@ -3287,7 +3310,7 @@ async fn openai_streaming_response(
                 String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
-        try_send_sse(&tx, Ok(Event::default().data(initial_data)), &cancelled);
+        send_sse(&tx, Ok(Event::default().data(initial_data)), &cancelled);
 
         let completion_id_for_event = completion_id.clone();
         let model_for_event = model_for_task.clone();
@@ -3324,7 +3347,7 @@ async fn openai_streaming_response(
                                 String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                             }
                         };
-                        try_send_sse(
+                        send_sse(
                             &tx_for_event,
                             Ok(Event::default().data(chunk_data)),
                             &cancelled_cb,
@@ -3338,13 +3361,24 @@ async fn openai_streaming_response(
                 Ok(result) => result,
                 Err(_elapsed) => {
                     warn!(timeout_secs, "OpenAI streaming request timed out");
+                    // Emit an error chunk so OpenAI-compatible clients know
+                    // the response was truncated, then send [DONE].  Without
+                    // the error chunk, clients treat timeout as success.
+                    let error_event = serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "Stream timeout exceeded after {timeout_secs}s"
+                            ),
+                            "type": "timeout",
+                        }
+                    });
+                    if let Ok(payload) = serde_json::to_string(&error_event) {
+                        // Use a direct try_send here — we're about to abort
+                        // anyway, so blocking is unnecessary.
+                        let _ = tx.try_send(Ok(Event::default().data(payload)));
+                    }
+                    let _ = tx.try_send(Ok(Event::default().data("[DONE]")));
                     cancelled.store(true, Ordering::Relaxed);
-                    // Send [DONE] so well-behaved clients close cleanly.
-                    try_send_sse(
-                        &tx,
-                        Ok(Event::default().data("[DONE]")),
-                        &cancelled,
-                    );
                     return;
                 }
             };
@@ -3368,7 +3402,7 @@ async fn openai_streaming_response(
                 String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
-        try_send_sse(&tx, Ok(Event::default().data(finish_data)), &cancelled);
+        send_sse(&tx, Ok(Event::default().data(finish_data)), &cancelled);
 
         // Send usage chunk if we got a successful outcome
         if let Ok(outcome) = run_result {
@@ -3391,11 +3425,11 @@ async fn openai_streaming_response(
                     String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                 }
             };
-            try_send_sse(&tx, Ok(Event::default().data(usage_data)), &cancelled);
+            send_sse(&tx, Ok(Event::default().data(usage_data)), &cancelled);
         }
 
         // Send [DONE] sentinel
-        try_send_sse(
+        send_sse(
             &tx,
             Ok(Event::default().data("[DONE]")),
             &cancelled,
@@ -3693,7 +3727,7 @@ async fn chat_stream_handler(
             }));
 
             if let Ok(payload) = initial_payload {
-                try_send_sse(
+                send_sse(
                     &tx,
                     Ok(Event::default().event("session").data(payload)),
                     &cancelled,
@@ -3719,7 +3753,7 @@ async fn chat_stream_handler(
                                 session_id: session_id.clone(),
                                 content: chunk.to_owned(),
                             }) {
-                                try_send_sse(
+                                send_sse(
                                     &tx_cb,
                                     Ok(Event::default().event("chunk").data(payload)),
                                     &cancelled_cb,
@@ -3731,7 +3765,7 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "tool": name,
                             })) {
-                                try_send_sse(
+                                send_sse(
                                     &tx_cb,
                                     Ok(Event::default().event("tool_call").data(payload)),
                                     &cancelled_cb,
@@ -3747,7 +3781,7 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "question": question,
                             })) {
-                                try_send_sse(
+                                send_sse(
                                     &tx_cb,
                                     Ok(Event::default().event("clarification").data(payload)),
                                     &cancelled_cb,
@@ -3773,7 +3807,7 @@ async fn chat_stream_handler(
                                 "streaming request timed out after {timeout_secs}s"
                             ),
                         }) {
-                            try_send_sse(
+                            send_sse(
                                 &tx,
                                 Ok(Event::default().event("error").data(payload)),
                                 &cancelled,
@@ -3810,7 +3844,7 @@ async fn chat_stream_handler(
                         total_input_tokens: outcome.result.total_input_tokens,
                         total_output_tokens: outcome.result.total_output_tokens,
                     }) {
-                        try_send_sse(
+                        send_sse(
                             &tx,
                             Ok(Event::default().event("done").data(payload)),
                             &cancelled,
@@ -3827,7 +3861,7 @@ async fn chat_stream_handler(
                         session_id,
                         error: error.to_string(),
                     }) {
-                        try_send_sse(
+                        send_sse(
                             &tx,
                             Ok(Event::default().event("error").data(payload)),
                             &cancelled,
