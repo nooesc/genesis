@@ -508,31 +508,37 @@ pub async fn run_tui(
         #[cfg(unix)]
         if app.should_suspend {
             app.should_suspend = false;
-            let _ = terminal::restore();
 
-            // SAFETY: Sending SIGTSTP to the process group (pid 0) is the
-            // standard way to suspend a foreground process. The process will
-            // stop here until the user types `fg` in the shell. After
-            // resumption, execution continues at the next line.
-            unsafe {
-                libc::kill(0, libc::SIGTSTP);
+            // Skip suspend in terminal multiplexers — they handle Ctrl+Z
+            // themselves and sending SIGTSTP can cause double-suspend or
+            // unexpected detach behaviour.
+            if !terminal::is_multiplexer() {
+                let _ = terminal::restore();
+
+                // SAFETY: Sending SIGTSTP to the process group (pid 0) is the
+                // standard way to suspend a foreground process. The process will
+                // stop here until the user types `fg` in the shell. After
+                // resumption, execution continues at the next line.
+                unsafe {
+                    libc::kill(0, libc::SIGTSTP);
+                }
+
+                // Process resumes here after `fg`.
+                terminal::init()?;
+
+                // Re-query terminal size — it may have changed while suspended.
+                let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+                let new_area = Rect::new(0, 0, w, h);
+                term.set_viewport_area(new_area);
+                app.viewport_width = new_area.width;
+                app.viewport_height = new_area.height;
+
+                // Clear stale effect state from the pre-suspend viewport.
+                app.effects.on_resize();
+
+                // Force a full redraw so the screen is repainted cleanly.
+                app.frame_requester.schedule_frame();
             }
-
-            // Process resumes here after `fg`.
-            terminal::init()?;
-
-            // Re-query terminal size — it may have changed while suspended.
-            let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-            let new_area = Rect::new(0, 0, w, h);
-            term.set_viewport_area(new_area);
-            app.viewport_width = new_area.width;
-            app.viewport_height = new_area.height;
-
-            // Clear stale effect state from the pre-suspend viewport.
-            app.effects.on_resize();
-
-            // Force a full redraw so the screen is repainted cleanly.
-            app.frame_requester.schedule_frame();
         }
 
         if app.should_exit {
