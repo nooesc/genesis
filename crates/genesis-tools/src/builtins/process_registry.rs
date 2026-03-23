@@ -922,7 +922,13 @@ impl ToolHandler for BackgroundShellExecTool {
                     reason: format!(
                         "command blocked: {danger}. Command: `{}`",
                         if command.len() > 80 {
-                            format!("{}...", &command[..77])
+                            let end = command
+                                .char_indices()
+                                .map(|(i, _)| i)
+                                .take_while(|&i| i <= 77)
+                                .last()
+                                .unwrap_or(0);
+                            format!("{}...", &command[..end])
                         } else {
                             command.clone()
                         }
