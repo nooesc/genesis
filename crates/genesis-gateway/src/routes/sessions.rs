@@ -115,7 +115,7 @@ fn default_search_limit() -> usize {
 pub(crate) async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
@@ -131,52 +131,51 @@ pub(crate) async fn list_sessions_handler(
     };
 
     let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SessionListResponse {
-        sessions,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SessionListResponse {
+            sessions,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn get_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let session = store.get_session(&id).map_err(storage_err)?;
 
     match session {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
+            ApiError::internal(format!("serialization error: {e}"))
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
+        None => Err(ApiError::not_found(format!("session '{id}' not found"))),
     }
 }
 
 pub(crate) async fn delete_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete_session(&id).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("session '{id}' not found")))
+        Err(ApiError::not_found(format!("session '{id}' not found")))
     }
 }
 
 pub(crate) async fn session_messages_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let messages = store.load_messages(&id).map_err(storage_err)?;
 
@@ -191,7 +190,7 @@ pub(crate) async fn fork_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<ForkRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let new_id = request.new_session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
@@ -213,7 +212,7 @@ pub(crate) async fn update_session_title_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<UpdateTitleRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
 
@@ -228,7 +227,7 @@ pub(crate) async fn export_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<ExportQuery>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let session_title = match store.get_session(&id) {
@@ -242,10 +241,9 @@ pub(crate) async fn export_session_handler(
     let stored = store.load_messages(&id).map_err(storage_err)?;
 
     if stored.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("no messages found for session '{id}'"),
-        ));
+        return Err(ApiError::not_found(format!(
+            "no messages found for session '{id}'"
+        )));
     }
 
     let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
@@ -271,12 +269,9 @@ pub(crate) async fn export_session_handler(
         "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
         "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
         _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
-                ),
-            ))
+            return Err(ApiError::bad_request(format!(
+                "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
+            )))
         }
     };
 
@@ -284,18 +279,13 @@ pub(crate) async fn export_session_handler(
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(content))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build response: {e}"),
-            )
-        })
+        .map_err(|e| ApiError::internal(format!("failed to build response: {e}")))
 }
 
 pub(crate) async fn purge_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PurgeQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let purged = store
         .purge_older_than(params.older_than_days)
@@ -310,7 +300,7 @@ pub(crate) async fn purge_sessions_handler(
 pub(crate) async fn get_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tags = store.get_tags(&id).map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
@@ -320,7 +310,7 @@ pub(crate) async fn set_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<SetTagsRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
     store.set_tags(&id, &tag_refs).map_err(storage_err)?;
@@ -332,7 +322,7 @@ pub(crate) async fn set_session_tags_handler(
 pub(crate) async fn add_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let added = store.add_tag(&id, &tag).map_err(storage_err)?;
     let tags = store.get_tags(&id).map_err(storage_err)?;
@@ -344,7 +334,7 @@ pub(crate) async fn add_session_tag_handler(
 pub(crate) async fn remove_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
     let tags = store.get_tags(&id).map_err(storage_err)?;
@@ -356,7 +346,7 @@ pub(crate) async fn remove_session_tag_handler(
 pub(crate) async fn sessions_by_tag_handler(
     State(state): State<Arc<AppState>>,
     Path(tag): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
     Ok(Json(
@@ -367,7 +357,7 @@ pub(crate) async fn sessions_by_tag_handler(
 pub(crate) async fn import_session_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ImportSessionRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let session_id = request.session_id.unwrap_or_else(|| {
@@ -387,12 +377,7 @@ pub(crate) async fn import_session_handler(
 
     store
         .import_session(&session_id, request.title.as_deref(), messages)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("import error: {e}"),
-            )
-        })?;
+        .map_err(|e| ApiError::internal(format!("import error: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
@@ -406,7 +391,7 @@ pub(crate) async fn import_session_handler(
 pub(crate) async fn bulk_export_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<BulkExportQuery>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let limit = params.limit.unwrap_or(1000);
@@ -440,13 +425,10 @@ pub(crate) async fn bulk_export_handler(
                 output.push('\n');
             }
             _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "unsupported bulk format '{}'; use 'jsonl' or 'json'",
-                        params.format
-                    ),
-                ))
+                return Err(ApiError::bad_request(format!(
+                    "unsupported bulk format '{}'; use 'jsonl' or 'json'",
+                    params.format
+                )))
             }
         }
     }
@@ -460,27 +442,17 @@ pub(crate) async fn bulk_export_handler(
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(output))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build response: {e}"),
-            )
-        })
+        .map_err(|e| ApiError::internal(format!("failed to build response: {e}")))
 }
 
 pub(crate) async fn search_messages_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMessagesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let results = store
         .search_messages(&params.q, params.limit)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("search error: {e}"),
-            )
-        })?;
+        .map_err(storage_err)?;
 
     Ok(Json(serde_json::json!({
         "query": params.q,
@@ -492,28 +464,22 @@ pub(crate) async fn search_messages_handler(
 pub(crate) async fn insights_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let data = store.insights(params.days).map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(data).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization error: {e}"))
     })?))
 }
 
 pub(crate) async fn usage_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let stats = store.usage_stats().map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization error: {e}"))
     })?))
 }

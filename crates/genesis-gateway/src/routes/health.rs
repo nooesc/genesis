@@ -224,9 +224,7 @@ pub(crate) async fn agent_card_handler(headers: HeaderMap) -> impl IntoResponse 
 ///
 /// Returns metrics in Prometheus text exposition format (text/plain).
 /// No external dependency needed — just formatted strings.
-pub(crate) async fn prometheus_metrics_handler(
-    State(state): State<Arc<AppState>>,
-) -> Response {
+pub(crate) async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Response {
     let uptime = state.started_at.elapsed().as_secs();
     let requests = state.requests_total.load(Ordering::Relaxed);
     let errors = state.errors_total.load(Ordering::Relaxed);

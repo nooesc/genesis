@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
+use crate::helpers::ApiError;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ pub(crate) struct ToolListResponse {
 
 pub(crate) async fn list_tools_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let registry = genesis_tools::default_registry();
     let definitions = registry.definitions();
 
@@ -63,13 +63,15 @@ pub(crate) async fn list_tools_handler(
     let mcp_count = mcp_tools.len();
     let total = builtin_count + mcp_count;
 
-    Ok(Json(serde_json::to_value(ToolListResponse {
-        builtin_tools,
-        builtin_count,
-        mcp_tools,
-        mcp_count,
-        total,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ToolListResponse {
+            builtin_tools,
+            builtin_count,
+            mcp_tools,
+            mcp_count,
+            total,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 

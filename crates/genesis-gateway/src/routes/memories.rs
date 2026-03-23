@@ -85,7 +85,7 @@ fn embedding_runtime_error(
     _provider: Option<&genesis_core::embedding::EmbeddingProvider>,
     context: &str,
     error: genesis_core::embedding::EmbeddingError,
-) -> (StatusCode, String) {
+) -> ApiError {
     #[cfg(not(feature = "local-embeddings"))]
     if let Some(provider) = _provider {
         if provider.backend() == "local"
@@ -94,22 +94,21 @@ fn embedding_runtime_error(
                 genesis_core::embedding::EmbeddingError::NotConfigured
             )
         {
-            return (
+            return ApiError::with_status(
                 StatusCode::NOT_IMPLEMENTED,
-                "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it".to_string(),
+                "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it",
             );
         }
     }
 
     match error {
-        genesis_core::embedding::EmbeddingError::ApiError { status, body } => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            format!("{context} error: {body}"),
-        ),
-        other => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{context} error: {other}"),
-        ),
+        genesis_core::embedding::EmbeddingError::ApiError { status, body } => {
+            ApiError::with_status(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                format!("{context} error: {body}"),
+            )
+        }
+        other => ApiError::internal(format!("{context} error: {other}")),
     }
 }
 
@@ -120,27 +119,29 @@ fn embedding_runtime_error(
 pub(crate) async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
     let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(serde_json::to_value(MemoryListResponse {
-        memories,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(MemoryListResponse {
+            memories,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
     ))
 }
 
 pub(crate) async fn search_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMemoriesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
 
@@ -192,7 +193,7 @@ pub(crate) async fn search_memories_handler(
 pub(crate) async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let db_path = &state.loaded.config.storage.database_path;
     let store = MemoryStore::new(db_path);
     let deleted = store.delete(&id).map_err(storage_err)?;
@@ -204,18 +205,17 @@ pub(crate) async fn delete_memory_handler(
         }
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
+        Err(ApiError::not_found(format!("memory '{id}' not found")))
     }
 }
 
 /// Embed all un-embedded memories. Requires an embedding provider to be configured.
 pub(crate) async fn embed_memories_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.loaded.config.embedding.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no embedding provider configured; add an [embedding] section to config".to_owned(),
+        return Err(ApiError::bad_request(
+            "no embedding provider configured; add an [embedding] section to config",
         ));
     }
 
@@ -319,12 +319,9 @@ pub(crate) async fn embed_memories_handler(
 pub(crate) async fn embed_single_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.loaded.config.embedding.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no embedding provider configured".to_owned(),
-        ));
+        return Err(ApiError::bad_request("no embedding provider configured"));
     }
 
     let provider = state
@@ -339,7 +336,7 @@ pub(crate) async fn embed_single_memory_handler(
     let memory = memory_store
         .get(&id)
         .map_err(storage_err)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
+        .ok_or_else(|| ApiError::not_found(format!("memory '{id}' not found")))?;
 
     genesis_core::embedding::embed_and_store(
         &memory.id,

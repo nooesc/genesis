@@ -38,6 +38,8 @@ pub(crate) mod helpers {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::Json;
     use serde::Serialize;
     use tracing::error;
 
@@ -70,13 +72,107 @@ pub(crate) mod helpers {
         format!("req-{next}")
     }
 
-    /// Map a storage error into an HTTP 500 response pair.
-    pub(crate) fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-        error!(error = %e, "storage operation failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("storage error: {e}"),
-        )
+    // -----------------------------------------------------------------------
+    // ApiError — structured JSON error response
+    // -----------------------------------------------------------------------
+
+    /// Structured JSON error response returned by all gateway endpoints.
+    ///
+    /// Serializes as `{"error": "<message>"}` with the appropriate HTTP status.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct ApiError {
+        pub error: String,
+        #[serde(skip)]
+        pub status: StatusCode,
+    }
+
+    impl ApiError {
+        /// 400 Bad Request — the caller made a malformed or invalid request.
+        pub(crate) fn bad_request(message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status: StatusCode::BAD_REQUEST,
+            }
+        }
+
+        /// 404 Not Found — the requested resource does not exist.
+        pub(crate) fn not_found(message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status: StatusCode::NOT_FOUND,
+            }
+        }
+
+        /// 500 Internal Server Error — log the real cause server-side but return
+        /// a generic message to clients so that implementation details do not leak.
+        pub(crate) fn internal(cause: impl std::fmt::Display) -> Self {
+            error!(error = %cause, "internal server error");
+            Self {
+                error: "internal server error".to_owned(),
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        }
+
+        /// Build an `ApiError` with an arbitrary status code and message.
+        pub(crate) fn with_status(status: StatusCode, message: impl Into<String>) -> Self {
+            Self {
+                error: message.into(),
+                status,
+            }
+        }
+    }
+
+    impl std::fmt::Display for ApiError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} {}: {}",
+                self.status.as_u16(),
+                self.status.canonical_reason().unwrap_or(""),
+                self.error
+            )
+        }
+    }
+
+    impl IntoResponse for ApiError {
+        fn into_response(self) -> Response {
+            (self.status, Json(serde_json::json!({"error": self.error}))).into_response()
+        }
+    }
+
+    /// Convert from the legacy `(StatusCode, String)` error tuple.
+    impl From<(StatusCode, String)> for ApiError {
+        fn from((status, message): (StatusCode, String)) -> Self {
+            Self {
+                error: message,
+                status,
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage error helpers
+    // -----------------------------------------------------------------------
+
+    /// Heuristic: FTS5 query-syntax errors are caused by bad user input and
+    /// should be returned as 400 Bad Request rather than 500.
+    fn is_fts5_query_error(msg: &str) -> bool {
+        let lower = msg.to_lowercase();
+        lower.contains("fts5") && (lower.contains("syntax") || lower.contains("parse"))
+    }
+
+    /// Map a storage error into an [`ApiError`].
+    ///
+    /// FTS5 query-syntax errors are returned as 400 Bad Request; all other
+    /// storage errors are treated as internal errors (logged server-side,
+    /// generic message returned to clients).
+    pub(crate) fn storage_err(e: impl std::fmt::Display) -> ApiError {
+        let msg = e.to_string();
+        if is_fts5_query_error(&msg) {
+            ApiError::bad_request(format!("invalid search query: {msg}"))
+        } else {
+            ApiError::internal(format!("storage error: {msg}"))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -102,12 +198,11 @@ pub(crate) mod helpers {
     pub(crate) const MAX_OFFSET: usize = i64::MAX as usize;
 
     /// Validate that the caller-supplied offset is within safe bounds.
-    pub(crate) fn validate_offset(offset: usize) -> Result<usize, (StatusCode, String)> {
+    pub(crate) fn validate_offset(offset: usize) -> Result<usize, ApiError> {
         if offset > MAX_OFFSET {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"),
-            ));
+            return Err(ApiError::bad_request(format!(
+                "offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"
+            )));
         }
         Ok(offset)
     }
@@ -143,14 +238,30 @@ pub(crate) mod helpers {
         };
     }
 
-    paginated_response!(SessionListResponse, sessions, genesis_storage::SessionSummary);
+    paginated_response!(
+        SessionListResponse,
+        sessions,
+        genesis_storage::SessionSummary
+    );
     paginated_response!(SkillListResponse, skills, genesis_storage::StoredSkill);
     paginated_response!(MemoryListResponse, memories, genesis_storage::StoredMemory);
-    paginated_response!(ScheduleListResponse, schedules, genesis_storage::StoredSchedule);
+    paginated_response!(
+        ScheduleListResponse,
+        schedules,
+        genesis_storage::StoredSchedule
+    );
     paginated_response!(TraitListResponse, traits, genesis_storage::StoredUserTrait);
     paginated_response!(TemplateListResponse, templates, serde_json::Value);
-    paginated_response!(ApprovedListResponse, approved, genesis_storage::ApprovedUser);
-    paginated_response!(PendingListResponse, pending, genesis_storage::PendingPairing);
+    paginated_response!(
+        ApprovedListResponse,
+        approved,
+        genesis_storage::ApprovedUser
+    );
+    paginated_response!(
+        PendingListResponse,
+        pending,
+        genesis_storage::PendingPairing
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +507,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 mod tests {
     use super::*;
     use crate::helpers::*;
-    use crate::state::{HistogramBuckets, get_or_try_init_arc};
     use crate::middleware::RateLimiter;
+    use crate::state::{get_or_try_init_arc, HistogramBuckets};
+    use axum::http::StatusCode;
+    use genesis_storage::{MemoryStore, SessionStore, SkillStore, SkillUsageStore};
     use std::net::IpAddr;
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
@@ -1167,7 +1280,11 @@ mod tests {
             .oneshot(req)
             .await
             .expect("request should succeed");
-        assert_eq!(resp.status(), StatusCode::OK, "/health at root must return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health at root must return 200"
+        );
 
         let req = Request::builder()
             .uri("/api/health")
@@ -1276,7 +1393,11 @@ mod tests {
             .uri("/api/memories/embed")
             .body(Body::empty())
             .expect("request should build");
-        let embed_resp = app.clone().oneshot(embed_req).await.expect("request should succeed");
+        let embed_resp = app
+            .clone()
+            .oneshot(embed_req)
+            .await
+            .expect("request should succeed");
         assert_eq!(embed_resp.status(), StatusCode::OK);
 
         let req = Request::builder()
@@ -1286,7 +1407,9 @@ mod tests {
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "vector");
         assert_eq!(json["count"], 1);
@@ -1304,18 +1427,30 @@ mod tests {
         let (state, dir) = create_test_state();
         let db_path = dir.path().join("genesis.db");
         let store = MemoryStore::new(&db_path);
-        store.create_note(NewMemoryNote {
-            id: "linked-note".to_owned(), session_id: Some("s1".to_owned()),
-            kind: "fact".to_owned(), content: "Rust ownership model".to_owned(),
-            keywords: vec!["rust".to_owned()], tags: vec!["language".to_owned()],
-            linked_ids: vec![], importance: 0.7,
-        }).expect("linked note should store");
-        store.create_note(NewMemoryNote {
-            id: "primary-note".to_owned(), session_id: Some("s1".to_owned()),
-            kind: "fact".to_owned(), content: "Genesis architecture memory".to_owned(),
-            keywords: vec!["genesis".to_owned()], tags: vec!["architecture".to_owned()],
-            linked_ids: vec!["linked-note".to_owned()], importance: 1.0,
-        }).expect("primary note should store");
+        store
+            .create_note(NewMemoryNote {
+                id: "linked-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust ownership model".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .expect("linked note should store");
+        store
+            .create_note(NewMemoryNote {
+                id: "primary-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis architecture memory".to_owned(),
+                keywords: vec!["genesis".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["linked-note".to_owned()],
+                importance: 1.0,
+            })
+            .expect("primary note should store");
 
         let app = build_router(state);
         let req = Request::builder()
@@ -1324,12 +1459,18 @@ mod tests {
             .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "graph");
         assert_eq!(json["count"], 2);
-        let ids = json["memories"].as_array().unwrap().iter()
-            .map(|item| item["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let ids = json["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
         assert!(ids.contains(&"primary-note".to_owned()));
         assert!(ids.contains(&"linked-note".to_owned()));
     }
@@ -1345,17 +1486,31 @@ mod tests {
         let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], 1);
         assert_eq!(json["skipped"], 0);
         assert_eq!(json["errors"], 0);
         assert_eq!(json["total"], 1);
-        assert_eq!(genesis_storage::EmbeddingStore::new(&db_path).count().unwrap(), 1);
+        assert_eq!(
+            genesis_storage::EmbeddingStore::new(&db_path)
+                .count()
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(feature = "local-embeddings")]
@@ -1368,14 +1523,21 @@ mod tests {
         let (state, _dir) = create_test_state_with_local_embedding();
         let db_path = state.loaded.config.storage.database_path.clone();
         let embedding_store = genesis_storage::EmbeddingStore::new(&db_path);
-        embedding_store.store("mem-local", &[1.0, 0.0], "legacy-model").expect("legacy embedding should store");
+        embedding_store
+            .store("mem-local", &[1.0, 0.0], "legacy-model")
+            .expect("legacy embedding should store");
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], 1);
         assert_eq!(json["reset"], true);
@@ -1393,24 +1555,44 @@ mod tests {
         let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/mem-local/embed")
-            .body(Body::empty()).expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/mem-local/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], true);
         assert_eq!(json["memory_id"], "mem-local");
         assert_eq!(json["model"], "sentence-transformers/all-MiniLM-L6-v2");
-        assert_eq!(genesis_storage::EmbeddingStore::new(&db_path).count().unwrap(), 1);
+        assert_eq!(
+            genesis_storage::EmbeddingStore::new(&db_path)
+                .count()
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(feature = "local-embeddings")]
     #[test]
     fn app_state_reuses_shared_local_embedding_provider() {
         let (state, _dir) = create_test_state_with_local_embedding();
-        let first = state.embedding_provider().expect("provider should initialize").expect("provider should be configured");
-        let second = state.embedding_provider().expect("provider should initialize").expect("provider should be configured");
+        let first = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
+        let second = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
         assert!(Arc::ptr_eq(&first, &second));
     }
 
@@ -1424,16 +1606,23 @@ mod tests {
         let embedding = genesis_config::EmbeddingConfig {
             backend: "local".to_owned(),
             model: "unsupported-local-model".to_owned(),
-            base_url: None, api_key_env: None, dimensions: Some(384),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
         };
         let (state, _dir) = create_test_state_with_key(None, false, Some(embedding));
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let message = String::from_utf8(body.to_vec()).unwrap();
         assert!(message.contains("unsupported local embedding model"));
     }
@@ -1457,14 +1646,16 @@ mod tests {
         let second = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(42)
-        }).expect("second init should succeed");
+        })
+        .expect("second init should succeed");
         assert_eq!(*second, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
 
         let third = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(7)
-        }).expect("cached init should succeed");
+        })
+        .expect("cached init should succeed");
         assert_eq!(*third, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
@@ -1492,7 +1683,8 @@ mod tests {
                     attempts.fetch_add(1, Ordering::Relaxed);
                     std::thread::sleep(std::time::Duration::from_millis(25));
                     Ok(42)
-                }).expect("init should succeed")
+                })
+                .expect("init should succeed")
             }));
         }
         for handle in threads {
@@ -1527,10 +1719,15 @@ mod tests {
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let req = Request::builder().uri("/api/metrics/json").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/api/metrics/json")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("uptime_seconds").is_some());
         assert!(json.get("requests_total").is_some());
@@ -1541,7 +1738,13 @@ mod tests {
 
     #[test]
     fn paginated_response_serializes_correctly() {
-        let resp = PaginatedResponse { items: vec!["a", "b"], total: 5, limit: 2, offset: 0, has_more: true };
+        let resp = PaginatedResponse {
+            items: vec!["a", "b"],
+            total: 5,
+            limit: 2,
+            offset: 0,
+            has_more: true,
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
         assert_eq!(json["items"], serde_json::json!(["a", "b"]));
         assert_eq!(json["total"], 5);
@@ -1550,7 +1753,13 @@ mod tests {
 
     #[test]
     fn paginated_response_has_more_false_at_end() {
-        let resp = PaginatedResponse { items: vec![1, 2], total: 4, limit: 2, offset: 2, has_more: false };
+        let resp = PaginatedResponse {
+            items: vec![1, 2],
+            total: 4,
+            limit: 2,
+            offset: 2,
+            has_more: false,
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
         assert_eq!(json["has_more"], false);
     }
@@ -1576,15 +1785,17 @@ mod tests {
         {
             let result = validate_offset(usize::MAX);
             assert!(result.is_err());
-            let (status, _msg) = result.unwrap_err();
-            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            let err = result.unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            assert!(err.error.contains("offset"));
         }
     }
 
     #[test]
     fn list_sessions_query_defaults_match_pagination() {
         let json = r#"{}"#;
-        let q: crate::routes::sessions::ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        let q: crate::routes::sessions::ListSessionsQuery =
+            serde_json::from_str(json).expect("should deserialize");
         assert_eq!(q.limit, DEFAULT_PAGE_LIMIT);
         assert_eq!(q.offset, 0);
         assert!(q.search.is_none());
@@ -1593,7 +1804,8 @@ mod tests {
     #[test]
     fn list_sessions_query_accepts_offset() {
         let json = r#"{"limit": 10, "offset": 20}"#;
-        let q: crate::routes::sessions::ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        let q: crate::routes::sessions::ListSessionsQuery =
+            serde_json::from_str(json).expect("should deserialize");
         assert_eq!(q.limit, 10);
         assert_eq!(q.offset, 20);
     }
@@ -1633,10 +1845,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/sessions?limit=10&offset=0").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/sessions?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("sessions").is_some());
         assert!(json.get("total").is_some());
@@ -1653,10 +1870,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/skills?limit=5").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/skills?limit=5")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("skills").is_some());
         assert!(json.get("total").is_some());
@@ -1671,10 +1893,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/memories?limit=10&offset=0").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/memories?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("memories").is_some());
         assert!(json.get("total").is_some());
@@ -1689,10 +1916,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/tools").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/tools")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("builtin_tools").is_some());
         assert!(json.get("mcp_tools").is_some());
@@ -1713,10 +1945,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/templates?limit=50").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/templates?limit=50")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("templates").is_some());
         assert!(json.get("total").is_some());
@@ -1733,13 +1970,30 @@ mod tests {
         let app = build_router(state);
 
         for uri in &[
-            "/api/sessions", "/api/skills", "/api/memories", "/api/schedules",
-            "/api/user/traits", "/api/tools", "/api/templates",
-            "/api/pairing/approved", "/api/pairing/pending",
+            "/api/sessions",
+            "/api/skills",
+            "/api/memories",
+            "/api/schedules",
+            "/api/user/traits",
+            "/api/tools",
+            "/api/templates",
+            "/api/pairing/approved",
+            "/api/pairing/pending",
         ] {
-            let req = Request::builder().uri(*uri).body(Body::empty()).expect("request should build");
-            let resp = app.clone().oneshot(req).await.expect("request should succeed");
-            assert_eq!(resp.status(), StatusCode::OK, "{uri} should return 200 with default params");
+            let req = Request::builder()
+                .uri(*uri)
+                .body(Body::empty())
+                .expect("request should build");
+            let resp = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("request should succeed");
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} should return 200 with default params"
+            );
         }
     }
 
@@ -1757,11 +2011,18 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a POST request with JSON body.
-    async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1772,7 +2033,10 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a DELETE request.
@@ -1786,11 +2050,18 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a PATCH request with JSON body.
-    async fn patch_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn patch_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1801,11 +2072,18 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a PUT request with JSON body.
-    async fn put_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn put_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1816,7 +2094,10 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: parse response body as JSON.
@@ -1838,7 +2119,10 @@ mod tests {
             .header("authorization", format!("Bearer {key}"))
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a POST request with auth header and JSON body.
@@ -1859,7 +2143,10 @@ mod tests {
             .header("authorization", format!("Bearer {key}"))
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: open the test database directly for seeding data.
@@ -1996,8 +2283,12 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
-        store.append_message("s1", "assistant", Some("Hi there!"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s1", "assistant", Some("Hi there!"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2013,7 +2304,9 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2158,20 +2451,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/s1/export").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("text/markdown")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/markdown"));
     }
 
     #[tokio::test]
@@ -2179,20 +2473,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("test"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/s1/export?format=json").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("application/json")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json"));
     }
 
     #[tokio::test]
@@ -2200,7 +2495,9 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("test"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2226,20 +2523,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/export?format=jsonl").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("jsonl")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("jsonl"));
     }
 
     #[tokio::test]
@@ -2248,7 +2546,9 @@ mod tests {
         let db = open_test_db(&dir);
         // Need at least one session with messages to trigger format validation
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("seed message"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("seed message"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2261,7 +2561,16 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Rust programming language"), None, None, None).unwrap();
+        store
+            .append_message(
+                "s1",
+                "user",
+                Some("Rust programming language"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2609,9 +2918,13 @@ mod tests {
         let db = open_test_db(&dir);
         // Create the skill first (foreign key constraint)
         let skill_store = SkillStore::new(&db);
-        skill_store.upsert("test-skill", "A skill", "Do it", None, &[]).unwrap();
+        skill_store
+            .upsert("test-skill", "A skill", "Do it", None, &[])
+            .unwrap();
         let usage_store = SkillUsageStore::new(&db);
-        usage_store.record_usage("test-skill", Some("s1"), "success", None).unwrap();
+        usage_store
+            .record_usage("test-skill", Some("s1"), "success", None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2696,12 +3009,7 @@ mod tests {
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/pairing/clear-pending",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/pairing/clear-pending", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let json = body_json(resp).await;
@@ -2949,12 +3257,7 @@ cases:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/eval/validate",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/eval/validate", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2984,12 +3287,7 @@ cases:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/guardrails/check",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/guardrails/check", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -3025,12 +3323,7 @@ steps:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/workflows/validate",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/workflows/validate", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -3185,7 +3478,12 @@ steps:
         let resp = get(&app, "/metrics").await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/plain"), "expected text/plain, got {ct}");
     }
 
@@ -3209,11 +3507,7 @@ steps:
 
     #[tokio::test]
     async fn auth_required_returns_401_without_key() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         // Protected routes should return 401
@@ -3229,11 +3523,7 @@ steps:
 
     #[tokio::test]
     async fn auth_with_valid_key_returns_200() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = get_with_auth(&app, "/api/sessions", "secret-key").await;
@@ -3242,11 +3532,7 @@ steps:
 
     #[tokio::test]
     async fn auth_with_wrong_key_returns_401() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = get_with_auth(&app, "/api/sessions", "wrong-key").await;
@@ -3255,11 +3541,7 @@ steps:
 
     #[tokio::test]
     async fn health_accessible_without_auth_when_key_configured() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         // Health endpoints are public
@@ -3275,11 +3557,7 @@ steps:
 
     #[tokio::test]
     async fn auth_post_endpoint_with_valid_key() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = post_json_with_auth(
@@ -3355,5 +3633,139 @@ steps:
             assert!(tool["description"].is_string());
             assert_eq!(tool["source"], "builtin");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ApiError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn api_error_bad_request_has_correct_status() {
+        let err = ApiError::bad_request("invalid input");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "invalid input");
+    }
+
+    #[test]
+    fn api_error_not_found_has_correct_status() {
+        let err = ApiError::not_found("session 'x' not found");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "session 'x' not found");
+    }
+
+    #[test]
+    fn api_error_internal_hides_cause_from_client() {
+        let err = ApiError::internal("sql error: disk full at /data/genesis.db");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // The client-facing message must NOT contain the internal cause.
+        assert_eq!(err.error, "internal server error");
+        assert!(!err.error.contains("sql"));
+        assert!(!err.error.contains("disk"));
+    }
+
+    #[test]
+    fn api_error_with_status_preserves_message() {
+        let err = ApiError::with_status(StatusCode::SERVICE_UNAVAILABLE, "provider down");
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.error, "provider down");
+    }
+
+    #[test]
+    fn api_error_serializes_as_json_with_error_field() {
+        let err = ApiError::bad_request("bad offset");
+        let json = serde_json::to_value(&err).expect("should serialize");
+        assert_eq!(json["error"], "bad offset");
+        // The `status` field should NOT appear in the JSON body (skip_serializing).
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn api_error_into_response_produces_json_content_type() {
+        use axum::response::IntoResponse;
+
+        let err = ApiError::not_found("missing");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("should have content-type")
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("application/json"),
+            "expected JSON content type, got: {content_type}"
+        );
+    }
+
+    #[test]
+    fn api_error_from_status_string_tuple() {
+        let tuple = (StatusCode::CONFLICT, "duplicate key".to_owned());
+        let err: ApiError = tuple.into();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.error, "duplicate key");
+    }
+
+    #[test]
+    fn api_error_display_includes_status_and_message() {
+        let err = ApiError::bad_request("missing field 'name'");
+        let display = format!("{err}");
+        assert!(display.contains("400"));
+        assert!(display.contains("missing field 'name'"));
+    }
+
+    #[test]
+    fn storage_err_returns_internal_for_generic_errors() {
+        let err = storage_err("connection refused");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Generic storage errors should not leak details to client.
+        assert_eq!(err.error, "internal server error");
+    }
+
+    #[test]
+    fn storage_err_returns_bad_request_for_fts5_syntax_error() {
+        let err = storage_err("sqlite error at /data/genesis.db: fts5 syntax error");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.error.contains("invalid search query"));
+    }
+
+    #[test]
+    fn storage_err_returns_bad_request_for_fts5_parse_error() {
+        let err = storage_err("fts5: parse error near 'OR OR'");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.error.contains("invalid search query"));
+    }
+
+    #[tokio::test]
+    async fn error_endpoints_return_json_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("genesis.db");
+        genesis_storage::bootstrap(&db).expect("bootstrap");
+
+        let loaded = genesis_config::load(None).expect("config");
+        let mut loaded = loaded;
+        loaded.config.storage.database_path = db;
+
+        let state = Arc::new(AppState::new(
+            loaded,
+            None,
+            false,
+            None,
+            None,
+            Vec::new(),
+            genesis_core::execution::PluginRuntimeOverrides::default(),
+        ));
+        let app = build_router(state);
+
+        // Request a non-existent session — should get JSON 404
+        let resp = get(&app, "/api/sessions/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = body_json(resp).await;
+        // The response body must have an "error" field (JSON, not plain text)
+        assert!(
+            body.get("error").is_some(),
+            "expected JSON error body with 'error' field, got: {body}"
+        );
     }
 }

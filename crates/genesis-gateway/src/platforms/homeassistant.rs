@@ -86,28 +86,30 @@ pub async fn webhook_handler(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     body: Bytes,
-) -> Result<Json<HomeAssistantResponse>, (StatusCode, String)> {
+) -> Result<Json<HomeAssistantResponse>, crate::helpers::ApiError> {
+    use crate::helpers::ApiError;
+
     let expected_token = match webhook_token() {
         Some(token) => token,
         None => {
             warn!("HOMEASSISTANT_TOKEN is not configured");
-            return Err((
+            return Err(ApiError::with_status(
                 StatusCode::FORBIDDEN,
-                "missing HOMEASSISTANT_TOKEN".to_owned(),
+                "missing HOMEASSISTANT_TOKEN",
             ));
         }
     };
 
     if !verify_secret_token(&expected_token, extract_provided_token(&headers)) {
         warn!("homeassistant webhook token verification failed");
-        return Err((
+        return Err(ApiError::with_status(
             StatusCode::UNAUTHORIZED,
-            "invalid homeassistant token".to_owned(),
+            "invalid homeassistant token",
         ));
     }
 
     let request: HomeAssistantRequest = serde_json::from_slice(body.as_ref())
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid request body".to_owned()))?;
+        .map_err(|_| ApiError::bad_request("invalid request body"))?;
 
     let session_id = request
         .entity_id
@@ -156,7 +158,7 @@ pub async fn webhook_handler(
         .await
         .map_err(|e| {
             error!(error = %e, "home assistant webhook failed");
-            (
+            ApiError::with_status(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("execution error: {e}"),
             )

@@ -4,8 +4,6 @@ use std::net::IpAddr;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::http::StatusCode;
-
 use crate::webhooks;
 
 /// Prometheus-style histogram with fixed bucket boundaries.
@@ -180,7 +178,8 @@ impl AppState {
 
     pub(crate) fn embedding_provider(
         &self,
-    ) -> Result<Option<Arc<genesis_core::embedding::EmbeddingProvider>>, (StatusCode, String)> {
+    ) -> Result<Option<Arc<genesis_core::embedding::EmbeddingProvider>>, crate::helpers::ApiError>
+    {
         let Some(config) = self.loaded.config.embedding.as_ref() else {
             return Ok(None);
         };
@@ -191,5 +190,6 @@ impl AppState {
             || crate::routes::memories::build_embedding_provider(config),
         )
         .map(Some)
+        .map_err(crate::helpers::ApiError::from)
     }
 }
