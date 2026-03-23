@@ -17,6 +17,11 @@ expression: buffer_to_string(&buf)
   Ctrl+T        Toggle transcript overlay                   
   Tab           Toggle Plan/Act mode                        
   @             File path completion                        
+  PageUp        Scroll chat up (half page)                  
+  PageDown      Scroll chat down (half page)                
+  Shift+Up      Scroll chat up (3 lines)                    
+  Shift+Down    Scroll chat down (3 lines)                  
+  Ctrl+End      Jump to bottom of chat                      
   Up/Down       Navigate input history / lines              
   Home/End      Move cursor to start/end of line            
   Ctrl+U        Delete from cursor to start of line         
@@ -26,9 +31,4 @@ expression: buffer_to_string(&buf)
   ──────────────                                            
   /clear        Clear conversation history                  
   /compact      Compact tool display (one-line)             
-  /exit         Exit Eve                                    
-  /grouped      Grouped tool display (bordered)             
-  /help         Show this help screen                       
-  /models       Switch AI model                             
-  /plan         Toggle Plan/Act mode                        
-  /theme        Cycle through built-in themes
+  /exit         Exit Eve

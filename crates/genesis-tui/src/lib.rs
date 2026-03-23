@@ -261,6 +261,9 @@ pub async fn run_tui(
         active_theme: crate::theme::resolve_theme(&config.tui.theme),
     };
 
+    // Apply the initial theme to the status bar.
+    app.status_bar.set_theme(&*app.active_theme);
+
     // If an initial prompt was provided, skip the welcome screen and submit
     // the prompt as the first user message once the event loop starts.
     let pending_initial_prompt = if initial_prompt.is_some() {

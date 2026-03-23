@@ -26,28 +26,54 @@ use unicode_width::UnicodeWidthChar;
 use crate::events::{AgentMode, StatusState};
 use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
-// ── Palette ─────────────────────────────────────────────────────────────────
+// ── Palette (theme-aware) ────────────────────────────────────────────────────
 
-/// Background tint for the bar (very subtle dark).
-const BAR_BG: Color = Color::Rgb(30, 28, 36);
-/// Background tint when active (slightly brighter).
-const BAR_BG_ACTIVE: Color = Color::Rgb(38, 34, 48);
-/// Dim text for labels and secondary info.
-const DIM: Color = Color::Rgb(98, 98, 98);
-/// Standard text.
-const TEXT: Color = Color::Rgb(168, 168, 168);
-/// Accent (Eve lavender) for the diamond and active labels.
-const ACCENT: Color = Color::Rgb(180, 167, 214);
-/// Success green for the branch icon.
-const BRANCH_COLOR: Color = Color::Rgb(135, 175, 95);
-/// Muted for separators.
-const SEP_COLOR: Color = Color::Rgb(58, 55, 66);
-/// Token count color.
-const TOKEN_COLOR: Color = Color::Rgb(138, 138, 138);
+/// Snapshot of theme colors used by the status bar. Updated when the theme
+/// changes via `set_theme_colors`.
+#[derive(Clone)]
+struct BarPalette {
+    bar_bg: Color,
+    bar_bg_active: Color,
+    dim: Color,
+    text: Color,
+    accent: Color,
+    success: Color,
+    sep: Color,
+    muted: Color,
+}
+
+impl BarPalette {
+    fn from_theme(theme: &dyn crate::theme::Theme) -> Self {
+        Self {
+            bar_bg: theme.bar_bg(),
+            bar_bg_active: theme.bar_bg_active(),
+            dim: theme.text_dim(),
+            text: theme.text(),
+            accent: theme.primary(),
+            success: theme.success(),
+            sep: theme.border(),
+            muted: theme.text_muted(),
+        }
+    }
+
+    fn eve() -> Self {
+        Self {
+            bar_bg: Color::Rgb(30, 28, 36),
+            bar_bg_active: Color::Rgb(38, 34, 48),
+            dim: Color::Rgb(98, 98, 98),
+            text: Color::Rgb(168, 168, 168),
+            accent: Color::Rgb(180, 167, 214),
+            success: Color::Rgb(135, 175, 95),
+            sep: Color::Rgb(58, 55, 66),
+            muted: Color::Rgb(138, 138, 138),
+        }
+    }
+}
+
+// ── Animation-specific constants (not themed) ───────────────────────────────
+
 /// Sparkline bar color (dim lavender).
 const SPARKLINE_COLOR: Color = Color::Rgb(120, 112, 148);
-/// Active spinner/dance color.
-const DANCE_COLOR: Color = Color::Rgb(180, 167, 214);
 /// Shimmer highlight color (bright white/lavender).
 const SHIMMER_HIGHLIGHT: Color = Color::Rgb(220, 215, 240);
 /// Dim text color for shimmer base.
@@ -114,6 +140,8 @@ pub struct StatusBarWidget {
     shimmer_phase: f64,
     /// Transient warning message shown briefly in the center section.
     transient_warning: Option<(String, Instant)>,
+    /// Theme-derived color palette.
+    palette: BarPalette,
 }
 
 impl StatusBarWidget {
@@ -141,7 +169,13 @@ impl StatusBarWidget {
             agent_mode: AgentMode::default(),
             shimmer_phase: 0.0,
             transient_warning: None,
+            palette: BarPalette::eve(),
         }
+    }
+
+    /// Update the color palette from the active theme.
+    pub fn set_theme(&mut self, theme: &dyn crate::theme::Theme) {
+        self.palette = BarPalette::from_theme(theme);
     }
 
     /// Update the current agent state, storing the previous for transition effects.
@@ -284,7 +318,11 @@ impl StatusBarWidget {
 
         let row = area.y;
         let is_active = self.is_animating();
-        let bg = if is_active { BAR_BG_ACTIVE } else { BAR_BG };
+        let bg = if is_active {
+            self.palette.bar_bg_active
+        } else {
+            self.palette.bar_bg
+        };
 
         // Fill entire row with background.
         let bg_style = Style::default().bg(bg);
@@ -337,7 +375,7 @@ impl StatusBarWidget {
             let fill_start = area.x + 1 + left_w as u16 + 1;
             let fill_end = area.x + center_start as u16;
             if fill_start < fill_end {
-                let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
+                let fill_style = Style::default().fg(self.palette.sep).bg(bg);
                 for x in fill_start..fill_end {
                     if let Some(cell) = buf.cell_mut((x, row)) {
                         cell.set_symbol("─");
@@ -363,6 +401,7 @@ impl StatusBarWidget {
                 sparkline_w + heartbeat_w,
                 row,
                 bg,
+                self.palette.sep,
                 buf,
             );
         } else {
@@ -374,6 +413,7 @@ impl StatusBarWidget {
                 sparkline_w + heartbeat_w,
                 row,
                 bg,
+                self.palette.sep,
                 buf,
             );
         }
@@ -462,7 +502,10 @@ impl StatusBarWidget {
         let mut spans = Vec::with_capacity(4);
 
         // Diamond accent.
-        spans.push(Span::styled("◆ ", Style::default().fg(ACCENT).bg(bg)));
+        spans.push(Span::styled(
+            "◆ ",
+            Style::default().fg(self.palette.accent).bg(bg),
+        ));
 
         // Mode indicator (Act / Plan).
         let mode_color = match self.agent_mode {
@@ -481,14 +524,17 @@ impl StatusBarWidget {
         spans.push(Span::styled(
             self.model.clone(),
             Style::default()
-                .fg(TEXT)
+                .fg(self.palette.text)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
         ));
 
         // Context %.
         let ctx = format!(" · {}%", self.context_percent);
-        spans.push(Span::styled(ctx, Style::default().fg(DIM).bg(bg)));
+        spans.push(Span::styled(
+            ctx,
+            Style::default().fg(self.palette.dim).bg(bg),
+        ));
 
         spans
     }
@@ -515,7 +561,7 @@ impl StatusBarWidget {
                 let elapsed = self.format_elapsed();
                 let mut spans = vec![Span::styled(
                     format!(" {sprite} "),
-                    Style::default().fg(DANCE_COLOR).bg(bg),
+                    Style::default().fg(self.palette.accent).bg(bg),
                 )];
                 let text = format!("thinking {elapsed}");
                 spans.extend(shimmer_spans(
@@ -552,16 +598,22 @@ impl StatusBarWidget {
                     format_tokens(self.tokens_in),
                     format_tokens(self.tokens_out)
                 ),
-                Style::default().fg(TOKEN_COLOR).bg(bg),
+                Style::default().fg(self.palette.muted).bg(bg),
             ));
-            spans.push(Span::styled(" · ", Style::default().fg(SEP_COLOR).bg(bg)));
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(self.palette.sep).bg(bg),
+            ));
         }
 
         // Branch name with icon.
-        spans.push(Span::styled("⎇ ", Style::default().fg(BRANCH_COLOR).bg(bg)));
+        spans.push(Span::styled(
+            "⎇ ",
+            Style::default().fg(self.palette.success).bg(bg),
+        ));
         spans.push(Span::styled(
             self.right_info.as_deref().unwrap_or("").to_owned(),
-            Style::default().fg(DIM).bg(bg),
+            Style::default().fg(self.palette.dim).bg(bg),
         ));
 
         spans
@@ -603,7 +655,7 @@ impl StatusBarWidget {
 impl StatusBarWidget {
     /// Render to a ratatui `Line` for tests.
     pub fn to_line(&self) -> ratatui::text::Line<'static> {
-        let bg = BAR_BG;
+        let bg = self.palette.bar_bg;
         let mut spans = Vec::new();
         spans.extend(self.build_left(bg));
         let center = self.build_center(bg);
@@ -638,6 +690,7 @@ fn fill_to_decorations(
     decorations_w: usize,
     row: u16,
     bg: Color,
+    sep_color: Color,
     buf: &mut Buffer,
 ) {
     let decorations_start = if decorations_w > 0 {
@@ -646,7 +699,7 @@ fn fill_to_decorations(
         right_start
     };
     if fill_start < decorations_start {
-        let fill_style = Style::default().fg(SEP_COLOR).bg(bg);
+        let fill_style = Style::default().fg(sep_color).bg(bg);
         for x in fill_start..decorations_start {
             if let Some(cell) = buf.cell_mut((x, row)) {
                 cell.set_symbol("─");
