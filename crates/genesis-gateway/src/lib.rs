@@ -57,6 +57,9 @@ fn try_send_sse(
     event: Result<Event, std::convert::Infallible>,
     cancelled: &AtomicBool,
 ) {
+    if cancelled.load(Ordering::Relaxed) {
+        return;
+    }
     match tx.try_send(event) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -66,6 +69,18 @@ fn try_send_sse(
         Err(mpsc::error::TrySendError::Full(_)) => {
             warn!("SSE channel full, dropping event (slow consumer)");
         }
+    }
+}
+
+/// Guard that sets a cancellation flag on drop.  Used to ensure the agent
+/// loop is cancelled when the SSE stream is dropped — whether that happens
+/// because the stream naturally ended or because Axum dropped the future
+/// mid-execution (client disconnect).
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -3387,14 +3402,15 @@ async fn openai_streaming_response(
         );
     }.instrument(span));
 
-    // When the client disconnects, the stream is dropped, which sets the
-    // cancellation flag so the spawned agent task exits promptly.
+    // When the client disconnects, Axum drops the stream future.  The
+    // `CancelOnDrop` guard ensures the cancellation flag is set regardless
+    // of whether the stream ends naturally or is dropped mid-execution.
     let cancelled_for_stream = Arc::clone(&cancelled);
     let stream = async_stream::stream! {
+        let _guard = CancelOnDrop(cancelled_for_stream);
         while let Some(event) = rx.recv().await {
             yield event;
         }
-        cancelled_for_stream.store(true, Ordering::Relaxed);
     };
 
     Ok(Sse::new(stream)
@@ -3823,17 +3839,15 @@ async fn chat_stream_handler(
         .instrument(spawn_span),
     );
 
-    // When the client disconnects, the stream is dropped, which sets the
-    // cancellation flag so the spawned agent task exits promptly.
+    // When the client disconnects, Axum drops the stream future.  The
+    // `CancelOnDrop` guard ensures the cancellation flag is set regardless
+    // of whether the stream ends naturally or is dropped mid-execution.
     let cancelled_for_stream = Arc::clone(&cancelled);
     let stream = async_stream::stream! {
+        let _guard = CancelOnDrop(cancelled_for_stream);
         while let Some(event) = rx.recv().await {
             yield event;
         }
-        // Stream ended — either the sender was dropped (task finished) or
-        // the client disconnected.  Signal cancellation either way so a
-        // still-running agent task can stop.
-        cancelled_for_stream.store(true, Ordering::Relaxed);
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
