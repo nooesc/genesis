@@ -411,7 +411,7 @@ impl ChatWidget {
                 let skip = cell_height.saturating_sub(rows_to_use);
                 let paragraph = Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
-                    .scroll((0, skip));
+                    .scroll((skip, 0));
                 paragraph.render(cell_area, buf);
 
                 bottom_y -= rows_to_use;

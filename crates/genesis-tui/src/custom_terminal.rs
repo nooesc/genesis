@@ -19,6 +19,7 @@ use ratatui::backend::{CrosstermBackend, IntoCrossterm};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
+use unicode_width::UnicodeWidthStr as _;
 
 /// A custom terminal that owns a crossterm backend and two ratatui buffers.
 ///
@@ -112,14 +113,18 @@ impl CustomTerminal {
 
         for (x, y, cell) in &updates {
             // Move cursor only when not adjacent to the previous position.
+            // After writing a cell with display width `w`, the terminal cursor
+            // is at column `x + w`, not `x + 1`. Track the actual cursor
+            // column to avoid unnecessary MoveTo commands for wide characters.
             let need_move = match last_pos {
-                Some((px, py)) => !(*x == px + 1 && *y == py),
+                Some((cursor_x, cursor_y)) => !(*x == cursor_x && *y == cursor_y),
                 None => true,
             };
             if need_move {
                 queue!(self.backend, MoveTo(*x, *y))?;
             }
-            last_pos = Some((*x, *y));
+            let cell_width = cell.symbol().width().max(1) as u16;
+            last_pos = Some((*x + cell_width, *y));
 
             // Apply modifier changes.
             if cell.modifier != modifier {
