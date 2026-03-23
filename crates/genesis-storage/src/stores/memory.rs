@@ -926,6 +926,8 @@ impl MemoryStore {
                    AND m.id != ?2
                    AND m.id NOT IN (
                        SELECT target_id FROM memory_links WHERE source_id = ?2
+                       UNION
+                       SELECT source_id FROM memory_links WHERE target_id = ?2
                    )
                  GROUP BY m.id
                  ORDER BY overlap DESC

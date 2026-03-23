@@ -1117,6 +1117,9 @@ impl ToolRuntime {
             registry: self.registry.clone(),
             context: ToolContext {
                 session_id: session_id.into(),
+                // Fresh recalled IDs for the subagent — must NOT share the
+                // parent's Arc or recall/store events will cross-contaminate.
+                recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 ..self.context.clone()
             },
             mcp: self.mcp.clone(),
