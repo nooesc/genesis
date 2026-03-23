@@ -532,6 +532,60 @@ impl App {
             return;
         }
 
+        // ── Chat scroll-back ──────────────────────────────────────
+        match key.code {
+            KeyCode::PageUp => {
+                let half = (self.viewport_height / 2).max(1) as usize;
+                self.chat.scroll_up(half, self.viewport_width);
+                self.frame_requester.schedule_frame();
+                return;
+            }
+            KeyCode::PageDown => {
+                let half = (self.viewport_height / 2).max(1) as usize;
+                self.chat.scroll_down(half);
+                self.frame_requester.schedule_frame();
+                return;
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.chat.scroll_to_bottom();
+                self.frame_requester.schedule_frame();
+                return;
+            }
+            _ => {}
+        }
+        // Shift+Up/Down for fine scrolling.
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            match key.code {
+                KeyCode::Up => {
+                    self.chat.scroll_up(3, self.viewport_width);
+                    self.frame_requester.schedule_frame();
+                    return;
+                }
+                KeyCode::Down => {
+                    self.chat.scroll_down(3);
+                    self.frame_requester.schedule_frame();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Auto-scroll to bottom when user starts typing or presses Enter.
+        if self.chat.is_scrolled_up() {
+            let should_snap = match key.code {
+                KeyCode::Char(_)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    true
+                }
+                KeyCode::Enter => true,
+                _ => false,
+            };
+            if should_snap {
+                self.chat.scroll_to_bottom();
+            }
+        }
+
         // When the command popup is visible, route keys to it first.
         if self.command_popup.is_visible() {
             // Keep the slash command query synced with the actual input widget so
