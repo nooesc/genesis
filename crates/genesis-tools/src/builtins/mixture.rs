@@ -73,7 +73,10 @@ impl ToolHandler for MixtureOfAgentsTool {
             .unwrap_or("openai");
 
         // Query all models in parallel using threads (since ToolHandler::run is sync).
+        // Capture the Tokio handle before spawning scoped threads so each thread
+        // can block_on async HTTP calls without needing block_in_place.
         let env: BTreeMap<String, String> = std::env::vars().collect();
+        let handle = tokio::runtime::Handle::current();
         type MoaResult = Vec<(String, String, Result<String, String>)>;
         let responses: Arc<Mutex<MoaResult>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -86,11 +89,13 @@ impl ToolHandler for MixtureOfAgentsTool {
                 let prompt = &prompt_owned;
                 let system = &system_owned;
                 let responses = Arc::clone(&responses);
+                let handle = &handle;
                 let backend = backend.to_owned();
                 let model = model.to_owned();
 
                 scope.spawn(move || {
-                    let result = query_model(env, &backend, &model, prompt, system.as_deref());
+                    let result =
+                        query_model(handle, env, &backend, &model, prompt, system.as_deref());
                     let mut lock = responses.lock().unwrap();
                     lock.push((backend, model, result));
                 });
@@ -119,6 +124,7 @@ impl ToolHandler for MixtureOfAgentsTool {
         let synthesis = if synthesize && successful_responses.len() > 1 {
             let synthesis_prompt = build_synthesis_prompt(prompt, &successful_responses);
             match query_model(
+                &handle,
                 &env,
                 synthesis_backend,
                 synthesis_model,
@@ -158,6 +164,7 @@ impl ToolHandler for MixtureOfAgentsTool {
 }
 
 fn query_model(
+    handle: &tokio::runtime::Handle,
     env: &BTreeMap<String, String>,
     backend: &str,
     model: &str,
@@ -176,10 +183,11 @@ fn query_model(
 
     let request = genesis_provider::ChatCompletionRequest::new("", messages);
 
-    let response = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(client.complete(request))
-    })
-    .map_err(|e| format!("{e}"))?;
+    // Use the explicitly-passed handle to run async HTTP calls. This
+    // works correctly whether called from spawn_blocking or scoped threads.
+    let response = handle
+        .block_on(client.complete(request))
+        .map_err(|e| format!("{e}"))?;
 
     response
         .choices
