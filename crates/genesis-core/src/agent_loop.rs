@@ -785,8 +785,9 @@ impl AgentLoop {
 
         match futures_util::future::select_ok(futures).await {
             Ok((result, _remaining)) => Ok(result),
-            Err(_last_err) => {
+            Err(last_err) => {
                 // select_ok returns the last error when all futures fail.
+                warn!(error = %last_err, "all fallback providers failed");
                 Err(ProviderError::AllProvidersFailed {
                     count: 1 + fallback_count,
                 })
@@ -863,7 +864,8 @@ impl AgentLoop {
 
         match futures_util::future::select_ok(futures).await {
             Ok((result, _remaining)) => Ok(result),
-            Err(_last_err) => {
+            Err(last_err) => {
+                warn!(error = %last_err, "all fallback providers failed");
                 Err(ProviderError::AllProvidersFailed {
                     count: 1 + fallback_count,
                 })
