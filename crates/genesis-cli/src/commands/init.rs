@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use genesis_config::load;
 use genesis_storage::bootstrap;
 
-use crate::commands::misc::{detect_codex_model, known_models};
+use crate::commands::model::{detect_codex_model, known_models};
 use crate::CliError;
 
 pub(crate) async fn run_login(config_path: Option<PathBuf>) -> Result<String, CliError> {

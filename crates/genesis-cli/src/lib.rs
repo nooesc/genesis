@@ -1101,7 +1101,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             if verify {
                 output.push_str("\n\nAPI connectivity:\n");
                 let loaded = load(cli.config.as_deref())?;
-                match commands::misc::verify_api_connectivity(&loaded).await {
+                match commands::model::verify_api_connectivity(&loaded).await {
                     Ok(latency_ms) => {
                         output.push_str(&format!(
                             "  [ok] {} / {} responded in {}ms",
@@ -1633,7 +1633,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
-        Command::Context(context_command) => commands::misc::run_context(context_command),
+        Command::Context(context_command) => commands::context::run_context(context_command),
         Command::Subagents(subagents_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -1660,8 +1660,8 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 }
             }
         }
-        Command::Tools => commands::misc::run_tools(cli.config, cli.json),
-        Command::Info => commands::misc::run_info(cli.config, cli.json),
+        Command::Tools => commands::info::run_tools(cli.config, cli.json),
+        Command::Info => commands::info::run_info(cli.config, cli.json),
         Command::Schedule(schedule_command) => {
             let loaded = load(cli.config.as_deref())?;
             bootstrap(&loaded.config.storage.database_path)?;
@@ -1721,7 +1721,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Model(model_command) => {
-            commands::misc::run_model(cli.config, model_command, cli.json).await
+            commands::model::run_model(cli.config, model_command, cli.json).await
         }
         Command::Serve { host, port } => {
             commands::serve::run_serve(cli.config, &host, port, runtime_overrides).await
@@ -1816,7 +1816,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             level,
             format,
             training,
-        } => commands::misc::run_compress(input, output, level, format, training),
+        } => commands::compress::run_compress(input, output, level, format, training),
         Command::Update => commands::init::run_update().await,
         Command::Memory(memory_command) => {
             let loaded = load(cli.config.as_deref())?;
@@ -1894,21 +1894,21 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
             }
         }
         Command::Mcp(mcp_command) => {
-            commands::misc::run_mcp(cli.config, mcp_command, cli.json).await
+            commands::mcp::run_mcp(cli.config, mcp_command, cli.json).await
         }
         Command::Benchmark {
             runs,
             tool_provider,
-        } => commands::misc::run_benchmark(cli.config, runs, tool_provider, cli.json).await,
+        } => commands::benchmark::run_benchmark(cli.config, runs, tool_provider, cli.json).await,
         Command::Pairing(pairing_command) => {
-            commands::misc::run_pairing(cli.config, pairing_command, cli.json).await
+            commands::pairing::run_pairing(cli.config, pairing_command, cli.json).await
         }
-        Command::Toolset(toolset_command) => commands::misc::run_toolset(toolset_command, cli.json),
+        Command::Toolset(toolset_command) => commands::toolset::run_toolset(toolset_command, cli.json),
         Command::Plugins(plugins_command) => {
-            commands::misc::run_plugins(cli.config, plugins_command, cli.json)
+            commands::plugins::run_plugins(cli.config, plugins_command, cli.json)
         }
         Command::Personality(personality_command) => {
-            commands::misc::run_personality(personality_command, cli.json)
+            commands::personality::run_personality(personality_command, cli.json)
         }
         Command::Workflow(WorkflowCommand::Validate { file }) => {
             let yaml = fs::read_to_string(&file)
@@ -2079,10 +2079,11 @@ mod tests {
     use crate::commands::batch::{batch_output_path, parse_batch_input_line, sha256_hex};
     use crate::commands::eval::run_eval_export_chatml;
     use crate::commands::eval::run_eval_quality;
-    use crate::commands::misc::{
-        known_models, parse_compression_format, parse_compression_level, run_compress,
-        run_personality, run_plugins, run_toolset,
-    };
+    use crate::commands::compress::{parse_compression_format, parse_compression_level, run_compress};
+    use crate::commands::model::known_models;
+    use crate::commands::personality::run_personality;
+    use crate::commands::plugins::run_plugins;
+    use crate::commands::toolset::run_toolset;
     use crate::commands::serve::{
         cron_time_from_datetime, default_schedule_id, default_schedule_session_id,
     };
@@ -4508,7 +4509,7 @@ trusted = true
     fn parse_compression_format_defaults_to_json() {
         assert!(matches!(
             parse_compression_format(None).expect("default format should parse"),
-            crate::commands::misc::CompressionFormat::Json
+            crate::commands::compress::CompressionFormat::Json
         ));
     }
 
