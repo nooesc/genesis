@@ -382,17 +382,72 @@ fn clamp_limit(limit: usize) -> usize {
     limit.clamp(1, MAX_PAGE_LIMIT)
 }
 
-/// Standard paginated response wrapper returned by all list endpoints.
+/// Maximum safe offset value.  Offsets beyond this are rejected with 400 to
+/// avoid overflow when converting to `i64` for SQLite OFFSET clauses.
+const MAX_OFFSET: usize = i64::MAX as usize;
+
+/// Validate that the caller-supplied offset is within safe bounds.
+fn validate_offset(offset: usize) -> Result<usize, (StatusCode, String)> {
+    if offset > MAX_OFFSET {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"),
+        ));
+    }
+    Ok(offset)
+}
+
+/// Generic paginated response wrapper.
 ///
-/// Wraps any serializable item type and includes total count, current page
-/// window, and a `has_more` flag for simple forward-pagination.
+/// Kept for potential internal use and testing.  Production endpoints use
+/// typed response structs below so that JSON field names match the legacy
+/// dashboard contract (e.g. `sessions`, `skills` instead of `items`).
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct PaginatedResponse<T: Serialize> {
     pub items: Vec<T>,
     pub total: u64,
     pub limit: usize,
     pub offset: usize,
     pub has_more: bool,
+}
+
+// ── Typed paginated response structs (legacy field names) ────────────
+
+/// Helper macro to avoid repeating the same pagination metadata fields.
+macro_rules! paginated_response {
+    ($name:ident, $field:ident, $item_ty:ty) => {
+        #[derive(Debug, Serialize)]
+        pub(crate) struct $name {
+            pub $field: Vec<$item_ty>,
+            pub total: u64,
+            pub limit: usize,
+            pub offset: usize,
+            pub has_more: bool,
+        }
+    };
+}
+
+paginated_response!(SessionListResponse, sessions, genesis_storage::SessionSummary);
+paginated_response!(SkillListResponse, skills, genesis_storage::StoredSkill);
+paginated_response!(MemoryListResponse, memories, genesis_storage::StoredMemory);
+paginated_response!(ScheduleListResponse, schedules, genesis_storage::StoredSchedule);
+paginated_response!(TraitListResponse, traits, genesis_storage::StoredUserTrait);
+paginated_response!(TemplateListResponse, templates, serde_json::Value);
+paginated_response!(ApprovedListResponse, approved, genesis_storage::ApprovedUser);
+paginated_response!(PendingListResponse, pending, genesis_storage::PendingPairing);
+
+/// Response body for GET /tools.
+///
+/// The dashboard expects `builtin_tools` and `mcp_tools` as separate arrays,
+/// so this endpoint does NOT use the generic paginated envelope.
+#[derive(Debug, Serialize)]
+pub(crate) struct ToolListResponse {
+    pub builtin_tools: Vec<serde_json::Value>,
+    pub builtin_count: usize,
+    pub mcp_tools: Vec<serde_json::Value>,
+    pub mcp_count: usize,
+    pub total: usize,
 }
 
 /// Response body from the `/chat` endpoint.
@@ -1184,7 +1239,7 @@ async fn list_sessions_handler(
     axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let (sessions, total) = if let Some(query) = &params.search {
@@ -1198,8 +1253,8 @@ async fn list_sessions_handler(
     };
 
     let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: sessions,
+    Ok(Json(serde_json::to_value(SessionListResponse {
+        sessions,
         total,
         limit,
         offset,
@@ -1699,13 +1754,13 @@ async fn list_skills_handler(
     axum::extract::Query(params): axum::extract::Query<ListSkillsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let (skills, total) = store.list_all_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + skills.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: skills,
+    Ok(Json(serde_json::to_value(SkillListResponse {
+        skills,
         total,
         limit,
         offset,
@@ -1886,13 +1941,13 @@ async fn list_memories_handler(
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
     let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: memories,
+    Ok(Json(serde_json::to_value(MemoryListResponse {
+        memories,
         total,
         limit,
         offset,
@@ -2152,15 +2207,15 @@ async fn list_schedules_handler(
     axum::extract::Query(params): axum::extract::Query<ListSchedulesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let (schedules, total) = store
         .list_paginated(params.enabled_only, limit, offset)
         .map_err(storage_err)?;
 
     let has_more = (offset + schedules.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: schedules,
+    Ok(Json(serde_json::to_value(ScheduleListResponse {
+        schedules,
         total,
         limit,
         offset,
@@ -2272,9 +2327,9 @@ async fn list_user_traits_handler(
     axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let (traits, total) = store
+    let (traits_list, total) = store
         .list_paginated(
             params.category.as_deref(),
             params.min_confidence,
@@ -2283,9 +2338,9 @@ async fn list_user_traits_handler(
         )
         .map_err(storage_err)?;
 
-    let has_more = (offset + traits.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: traits,
+    let has_more = (offset + traits_list.len()) < total as usize;
+    Ok(Json(serde_json::to_value(TraitListResponse {
+        traits: traits_list,
         total,
         limit,
         offset,
@@ -2433,25 +2488,13 @@ async fn skill_usage_recent_handler(
 
 // ── Tool introspection ───────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-struct ListToolsQuery {
-    #[serde(default = "default_page_limit")]
-    limit: usize,
-    #[serde(default)]
-    offset: usize,
-}
-
 async fn list_tools_handler(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(params): axum::extract::Query<ListToolsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let limit = clamp_limit(params.limit);
-    let offset = params.offset;
-
     let registry = genesis_tools::default_registry();
     let definitions = registry.definitions();
 
-    let mut all_tools: Vec<serde_json::Value> = definitions
+    let builtin_tools: Vec<serde_json::Value> = definitions
         .iter()
         .map(|def| {
             serde_json::json!({
@@ -2463,10 +2506,10 @@ async fn list_tools_handler(
         })
         .collect();
 
-    // Also include MCP tools if available
+    let mut mcp_tools: Vec<serde_json::Value> = Vec::new();
     if let Some(mcp) = &state.mcp {
         for t in mcp.tool_definitions().await {
-            all_tools.push(serde_json::json!({
+            mcp_tools.push(serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "source": "mcp",
@@ -2474,16 +2517,16 @@ async fn list_tools_handler(
         }
     }
 
-    let total = all_tools.len() as u64;
-    let page: Vec<serde_json::Value> = all_tools.into_iter().skip(offset).take(limit).collect();
-    let has_more = (offset + page.len()) < total as usize;
+    let builtin_count = builtin_tools.len();
+    let mcp_count = mcp_tools.len();
+    let total = builtin_count + mcp_count;
 
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: page,
+    Ok(Json(serde_json::to_value(ToolListResponse {
+        builtin_tools,
+        builtin_count,
+        mcp_tools,
+        mcp_count,
         total,
-        limit,
-        offset,
-        has_more,
     }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
     ))
 }
@@ -2685,14 +2728,19 @@ async fn list_templates_handler(
     axum::extract::Query(params): axum::extract::Query<ListTemplatesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let all_templates = genesis_core::templates::list_templates();
     let total = all_templates.len() as u64;
-    let page: Vec<_> = all_templates.iter().skip(offset).take(limit).collect();
+    let page: Vec<serde_json::Value> = all_templates
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|t| serde_json::to_value(t).unwrap_or_default())
+        .collect();
     let has_more = (offset + page.len()) < total as usize;
 
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: page,
+    Ok(Json(serde_json::to_value(TemplateListResponse {
+        templates: page,
         total,
         limit,
         offset,
@@ -4039,15 +4087,15 @@ async fn list_approved_handler(
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let (users, total) = store
+    let (approved, total) = store
         .list_approved_paginated(params.platform.as_deref(), limit, offset)
         .map_err(storage_err)?;
 
-    let has_more = (offset + users.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: users,
+    let has_more = (offset + approved.len()) < total as usize;
+    Ok(Json(serde_json::to_value(ApprovedListResponse {
+        approved,
         total,
         limit,
         offset,
@@ -4061,15 +4109,15 @@ async fn list_pending_handler(
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let limit = clamp_limit(params.limit);
-    let offset = params.offset;
+    let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let (pending, total) = store
         .list_pending_paginated(params.platform.as_deref(), limit, offset)
         .map_err(storage_err)?;
 
     let has_more = (offset + pending.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PaginatedResponse {
-        items: pending,
+    Ok(Json(serde_json::to_value(PendingListResponse {
+        pending,
         total,
         limit,
         offset,
@@ -5475,6 +5523,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_offset_accepts_normal_values() {
+        assert_eq!(validate_offset(0).unwrap(), 0);
+        assert_eq!(validate_offset(100).unwrap(), 100);
+        assert_eq!(validate_offset(MAX_OFFSET).unwrap(), MAX_OFFSET);
+    }
+
+    #[test]
+    fn validate_offset_rejects_oversized_values() {
+        // Values above MAX_OFFSET (i64::MAX as usize) should be rejected.
+        // On 64-bit platforms, usize::MAX > i64::MAX.
+        #[cfg(target_pointer_width = "64")]
+        {
+            let result = validate_offset(usize::MAX);
+            assert!(result.is_err());
+            let (status, _msg) = result.unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
     fn list_sessions_query_defaults_match_pagination() {
         let json = r#"{}"#;
         let q: ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
@@ -5539,7 +5607,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("items").is_some(), "response must have 'items' field");
+        assert!(json.get("sessions").is_some(), "response must have 'sessions' field");
         assert!(json.get("total").is_some(), "response must have 'total' field");
         assert!(json.get("limit").is_some(), "response must have 'limit' field");
         assert!(json.get("offset").is_some(), "response must have 'offset' field");
@@ -5567,7 +5635,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("items").is_some());
+        assert!(json.get("skills").is_some());
         assert!(json.get("total").is_some());
         assert!(json.get("has_more").is_some());
     }
@@ -5593,13 +5661,13 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("items").is_some());
+        assert!(json.get("memories").is_some());
         assert!(json.get("total").is_some());
         assert!(json.get("has_more").is_some());
     }
 
     #[tokio::test]
-    async fn list_tools_returns_paginated_response() {
+    async fn list_tools_returns_all_tools_with_legacy_fields() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt as _;
@@ -5608,7 +5676,7 @@ mod tests {
         let app = build_router(state);
 
         let req = Request::builder()
-            .uri("/api/tools?limit=5&offset=0")
+            .uri("/api/tools")
             .body(Body::empty())
             .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
@@ -5619,12 +5687,16 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("items").is_some());
-        assert!(json.get("total").is_some());
-        assert!(json.get("has_more").is_some());
-        // With 60+ builtin tools and limit=5, there should be more
-        assert_eq!(json["has_more"], true);
-        assert_eq!(json["items"].as_array().unwrap().len(), 5);
+        assert!(json.get("builtin_tools").is_some(), "response must have 'builtin_tools'");
+        assert!(json.get("mcp_tools").is_some(), "response must have 'mcp_tools'");
+        assert!(json.get("builtin_count").is_some(), "response must have 'builtin_count'");
+        assert!(json.get("mcp_count").is_some(), "response must have 'mcp_count'");
+        assert!(json.get("total").is_some(), "response must have 'total'");
+        // All builtin tools should be returned (no pagination)
+        let builtin = json["builtin_tools"].as_array().unwrap();
+        assert!(builtin.len() >= 50, "should return all builtin tools, got {}", builtin.len());
+        assert_eq!(json["builtin_count"], builtin.len());
+        assert_eq!(json["mcp_count"], 0);
     }
 
     #[tokio::test]
@@ -5648,7 +5720,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("items").is_some());
+        assert!(json.get("templates").is_some());
         assert!(json.get("total").is_some());
         assert!(json.get("has_more").is_some());
     }
