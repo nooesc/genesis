@@ -171,6 +171,13 @@ impl StatusBarWidget {
             };
         } else if !was_idle && is_idle {
             self.heartbeat = Pattern::Flatline;
+
+            // Reset warning TTL when returning to Idle so it counts from the
+            // moment the warning actually becomes visible (build_center only
+            // renders warnings in the Idle state).
+            if let Some((_msg, shown_at)) = &mut self.transient_warning {
+                *shown_at = Instant::now();
+            }
         }
     }
 
@@ -222,9 +229,9 @@ impl StatusBarWidget {
 
     /// Returns `true` if a non-expired transient warning is active.
     pub fn has_transient_warning(&self) -> bool {
-        self.transient_warning.as_ref().is_some_and(|(_, created)| {
-            created.elapsed() < Duration::from_secs(8)
-        })
+        self.transient_warning
+            .as_ref()
+            .is_some_and(|(_, created)| created.elapsed() < Duration::from_secs(8))
     }
 
     /// Whether the status bar is in an animated state (needs periodic redraws).
@@ -505,9 +512,7 @@ impl StatusBarWidget {
                     if created.elapsed() < WARNING_TTL {
                         return vec![Span::styled(
                             format!(" \u{26a0} {msg} "),
-                            Style::default()
-                                .fg(Color::Rgb(214, 180, 90))
-                                .bg(bg),
+                            Style::default().fg(Color::Rgb(214, 180, 90)).bg(bg),
                         )];
                     }
                 }

@@ -227,21 +227,30 @@ impl App {
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
             AgentEvent::Error(err) => {
-                // Append the error text so the user can see what went wrong.
-                self.chat.append_text(&format!("\n\n**Error:** {err}"));
+                let is_cancellation =
+                    err.contains("cancelled by user") || err.contains("Turn cancelled");
+
+                if is_cancellation {
+                    // User-initiated cancellation — neutral message, no alarm flash.
+                    self.chat.append_text("\n\n*Turn cancelled.*");
+                } else {
+                    // Genuine error — alarming message with visual flash.
+                    self.chat.append_text(&format!("\n\n**Error:** {err}"));
+                    let chat_area = ratatui::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        width: self.viewport_width,
+                        height: self.viewport_height.saturating_sub(1),
+                    };
+                    self.effects.flash_error(chat_area);
+                }
+
                 self.chat.complete_turn();
                 self.turn_running = false;
                 self.turn_start = None;
                 self.status_bar.turn_elapsed = None;
-                // Flash a brief glitch effect to draw attention to the error.
-                let chat_area = ratatui::layout::Rect {
-                    x: 0,
-                    y: 0,
-                    width: self.viewport_width,
-                    height: self.viewport_height.saturating_sub(1),
-                };
-                self.effects.flash_error(chat_area);
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+                let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
             AgentEvent::Warning(msg) => {
                 tracing::warn!(warning = %msg, "agent warning");
@@ -870,7 +879,10 @@ mod tests {
                 false
             }
         });
-        assert!(has_error, "committed cells should contain the error message");
+        assert!(
+            has_error,
+            "committed cells should contain the error message"
+        );
     }
 
     #[tokio::test]

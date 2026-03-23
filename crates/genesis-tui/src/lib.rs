@@ -104,8 +104,7 @@ fn make_turn_future<'a>(
                 StreamEvent::Warning(msg) => {
                     let _ = agent_tx.send(AgentEvent::Warning(msg.to_string()));
                 }
-                StreamEvent::TurnStarted
-                | StreamEvent::TokenUsage { .. } => {}
+                StreamEvent::TurnStarted | StreamEvent::TokenUsage { .. } => {}
             })
             .await
     })
@@ -328,7 +327,7 @@ pub async fn run_tui(
                     // dropped.
                     turn_future = None;
                     let _ = agent_tx.send(AgentEvent::Error(
-                        "Turn cancelled by user (Ctrl+C).".to_string(),
+                        "Turn cancelled by user.".to_string(),
                     ));
                 }
             }
