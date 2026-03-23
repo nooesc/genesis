@@ -38,6 +38,97 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+// ---------------------------------------------------------------------------
+// Structured API error type
+// ---------------------------------------------------------------------------
+
+/// Structured JSON error response for all API endpoints.
+///
+/// Every error returned from the gateway is serialized as:
+/// ```json
+/// { "error": "human-readable message", "code": "error_category" }
+/// ```
+/// with the appropriate HTTP status code.
+#[derive(Debug, Serialize)]
+pub(crate) struct ApiError {
+    error: String,
+    code: String,
+    #[serde(skip)]
+    status: StatusCode,
+}
+
+impl ApiError {
+    /// 404 Not Found.
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "not_found".to_owned(),
+            status: StatusCode::NOT_FOUND,
+        }
+    }
+
+    /// 500 Internal Server Error.
+    ///
+    /// The original error is logged server-side; clients receive a generic message.
+    fn internal(err: impl std::fmt::Display) -> Self {
+        error!(error = %err, "internal server error");
+        Self {
+            error: "internal server error".to_owned(),
+            code: "internal_error".to_owned(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// 400 Bad Request — validation failures, malformed input.
+    fn validation(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: "validation_error".to_owned(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// 401 Unauthorized.
+    fn unauthorized() -> Self {
+        Self {
+            error: "unauthorized".to_owned(),
+            code: "unauthorized".to_owned(),
+            status: StatusCode::UNAUTHORIZED,
+        }
+    }
+
+    /// 429 Too Many Requests.
+    fn rate_limited() -> Self {
+        Self {
+            error: "rate limit exceeded".to_owned(),
+            code: "rate_limited".to_owned(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+        }
+    }
+
+    /// Build an error with an arbitrary status and code.
+    fn with_status(status: StatusCode, code: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: code.into(),
+            status,
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = self.status;
+        let mut response = Json(serde_json::json!({
+            "error": self.error,
+            "code": self.code,
+        }))
+        .into_response();
+        *response.status_mut() = status;
+        response
+    }
+}
+
 /// Buffer size for bounded SSE channels.  Provides backpressure: when the
 /// buffer fills up, the sender blocks (up to [`SSE_SEND_TIMEOUT`]) rather
 /// than silently dropping events.
@@ -352,7 +443,7 @@ impl AppState {
 
     fn embedding_provider(
         &self,
-    ) -> Result<Option<Arc<genesis_core::embedding::EmbeddingProvider>>, (StatusCode, String)> {
+    ) -> Result<Option<Arc<genesis_core::embedding::EmbeddingProvider>>, ApiError> {
         let Some(config) = self.loaded.config.embedding.as_ref() else {
             return Ok(None);
         };
@@ -425,13 +516,50 @@ fn default_request_id() -> String {
     format!("req-{next}")
 }
 
-/// Map a storage error into an HTTP 500 response pair.
-fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-    error!(error = %e, "storage operation failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("storage error: {e}"),
-    )
+/// Map a storage error into a structured [`ApiError`].
+fn storage_err(e: impl std::fmt::Display) -> ApiError {
+    ApiError::internal(format!("storage: {e}"))
+}
+
+/// Map a chat execution error into an [`ApiError`], preserving actionable
+/// provider messages (missing API key, circuit breaker open, etc.) while
+/// hiding internal Rust error types from clients.
+fn chat_execution_err(e: impl std::fmt::Display) -> ApiError {
+    let msg = e.to_string();
+    // Preserve errors that help the operator fix configuration issues.
+    let actionable_patterns = [
+        "api key",
+        "API key",
+        "circuit",
+        "rate limit",
+        "quota",
+        "unauthorized",
+        "authentication",
+        "timeout",
+        "model not found",
+    ];
+    let is_actionable = actionable_patterns
+        .iter()
+        .any(|pattern| msg.contains(pattern));
+    if is_actionable {
+        error!(error = %msg, "chat execution failed (actionable)");
+        ApiError::with_status(StatusCode::INTERNAL_SERVER_ERROR, "execution_error", msg)
+    } else {
+        ApiError::internal(format!("execution: {msg}"))
+    }
+}
+
+/// Map a search/FTS5 error into the appropriate [`ApiError`].
+///
+/// SQLite FTS5 query syntax errors are returned as 400 (the caller sent a
+/// malformed query), while all other storage errors are 500.
+fn search_err(e: impl std::fmt::Display, query: &str) -> ApiError {
+    let msg = e.to_string();
+    if msg.contains("fts5") || msg.contains("syntax error") || msg.contains("parse error") {
+        ApiError::validation(format!("invalid search query '{query}': {msg}"))
+    } else {
+        storage_err(e)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,12 +587,11 @@ fn clamp_limit(limit: usize) -> usize {
 const MAX_OFFSET: usize = i64::MAX as usize;
 
 /// Validate that the caller-supplied offset is within safe bounds.
-fn validate_offset(offset: usize) -> Result<usize, (StatusCode, String)> {
+fn validate_offset(offset: usize) -> Result<usize, ApiError> {
     if offset > MAX_OFFSET {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"),
-        ));
+        return Err(ApiError::validation(format!(
+            "offset {offset} exceeds maximum allowed value ({MAX_OFFSET})"
+        )));
     }
     Ok(offset)
 }
@@ -500,14 +627,30 @@ macro_rules! paginated_response {
     };
 }
 
-paginated_response!(SessionListResponse, sessions, genesis_storage::SessionSummary);
+paginated_response!(
+    SessionListResponse,
+    sessions,
+    genesis_storage::SessionSummary
+);
 paginated_response!(SkillListResponse, skills, genesis_storage::StoredSkill);
 paginated_response!(MemoryListResponse, memories, genesis_storage::StoredMemory);
-paginated_response!(ScheduleListResponse, schedules, genesis_storage::StoredSchedule);
+paginated_response!(
+    ScheduleListResponse,
+    schedules,
+    genesis_storage::StoredSchedule
+);
 paginated_response!(TraitListResponse, traits, genesis_storage::StoredUserTrait);
 paginated_response!(TemplateListResponse, templates, serde_json::Value);
-paginated_response!(ApprovedListResponse, approved, genesis_storage::ApprovedUser);
-paginated_response!(PendingListResponse, pending, genesis_storage::PendingPairing);
+paginated_response!(
+    ApprovedListResponse,
+    approved,
+    genesis_storage::ApprovedUser
+);
+paginated_response!(
+    PendingListResponse,
+    pending,
+    genesis_storage::PendingPairing
+);
 
 /// Response body for GET /tools.
 ///
@@ -942,10 +1085,10 @@ async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let expected_key = match &state.api_key {
         Some(key) => key,
-        None if state.api_key_required => return Err(StatusCode::UNAUTHORIZED),
+        None if state.api_key_required => return Err(ApiError::unauthorized()),
         None => return Ok(next.run(request).await),
     };
 
@@ -970,7 +1113,7 @@ async fn auth_middleware(
         Some(t) if verify::constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => {
             Ok(next.run(request).await)
         }
-        _ => Err(StatusCode::UNAUTHORIZED),
+        _ => Err(ApiError::unauthorized()),
     }
 }
 
@@ -1019,7 +1162,7 @@ async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,
     request: Request<axum::body::Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let limiter = match &state.rate_limiter {
         Some(l) => l,
         None => return Ok(next.run(request).await),
@@ -1028,7 +1171,7 @@ async fn rate_limit_middleware(
     if limiter.check(ip) {
         Ok(next.run(request).await)
     } else {
-        Err(StatusCode::TOO_MANY_REQUESTS)
+        Err(ApiError::rate_limited())
     }
 }
 
@@ -1309,7 +1452,7 @@ struct ListSessionsQuery {
 async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
@@ -1317,7 +1460,7 @@ async fn list_sessions_handler(
     let (sessions, total) = if let Some(query) = &params.search {
         store
             .search_sessions_paginated(query, limit, offset)
-            .map_err(storage_err)?
+            .map_err(|e| search_err(e, query))?
     } else {
         store
             .list_recent_sessions_paginated(limit, offset)
@@ -1325,45 +1468,46 @@ async fn list_sessions_handler(
     };
 
     let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SessionListResponse {
-        sessions,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SessionListResponse {
+            sessions,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn get_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let session = store.get_session(&id).map_err(storage_err)?;
 
     match session {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
+        Some(s) => {
+            Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization: {e}"))
+            })?))
+        }
+        None => Err(ApiError::not_found(format!("session '{id}' not found"))),
     }
 }
 
 async fn delete_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete_session(&id).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("session '{id}' not found")))
+        Err(ApiError::not_found(format!("session '{id}' not found")))
     }
 }
 
@@ -1409,7 +1553,7 @@ fn default_insights_days() -> u32 {
 async fn session_messages_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let messages = store.load_messages(&id).map_err(storage_err)?;
 
@@ -1424,7 +1568,7 @@ async fn fork_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<ForkRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let new_id = request.new_session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
@@ -1446,7 +1590,7 @@ async fn update_session_title_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<UpdateTitleRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
 
@@ -1466,7 +1610,7 @@ async fn export_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<ExportQuery>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let session_title = store.get_session(&id).ok().flatten().and_then(|s| s.title);
@@ -1474,10 +1618,9 @@ async fn export_session_handler(
     let stored = store.load_messages(&id).map_err(storage_err)?;
 
     if stored.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("no messages found for session '{id}'"),
-        ));
+        return Err(ApiError::not_found(format!(
+            "no messages found for session '{id}'"
+        )));
     }
 
     let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
@@ -1503,12 +1646,9 @@ async fn export_session_handler(
         "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
         "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
         _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
-                ),
-            ))
+            return Err(ApiError::validation(format!(
+                "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
+            )))
         }
     };
 
@@ -1516,18 +1656,13 @@ async fn export_session_handler(
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(content))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build response: {e}"),
-            )
-        })
+        .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }
 
 async fn purge_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PurgeQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let purged = store
         .purge_older_than(params.older_than_days)
@@ -1542,7 +1677,7 @@ async fn purge_sessions_handler(
 async fn get_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tags = store.get_tags(&id).map_err(storage_err)?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
@@ -1557,7 +1692,7 @@ async fn set_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<SetTagsRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
     store.set_tags(&id, &tag_refs).map_err(storage_err)?;
@@ -1569,7 +1704,7 @@ async fn set_session_tags_handler(
 async fn add_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let added = store.add_tag(&id, &tag).map_err(storage_err)?;
     let tags = store.get_tags(&id).map_err(storage_err)?;
@@ -1581,7 +1716,7 @@ async fn add_session_tag_handler(
 async fn remove_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
     let tags = store.get_tags(&id).map_err(storage_err)?;
@@ -1593,7 +1728,7 @@ async fn remove_session_tag_handler(
 async fn sessions_by_tag_handler(
     State(state): State<Arc<AppState>>,
     Path(tag): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
     Ok(Json(
@@ -1617,7 +1752,7 @@ struct ImportMessage {
 async fn import_session_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ImportSessionRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let session_id = request.session_id.unwrap_or_else(|| {
@@ -1637,12 +1772,7 @@ async fn import_session_handler(
 
     store
         .import_session(&session_id, request.title.as_deref(), messages)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("import error: {e}"),
-            )
-        })?;
+        .map_err(|e| ApiError::internal(format!("import: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
@@ -1668,7 +1798,7 @@ fn default_bulk_format() -> String {
 async fn bulk_export_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<BulkExportQuery>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
 
     let limit = params.limit.unwrap_or(1000);
@@ -1702,13 +1832,10 @@ async fn bulk_export_handler(
                 output.push('\n');
             }
             _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "unsupported bulk format '{}'; use 'jsonl' or 'json'",
-                        params.format
-                    ),
-                ))
+                return Err(ApiError::validation(format!(
+                    "unsupported bulk format '{}'; use 'jsonl' or 'json'",
+                    params.format
+                )))
             }
         }
     }
@@ -1722,12 +1849,7 @@ async fn bulk_export_handler(
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
         .body(axum::body::Body::from(output))
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build response: {e}"),
-            )
-        })
+        .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }
 
 #[derive(Deserialize)]
@@ -1744,16 +1866,11 @@ fn default_search_limit() -> usize {
 async fn search_messages_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMessagesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let results = store
         .search_messages(&params.q, params.limit)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("search error: {e}"),
-            )
-        })?;
+        .map_err(|e| search_err(e, &params.q))?;
 
     Ok(Json(serde_json::json!({
         "query": params.q,
@@ -1765,29 +1882,23 @@ async fn search_messages_handler(
 async fn insights_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let data = store.insights(params.days).map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(data).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization: {e}"))
     })?))
 }
 
 async fn usage_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let stats = store.usage_stats().map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization: {e}"))
     })?))
 }
 
@@ -1824,45 +1935,48 @@ struct ListSkillsQuery {
 async fn list_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSkillsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let (skills, total) = store.list_all_paginated(limit, offset).map_err(storage_err)?;
+    let (skills, total) = store
+        .list_all_paginated(limit, offset)
+        .map_err(storage_err)?;
 
     let has_more = (offset + skills.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SkillListResponse {
-        skills,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SkillListResponse {
+            skills,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn get_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skill = store.get(&name).map_err(storage_err)?;
 
     match skill {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
+        Some(s) => {
+            Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization: {e}"))
+            })?))
+        }
+        None => Err(ApiError::not_found(format!("skill '{name}' not found"))),
     }
 }
 
 async fn upsert_skill_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UpsertSkillRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
     let skill = store
@@ -1876,31 +1990,28 @@ async fn upsert_skill_handler(
         .map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(skill).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization: {e}"))
     })?))
 }
 
 async fn delete_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete(&name).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "name": name})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found")))
+        Err(ApiError::not_found(format!("skill '{name}' not found")))
     }
 }
 
 async fn search_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
     let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
 
@@ -1942,7 +2053,7 @@ fn default_memory_search_limit() -> usize {
 
 fn build_embedding_provider(
     config: &genesis_config::EmbeddingConfig,
-) -> Result<genesis_core::embedding::EmbeddingProvider, (StatusCode, String)> {
+) -> Result<genesis_core::embedding::EmbeddingProvider, ApiError> {
     genesis_core::embedding::EmbeddingProvider::from_config(config)
         .map_err(|error| embedding_provider_error(config, error))
 }
@@ -1950,7 +2061,7 @@ fn build_embedding_provider(
 fn embedding_provider_error(
     _config: &genesis_config::EmbeddingConfig,
     error: genesis_core::embedding::EmbeddingError,
-) -> (StatusCode, String) {
+) -> ApiError {
     #[cfg(not(feature = "local-embeddings"))]
     if _config.is_local_backend()
         && matches!(
@@ -1958,21 +2069,22 @@ fn embedding_provider_error(
             genesis_core::embedding::EmbeddingError::NotConfigured
         )
     {
-        return (
+        return ApiError::with_status(
             StatusCode::NOT_IMPLEMENTED,
-            "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it.".to_owned(),
+            "not_implemented",
+            "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it",
         );
     }
 
     match error {
-        genesis_core::embedding::EmbeddingError::ApiError { status, body } => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            format!("embedding provider error: {body}"),
-        ),
-        other => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("embedding provider error: {other}"),
-        ),
+        genesis_core::embedding::EmbeddingError::ApiError { status, body } => {
+            ApiError::with_status(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                "embedding_error",
+                format!("embedding provider error: {body}"),
+            )
+        }
+        other => ApiError::internal(format!("embedding provider: {other}")),
     }
 }
 
@@ -1980,7 +2092,7 @@ fn embedding_runtime_error(
     _provider: Option<&genesis_core::embedding::EmbeddingProvider>,
     context: &str,
     error: genesis_core::embedding::EmbeddingError,
-) -> (StatusCode, String) {
+) -> ApiError {
     #[cfg(not(feature = "local-embeddings"))]
     if let Some(provider) = _provider {
         if provider.backend() == "local"
@@ -1989,49 +2101,52 @@ fn embedding_runtime_error(
                 genesis_core::embedding::EmbeddingError::NotConfigured
             )
         {
-            return (
+            return ApiError::with_status(
                 StatusCode::NOT_IMPLEMENTED,
-                "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it".to_string(),
+                "not_implemented",
+                "local embedding backend requires the 'local-embeddings' feature; rebuild genesis-gateway with --features local-embeddings to enable it",
             );
         }
     }
 
     match error {
-        genesis_core::embedding::EmbeddingError::ApiError { status, body } => (
-            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            format!("{context} error: {body}"),
-        ),
-        other => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{context} error: {other}"),
-        ),
+        genesis_core::embedding::EmbeddingError::ApiError { status, body } => {
+            ApiError::with_status(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                "embedding_error",
+                format!("{context} error: {body}"),
+            )
+        }
+        other => ApiError::internal(format!("{context}: {other}")),
     }
 }
 
 async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = MemoryStore::new(&state.loaded.config.storage.database_path);
     let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(serde_json::to_value(MemoryListResponse {
-        memories,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(MemoryListResponse {
+            memories,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn search_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMemoriesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let db_path = &state.loaded.config.storage.database_path;
     let memory_store = MemoryStore::new(db_path);
 
@@ -2083,7 +2198,7 @@ async fn search_memories_handler(
 async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let db_path = &state.loaded.config.storage.database_path;
     let store = MemoryStore::new(db_path);
     let deleted = store.delete(&id).map_err(storage_err)?;
@@ -2095,18 +2210,17 @@ async fn delete_memory_handler(
         }
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
+        Err(ApiError::not_found(format!("memory '{id}' not found")))
     }
 }
 
 /// Embed all un-embedded memories. Requires an embedding provider to be configured.
 async fn embed_memories_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.loaded.config.embedding.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no embedding provider configured; add an [embedding] section to config".to_owned(),
+        return Err(ApiError::validation(
+            "no embedding provider configured; add an [embedding] section to config",
         ));
     }
 
@@ -2210,12 +2324,9 @@ async fn embed_memories_handler(
 async fn embed_single_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.loaded.config.embedding.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "no embedding provider configured".to_owned(),
-        ));
+        return Err(ApiError::validation("no embedding provider configured"));
     }
 
     let provider = state
@@ -2230,7 +2341,7 @@ async fn embed_single_memory_handler(
     let memory = memory_store
         .get(&id)
         .map_err(storage_err)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
+        .ok_or_else(|| ApiError::not_found(format!("memory '{id}' not found")))?;
 
     genesis_core::embedding::embed_and_store(
         &memory.id,
@@ -2280,7 +2391,7 @@ struct ListSchedulesQuery {
 async fn list_schedules_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSchedulesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
@@ -2289,50 +2400,50 @@ async fn list_schedules_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + schedules.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ScheduleListResponse {
-        schedules,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ScheduleListResponse {
+            schedules,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn get_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let schedule = store.get(&id).map_err(storage_err)?;
 
     match schedule {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
+        Some(s) => {
+            Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization: {e}"))
+            })?))
+        }
+        None => Err(ApiError::not_found(format!("schedule '{id}' not found"))),
     }
 }
 
 async fn create_schedule_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateScheduleRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Validate cron expression at creation time
     if let Err(e) = genesis_core::scheduler::validate_cron(&request.cron_expression) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("invalid cron expression: {e}"),
-        ));
+        return Err(ApiError::validation(format!(
+            "invalid cron expression: {e}"
+        )));
     }
 
     // Validate timezone if provided
     if let Some(ref tz) = request.timezone {
         if let Err(e) = genesis_core::scheduler::resolve_timezone(Some(tz)) {
-            return Err((StatusCode::BAD_REQUEST, e));
+            return Err(ApiError::validation(e));
         }
     }
 
@@ -2349,26 +2460,24 @@ async fn create_schedule_handler(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::to_value(schedule).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?),
+        Json(
+            serde_json::to_value(schedule)
+                .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
+        ),
     ))
 }
 
 async fn delete_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete(&id).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))
+        Err(ApiError::not_found(format!("schedule '{id}' not found")))
     }
 }
 
@@ -2376,7 +2485,7 @@ async fn set_schedule_enabled_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<SetEnabledRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let updated = store
         .set_enabled(&id, request.enabled)
@@ -2389,7 +2498,7 @@ async fn set_schedule_enabled_handler(
             "updated": true,
         })))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found")))
+        Err(ApiError::not_found(format!("schedule '{id}' not found")))
     }
 }
 
@@ -2416,7 +2525,7 @@ struct ListTraitsQuery {
 async fn list_user_traits_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
@@ -2430,38 +2539,39 @@ async fn list_user_traits_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + traits_list.len()) < total as usize;
-    Ok(Json(serde_json::to_value(TraitListResponse {
-        traits: traits_list,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TraitListResponse {
+            traits: traits_list,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn get_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let user_trait = store.get(&key).map_err(storage_err)?;
 
     match user_trait {
-        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
+        Some(t) => {
+            Ok(Json(serde_json::to_value(t).map_err(|e| {
+                ApiError::internal(format!("serialization: {e}"))
+            })?))
+        }
+        None => Err(ApiError::not_found(format!("trait '{key}' not found"))),
     }
 }
 
 async fn observe_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ObserveTraitRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let observed = store
         .observe(
@@ -2474,26 +2584,24 @@ async fn observe_user_trait_handler(
 
     Ok((
         StatusCode::OK,
-        Json(serde_json::to_value(observed).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?),
+        Json(
+            serde_json::to_value(observed)
+                .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
+        ),
     ))
 }
 
 async fn delete_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = UserModelStore::new(&state.loaded.config.storage.database_path);
     let deleted = store.delete(&key).map_err(storage_err)?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found")))
+        Err(ApiError::not_found(format!("trait '{key}' not found")))
     }
 }
 
@@ -2502,25 +2610,24 @@ async fn delete_user_trait_handler(
 async fn get_subagent_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
     let subagent = store.get(&id).map_err(storage_err)?;
 
     match subagent {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {e}"),
-            )
-        })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("subagent '{id}' not found"))),
+        Some(s) => {
+            Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization: {e}"))
+            })?))
+        }
+        None => Err(ApiError::not_found(format!("subagent '{id}' not found"))),
     }
 }
 
 async fn list_session_subagents_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SubagentStore::new(&state.loaded.config.storage.database_path);
     let subagents = store.list_by_parent(&id).map_err(storage_err)?;
 
@@ -2547,15 +2654,12 @@ fn default_usage_limit() -> usize {
 async fn skill_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats(&name).map_err(storage_err)?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("serialization error: {e}"),
-        )
+        ApiError::internal(format!("serialization: {e}"))
     })?))
 }
 
@@ -2563,7 +2667,7 @@ async fn skill_usage_recent_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<SkillUsageRecentQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let usages = store
         .recent_usages(&name, params.limit)
@@ -2581,7 +2685,7 @@ async fn skill_usage_recent_handler(
 
 async fn list_tools_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let registry = genesis_tools::default_registry();
     let definitions = registry.definitions();
 
@@ -2612,13 +2716,15 @@ async fn list_tools_handler(
     let mcp_count = mcp_tools.len();
     let total = builtin_count + mcp_count;
 
-    Ok(Json(serde_json::to_value(ToolListResponse {
-        builtin_tools,
-        builtin_count,
-        mcp_tools,
-        mcp_count,
-        total,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ToolListResponse {
+            builtin_tools,
+            builtin_count,
+            mcp_tools,
+            mcp_count,
+            total,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
@@ -2705,7 +2811,7 @@ struct AuditQueryParams {
 async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(50);
     let entries = if let Some(ref event_type) = params.event_type {
@@ -2723,7 +2829,7 @@ async fn audit_recent_handler(
 
 async fn audit_stats_handler(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats().map_err(storage_err)?;
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
@@ -2739,7 +2845,7 @@ async fn audit_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let limit = params.limit.unwrap_or(100);
     let entries = store.by_session(&id, limit).map_err(storage_err)?;
@@ -2758,7 +2864,7 @@ struct AuditPurgeRequest {
 async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = request.older_than_days.unwrap_or(90);
     let deleted = store.purge_older_than(days).map_err(storage_err)?;
@@ -2780,7 +2886,7 @@ struct AnalyticsQuery {
 async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.tool_analytics(days).map_err(storage_err)?;
@@ -2793,7 +2899,7 @@ async fn tool_analytics_handler(
 async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
     let days = params.days.unwrap_or(30);
     let analytics = store.llm_analytics(days).map_err(storage_err)?;
@@ -2817,7 +2923,7 @@ struct ListTemplatesQuery {
 
 async fn list_templates_handler(
     axum::extract::Query(params): axum::extract::Query<ListTemplatesQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let all_templates = genesis_core::templates::list_templates();
@@ -2830,19 +2936,21 @@ async fn list_templates_handler(
         .collect();
     let has_more = (offset + page.len()) < total as usize;
 
-    Ok(Json(serde_json::to_value(TemplateListResponse {
-        templates: page,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TemplateListResponse {
+            templates: page,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn get_template_handler(
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     match genesis_core::templates::get_template(&name) {
         Some(t) => {
             let prompt = genesis_core::templates::format_template_prompt(t);
@@ -2851,10 +2959,7 @@ async fn get_template_handler(
                 "formatted_prompt": prompt,
             })))
         }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            format!("Template '{name}' not found"),
-        )),
+        None => Err(ApiError::not_found(format!("template '{name}' not found"))),
     }
 }
 
@@ -2864,20 +2969,14 @@ async fn get_template_handler(
 
 async fn workflow_validate_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Missing 'yaml' field in request body".to_owned(),
-        )
-    })?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::validation("missing 'yaml' field in request body"))?;
 
-    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse workflow: {e}"),
-        )
-    })?;
+    let workflow = genesis_core::workflow::parse_workflow(yaml)
+        .map_err(|e| ApiError::validation(format!("failed to parse workflow: {e}")))?;
 
     let issues = genesis_core::workflow::validate_workflow(&workflow);
     Ok(Json(serde_json::json!({
@@ -2891,44 +2990,33 @@ async fn workflow_validate_handler(
 async fn workflow_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let yaml = body.get("yaml").and_then(|v| v.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Missing 'yaml' field in request body".to_owned(),
-        )
-    })?;
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let yaml = body
+        .get("yaml")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::validation("missing 'yaml' field in request body"))?;
     let input = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
     let session_id = body
         .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or("workflow-api");
 
-    let workflow = genesis_core::workflow::parse_workflow(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse workflow: {e}"),
-        )
-    })?;
+    let workflow = genesis_core::workflow::parse_workflow(yaml)
+        .map_err(|e| ApiError::validation(format!("failed to parse workflow: {e}")))?;
 
     let issues = genesis_core::workflow::validate_workflow(&workflow);
     if !issues.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Workflow validation failed: {}", issues.join("; ")),
-        ));
+        return Err(ApiError::validation(format!(
+            "workflow validation failed: {}",
+            issues.join("; ")
+        )));
     }
 
     let service = state.session_service();
     let result = service
         .run_workflow(&workflow, input, session_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Workflow execution failed: {e}"),
-            )
-        })?;
+        .map_err(|e| ApiError::internal(format!("workflow execution: {e}")))?;
 
     Ok(Json(serde_json::json!(result)))
 }
@@ -2948,26 +3036,16 @@ async fn bus_channels_handler(State(state): State<Arc<AppState>>) -> Json<serde_
 async fn bus_publish_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let channel = body
         .get("channel")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'channel' field".to_owned(),
-            )
-        })?;
+        .ok_or_else(|| ApiError::validation("missing 'channel' field"))?;
     let sender = body.get("sender").and_then(|v| v.as_str()).unwrap_or("api");
     let payload = body
         .get("payload")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing 'payload' field".to_owned(),
-            )
-        })?;
+        .ok_or_else(|| ApiError::validation("missing 'payload' field"))?;
     let kind_str = body.get("kind").and_then(|v| v.as_str()).unwrap_or("text");
     let kind: genesis_core::agent_bus::MessageKind =
         serde_json::from_str(&format!("\"{kind_str}\""))
@@ -3040,18 +3118,14 @@ async fn bus_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_jso
 
 async fn eval_validate_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let yaml = body
         .get("yaml")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
+        .ok_or_else(|| ApiError::validation("missing 'yaml' field"))?;
 
-    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse suite: {e}"),
-        )
-    })?;
+    let suite = genesis_core::eval::parse_suite(yaml)
+        .map_err(|e| ApiError::validation(format!("failed to parse eval suite: {e}")))?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
     Ok(Json(serde_json::json!({
@@ -3065,34 +3139,28 @@ async fn eval_validate_handler(
 async fn eval_run_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let yaml = body
         .get("yaml")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'yaml' field".to_owned()))?;
+        .ok_or_else(|| ApiError::validation("missing 'yaml' field"))?;
 
-    let suite = genesis_core::eval::parse_suite(yaml).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse suite: {e}"),
-        )
-    })?;
+    let suite = genesis_core::eval::parse_suite(yaml)
+        .map_err(|e| ApiError::validation(format!("failed to parse eval suite: {e}")))?;
 
     let issues = genesis_core::eval::validate_suite(&suite);
     if !issues.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Suite validation failed: {}", issues.join("; ")),
-        ));
+        return Err(ApiError::validation(format!(
+            "suite validation failed: {}",
+            issues.join("; ")
+        )));
     }
 
     let service = state.session_service();
-    let report = service.run_eval(&suite).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Eval run failed: {e}"),
-        )
-    })?;
+    let report = service
+        .run_eval(&suite)
+        .await
+        .map_err(|e| ApiError::internal(format!("eval run: {e}")))?;
 
     Ok(Json(serde_json::json!(report)))
 }
@@ -3103,11 +3171,11 @@ async fn eval_run_handler(
 
 async fn guardrails_check_handler(
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let text = body
         .get("text")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing 'text' field".to_owned()))?;
+        .ok_or_else(|| ApiError::validation("missing 'text' field"))?;
     let direction = body
         .get("direction")
         .and_then(|v| v.as_str())
@@ -3169,7 +3237,7 @@ async fn webhooks_clear_dead_letters_handler(
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, (StatusCode, String)> {
+) -> Result<Json<ChatResponse>, ApiError> {
     let loaded = &state.loaded;
     let mut service = state.session_service();
     if let Some(system_prompt) = request.system_prompt {
@@ -3238,10 +3306,7 @@ async fn chat_handler(
                     error = %e,
                     "chat request failed"
                 );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("execution error: {e}"),
-                )
+                chat_execution_err(e)
             })?;
         info!(
             request_id = request_id.as_str(),
@@ -3308,7 +3373,7 @@ async fn chat_handler(
 async fn openai_chat_completions_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<OpenAiCompletionsRequest>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     // Extract the last user message as the prompt
     let prompt = request
         .messages
@@ -3316,12 +3381,7 @@ async fn openai_chat_completions_handler(
         .rev()
         .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
         .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no user message found in messages array".to_owned(),
-            )
-        })?
+        .ok_or_else(|| ApiError::validation("no user message found in messages array"))?
         .to_owned();
 
     // Extract optional system prompt
@@ -3360,7 +3420,7 @@ async fn openai_blocking_response(
     session_id: String,
     model: String,
     span: tracing::Span,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     state.requests_total.fetch_add(1, Ordering::Relaxed);
 
     let mut service = state.session_service();
@@ -3383,10 +3443,7 @@ async fn openai_blocking_response(
             .await
             .map_err(|e| {
                 error!(error = %e, "OpenAI-compat request failed");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("execution error: {e}"),
-                )
+                chat_execution_err(e)
             })?;
 
         let body = serde_json::json!({
@@ -3430,7 +3487,7 @@ async fn openai_streaming_response(
     session_id: String,
     model: String,
     span: tracing::Span,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     state.requests_total.fetch_add(1, Ordering::Relaxed);
     state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
 
@@ -3838,10 +3895,8 @@ struct OpenAiCompletionsRequest {
 async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<
-    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    (StatusCode, String),
-> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     info!(
@@ -3912,59 +3967,58 @@ async fn chat_stream_handler(
             let tx_cb = tx.clone();
             let cancelled_cb = Arc::clone(&cancelled);
 
-            let agent_future = service
-                .run_turn_streaming(
-                    SessionTurnInput {
-                        session_id: &session_id,
-                        session_platform: &platform,
-                        delivery_platform: delivery_platform_from_str(&platform),
-                        prompt: &message,
-                        title: None,
-                        images,
-                    },
-                    |event| match event {
-                        StreamEvent::Chunk(chunk) => {
-                            if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
-                                session_id: session_id.clone(),
-                                content: chunk.to_owned(),
-                            }) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("chunk").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+            let agent_future = service.run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: &platform,
+                    delivery_platform: delivery_platform_from_str(&platform),
+                    prompt: &message,
+                    title: None,
+                    images,
+                },
+                |event| match event {
+                    StreamEvent::Chunk(chunk) => {
+                        if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
+                            session_id: session_id.clone(),
+                            content: chunk.to_owned(),
+                        }) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("chunk").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallStart { name, .. } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "tool": name,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("tool_call").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallStart { name, .. } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "tool": name,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("tool_call").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallEnd { .. }
-                        | StreamEvent::TurnStarted
-                        | StreamEvent::TokenUsage { .. }
-                        | StreamEvent::Warning(_) => {}
-                        StreamEvent::ClarificationNeeded { question } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "question": question,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("clarification").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallEnd { .. }
+                    | StreamEvent::TurnStarted
+                    | StreamEvent::TokenUsage { .. }
+                    | StreamEvent::Warning(_) => {}
+                    StreamEvent::ClarificationNeeded { question } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "question": question,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("clarification").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                    },
-                );
+                    }
+                },
+            );
 
             let run_result =
                 match tokio::time::timeout(Duration::from_secs(timeout_secs), agent_future).await {
@@ -3972,15 +4026,12 @@ async fn chat_stream_handler(
                     Err(_elapsed) => {
                         warn!(
                             request_id = request_id_for_task.as_str(),
-                            timeout_secs,
-                            "streaming chat request timed out"
+                            timeout_secs, "streaming chat request timed out"
                         );
                         cancelled.store(true, Ordering::Relaxed);
                         if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
                             session_id,
-                            error: format!(
-                                "streaming request timed out after {timeout_secs}s"
-                            ),
+                            error: format!("streaming request timed out after {timeout_secs}s"),
                         }) {
                             send_sse(
                                 &tx,
@@ -4128,18 +4179,14 @@ const MAX_BATCH_SIZE: usize = 100;
 async fn chat_batch_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<BatchRequest>,
-) -> Result<Json<BatchResponse>, (StatusCode, String)> {
+) -> Result<Json<BatchResponse>, ApiError> {
     if request.items.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "batch must contain at least one item".to_owned(),
-        ));
+        return Err(ApiError::validation("batch must contain at least one item"));
     }
     if request.items.len() > MAX_BATCH_SIZE {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("batch exceeds maximum size of {MAX_BATCH_SIZE} items"),
-        ));
+        return Err(ApiError::validation(format!(
+            "batch exceeds maximum size of {MAX_BATCH_SIZE} items"
+        )));
     }
 
     let concurrency = request.concurrency.clamp(1, MAX_BATCH_CONCURRENCY);
@@ -4289,7 +4336,7 @@ struct ClearPendingRequest {
 async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
@@ -4298,20 +4345,22 @@ async fn list_approved_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + approved.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ApprovedListResponse {
-        approved,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ApprovedListResponse {
+            approved,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn list_pending_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
@@ -4320,20 +4369,22 @@ async fn list_pending_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + pending.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PendingListResponse {
-        pending,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(PendingListResponse {
+            pending,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| ApiError::internal(format!("serialization: {e}")))?,
     ))
 }
 
 async fn approve_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApprovePairingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let approved = store
         .approve_code(&request.platform, &request.code)
@@ -4344,17 +4395,14 @@ async fn approve_pairing_handler(
             "approved": true,
             "user": user,
         }))),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            "invalid or expired pairing code".to_owned(),
-        )),
+        None => Err(ApiError::not_found("invalid or expired pairing code")),
     }
 }
 
 async fn revoke_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RevokePairingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let revoked = store
         .revoke(&request.platform, &request.user_id)
@@ -4367,20 +4415,17 @@ async fn revoke_pairing_handler(
             "user_id": request.user_id,
         })))
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!(
-                "no approved user '{}' on platform '{}'",
-                request.user_id, request.platform
-            ),
-        ))
+        Err(ApiError::not_found(format!(
+            "no approved user '{}' on platform '{}'",
+            request.user_id, request.platform
+        )))
     }
 }
 
 async fn clear_pending_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ClearPendingRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = PairingStore::new(&state.loaded.config.storage.database_path);
     let cleared = store
         .clear_pending(request.platform.as_deref())
@@ -5540,8 +5585,11 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        let message = String::from_utf8(body.to_vec()).unwrap();
-        assert!(message.contains("unsupported local embedding model"));
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported local embedding model"));
     }
 
     #[test]
@@ -5743,8 +5791,8 @@ mod tests {
         {
             let result = validate_offset(usize::MAX);
             assert!(result.is_err());
-            let (status, _msg) = result.unwrap_err();
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let err = result.unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
         }
     }
 
@@ -5813,11 +5861,26 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("sessions").is_some(), "response must have 'sessions' field");
-        assert!(json.get("total").is_some(), "response must have 'total' field");
-        assert!(json.get("limit").is_some(), "response must have 'limit' field");
-        assert!(json.get("offset").is_some(), "response must have 'offset' field");
-        assert!(json.get("has_more").is_some(), "response must have 'has_more' field");
+        assert!(
+            json.get("sessions").is_some(),
+            "response must have 'sessions' field"
+        );
+        assert!(
+            json.get("total").is_some(),
+            "response must have 'total' field"
+        );
+        assert!(
+            json.get("limit").is_some(),
+            "response must have 'limit' field"
+        );
+        assert!(
+            json.get("offset").is_some(),
+            "response must have 'offset' field"
+        );
+        assert!(
+            json.get("has_more").is_some(),
+            "response must have 'has_more' field"
+        );
     }
 
     #[tokio::test]
@@ -5893,14 +5956,30 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("builtin_tools").is_some(), "response must have 'builtin_tools'");
-        assert!(json.get("mcp_tools").is_some(), "response must have 'mcp_tools'");
-        assert!(json.get("builtin_count").is_some(), "response must have 'builtin_count'");
-        assert!(json.get("mcp_count").is_some(), "response must have 'mcp_count'");
+        assert!(
+            json.get("builtin_tools").is_some(),
+            "response must have 'builtin_tools'"
+        );
+        assert!(
+            json.get("mcp_tools").is_some(),
+            "response must have 'mcp_tools'"
+        );
+        assert!(
+            json.get("builtin_count").is_some(),
+            "response must have 'builtin_count'"
+        );
+        assert!(
+            json.get("mcp_count").is_some(),
+            "response must have 'mcp_count'"
+        );
         assert!(json.get("total").is_some(), "response must have 'total'");
         // All builtin tools should be returned (no pagination)
         let builtin = json["builtin_tools"].as_array().unwrap();
-        assert!(builtin.len() >= 50, "should return all builtin tools, got {}", builtin.len());
+        assert!(
+            builtin.len() >= 50,
+            "should return all builtin tools, got {}",
+            builtin.len()
+        );
         assert_eq!(json["builtin_count"], builtin.len());
         assert_eq!(json["mcp_count"], 0);
     }
@@ -5967,5 +6046,201 @@ mod tests {
                 "{uri} should return 200 with default params"
             );
         }
+    }
+
+    // ── JSON error response tests ────────────────────────────────────
+
+    #[test]
+    fn api_error_serializes_to_json() {
+        let err = ApiError::not_found("widget 'x' not found");
+        let json = serde_json::to_value(&err).expect("should serialize");
+        assert_eq!(json["error"], "widget 'x' not found");
+        assert_eq!(json["code"], "not_found");
+        // `status` should be skipped from the JSON output
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn api_error_into_response_sets_status_and_json_body() {
+        let err = ApiError::validation("bad input");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn api_error_internal_hides_details() {
+        let err = ApiError::internal("rusqlite panic: cannot open /foo.db");
+        assert_eq!(err.error, "internal server error");
+        assert_eq!(err.code, "internal_error");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn api_error_unauthorized_fields() {
+        let err = ApiError::unauthorized();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.code, "unauthorized");
+    }
+
+    #[test]
+    fn api_error_rate_limited_fields() {
+        let err = ApiError::rate_limited();
+        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.code, "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn not_found_session_returns_json_error() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/sessions/nonexistent-session-id")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response must be valid JSON");
+        assert_eq!(json["code"], "not_found");
+        assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_returns_json_error() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state_with_key(Some("secret".to_string()), true, None);
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/sessions")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response must be valid JSON");
+        assert_eq!(json["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_session_returns_json_not_found() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/sessions/does-not-exist")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response must be valid JSON");
+        assert_eq!(json["code"], "not_found");
+        assert!(json["error"].as_str().unwrap().contains("session"));
+    }
+
+    #[tokio::test]
+    async fn not_found_skill_returns_json_error() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/skills/nonexistent-skill")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response must be valid JSON");
+        assert_eq!(json["code"], "not_found");
+        assert!(json["error"].as_str().unwrap().contains("skill"));
+    }
+
+    #[tokio::test]
+    async fn not_found_template_returns_json_error() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/templates/nonexistent-template")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app.oneshot(req).await.expect("request should succeed");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response must be valid JSON");
+        assert_eq!(json["code"], "not_found");
+    }
+
+    #[test]
+    fn search_err_returns_validation_for_fts5_syntax_errors() {
+        let err = search_err("fts5: syntax error near \":\"", "bad:query");
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "validation_error");
+        assert!(err.error.contains("bad:query"));
+    }
+
+    #[test]
+    fn search_err_returns_internal_for_storage_errors() {
+        let err = search_err("disk I/O error", "hello");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn chat_execution_err_preserves_actionable_api_key_errors() {
+        let err = chat_execution_err("missing API key for provider openai");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "execution_error");
+        assert!(err.error.contains("API key"));
+    }
+
+    #[test]
+    fn chat_execution_err_hides_internal_errors() {
+        let err = chat_execution_err("serde_json::Error: unexpected token at position 42");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "internal_error");
+        assert_eq!(err.error, "internal server error");
     }
 }
