@@ -28,6 +28,18 @@ pub(crate) fn decayed_importance(
     Ok(importance * 0.99_f32.powf(days))
 }
 
+/// Return the retrieval weight multiplier for a given edge type.
+pub(crate) fn edge_type_weight(edge_type: &str) -> f64 {
+    match edge_type {
+        "consolidation" => 1.2,
+        "semantic" => 1.0,
+        "causal" => 0.9,
+        "temporal" => 0.7,
+        "entity" => 0.6,
+        _ => 0.5,
+    }
+}
+
 pub(crate) fn sql_placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
