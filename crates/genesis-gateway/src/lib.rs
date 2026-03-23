@@ -12,8 +12,9 @@ pub mod webhooks;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, Request, StatusCode};
@@ -33,9 +34,40 @@ use genesis_storage::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Buffer size for bounded SSE channels.  Provides backpressure: when a slow
+/// consumer lets the buffer fill up, new events are dropped rather than
+/// accumulating unbounded memory.
+const SSE_CHANNEL_BUFFER: usize = 64;
+
+/// Default timeout for SSE streaming requests (5 minutes).  Overridable via
+/// `gateway.stream_timeout_secs` in the config file.
+const DEFAULT_STREAM_TIMEOUT_SECS: u64 = 300;
+
+/// Try to send an SSE event on a bounded channel.  If the receiver has been
+/// dropped (client disconnected) the cancellation flag is set so the agent
+/// loop exits at the next opportunity.  If the channel is merely full, the
+/// event is dropped with a warning — this applies backpressure without
+/// blocking the synchronous callback.
+fn try_send_sse(
+    tx: &mpsc::Sender<Result<Event, std::convert::Infallible>>,
+    event: Result<Event, std::convert::Infallible>,
+    cancelled: &AtomicBool,
+) {
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            debug!("SSE client disconnected, signalling cancellation");
+            cancelled.store(true, Ordering::Relaxed);
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("SSE channel full, dropping event (slow consumer)");
+        }
+    }
+}
 
 /// Simple in-memory sliding-window rate limiter keyed by IP address.
 ///
@@ -3189,10 +3221,22 @@ async fn openai_streaming_response(
     state.requests_total.fetch_add(1, Ordering::Relaxed);
     state.stream_requests_total.fetch_add(1, Ordering::Relaxed);
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+    let (tx, mut rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(SSE_CHANNEL_BUFFER);
     let state_for_task = Arc::clone(&state);
     let session_id_for_task = session_id.clone();
     let model_for_task = model.clone();
+
+    // Shared cancellation flag — set when the client disconnects or on timeout.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_for_task = Arc::clone(&cancelled);
+
+    let timeout_secs = state
+        .loaded
+        .config
+        .gateway
+        .as_ref()
+        .and_then(|g| g.stream_timeout_secs)
+        .unwrap_or(DEFAULT_STREAM_TIMEOUT_SECS);
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3201,6 +3245,7 @@ async fn openai_streaming_response(
     let completion_id = format!("chatcmpl-{}", session_id);
 
     tokio::spawn(async move {
+        let cancelled = cancelled_for_task;
         let mut service = state_for_task.session_service();
         if let Some(sp) = system_prompt {
             service.set_system_prompt_override(sp);
@@ -3224,18 +3269,17 @@ async fn openai_streaming_response(
             Ok(json) => json,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize SSE event");
-                // Return a minimal OpenAI-compatible error chunk so clients
-                // can still parse it.
                 String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
-        let _ = tx.send(Ok(Event::default().data(initial_data)));
+        try_send_sse(&tx, Ok(Event::default().data(initial_data)), &cancelled);
 
         let completion_id_for_event = completion_id.clone();
         let model_for_event = model_for_task.clone();
         let tx_for_event = tx.clone();
+        let cancelled_cb = Arc::clone(&cancelled);
 
-        let run_result = service
+        let agent_future = service
             .run_turn_streaming(
                 SessionTurnInput {
                     session_id: &session_id_for_task,
@@ -3262,16 +3306,33 @@ async fn openai_streaming_response(
                             Ok(json) => json,
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to serialize SSE event");
-                                // Return a minimal OpenAI-compatible error chunk so clients
-                // can still parse it.
-                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
+                                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                             }
                         };
-                        let _ = tx_for_event.send(Ok(Event::default().data(chunk_data)));
+                        try_send_sse(
+                            &tx_for_event,
+                            Ok(Event::default().data(chunk_data)),
+                            &cancelled_cb,
+                        );
                     }
                 },
-            )
-            .await;
+            );
+
+        let run_result =
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), agent_future).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    warn!(timeout_secs, "OpenAI streaming request timed out");
+                    cancelled.store(true, Ordering::Relaxed);
+                    // Send [DONE] so well-behaved clients close cleanly.
+                    try_send_sse(
+                        &tx,
+                        Ok(Event::default().data("[DONE]")),
+                        &cancelled,
+                    );
+                    return;
+                }
+            };
 
         // Send finish chunk
         let finish_chunk = serde_json::json!({
@@ -3289,12 +3350,10 @@ async fn openai_streaming_response(
             Ok(json) => json,
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize SSE event");
-                // Return a minimal OpenAI-compatible error chunk so clients
-                // can still parse it.
                 String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
             }
         };
-        let _ = tx.send(Ok(Event::default().data(finish_data)));
+        try_send_sse(&tx, Ok(Event::default().data(finish_data)), &cancelled);
 
         // Send usage chunk if we got a successful outcome
         if let Ok(outcome) = run_result {
@@ -3314,22 +3373,28 @@ async fn openai_streaming_response(
                 Ok(json) => json,
                 Err(e) => {
                     tracing::error!(error = %e, "failed to serialize SSE event");
-                    // Return a minimal OpenAI-compatible error chunk so clients
-                // can still parse it.
-                String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
+                    String::from(r#"{"id":"error","object":"chat.completion.chunk","choices":[]}"#)
                 }
             };
-            let _ = tx.send(Ok(Event::default().data(usage_data)));
+            try_send_sse(&tx, Ok(Event::default().data(usage_data)), &cancelled);
         }
 
         // Send [DONE] sentinel
-        let _ = tx.send(Ok(Event::default().data("[DONE]")));
+        try_send_sse(
+            &tx,
+            Ok(Event::default().data("[DONE]")),
+            &cancelled,
+        );
     }.instrument(span));
 
+    // When the client disconnects, the stream is dropped, which sets the
+    // cancellation flag so the spawned agent task exits promptly.
+    let cancelled_for_stream = Arc::clone(&cancelled);
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
             yield event;
         }
+        cancelled_for_stream.store(true, Ordering::Relaxed);
     };
 
     Ok(Sse::new(stream)
@@ -3573,10 +3638,23 @@ async fn chat_stream_handler(
             detail: img.detail,
         })
         .collect();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+    let (tx, mut rx) = mpsc::channel::<Result<Event, std::convert::Infallible>>(SSE_CHANNEL_BUFFER);
     let state_for_task = Arc::clone(&state);
     let session_id_for_task = session_id.clone();
     let request_id_for_task = request_id.clone();
+
+    // Shared cancellation flag — set when the client disconnects or on timeout
+    // so the agent loop can exit early.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_for_task = Arc::clone(&cancelled);
+
+    let timeout_secs = state
+        .loaded
+        .config
+        .gateway
+        .as_ref()
+        .and_then(|g| g.stream_timeout_secs)
+        .unwrap_or(DEFAULT_STREAM_TIMEOUT_SECS);
 
     let spawn_span = info_span!(
         "gateway.chat_stream",
@@ -3586,6 +3664,7 @@ async fn chat_stream_handler(
     );
     tokio::spawn(
         async move {
+            let cancelled = cancelled_for_task;
             let mut service = state_for_task.session_service();
             if let Some(system_prompt) = system_prompt {
                 service.set_system_prompt_override(system_prompt);
@@ -3598,10 +3677,17 @@ async fn chat_stream_handler(
             }));
 
             if let Ok(payload) = initial_payload {
-                let _ = tx.send(Ok(Event::default().event("session").data(payload)));
+                try_send_sse(
+                    &tx,
+                    Ok(Event::default().event("session").data(payload)),
+                    &cancelled,
+                );
             }
 
-            let run_result = service
+            let tx_cb = tx.clone();
+            let cancelled_cb = Arc::clone(&cancelled);
+
+            let agent_future = service
                 .run_turn_streaming(
                     SessionTurnInput {
                         session_id: &session_id,
@@ -3617,7 +3703,11 @@ async fn chat_stream_handler(
                                 session_id: session_id.clone(),
                                 content: chunk.to_owned(),
                             }) {
-                                let _ = tx.send(Ok(Event::default().event("chunk").data(payload)));
+                                try_send_sse(
+                                    &tx_cb,
+                                    Ok(Event::default().event("chunk").data(payload)),
+                                    &cancelled_cb,
+                                );
                             }
                         }
                         StreamEvent::ToolCallStart { name, .. } => {
@@ -3625,8 +3715,11 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "tool": name,
                             })) {
-                                let _ =
-                                    tx.send(Ok(Event::default().event("tool_call").data(payload)));
+                                try_send_sse(
+                                    &tx_cb,
+                                    Ok(Event::default().event("tool_call").data(payload)),
+                                    &cancelled_cb,
+                                );
                             }
                         }
                         StreamEvent::ToolCallEnd { .. }
@@ -3638,14 +3731,41 @@ async fn chat_stream_handler(
                                 "session_id": &session_id,
                                 "question": question,
                             })) {
-                                let _ = tx.send(Ok(Event::default()
-                                    .event("clarification")
-                                    .data(payload)));
+                                try_send_sse(
+                                    &tx_cb,
+                                    Ok(Event::default().event("clarification").data(payload)),
+                                    &cancelled_cb,
+                                );
                             }
                         }
                     },
-                )
-                .await;
+                );
+
+            let run_result =
+                match tokio::time::timeout(Duration::from_secs(timeout_secs), agent_future).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        warn!(
+                            request_id = request_id_for_task.as_str(),
+                            timeout_secs,
+                            "streaming chat request timed out"
+                        );
+                        cancelled.store(true, Ordering::Relaxed);
+                        if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
+                            session_id,
+                            error: format!(
+                                "streaming request timed out after {timeout_secs}s"
+                            ),
+                        }) {
+                            try_send_sse(
+                                &tx,
+                                Ok(Event::default().event("error").data(payload)),
+                                &cancelled,
+                            );
+                        }
+                        return;
+                    }
+                };
 
             match run_result {
                 Ok(outcome) => {
@@ -3674,7 +3794,11 @@ async fn chat_stream_handler(
                         total_input_tokens: outcome.result.total_input_tokens,
                         total_output_tokens: outcome.result.total_output_tokens,
                     }) {
-                        let _ = tx.send(Ok(Event::default().event("done").data(payload)));
+                        try_send_sse(
+                            &tx,
+                            Ok(Event::default().event("done").data(payload)),
+                            &cancelled,
+                        );
                     }
                 }
                 Err(error) => {
@@ -3687,7 +3811,11 @@ async fn chat_stream_handler(
                         session_id,
                         error: error.to_string(),
                     }) {
-                        let _ = tx.send(Ok(Event::default().event("error").data(payload)));
+                        try_send_sse(
+                            &tx,
+                            Ok(Event::default().event("error").data(payload)),
+                            &cancelled,
+                        );
                     }
                 }
             }
@@ -3695,10 +3823,17 @@ async fn chat_stream_handler(
         .instrument(spawn_span),
     );
 
+    // When the client disconnects, the stream is dropped, which sets the
+    // cancellation flag so the spawned agent task exits promptly.
+    let cancelled_for_stream = Arc::clone(&cancelled);
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
             yield event;
         }
+        // Stream ended — either the sender was dropped (task finished) or
+        // the client disconnected.  Signal cancellation either way so a
+        // still-running agent task can stop.
+        cancelled_for_stream.store(true, Ordering::Relaxed);
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
