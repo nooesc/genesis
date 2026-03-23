@@ -226,24 +226,24 @@ impl App {
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
+            AgentEvent::Cancelled => {
+                self.chat.append_text("\n\n*Turn cancelled.*");
+                self.chat.complete_turn();
+                self.turn_running = false;
+                self.turn_start = None;
+                self.status_bar.turn_elapsed = None;
+                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+                let _ = self.app_tx.send(AppEvent::CommitHistory);
+            }
             AgentEvent::Error(err) => {
-                let is_cancellation =
-                    err.contains("cancelled by user") || err.contains("Turn cancelled");
-
-                if is_cancellation {
-                    // User-initiated cancellation — neutral message, no alarm flash.
-                    self.chat.append_text("\n\n*Turn cancelled.*");
-                } else {
-                    // Genuine error — alarming message with visual flash.
-                    self.chat.append_text(&format!("\n\n**Error:** {err}"));
-                    let chat_area = ratatui::layout::Rect {
-                        x: 0,
-                        y: 0,
-                        width: self.viewport_width,
-                        height: self.viewport_height.saturating_sub(1),
-                    };
-                    self.effects.flash_error(chat_area);
-                }
+                self.chat.append_text(&format!("\n\n**Error:** {err}"));
+                let chat_area = ratatui::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: self.viewport_width,
+                    height: self.viewport_height.saturating_sub(1),
+                };
+                self.effects.flash_error(chat_area);
 
                 self.chat.complete_turn();
                 self.turn_running = false;

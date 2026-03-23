@@ -51,6 +51,8 @@ pub enum AgentEvent {
     },
     /// Agent needs clarification from user.
     ClarificationNeeded(String),
+    /// The running turn was cancelled by the user (Ctrl+C).
+    Cancelled,
     /// Agent encountered an error.
     Error(String),
     /// Non-fatal warning from agent.

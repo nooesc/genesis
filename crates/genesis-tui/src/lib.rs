@@ -326,9 +326,7 @@ pub async fn run_tui(
                     // cooperatively by the Tokio runtime when the future is
                     // dropped.
                     turn_future = None;
-                    let _ = agent_tx.send(AgentEvent::Error(
-                        "Turn cancelled by user.".to_string(),
-                    ));
+                    let _ = agent_tx.send(AgentEvent::Cancelled);
                 }
             }
 
