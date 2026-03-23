@@ -1532,6 +1532,70 @@ version = "0.1.0"
         std::env::remove_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS");
     }
 
+    #[test]
+    fn config_env_returns_allowed_var() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("GENESIS_TEST_VAR", "hello");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('GENESIS_TEST_VAR')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!("hello"));
+
+        std::env::remove_var("GENESIS_TEST_VAR");
+    }
+
+    #[test]
+    fn config_env_blocks_disallowed_var() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("DATABASE_URL", "secret");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('DATABASE_URL')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!(null));
+
+        std::env::remove_var("DATABASE_URL");
+    }
+
+    #[test]
+    fn config_env_returns_nil_for_missing() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::remove_var("GENESIS_NONEXISTENT_VAR_12345");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('GENESIS_NONEXISTENT_VAR_12345')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!(null));
+    }
+
     fn write_package_plugin(
         plugin_dir: &std::path::Path,
         name: &str,
