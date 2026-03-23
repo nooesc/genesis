@@ -260,6 +260,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             terminal_backend: None,
             default_working_dir: None,
             sandbox_manager: None,
+            embedding_service: None,
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
@@ -1107,6 +1108,11 @@ impl ToolRuntime {
     /// Set the sandbox executor for lifecycle-managed backends.
     pub fn set_sandbox_manager(&mut self, executor: Arc<dyn genesis_tools::SandboxExecutor>) {
         self.context.sandbox_manager = Some(executor);
+    }
+
+    /// Set the embedding service for auto-embedding memories at write time.
+    pub fn set_embedding_service(&mut self, service: Arc<dyn genesis_tools::EmbeddingService>) {
+        self.context.embedding_service = Some(service);
     }
 
     /// Create a new ToolRuntime with a different session ID.

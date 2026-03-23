@@ -171,6 +171,10 @@ pub struct ToolContext {
     /// spawning CLI processes directly.
     #[serde(skip)]
     pub sandbox_manager: Option<Arc<dyn SandboxExecutor>>,
+    /// Embedding service for auto-embedding memories at write time.
+    /// When set, memory tools generate embeddings and perform deduplication.
+    #[serde(skip)]
+    pub embedding_service: Option<Arc<dyn EmbeddingService>>,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -189,6 +193,7 @@ impl std::fmt::Debug for ToolContext {
                 "sandbox_manager",
                 &self.sandbox_manager.as_ref().map(|_| ".."),
             )
+            .field("embedding_service", &self.embedding_service.as_ref().map(|_| ".."))
             .field("approval_mode", &self.approval_mode)
             .finish()
     }
@@ -204,6 +209,7 @@ impl PartialEq for ToolContext {
             && self.default_working_dir == other.default_working_dir
             && self.approval_mode == other.approval_mode
         // sandbox_manager intentionally excluded from equality comparison
+        // embedding_service intentionally excluded from equality comparison
     }
 }
 
@@ -240,6 +246,24 @@ pub trait SandboxExecutor: Send + Sync {
         working_dir: Option<&str>,
         timeout_secs: u64,
     ) -> Result<(String, i32), String>;
+}
+
+/// Trait for embedding text into vector representations.
+///
+/// Implemented in genesis-core to bridge the async `EmbeddingProvider` into the
+/// sync `ToolHandler` interface. When present in `ToolContext`, memory tools use
+/// this for auto-embedding and deduplication at write time.
+///
+/// # Panics
+///
+/// Implementations use `tokio::task::block_in_place` + `Handle::block_on` to
+/// bridge sync to async. Callers must be on either a blocking thread
+/// (`spawn_blocking`) or a Tokio multi-threaded worker thread.
+pub trait EmbeddingService: Send + Sync {
+    /// Generate an embedding vector for a single text.
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, String>;
+    /// Return the model name used for embeddings.
+    fn model_name(&self) -> &str;
 }
 
 /// Configurable terminal backend for shell command execution.
@@ -1961,6 +1985,7 @@ pub mod test_utils {
             terminal_backend: None,
             default_working_dir: None,
             sandbox_manager: None,
+            embedding_service: None,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

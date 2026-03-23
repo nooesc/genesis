@@ -96,6 +96,29 @@ fn plugins_enabled(loaded: &LoadedConfig, overrides: PluginRuntimeOverrides) -> 
         .unwrap_or(loaded.config.plugins.enabled && !env_flag("GENESIS_NO_PLUGINS"))
 }
 
+/// Bridges the async `EmbeddingProvider` into the sync `EmbeddingService` trait.
+struct EmbeddingServiceBridge {
+    provider: Arc<crate::embedding::EmbeddingProvider>,
+    model: String,
+}
+
+impl genesis_tools::EmbeddingService for EmbeddingServiceBridge {
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.provider
+                    .embed_one(text)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        })
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
 impl genesis_tools::SandboxExecutor for SandboxExecutorImpl {
     fn execute_in_sandbox(
         &self,
@@ -703,6 +726,19 @@ impl<'a> SessionExecutionService<'a> {
         );
         if let Some(runtime) = &lua_runtime {
             tool_runtime.set_lua_runtime(Arc::clone(runtime));
+        }
+
+        // Wire embedding provider for auto-embed in memory tools
+        if let Some(ref config) = self.loaded.config.embedding {
+            if let Ok(provider) = crate::embedding::EmbeddingProvider::from_config(config) {
+                let model = provider.model().to_owned();
+                let bridge: Arc<dyn genesis_tools::EmbeddingService> =
+                    Arc::new(EmbeddingServiceBridge {
+                        provider: Arc::new(provider),
+                        model,
+                    });
+                tool_runtime.set_embedding_service(bridge);
+            }
         }
 
         // Start filesystem watcher for tool result cache.
