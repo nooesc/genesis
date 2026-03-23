@@ -445,6 +445,83 @@ mod session_store_tests {
         assert!(results.iter().all(|r| r.session_id == "session-search"));
         assert!(results.iter().all(|r| r.content.contains("hello")));
     }
+
+    #[test]
+    fn list_recent_sessions_paginated_returns_total_and_page() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        for i in 0..5 {
+            store
+                .create_session(&format!("s-{i}"), "cli", None)
+                .expect("session should be created");
+        }
+
+        // First page
+        let (page, total) = store
+            .list_recent_sessions_paginated(2, 0)
+            .expect("paginated list should succeed");
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+
+        // Second page
+        let (page2, total2) = store
+            .list_recent_sessions_paginated(2, 2)
+            .expect("second page should succeed");
+        assert_eq!(total2, 5);
+        assert_eq!(page2.len(), 2);
+
+        // Pages should not overlap
+        assert_ne!(page[0].id, page2[0].id);
+
+        // Beyond end
+        let (page3, total3) = store
+            .list_recent_sessions_paginated(2, 10)
+            .expect("beyond-end page should succeed");
+        assert_eq!(total3, 5);
+        assert!(page3.is_empty());
+    }
+
+    #[test]
+    fn search_sessions_paginated_returns_filtered_total() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store
+            .create_session("s-match-1", "cli", None)
+            .expect("session should be created");
+        store
+            .create_session("s-match-2", "cli", None)
+            .expect("session should be created");
+        store
+            .create_session("s-other", "cli", None)
+            .expect("session should be created");
+        store
+            .append_message("s-match-1", "user", Some("pagination test alpha"), None, None, None)
+            .expect("msg");
+        store
+            .append_message("s-match-2", "user", Some("pagination test beta"), None, None, None)
+            .expect("msg");
+        store
+            .append_message("s-other", "user", Some("unrelated topic"), None, None, None)
+            .expect("msg");
+
+        let (results, total) = store
+            .search_sessions_paginated("pagination", 1, 0)
+            .expect("search should succeed");
+        assert_eq!(total, 2);
+        assert_eq!(results.len(), 1);
+
+        let (results2, total2) = store
+            .search_sessions_paginated("pagination", 1, 1)
+            .expect("second page should succeed");
+        assert_eq!(total2, 2);
+        assert_eq!(results2.len(), 1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2230,6 +2307,92 @@ impl SessionStore {
         collect_rows(rows, &self.database_path)
     }
 
+    /// List recent sessions with offset/limit pagination.
+    pub fn list_recent_sessions_paginated(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SessionSummary>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
+                 FROM sessions
+                 ORDER BY updated_at DESC, created_at DESC, id DESC
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], Self::row_to_session_summary)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let items = collect_rows(rows, &self.database_path)?;
+        Ok((items, total as u64))
+    }
+
+    /// Search sessions with offset/limit pagination.
+    pub fn search_sessions_paginated(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<SessionSummary>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let total: i64 = connection
+            .query_row(
+                "SELECT COUNT(DISTINCT s.id)
+                 FROM session_search ss
+                 JOIN sessions s ON s.id = ss.session_id
+                 WHERE session_search MATCH ?1",
+                params![query],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT DISTINCT s.id, s.title, s.platform, s.total_input_tokens, s.total_output_tokens, s.parent_session_id, s.created_at, s.updated_at
+                 FROM session_search ss
+                 JOIN sessions s ON s.id = ss.session_id
+                 WHERE session_search MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![query, limit as i64, offset as i64], Self::row_to_session_summary)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let items = collect_rows(rows, &self.database_path)?;
+        Ok((items, total as u64))
+    }
+
     /// Count total number of sessions.
     pub fn count_sessions(&self) -> Result<u64, StorageError> {
         let connection = open(&self.database_path)?;
@@ -2621,6 +2784,63 @@ impl ScheduleStore {
         collect_rows(rows, &self.database_path)
     }
 
+    /// List schedules with offset/limit pagination.
+    ///
+    /// When `enabled_only` is `true`, only enabled schedules are returned and
+    /// the total count reflects the enabled subset.
+    pub fn list_paginated(
+        &self,
+        enabled_only: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<StoredSchedule>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
+
+        let (count_sql, data_sql) = if enabled_only {
+            (
+                "SELECT COUNT(*) FROM schedules WHERE enabled = 1",
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                 FROM schedules WHERE enabled = 1
+                 ORDER BY created_at ASC
+                 LIMIT ?1 OFFSET ?2",
+            )
+        } else {
+            (
+                "SELECT COUNT(*) FROM schedules",
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                 FROM schedules
+                 ORDER BY created_at ASC
+                 LIMIT ?1 OFFSET ?2",
+            )
+        };
+
+        let total: i64 = connection
+            .query_row(count_sql, [], |row| row.get(0))
+            .map_err(me)?;
+
+        let mut stmt = connection.prepare(data_sql).map_err(me)?;
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], |row| {
+                Ok(StoredSchedule {
+                    id: row.get(0)?,
+                    cron_expression: row.get(1)?,
+                    destination: row.get(2)?,
+                    prompt: row.get(3)?,
+                    enabled: row.get::<_, i64>(4)? != 0,
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(me)?;
+
+        let items = collect_rows(rows, &self.database_path)?;
+        Ok((items, total as u64))
+    }
+
     /// Enable or disable a schedule.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -2887,6 +3107,95 @@ impl UserModelStore {
         collect_rows(rows, &self.database_path)
     }
 
+    /// List user traits with offset/limit pagination.
+    ///
+    /// Supports optional `category` and `min_confidence` filters.  The returned
+    /// total count reflects the filtered subset.
+    pub fn list_paginated(
+        &self,
+        category: Option<&str>,
+        min_confidence: Option<f64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<StoredUserTrait>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
+
+        let (count_sql, data_sql, total): (&str, &str, i64) = if let Some(cat) = category {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM user_model WHERE category = ?1",
+                    params![cat],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            (
+                // not used below, just for symmetry
+                "",
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model WHERE category = ?1 ORDER BY confidence DESC
+                 LIMIT ?2 OFFSET ?3",
+                t,
+            )
+        } else if let Some(threshold) = min_confidence {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM user_model WHERE confidence >= ?1",
+                    params![threshold],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            (
+                "",
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model WHERE confidence >= ?1 ORDER BY confidence DESC
+                 LIMIT ?2 OFFSET ?3",
+                t,
+            )
+        } else {
+            let t: i64 = connection
+                .query_row("SELECT COUNT(*) FROM user_model", [], |row| row.get(0))
+                .map_err(me)?;
+            (
+                "",
+                "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
+                 FROM user_model ORDER BY confidence DESC, evidence_count DESC
+                 LIMIT ?1 OFFSET ?2",
+                t,
+            )
+        };
+
+        // Suppress unused-variable warning for count_sql (kept for readability).
+        let _ = count_sql;
+
+        let mut stmt = connection.prepare(data_sql).map_err(me)?;
+        let items = if let Some(cat) = category {
+            let rows = stmt
+                .query_map(params![cat, limit as i64, offset as i64], Self::row_to_trait)
+                .map_err(me)?;
+            collect_rows(rows, &self.database_path)?
+        } else if let Some(threshold) = min_confidence {
+            let rows = stmt
+                .query_map(
+                    params![threshold, limit as i64, offset as i64],
+                    Self::row_to_trait,
+                )
+                .map_err(me)?;
+            collect_rows(rows, &self.database_path)?
+        } else {
+            let rows = stmt
+                .query_map(params![limit as i64, offset as i64], Self::row_to_trait)
+                .map_err(me)?;
+            collect_rows(rows, &self.database_path)?
+        };
+
+        Ok((items, total as u64))
+    }
+
     /// Delete a user trait.
     pub fn delete(&self, trait_key: &str) -> Result<bool, StorageError> {
         let connection = open(&self.database_path)?;
@@ -3035,6 +3344,43 @@ impl SkillStore {
                 })?;
 
         collect_rows(rows, &self.database_path)
+    }
+
+    /// List all skills with offset/limit pagination.
+    pub fn list_all_paginated(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<StoredSkill>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
+                 FROM skills ORDER BY name ASC
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], Self::row_to_skill)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let items = collect_rows(rows, &self.database_path)?;
+        Ok((items, total as u64))
     }
 
     /// Find skills matching any of the given tags.
@@ -3679,6 +4025,42 @@ impl MemoryStore {
                 source,
             })?;
         collect_rows(rows, &self.database_path)
+    }
+
+    /// List stored memories with offset/limit pagination.
+    pub fn list_paginated(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<StoredMemory>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+
+        let total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at
+                 FROM memories ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![limit as i64, offset as i64], Self::row_to_memory)
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let items = collect_rows(rows, &self.database_path)?;
+        Ok((items, total as u64))
     }
 
     /// Get a single memory by ID. Returns `None` if not found.
@@ -4980,6 +5362,150 @@ impl PairingStore {
                 })?
         };
         Ok(rows)
+    }
+
+    /// List approved users with offset/limit pagination.
+    pub fn list_approved_paginated(
+        &self,
+        platform: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<ApprovedUser>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<ApprovedUser> {
+            Ok(ApprovedUser {
+                platform: row.get(0)?,
+                user_id: row.get(1)?,
+                user_name: row.get(2)?,
+                approved_at: row.get(3)?,
+            })
+        };
+
+        let (total, items) = if let Some(p) = platform {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pairing_approved WHERE platform = ?1",
+                    params![p],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, user_id, user_name, approved_at
+                     FROM pairing_approved WHERE platform = ?1
+                     ORDER BY approved_at DESC
+                     LIMIT ?2 OFFSET ?3",
+                )
+                .map_err(me)?;
+            let rows = stmt
+                .query_map(params![p, limit as i64, offset as i64], map_row)
+                .map_err(me)?;
+            (t, collect_rows(rows, &self.database_path)?)
+        } else {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pairing_approved",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, user_id, user_name, approved_at
+                     FROM pairing_approved
+                     ORDER BY platform, approved_at DESC
+                     LIMIT ?1 OFFSET ?2",
+                )
+                .map_err(me)?;
+            let rows = stmt
+                .query_map(params![limit as i64, offset as i64], map_row)
+                .map_err(me)?;
+            (t, collect_rows(rows, &self.database_path)?)
+        };
+
+        Ok((items, total as u64))
+    }
+
+    /// List pending pairings with offset/limit pagination.
+    pub fn list_pending_paginated(
+        &self,
+        platform: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<PendingPairing>, u64), StorageError> {
+        let connection = open(&self.database_path)?;
+        let db = &self.database_path;
+        let me = |source: rusqlite::Error| StorageError::Sqlite {
+            path: db.clone(),
+            source,
+        };
+
+        // Clean up expired first
+        Self::cleanup_expired_codes(
+            &connection,
+            &self.database_path,
+            &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
+        )?;
+
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<PendingPairing> {
+            Ok(PendingPairing {
+                platform: row.get(0)?,
+                code: row.get(1)?,
+                user_id: row.get(2)?,
+                user_name: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        };
+
+        let (total, items) = if let Some(p) = platform {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pairing_pending WHERE platform = ?1",
+                    params![p],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, code, user_id, user_name, created_at
+                     FROM pairing_pending WHERE platform = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2 OFFSET ?3",
+                )
+                .map_err(me)?;
+            let rows = stmt
+                .query_map(params![p, limit as i64, offset as i64], map_row)
+                .map_err(me)?;
+            (t, collect_rows(rows, &self.database_path)?)
+        } else {
+            let t: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pairing_pending",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(me)?;
+            let mut stmt = connection
+                .prepare(
+                    "SELECT platform, code, user_id, user_name, created_at
+                     FROM pairing_pending
+                     ORDER BY platform, created_at DESC
+                     LIMIT ?1 OFFSET ?2",
+                )
+                .map_err(me)?;
+            let rows = stmt
+                .query_map(params![limit as i64, offset as i64], map_row)
+                .map_err(me)?;
+            (t, collect_rows(rows, &self.database_path)?)
+        };
+
+        Ok((items, total as u64))
     }
 }
 
@@ -8277,6 +8803,34 @@ mod memory_store_tests {
             results.len()
         );
     }
+
+    #[test]
+    fn list_paginated_returns_total_and_windowed_results() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        for i in 0..5 {
+            store
+                .create(Some("s1"), "fact", &format!("memory number {i}"))
+                .unwrap();
+        }
+
+        let (page, total) = store.list_paginated(2, 0).expect("first page");
+        assert_eq!(total, 5);
+        assert_eq!(page.len(), 2);
+
+        let (page2, total2) = store.list_paginated(2, 2).expect("second page");
+        assert_eq!(total2, 5);
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page[0].id, page2[0].id);
+
+        let (page3, _) = store.list_paginated(10, 5).expect("beyond end");
+        assert!(page3.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -9550,6 +10104,29 @@ mod skill_store_tests {
             .expect("find_by_tag should succeed");
         assert!(no_match.is_empty());
     }
+
+    #[test]
+    fn list_all_paginated_returns_total_and_page() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SkillStore::new(&database_path);
+        for i in 0..4 {
+            store
+                .upsert(&format!("skill_{i}"), "desc", "instr", None, &[])
+                .expect("upsert should succeed");
+        }
+
+        let (page, total) = store.list_all_paginated(2, 0).expect("first page");
+        assert_eq!(total, 4);
+        assert_eq!(page.len(), 2);
+
+        let (page2, total2) = store.list_all_paginated(2, 2).expect("second page");
+        assert_eq!(total2, 4);
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page[0].name, page2[0].name);
+    }
 }
 
 #[cfg(test)]
@@ -9754,6 +10331,44 @@ mod user_model_store_tests {
             !deleted_again,
             "delete should return false for nonexistent trait"
         );
+    }
+
+    #[test]
+    fn list_paginated_returns_total_and_page() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        for i in 0..4 {
+            store
+                .observe(&format!("trait_{i}"), "category_a", &format!("value_{i}"), None)
+                .expect("observe should succeed");
+        }
+
+        let (page, total) = store.list_paginated(None, None, 2, 0).expect("first page");
+        assert_eq!(total, 4);
+        assert_eq!(page.len(), 2);
+
+        let (page2, _) = store.list_paginated(None, None, 2, 2).expect("second page");
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page[0].trait_key, page2[0].trait_key);
+    }
+
+    #[test]
+    fn list_paginated_with_category_filter() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = UserModelStore::new(&database_path);
+        store.observe("t1", "pref", "v1", None).unwrap();
+        store.observe("t2", "pref", "v2", None).unwrap();
+        store.observe("t3", "skill", "v3", None).unwrap();
+
+        let (page, total) = store.list_paginated(Some("pref"), None, 50, 0).expect("filter by category");
+        assert_eq!(total, 2);
+        assert_eq!(page.len(), 2);
     }
 }
 
