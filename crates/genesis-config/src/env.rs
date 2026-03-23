@@ -63,6 +63,9 @@ pub const GENESIS_CODEX_BASE_URL: &str = "GENESIS_CODEX_BASE_URL";
 /// Debug mode flag.
 pub const GENESIS_DEBUG: &str = "GENESIS_DEBUG";
 
+/// Per-session budget limit in USD. Set to `0` for unlimited.
+pub const GENESIS_BUDGET_LIMIT: &str = "GENESIS_BUDGET_LIMIT";
+
 // ---------------------------------------------------------------------------
 // LLM provider API keys
 // ---------------------------------------------------------------------------
@@ -347,7 +350,12 @@ pub fn get_os(name: &str) -> Option<std::ffi::OsString> {
 pub fn get_bool(name: &str, default: bool) -> bool {
     std::env::var(name)
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }
 
@@ -360,6 +368,12 @@ pub fn get_u64(name: &str) -> Option<u64> {
 /// Parse a `u32` env var, returning `None` when unset or unparseable.
 #[inline]
 pub fn get_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Parse an `f64` env var, returning `None` when unset or unparseable.
+#[inline]
+pub fn get_f64(name: &str) -> Option<f64> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
 }
 
@@ -586,5 +600,29 @@ mod tests {
         let vars = all_vars();
         // PATH is virtually always set.
         assert!(vars.contains_key("PATH") || vars.is_empty());
+    }
+
+    #[test]
+    fn get_f64_returns_none_for_unset() {
+        assert!(get_f64("__GENESIS_TEST_UNSET_VAR_XYZ__").is_none());
+    }
+
+    #[test]
+    fn get_f64_parses_valid_numbers() {
+        std::env::set_var("__GENESIS_TEST_F64__", "3.14");
+        assert_eq!(get_f64("__GENESIS_TEST_F64__"), Some(3.14));
+        std::env::remove_var("__GENESIS_TEST_F64__");
+    }
+
+    #[test]
+    fn get_f64_returns_none_for_non_numeric() {
+        std::env::set_var("__GENESIS_TEST_F64_BAD__", "abc");
+        assert!(get_f64("__GENESIS_TEST_F64_BAD__").is_none());
+        std::env::remove_var("__GENESIS_TEST_F64_BAD__");
+    }
+
+    #[test]
+    fn genesis_budget_limit_constant_is_correct() {
+        assert_eq!(GENESIS_BUDGET_LIMIT, "GENESIS_BUDGET_LIMIT");
     }
 }

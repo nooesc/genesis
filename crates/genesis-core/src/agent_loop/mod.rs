@@ -683,7 +683,8 @@ impl AgentLoop {
                 let result = AgentResult {
                     response: format!(
                         "I've reached the maximum of {} turns for this request. \
-                         The work so far has been saved. You can continue by sending another message.",
+                         The work so far has been saved. You can continue by sending another message, \
+                         or increase the limit via `runtime.max_turns` in config or the GENESIS_MAX_TURNS env var.",
                         self.config.max_turns
                     ),
                     turns_used: turns_used - 1,
@@ -1561,7 +1562,7 @@ tools = [{tools_list}]
     #[test]
     fn agent_loop_config_has_sensible_defaults() {
         let config = AgentLoopConfig::default();
-        assert_eq!(config.max_turns, 20);
+        assert_eq!(config.max_turns, genesis_config::defaults::agent::DEFAULT_MAX_TURNS);
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
         assert_eq!(config.memory_nudge_interval, Some(15));

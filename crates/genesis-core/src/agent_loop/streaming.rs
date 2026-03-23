@@ -232,7 +232,8 @@ impl AgentLoop {
                 );
                 let msg = format!(
                     "I've reached the maximum of {} turns for this request. \
-                     The work so far has been saved. You can continue by sending another message.",
+                     The work so far has been saved. You can continue by sending another message, \
+                     or increase the limit via `runtime.max_turns` in config or the GENESIS_MAX_TURNS env var.",
                     self.config.max_turns
                 );
                 on_event(StreamEvent::Chunk(&msg));

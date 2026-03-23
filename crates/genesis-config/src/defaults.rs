@@ -95,6 +95,16 @@ pub mod timeouts {
     pub const OPENROUTER_FETCH_TIMEOUT_SECS: u64 = 15;
 }
 
+/// Agent loop defaults.
+pub mod agent {
+    /// Default maximum agent loop iterations per user turn.
+    pub const DEFAULT_MAX_TURNS: usize = 10;
+
+    /// Default per-session budget limit in USD.
+    /// Set to `0.0` or `null` in config to disable.
+    pub const DEFAULT_BUDGET_LIMIT: f64 = 5.0;
+}
+
 /// Size and count limits.
 pub mod limits {
     /// Maximum tool output size in bytes (64 KiB).
