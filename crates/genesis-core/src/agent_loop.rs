@@ -23,7 +23,7 @@ use crate::ToolRuntime;
 use genesis_lua::hooks::{PostHookOutcome, PreHookOutcome};
 use genesis_lua::LuaRuntime;
 
-const DEFAULT_MAX_TURNS: usize = 20;
+const DEFAULT_MAX_TURNS: usize = 10;
 
 /// Events emitted during streaming execution.
 #[derive(Debug, Clone)]
@@ -300,7 +300,7 @@ pub enum AgentError {
     ArgumentParse(String),
     #[error("agent loop exceeded maximum of {0} turns")]
     MaxTurnsExceeded(usize),
-    #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
+    #[error("budget exceeded: ${used:.4} / ${limit:.4} — increase with `genesis config set runtime.budget_limit <amount>` or set GENESIS_BUDGET_LIMIT=0 for unlimited")]
     BudgetExceeded { used: f64, limit: f64 },
     #[error("iteration budget exhausted: {used} / {limit} iterations")]
     IterationsExhausted { used: usize, limit: usize },
@@ -3598,7 +3598,7 @@ tools = [{tools_list}]
     #[test]
     fn agent_loop_config_has_sensible_defaults() {
         let config = AgentLoopConfig::default();
-        assert_eq!(config.max_turns, 20);
+        assert_eq!(config.max_turns, 10);
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
         assert_eq!(config.memory_nudge_interval, Some(15));

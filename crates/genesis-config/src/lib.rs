@@ -934,6 +934,21 @@ struct FileStorageConfig {
     database_path: Option<PathBuf>,
 }
 
+/// Custom deserializer that distinguishes between absent, null, and a value
+/// for an `Option<Option<f64>>` field.
+///
+/// - Absent (handled by `#[serde(default)]`): outer `None`.
+/// - Explicit `null`: `Some(None)`.
+/// - Explicit number: `Some(Some(number))`.
+fn deserialize_nullable_f64<'de, D>(deserializer: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // If the deserializer calls us, the field was present in the input.
+    let value: Option<f64> = Option::deserialize(deserializer)?;
+    Ok(Some(value))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct FileRuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -944,8 +959,16 @@ struct FileRuntimeConfig {
     max_turns: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_context_messages: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    budget_limit: Option<f64>,
+    /// Budget limit in USD. Three states:
+    /// - Absent from file (`None`): use the default ($5.00).
+    /// - Explicitly `null` (`Some(None)`): unlimited.
+    /// - Explicit value (`Some(Some(5.0))`): use that value.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_nullable_f64"
+    )]
+    budget_limit: Option<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal: Option<TerminalConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1045,9 +1068,9 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
         runtime: RuntimeConfig {
             max_concurrency: 4,
             allow_destructive_tools: false,
-            max_turns: 20,
+            max_turns: defaults::DEFAULT_MAX_TURNS,
             max_context_messages: None,
-            budget_limit: None,
+            budget_limit: Some(defaults::DEFAULT_BUDGET_LIMIT_USD),
             terminal: None,
             thinking_budget: None,
             max_context_tokens: None,
@@ -1211,10 +1234,11 @@ pub fn load_from_map(
         max_turns: parse_env(
             env,
             "GENESIS_MAX_TURNS",
-            rt.and_then(|r| r.max_turns).unwrap_or(20),
+            rt.and_then(|r| r.max_turns)
+                .unwrap_or(defaults::DEFAULT_MAX_TURNS),
         )?,
         max_context_messages: rt.and_then(|r| r.max_context_messages),
-        budget_limit: rt.and_then(|r| r.budget_limit),
+        budget_limit: resolve_budget_limit(env, rt.and_then(|r| r.budget_limit)),
         terminal: rt.and_then(|r| r.terminal.clone()),
         thinking_budget: rt.and_then(|r| r.thinking_budget),
         max_context_tokens: rt.and_then(|r| r.max_context_tokens),
@@ -1340,6 +1364,38 @@ where
     }
 }
 
+/// Resolve the effective budget limit from the config file and environment.
+///
+/// Priority: env var `GENESIS_BUDGET_LIMIT` > config file > default ($5.00).
+///
+/// - `GENESIS_BUDGET_LIMIT=0` or config `budget_limit: 0` → unlimited (`None`).
+/// - `GENESIS_BUDGET_LIMIT=10` → `Some(10.0)`.
+/// - Config `budget_limit: null` → unlimited (`None`).
+/// - Config absent + env absent → `Some(DEFAULT_BUDGET_LIMIT_USD)`.
+fn resolve_budget_limit(
+    env: &BTreeMap<String, String>,
+    file_value: Option<Option<f64>>,
+) -> Option<f64> {
+    // Environment variable takes highest priority.
+    if let Some(raw) = env.get("GENESIS_BUDGET_LIMIT") {
+        return match raw.parse::<f64>() {
+            Ok(v) if v <= 0.0 => None,
+            Ok(v) => Some(v),
+            Err(_) => Some(defaults::DEFAULT_BUDGET_LIMIT_USD),
+        };
+    }
+
+    match file_value {
+        // Explicitly `null` in config → unlimited.
+        Some(None) => None,
+        // Explicit value; 0 means unlimited.
+        Some(Some(v)) if v <= 0.0 => None,
+        Some(Some(v)) => Some(v),
+        // Not present in config file → apply default.
+        None => Some(defaults::DEFAULT_BUDGET_LIMIT_USD),
+    }
+}
+
 /// Update provider fields in the config file.  Creates the file (and parent
 /// directories) when it does not exist yet.  Only the supplied `Some` fields
 /// are written; `None` fields are left untouched.
@@ -1393,8 +1449,8 @@ macro_rules! parse_and_set {
 ///   provider.api_key_env, provider.tool_call_parser,
 ///   runtime.max_turns, runtime.max_concurrency,
 ///   runtime.allow_destructive_tools, runtime.max_context_messages,
-///   runtime.thinking_budget, runtime.max_context_tokens, runtime.max_iterations,
-///   runtime.reasoning_effort,
+///   runtime.budget_limit, runtime.thinking_budget, runtime.max_context_tokens,
+///   runtime.max_iterations, runtime.reasoning_effort,
 ///   gateway.idle_timeout_minutes, gateway.daily_reset_hour, gateway.rate_limit_rpm,
 ///   tui.theme
 pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
@@ -1470,6 +1526,21 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(FileRuntimeConfig::default)
                 .max_context_messages
         ),
+        "runtime.budget_limit" => {
+            let parsed: f64 = value.parse().map_err(|_| ConfigError::InvalidEnvValue {
+                name: "runtime.budget_limit",
+                value: value.to_owned(),
+            })?;
+            let rt = file_config
+                .runtime
+                .get_or_insert_with(FileRuntimeConfig::default);
+            if parsed <= 0.0 {
+                // 0 (or negative) means unlimited.
+                rt.budget_limit = Some(None);
+            } else {
+                rt.budget_limit = Some(Some(parsed));
+            }
+        }
         "runtime.thinking_budget" => parse_and_set!(
             value,
             "runtime.thinking_budget",
@@ -1572,7 +1643,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      provider.base_url, provider.api_key_env, provider.tool_call_parser, \
                      runtime.max_turns, runtime.max_concurrency, \
                      runtime.allow_destructive_tools, runtime.max_context_messages, \
-                     runtime.thinking_budget, runtime.max_context_tokens, \
+                     runtime.budget_limit, runtime.thinking_budget, runtime.max_context_tokens, \
                      runtime.max_iterations, runtime.reasoning_effort, \
                      gateway.idle_timeout_minutes, gateway.daily_reset_hour, \
                      gateway.rate_limit_rpm, gateway.stream_timeout_secs, tui.theme"
@@ -2701,5 +2772,156 @@ runtime:
     fn cache_config_absent_when_not_configured() {
         let loaded = load_from_map(None, &BTreeMap::new()).expect("config should load");
         assert!(loaded.config.runtime.cache.is_none());
+    }
+
+    // --- Budget limit and max_turns default tests ---
+
+    #[test]
+    fn default_budget_limit_is_five_dollars() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(5.0));
+    }
+
+    #[test]
+    fn default_max_turns_is_ten() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.max_turns, 10);
+    }
+
+    #[test]
+    fn budget_limit_env_var_overrides_default() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let env = BTreeMap::from([("GENESIS_BUDGET_LIMIT".to_owned(), "20".to_owned())]);
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(20.0));
+    }
+
+    #[test]
+    fn budget_limit_env_var_zero_means_unlimited() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let env = BTreeMap::from([("GENESIS_BUDGET_LIMIT".to_owned(), "0".to_owned())]);
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
+        assert!(loaded.config.runtime.budget_limit.is_none());
+    }
+
+    #[test]
+    fn budget_limit_null_in_config_means_unlimited() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\nruntime:\n  budget_limit: null\n",
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.runtime.budget_limit.is_none());
+    }
+
+    #[test]
+    fn budget_limit_explicit_value_in_config() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\nruntime:\n  budget_limit: 10.0\n",
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(10.0));
+    }
+
+    #[test]
+    fn budget_limit_zero_in_config_means_unlimited() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\nruntime:\n  budget_limit: 0\n",
+        )
+        .expect("config file should be written");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
+        assert!(loaded.config.runtime.budget_limit.is_none());
+    }
+
+    #[test]
+    fn budget_limit_env_var_overrides_config_file() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            "provider:\n  backend: openai\n  model: gpt-4.1-mini\nruntime:\n  budget_limit: 10.0\n",
+        )
+        .expect("config file should be written");
+
+        let env = BTreeMap::from([("GENESIS_BUDGET_LIMIT".to_owned(), "25".to_owned())]);
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(25.0));
+    }
+
+    #[test]
+    fn set_value_in_file_sets_budget_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_value_in_file(&config_path, "runtime.budget_limit", "15.0")
+            .expect("set should succeed");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
+        assert_eq!(loaded.config.runtime.budget_limit, Some(15.0));
+    }
+
+    #[test]
+    fn set_value_in_file_sets_budget_limit_zero_for_unlimited() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        super::set_value_in_file(&config_path, "runtime.budget_limit", "0")
+            .expect("set should succeed");
+
+        let loaded =
+            load_from_map(Some(&config_path), &BTreeMap::new()).expect("reload should work");
+        assert!(loaded.config.runtime.budget_limit.is_none());
+    }
+
+    #[test]
+    fn set_value_in_file_rejects_invalid_budget_limit() {
+        let dir = tempdir().expect("tempdir should exist");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(&config_path, "").expect("initial write");
+
+        let result = super::set_value_in_file(&config_path, "runtime.budget_limit", "not_a_number");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn example_config_has_default_budget_and_turns() {
+        let config = super::example_config(None).expect("example config should load");
+        assert_eq!(config.runtime.budget_limit, Some(5.0));
+        assert_eq!(config.runtime.max_turns, 10);
     }
 }

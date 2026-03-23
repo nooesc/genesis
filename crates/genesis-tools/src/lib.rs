@@ -555,7 +555,7 @@ impl ToolRegistry {
         if matches!(policy, ApprovalPolicy::Destructive) && !context.allow_destructive_tools {
             return Err(ToolError::ApprovalDenied {
                 tool: tool_name.to_owned(),
-                reason: "destructive tools are disabled".to_owned(),
+                reason: "destructive tools are disabled — enable with `genesis config set runtime.allow_destructive_tools true` or GENESIS_ALLOW_DESTRUCTIVE_TOOLS=true".to_owned(),
             });
         }
 
@@ -2074,7 +2074,7 @@ mod tests {
             error,
             ToolError::ApprovalDenied {
                 tool: "dangerous_tool".to_owned(),
-                reason: "destructive tools are disabled".to_owned(),
+                reason: "destructive tools are disabled — enable with `genesis config set runtime.allow_destructive_tools true` or GENESIS_ALLOW_DESTRUCTIVE_TOOLS=true".to_owned(),
             }
         );
     }
@@ -2625,7 +2625,7 @@ mod tests {
                 err,
                 ToolError::ApprovalDenied {
                     tool: "rm_tool".to_owned(),
-                    reason: "destructive tools are disabled".to_owned(),
+                    reason: "destructive tools are disabled — enable with `genesis config set runtime.allow_destructive_tools true` or GENESIS_ALLOW_DESTRUCTIVE_TOOLS=true".to_owned(),
                 },
                 "destructive should be blocked in {:?} mode",
                 mode,
