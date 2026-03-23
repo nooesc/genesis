@@ -229,6 +229,9 @@ pub struct AgentLoopConfig {
     /// Compiled tool policy for permission scoping. When set, tool calls
     /// are checked against allow/deny rules before execution.
     pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
+    /// Consecutive same-tool failures before injecting a stuck-loop nudge.
+    /// Default: 5 (from `defaults::retry::STUCK_LOOP_THRESHOLD`).
+    pub stuck_loop_threshold: usize,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -270,6 +273,7 @@ impl Default for AgentLoopConfig {
             core_tools: None,
             routing: None,
             tool_policy: None,
+            stuck_loop_threshold: STUCK_LOOP_THRESHOLD,
         }
     }
 }
@@ -392,9 +396,12 @@ pub struct AgentLoop {
     /// context compression.
     last_prompt_tokens: u32,
     /// Tracks consecutive failures per tool name. When a tool fails
-    /// `STUCK_LOOP_THRESHOLD` times in a row, a system nudge tells the LLM
+    /// `stuck_loop_threshold` times in a row, a system nudge tells the LLM
     /// to try a different approach.
     tool_failure_counts: HashMap<String, usize>,
+    /// Tools that have already been nudged in this user turn. If a nudged
+    /// tool fails again, the nudge message escalates.
+    nudged_tools: HashSet<String>,
     /// Total number of LLM iterations consumed across all user turns.
     /// Checked against `config.max_iterations` at each loop boundary.
     iterations_used: usize,
@@ -477,6 +484,7 @@ impl AgentLoop {
             trajectory,
             last_prompt_tokens: 0,
             tool_failure_counts: HashMap::new(),
+            nudged_tools: HashSet::new(),
             iterations_used: 0,
             cancelled: Arc::new(AtomicBool::new(false)),
             response_cache: None,
@@ -968,6 +976,12 @@ impl AgentLoop {
         // Fire turn-start hook
         self.hooks.on_turn_start(&hook_session, &user_message);
 
+        // Reset stuck-loop state for the new user turn so that transient
+        // failures from a previous turn don't carry over and cause false
+        // positive nudges.
+        self.tool_failure_counts.clear();
+        self.nudged_tools.clear();
+
         let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
@@ -1098,15 +1112,15 @@ impl AgentLoop {
             };
 
             let cached = cache_key.as_ref().and_then(|key| {
-                self.response_cache.as_ref().and_then(|cache| {
-                    match cache.get(key) {
+                self.response_cache
+                    .as_ref()
+                    .and_then(|cache| match cache.get(key) {
                         Ok(hit) => hit,
                         Err(e) => {
                             debug!(error = %e, "response cache lookup failed");
                             None
                         }
-                    }
-                })
+                    })
             });
 
             self.hooks
@@ -1188,17 +1202,16 @@ impl AgentLoop {
                 {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
-                    let tc_json = choice
-                        .message
-                        .tool_calls
-                        .as_ref()
-                        .and_then(|tc| match serde_json::to_string(tc) {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                debug!(error = %e, "failed to serialize tool calls for cache");
-                                None
-                            }
-                        });
+                    let tc_json =
+                        choice.message.tool_calls.as_ref().and_then(
+                            |tc| match serde_json::to_string(tc) {
+                                Ok(s) => Some(s),
+                                Err(e) => {
+                                    debug!(error = %e, "failed to serialize tool calls for cache");
+                                    None
+                                }
+                            },
+                        );
                     let (in_tok, out_tok) = response
                         .usage
                         .as_ref()
@@ -1572,6 +1585,10 @@ impl AgentLoop {
         self.hooks.on_turn_start(&hook_session, &user_message);
         on_event(StreamEvent::TurnStarted);
 
+        // Reset stuck-loop state for the new user turn (streaming path).
+        self.tool_failure_counts.clear();
+        self.nudged_tools.clear();
+
         let all_tool_defs: Vec<ChatTool> = self
             .tools
             .definitions_async()
@@ -1782,10 +1799,8 @@ impl AgentLoop {
                         );
                         // Only response.completed emits provider_metadata today; last write wins is intentional.
                         msg.provider_metadata = streamed_provider_metadata;
-                        if let Some(message) = self.push_message_with_lua_hooks(
-                            &hook_session,
-                            msg,
-                        ) {
+                        if let Some(message) = self.push_message_with_lua_hooks(&hook_session, msg)
+                        {
                             if let Some(text) = message.content_text() {
                                 if !text.is_empty() {
                                     self.trajectory.record_assistant_message(text);
@@ -1944,10 +1959,7 @@ impl AgentLoop {
                     let mut text_msg = ChatMessage::assistant(&response_text);
                     text_msg.provider_metadata = streamed_provider_metadata;
                     let response_text = self
-                        .push_message_with_lua_hooks(
-                            &hook_session,
-                            text_msg,
-                        )
+                        .push_message_with_lua_hooks(&hook_session, text_msg)
                         .and_then(|message| message.content_text().map(str::to_owned))
                         .unwrap_or_default();
                     if !response_text.is_empty() {
@@ -2260,12 +2272,15 @@ impl AgentLoop {
     }
 
     /// Check if any tool has failed too many times in a row and inject a
-    /// system nudge telling the LLM to try a different approach.
+    /// system nudge telling the LLM to try a different approach. If the tool
+    /// was already nudged in this turn and is failing again, escalate the
+    /// message to be more forceful.
     fn maybe_inject_stuck_nudge(&mut self) {
+        let threshold = self.config.stuck_loop_threshold;
         let stuck_tools: Vec<String> = self
             .tool_failure_counts
             .iter()
-            .filter(|(_, count)| **count >= STUCK_LOOP_THRESHOLD)
+            .filter(|(_, count)| **count >= threshold)
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -2274,6 +2289,9 @@ impl AgentLoop {
         }
 
         let hook_session = self.session_id_str().to_owned();
+        let mut escalated: Vec<String> = Vec::new();
+        let mut first_time: Vec<String> = Vec::new();
+
         for tool in &stuck_tools {
             let count = self.tool_failure_counts[tool];
             warn!(
@@ -2284,15 +2302,31 @@ impl AgentLoop {
             self.hooks.on_stuck_loop(&hook_session, tool, count);
             // Reset the counter so we don't spam nudges
             self.tool_failure_counts.remove(tool);
+
+            if self.nudged_tools.contains(tool) {
+                escalated.push(tool.clone());
+            } else {
+                self.nudged_tools.insert(tool.clone());
+                first_time.push(tool.clone());
+            }
         }
 
-        let tools_list = stuck_tools.join(", ");
-        let nudge = format!(
-            "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
-             Stop retrying the same approach. Consider: (1) using a different tool, \
-             (2) modifying the arguments, (3) breaking the task into smaller steps, or \
-             (4) asking the user for clarification."
-        );
+        let nudge = if !escalated.is_empty() {
+            let escalated_list = escalated.join(", ");
+            format!(
+                "[Stuck loop escalation] The tool(s) {escalated_list} have CONTINUED to fail \
+                 after a previous warning. You MUST stop using these tools entirely for this task. \
+                 Take a completely different approach or ask the user for help."
+            )
+        } else {
+            let tools_list = first_time.join(", ");
+            format!(
+                "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
+                 Stop retrying the same approach. Consider: (1) using a different tool, \
+                 (2) modifying the arguments, (3) breaking the task into smaller steps, or \
+                 (4) asking the user for clarification."
+            )
+        };
         let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
     }
 
@@ -3676,10 +3710,12 @@ tools = [{tools_list}]
     #[test]
     fn stuck_loop_nudge_fires_after_threshold() {
         let mut agent = test_agent();
+        // Default threshold is 5
+        assert_eq!(agent.config.stuck_loop_threshold, 5);
         let initial_len = agent.messages().len();
 
-        // Simulate 2 failures — not enough to trigger
-        agent.tool_failure_counts.insert("web_search".to_owned(), 2);
+        // Simulate 4 failures — not enough to trigger (threshold is 5)
+        agent.tool_failure_counts.insert("web_search".to_owned(), 4);
         agent.maybe_inject_stuck_nudge();
         assert_eq!(
             agent.messages().len(),
@@ -3687,8 +3723,8 @@ tools = [{tools_list}]
             "no nudge below threshold"
         );
 
-        // Simulate 3 failures — should trigger
-        agent.tool_failure_counts.insert("web_search".to_owned(), 3);
+        // Simulate 5 failures — should trigger
+        agent.tool_failure_counts.insert("web_search".to_owned(), 5);
         agent.maybe_inject_stuck_nudge();
         assert_eq!(
             agent.messages().len(),
@@ -3705,6 +3741,31 @@ tools = [{tools_list}]
     }
 
     #[test]
+    fn stuck_loop_threshold_configurable() {
+        let mut agent = test_agent();
+        agent.config.stuck_loop_threshold = 3;
+        let initial_len = agent.messages().len();
+
+        // 2 failures — below custom threshold of 3
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 2);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len,
+            "no nudge at 2 with threshold 3"
+        );
+
+        // 3 failures — exactly at custom threshold
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 3);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 1,
+            "nudge at custom threshold 3"
+        );
+    }
+
+    #[test]
     fn tool_success_resets_failure_count() {
         let mut agent = test_agent();
 
@@ -3715,6 +3776,68 @@ tools = [{tools_list}]
         // A success should clear the counter
         agent.tool_failure_counts.remove("shell_exec");
         assert!(!agent.tool_failure_counts.contains_key("shell_exec"));
+    }
+
+    #[test]
+    fn post_nudge_escalation_on_repeated_failure() {
+        let mut agent = test_agent();
+        agent.config.stuck_loop_threshold = 3;
+        let initial_len = agent.messages().len();
+
+        // First round: 3 failures triggers normal nudge
+        agent.tool_failure_counts.insert("web_search".to_owned(), 3);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 1,
+            "first nudge injected"
+        );
+        let msg = agent.messages().last().unwrap().content_text().unwrap();
+        assert!(
+            msg.contains("Stuck loop detected"),
+            "first nudge is a detection message"
+        );
+        assert!(
+            !msg.contains("escalation"),
+            "first nudge should not escalate"
+        );
+
+        // web_search is now in nudged_tools
+        assert!(agent.nudged_tools.contains("web_search"));
+
+        // Second round: tool fails again after nudge — should escalate
+        agent.tool_failure_counts.insert("web_search".to_owned(), 3);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 2,
+            "escalation nudge injected"
+        );
+        let msg = agent.messages().last().unwrap().content_text().unwrap();
+        assert!(
+            msg.contains("escalation"),
+            "second nudge should be an escalation"
+        );
+        assert!(msg.contains("MUST stop"), "escalation should be forceful");
+    }
+
+    #[test]
+    fn nudge_state_cleared_on_new_turn_setup() {
+        let mut agent = test_agent();
+
+        // Simulate some accumulated state
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 2);
+        agent.nudged_tools.insert("web_search".to_owned());
+
+        // Simulate what happens at turn start: clear both maps
+        agent.tool_failure_counts.clear();
+        agent.nudged_tools.clear();
+
+        assert!(
+            agent.tool_failure_counts.is_empty(),
+            "failure counts cleared"
+        );
+        assert!(agent.nudged_tools.is_empty(), "nudged tools cleared");
     }
 
     #[test]

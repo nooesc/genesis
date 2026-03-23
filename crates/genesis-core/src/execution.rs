@@ -876,6 +876,7 @@ impl<'a> SessionExecutionService<'a> {
                 core_tools: self.loaded.config.runtime.core_tools.clone(),
                 routing: self.loaded.config.routing.clone(),
                 tool_policy,
+                stuck_loop_threshold: self.loaded.config.runtime.stuck_loop_threshold,
                 ..AgentLoopConfig::default()
             },
             hook_runner.clone(),
@@ -2270,6 +2271,7 @@ tools = [{tools_list}]
                     batch: None,
                     tool_policy_path: None,
                     approval_mode: genesis_config::ApprovalMode::default(),
+                    stuck_loop_threshold: genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
