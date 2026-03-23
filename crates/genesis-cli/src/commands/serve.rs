@@ -67,6 +67,19 @@ pub(crate) async fn run_serve(
 
     let api_key = std::env::var("GENESIS_API_KEY").ok();
     let api_key_required = resolve_api_key_required(&loaded.config.profile)?;
+
+    // Warn before binding if exposing the server without authentication
+    let is_loopback = host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !is_loopback && !api_key_required && api_key.is_none() {
+        eprintln!(
+            "WARNING: Serving on {host} without API key authentication. \
+             Set GENESIS_API_KEY to secure network deployments."
+        );
+    }
+
     let trusted_proxies = parse_trusted_proxies()?;
     // Env var overrides config file setting
     let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
