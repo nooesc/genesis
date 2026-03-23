@@ -86,6 +86,11 @@ impl HelpOverlay {
             ("Ctrl+T", "Toggle transcript overlay"),
             ("Tab", "Toggle Plan/Act mode"),
             ("@", "File path completion"),
+            ("PageUp", "Scroll chat up (half page)"),
+            ("PageDown", "Scroll chat down (half page)"),
+            ("Shift+Up", "Scroll chat up (3 lines)"),
+            ("Shift+Down", "Scroll chat down (3 lines)"),
+            ("Ctrl+End", "Jump to bottom of chat"),
             ("Up/Down", "Navigate input history / lines"),
             ("Home/End", "Move cursor to start/end of line"),
             ("Ctrl+U", "Delete from cursor to start of line"),
@@ -355,7 +360,7 @@ mod tests {
     #[test]
     fn snapshot_help_overlay() {
         let overlay = HelpOverlay::new();
-        let area = Rect::new(0, 0, 60, 30);
+        let area = Rect::new(0, 0, 60, 55);
         let mut buf = Buffer::empty(area);
         overlay.render(area, &mut buf);
         insta::assert_snapshot!(buffer_to_string(&buf));
