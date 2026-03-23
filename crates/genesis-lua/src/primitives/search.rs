@@ -308,7 +308,12 @@ fn walk_and_match_inner(
             results.push(path.clone());
         }
 
-        if path.is_dir() {
+        // Use symlink_metadata to avoid following symlinks (which could cause
+        // infinite loops or escape the sandbox).
+        let is_real_dir = std::fs::symlink_metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
+        if is_real_dir {
             // Only recurse if the pattern could match deeper paths (contains `/` or `**`).
             walk_and_match_inner(base, &path, pattern, results)?;
         }

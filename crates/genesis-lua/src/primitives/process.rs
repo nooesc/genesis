@@ -13,7 +13,7 @@ use mlua::{Lua, Table, Value};
 ///
 /// The optional `opts` table supports:
 /// - `cwd` (string) — working directory override
-/// - `timeout` (number) — timeout in seconds (default 120, currently a TODO)
+/// - `timeout` (number) — not yet supported; specifying a timeout returns an error
 /// - `env` (table) — extra environment variables merged into the current env
 pub fn make_process_bridge(
     lua: &Lua,
@@ -57,14 +57,17 @@ pub fn make_process_bridge(
                 }
             }
 
-            // TODO: implement proper timeout support. For now, the `timeout`
-            // option in `opts` is accepted but not enforced. A future
-            // implementation could spawn the child and use
-            // `wait_timeout` or a background thread.
-            let _timeout_secs: u64 = opts
+            // Timeout is not yet implemented — return an explicit error so
+            // callers don't silently assume their timeout is enforced.
+            if let Some(timeout) = opts
                 .as_ref()
                 .and_then(|o| o.get::<Option<u64>>("timeout").ok().flatten())
-                .unwrap_or(120);
+            {
+                return Err(mlua::Error::external(format!(
+                    "process.exec timeout ({timeout}s) is not yet implemented — \
+                     remove the timeout option or use shell_exec which has built-in timeout support"
+                )));
+            }
 
             let output = cmd
                 .output()

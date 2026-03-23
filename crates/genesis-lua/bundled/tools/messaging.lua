@@ -185,6 +185,7 @@ local function send_homeassistant(target, message)
             title = "Genesis Agent",
             message = message,
         }),
+        allow_private = true,  -- HA is typically a LAN service (e.g. 192.168.x.x)
     })
     if resp.status < 200 or resp.status >= 300 then
         error("Home Assistant error (HTTP " .. resp.status .. "): " .. resp.body)

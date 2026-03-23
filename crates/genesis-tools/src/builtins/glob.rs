@@ -62,6 +62,20 @@ impl ToolHandler for GlobSearchTool {
             });
         }
 
+        // If the glob pattern is an absolute path, validate its directory
+        // component through the path validator to prevent sandbox escapes.
+        if pattern.starts_with('/') {
+            let pattern_dir = Path::new(pattern).parent().unwrap_or(Path::new("/"));
+            if let Some(ref validator) = context.path_validator {
+                validator
+                    .validate(&pattern_dir.to_string_lossy())
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: format!("absolute glob pattern blocked: {e}"),
+                    })?;
+            }
+        }
+
         // Build the full glob pattern. If the pattern already starts with the
         // base path (or is absolute), use it as-is. Otherwise prepend the base.
         let full_pattern = if pattern.starts_with(base_path)

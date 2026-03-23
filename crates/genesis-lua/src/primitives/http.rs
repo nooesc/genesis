@@ -29,9 +29,11 @@ fn fallback_client() -> &'static reqwest::blocking::Client {
 /// - `body` (string) — request body
 /// - `timeout` (number) — per-request timeout in seconds (omit to use the
 ///   client's default)
+/// - `allow_private` (boolean) — skip SSRF validation for private/LAN IPs
+///   (default: false). Use only for known-internal services like Home Assistant.
 ///
 /// URLs are validated before sending to block SSRF (private IPs, localhost,
-/// cloud metadata endpoints, non-HTTP schemes).
+/// cloud metadata endpoints, non-HTTP schemes) unless `allow_private` is set.
 ///
 /// When a shared `reqwest::blocking::Client` is provided it is reused across
 /// calls; otherwise a lazily-initialized cached fallback client is used.
@@ -58,6 +60,11 @@ pub fn make_http_bridge(
                 .as_ref()
                 .and_then(|o| o.get::<Option<String>>("body").ok().flatten());
 
+            let allow_private: bool = opts
+                .as_ref()
+                .and_then(|o| o.get::<Option<bool>>("allow_private").ok().flatten())
+                .unwrap_or(false);
+
             // Collect headers from opts.headers table.
             let mut header_pairs: Vec<(String, String)> = Vec::new();
             if let Some(ref opts) = opts {
@@ -69,9 +76,12 @@ pub fn make_http_bridge(
                 }
             }
 
-            // Validate the URL to prevent SSRF.
-            genesis_tools::url_safety::validate_url(&url)
-                .map_err(|e| mlua::Error::external(format!("http: blocked URL: {e}")))?;
+            // Validate the URL to prevent SSRF (skip when allow_private is set
+            // for known-internal services like Home Assistant on a LAN).
+            if !allow_private {
+                genesis_tools::url_safety::validate_url(&url)
+                    .map_err(|e| mlua::Error::external(format!("http: blocked URL: {e}")))?;
+            }
 
             // Use the shared client or the cached fallback.
             let effective_client: &reqwest::blocking::Client = match client {
@@ -274,6 +284,29 @@ mod tests {
             .eval();
         // Timeout/connection error, but no crash from body/header construction.
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn allow_private_skips_ssrf_validation() {
+        let lua = test_lua_with_http();
+        // With allow_private = true, the request should NOT be blocked by URL
+        // validation. It will fail with a network error instead (connection
+        // refused) which proves SSRF validation was skipped.
+        let result: mlua::Result<mlua::Value> = lua
+            .load(
+                r#"return genesis.http.request('http://192.168.1.1:8123/api/services/notify/me', {
+                    allow_private = true,
+                    timeout = 1
+                })"#,
+            )
+            .eval();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should be a network error, NOT an SSRF "blocked URL" error.
+        assert!(
+            err.contains("http: request failed"),
+            "error should be a network error (not blocked URL), got: {err}"
+        );
     }
 
     #[test]

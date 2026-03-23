@@ -87,12 +87,17 @@ pub fn make_fs_bridge(lua: &Lua, validator: Option<Arc<PathValidator>>) -> mlua:
             for entry in entries {
                 let entry =
                     entry.map_err(|e| mlua::Error::external(format!("fs.list entry: {e}")))?;
+                // Use file_type() (lstat) for is_dir to avoid following symlinks,
+                // but metadata() (stat) for size so we report the target's size.
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| mlua::Error::external(format!("fs.list file_type: {e}")))?;
                 let meta = entry
                     .metadata()
                     .map_err(|e| mlua::Error::external(format!("fs.list metadata: {e}")))?;
                 let row = lua.create_table()?;
                 row.set("name", entry.file_name().to_string_lossy().into_owned())?;
-                row.set("is_dir", meta.is_dir())?;
+                row.set("is_dir", file_type.is_dir())?;
                 row.set("size", meta.len())?;
                 result.set(index, row)?;
                 index += 1;
