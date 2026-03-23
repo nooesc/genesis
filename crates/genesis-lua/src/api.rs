@@ -28,6 +28,7 @@ pub struct GenesisApi {
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
     pub path_validator: Option<Arc<PathValidator>>,
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +177,9 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("fs", |lua, this| {
             crate::primitives::fs::make_fs_bridge(lua, this.path_validator.clone())
         });
+        fields.add_field_method_get("process", |lua, this| {
+            crate::primitives::process::make_process_bridge(lua, this.working_dir.clone())
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -280,6 +284,7 @@ pub(crate) fn install_genesis_api(
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
+    working_dir: Option<String>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -299,6 +304,7 @@ pub(crate) fn install_genesis_api(
         active_plugin,
         plugin_context,
         path_validator,
+        working_dir,
     })?)
 }
 
