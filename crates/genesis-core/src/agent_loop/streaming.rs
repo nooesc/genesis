@@ -398,8 +398,7 @@ impl AgentLoop {
                         );
                         // Only response.completed emits provider_metadata today; last write wins is intentional.
                         msg.provider_metadata = streamed_provider_metadata;
-                        if let Some(message) =
-                            self.push_message_with_lua_hooks(&hook_session, msg)
+                        if let Some(message) = self.push_message_with_lua_hooks(&hook_session, msg)
                         {
                             if let Some(text) = message.content_text() {
                                 if !text.is_empty() {
@@ -585,24 +584,23 @@ impl AgentLoop {
                         turn = turns_used,
                         "streaming provider request failed; falling back to blocking completion"
                     );
-                    let (mut response, fb_model) =
-                        match self.complete_with_failover(request).await {
-                            Ok(result) => result,
-                            Err(err) => {
-                                return Err(self.report_error(
-                                    &hook_session,
-                                    "llm_request_fallback",
-                                    err.into(),
-                                ));
-                            }
-                        };
+                    let (mut response, fb_model) = match self.complete_with_failover(request).await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            return Err(self.report_error(
+                                &hook_session,
+                                "llm_request_fallback",
+                                err.into(),
+                            ));
+                        }
+                    };
 
                     // Apply tool call parser for models that embed tool calls in text
                     self.apply_tool_call_parser(&mut response, &fb_model);
 
                     if let Some(usage) = &response.usage {
-                        total_input_tokens =
-                            total_input_tokens.saturating_add(usage.prompt_tokens);
+                        total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
                         total_output_tokens =
                             total_output_tokens.saturating_add(usage.completion_tokens);
                         self.last_prompt_tokens = usage.prompt_tokens;
@@ -696,15 +694,12 @@ impl AgentLoop {
 
                             let mut clarification = None;
                             let mut executed_results = executed_results.into_iter();
-                            for (tc, veto_reason) in
-                                tool_calls.iter().zip(veto_reasons.into_iter())
+                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter())
                             {
                                 let lua_vetoed = veto_reason.is_some();
                                 let (mut result, requires_input) = match veto_reason {
                                     Some(reason) => (
-                                        format!(
-                                            "Error: tool call blocked by Lua hook: {reason}"
-                                        ),
+                                        format!("Error: tool call blocked by Lua hook: {reason}"),
                                         false,
                                     ),
                                     None => executed_results.next().expect(

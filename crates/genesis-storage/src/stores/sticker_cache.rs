@@ -3,8 +3,8 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
+use crate::Database;
 
 /// Cached sticker description from vision analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +113,8 @@ impl StickerCacheStore {
 
 #[cfg(test)]
 mod sticker_cache_tests {
-    use crate::bootstrap;
     use super::StickerCacheStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -199,4 +199,3 @@ mod sticker_cache_tests {
         assert_eq!(store.count().unwrap(), 2);
     }
 }
-

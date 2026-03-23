@@ -73,9 +73,11 @@ fn send_slack(
     thread_ts: Option<&String>,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::SLACK_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "SLACK_BOT_TOKEN environment variable not set".to_owned(),
+    let token = genesis_config::env::get(genesis_config::env::SLACK_BOT_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "SLACK_BOT_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
     let mut body = serde_json::json!({
@@ -131,10 +133,13 @@ fn send_telegram(
     reply_to: Option<&String>,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::TELEGRAM_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "TELEGRAM_BOT_TOKEN environment variable not set".to_owned(),
-    })?;
+    let token =
+        genesis_config::env::get(genesis_config::env::TELEGRAM_BOT_TOKEN).map_err(|_| {
+            ToolError::ExecutionFailed {
+                tool: tool_name.to_owned(),
+                reason: "TELEGRAM_BOT_TOKEN environment variable not set".to_owned(),
+            }
+        })?;
 
     // Telegram messages have a 4096 character limit; split if needed.
     let chunks = split_message(text, 4096);
@@ -201,9 +206,11 @@ fn send_telegram(
 }
 
 fn send_discord(channel_id: &str, content: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::DISCORD_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+    let token = genesis_config::env::get(genesis_config::env::DISCORD_BOT_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
     // Discord has a 2000 character limit
@@ -249,16 +256,18 @@ fn send_discord(channel_id: &str, content: &str, tool_name: &str) -> Result<Tool
 }
 
 fn send_whatsapp(recipient: &str, text: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
-    let token = genesis_config::env::get(genesis_config::env::WHATSAPP_TOKEN).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+    let token = genesis_config::env::get(genesis_config::env::WHATSAPP_TOKEN).map_err(|_| {
+        ToolError::ExecutionFailed {
+            tool: tool_name.to_owned(),
+            reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
+        }
     })?;
 
-    let phone_number_id =
-        genesis_config::env::get(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID).map_err(|_| ToolError::ExecutionFailed {
-            tool: tool_name.to_owned(),
-            reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
-        })?;
+    let phone_number_id = genesis_config::env::get(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID)
+        .map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.to_owned(),
+        reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
+    })?;
 
     // WhatsApp has a 4096 character limit
     let truncated = crate::truncate_at(text, 4093, "...");
@@ -317,17 +326,19 @@ fn send_homeassistant(
     message: &str,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let ha_url = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_URL).map_err(|_| ToolError::ExecutionFailed {
-        tool: tool_name.to_owned(),
-        reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
-    })?;
+    let ha_url =
+        genesis_config::env::get(genesis_config::env::HOMEASSISTANT_URL).map_err(|_| {
+            ToolError::ExecutionFailed {
+                tool: tool_name.to_owned(),
+                reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
+            }
+        })?;
 
-    let ha_token = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_LONG_LIVED_TOKEN).map_err(|_| {
-        ToolError::ExecutionFailed {
+    let ha_token = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_LONG_LIVED_TOKEN)
+        .map_err(|_| ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: "HOMEASSISTANT_LONG_LIVED_TOKEN environment variable not set".to_owned(),
-        }
-    })?;
+        })?;
 
     // service_target can be:
     //   "notify.persistent_notification" — creates a HA notification

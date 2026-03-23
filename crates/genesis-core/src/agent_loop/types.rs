@@ -20,7 +20,8 @@ pub(crate) const SKILL_CREATION_THRESHOLD: usize = 8;
 
 /// Number of consecutive failures for the same tool before injecting a
 /// "try a different approach" nudge.
-pub(crate) const STUCK_LOOP_THRESHOLD: usize = genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
+pub(crate) const STUCK_LOOP_THRESHOLD: usize =
+    genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
 
 /// Events emitted during streaming execution.
 #[derive(Debug, Clone)]

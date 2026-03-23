@@ -6,8 +6,8 @@ mod types;
 
 // Re-export the full public API (unchanged).
 pub use types::{
-    AgentError, AgentHooks, AgentLoopConfig, AgentResult, NoopHooks, StreamEvent,
-    SubagentSpawner, DEFAULT_CORE_TOOLS,
+    AgentError, AgentHooks, AgentLoopConfig, AgentResult, NoopHooks, StreamEvent, SubagentSpawner,
+    DEFAULT_CORE_TOOLS,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -32,9 +32,7 @@ use genesis_lua::hooks::PreHookOutcome;
 use genesis_lua::LuaRuntime;
 
 use tools::execute_tool_calls_parallel;
-use types::{
-    format_blocked_reasons, MEMORY_NUDGE, SKILL_CREATION_THRESHOLD, STUCK_LOOP_THRESHOLD,
-};
+use types::{format_blocked_reasons, MEMORY_NUDGE, SKILL_CREATION_THRESHOLD, STUCK_LOOP_THRESHOLD};
 
 /// The core agent loop that wires provider (LLM) and tool execution together.
 ///
@@ -764,15 +762,15 @@ impl AgentLoop {
             };
 
             let cached = cache_key.as_ref().and_then(|key| {
-                self.response_cache.as_ref().and_then(|cache| {
-                    match cache.get(key) {
+                self.response_cache
+                    .as_ref()
+                    .and_then(|cache| match cache.get(key) {
                         Ok(hit) => hit,
                         Err(e) => {
                             debug!(error = %e, "response cache lookup failed");
                             None
                         }
-                    }
-                })
+                    })
             });
 
             self.hooks
@@ -854,17 +852,16 @@ impl AgentLoop {
                 {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
-                    let tc_json = choice
-                        .message
-                        .tool_calls
-                        .as_ref()
-                        .and_then(|tc| match serde_json::to_string(tc) {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                debug!(error = %e, "failed to serialize tool calls for cache");
-                                None
-                            }
-                        });
+                    let tc_json =
+                        choice.message.tool_calls.as_ref().and_then(
+                            |tc| match serde_json::to_string(tc) {
+                                Ok(s) => Some(s),
+                                Err(e) => {
+                                    debug!(error = %e, "failed to serialize tool calls for cache");
+                                    None
+                                }
+                            },
+                        );
                     let (in_tok, out_tok) = response
                         .usage
                         .as_ref()

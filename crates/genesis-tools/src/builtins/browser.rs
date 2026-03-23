@@ -64,8 +64,9 @@ impl Default for BrowserManager {
 
 impl BrowserManager {
     pub fn new() -> Self {
-        let timeout_secs: u64 = genesis_config::env::get_u64(genesis_config::env::BROWSER_INACTIVITY_TIMEOUT)
-            .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
+        let timeout_secs: u64 =
+            genesis_config::env::get_u64(genesis_config::env::BROWSER_INACTIVITY_TIMEOUT)
+                .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
         Self {
             sessions: Mutex::new(HashMap::new()),
             inactivity_timeout: Duration::from_secs(timeout_secs),
@@ -598,12 +599,15 @@ struct BrowserbaseConfig {
 }
 
 fn get_browserbase_config() -> Result<BrowserbaseConfig, ToolError> {
-    let api_key = genesis_config::env::get(genesis_config::env::BROWSERBASE_API_KEY).map_err(|_| ToolError::ExecutionFailed {
-        tool: "browser".to_owned(),
-        reason: "BROWSERBASE_API_KEY environment variable not set".to_owned(),
-    })?;
-    let project_id =
-        genesis_config::env::get(genesis_config::env::BROWSERBASE_PROJECT_ID).map_err(|_| ToolError::ExecutionFailed {
+    let api_key =
+        genesis_config::env::get(genesis_config::env::BROWSERBASE_API_KEY).map_err(|_| {
+            ToolError::ExecutionFailed {
+                tool: "browser".to_owned(),
+                reason: "BROWSERBASE_API_KEY environment variable not set".to_owned(),
+            }
+        })?;
+    let project_id = genesis_config::env::get(genesis_config::env::BROWSERBASE_PROJECT_ID)
+        .map_err(|_| ToolError::ExecutionFailed {
             tool: "browser".to_owned(),
             reason: "BROWSERBASE_PROJECT_ID environment variable not set".to_owned(),
         })?;
@@ -661,11 +665,14 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
     let enable_proxies = genesis_config::env::get_opt(genesis_config::env::BROWSERBASE_PROXIES)
         .map(|v| v.to_lowercase() != "false")
         .unwrap_or(true);
-    let enable_advanced_stealth = genesis_config::env::get_bool(genesis_config::env::BROWSERBASE_ADVANCED_STEALTH, false); // opt-in, requires Scale plan
-    let enable_keep_alive = genesis_config::env::get_opt(genesis_config::env::BROWSERBASE_KEEP_ALIVE)
-        .map(|v| v.to_lowercase() != "false")
-        .unwrap_or(true);
-    let timeout_ms: Option<u64> = genesis_config::env::get_u64(genesis_config::env::BROWSERBASE_SESSION_TIMEOUT);
+    let enable_advanced_stealth =
+        genesis_config::env::get_bool(genesis_config::env::BROWSERBASE_ADVANCED_STEALTH, false); // opt-in, requires Scale plan
+    let enable_keep_alive =
+        genesis_config::env::get_opt(genesis_config::env::BROWSERBASE_KEEP_ALIVE)
+            .map(|v| v.to_lowercase() != "false")
+            .unwrap_or(true);
+    let timeout_ms: Option<u64> =
+        genesis_config::env::get_u64(genesis_config::env::BROWSERBASE_SESSION_TIMEOUT);
 
     // Fallback sequence: full features → no keepAlive → no proxies either
     let attempts = [
@@ -1384,12 +1391,19 @@ impl ToolHandler for BrowserVision {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&screenshot_bytes);
 
         // Get vision model config
-        let api_base = genesis_config::env::get_or(genesis_config::env::OPENAI_API_BASE, genesis_provider::OPENAI_BASE_URL);
-        let api_key = genesis_config::env::get(genesis_config::env::OPENAI_API_KEY).map_err(|_| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: "OPENAI_API_KEY environment variable not set".to_owned(),
-        })?;
-        let model = genesis_config::env::get_or(genesis_config::env::AUXILIARY_VISION_MODEL, "gpt-4o");
+        let api_base = genesis_config::env::get_or(
+            genesis_config::env::OPENAI_API_BASE,
+            genesis_provider::OPENAI_BASE_URL,
+        );
+        let api_key =
+            genesis_config::env::get(genesis_config::env::OPENAI_API_KEY).map_err(|_| {
+                ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: "OPENAI_API_KEY environment variable not set".to_owned(),
+                }
+            })?;
+        let model =
+            genesis_config::env::get_or(genesis_config::env::AUXILIARY_VISION_MODEL, "gpt-4o");
 
         // Build vision API request
         let vision_url = format!("{api_base}/chat/completions");

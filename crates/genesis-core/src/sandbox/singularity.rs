@@ -190,13 +190,15 @@ impl SandboxBackend for SingularitySandbox {
             let dir = config
                 .snapshot_data
                 .as_deref()
-                .and_then(|snap| match serde_json::from_str::<serde_json::Value>(snap) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to parse sandbox snapshot data");
-                        None
-                    }
-                })
+                .and_then(
+                    |snap| match serde_json::from_str::<serde_json::Value>(snap) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to parse sandbox snapshot data");
+                            None
+                        }
+                    },
+                )
                 .and_then(|v| v["overlay_path"].as_str().map(|s| s.to_owned()))
                 .unwrap_or_else(|| {
                     self.scratch_dir
