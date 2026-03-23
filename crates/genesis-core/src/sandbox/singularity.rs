@@ -13,13 +13,16 @@ use super::{ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInst
 
 fn detect_binary() -> Result<String, SandboxError> {
     for name in &["apptainer", "singularity"] {
-        let output = std::process::Command::new("which").arg(name).output().ok();
-        if let Some(out) = output {
-            if out.status.success() {
+        match std::process::Command::new("which").arg(name).output() {
+            Ok(out) if out.status.success() => {
                 let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !path.is_empty() {
                     return Ok(name.to_string());
                 }
+            }
+            Ok(_) => {} // command ran but binary not found — expected
+            Err(e) => {
+                tracing::debug!(binary = %name, error = %e, "failed to check for sandbox binary");
             }
         }
     }
@@ -187,7 +190,13 @@ impl SandboxBackend for SingularitySandbox {
             let dir = config
                 .snapshot_data
                 .as_deref()
-                .and_then(|snap| serde_json::from_str::<serde_json::Value>(snap).ok())
+                .and_then(|snap| match serde_json::from_str::<serde_json::Value>(snap) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to parse sandbox snapshot data");
+                        None
+                    }
+                })
                 .and_then(|v| v["overlay_path"].as_str().map(|s| s.to_owned()))
                 .unwrap_or_else(|| {
                     self.scratch_dir

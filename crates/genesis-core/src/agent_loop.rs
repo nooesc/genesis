@@ -1098,9 +1098,15 @@ impl AgentLoop {
             };
 
             let cached = cache_key.as_ref().and_then(|key| {
-                self.response_cache
-                    .as_ref()
-                    .and_then(|cache| cache.get(key).ok().flatten())
+                self.response_cache.as_ref().and_then(|cache| {
+                    match cache.get(key) {
+                        Ok(hit) => hit,
+                        Err(e) => {
+                            debug!(error = %e, "response cache lookup failed");
+                            None
+                        }
+                    }
+                })
             });
 
             self.hooks
@@ -1116,7 +1122,13 @@ impl AgentLoop {
                 let tool_calls: Option<Vec<ToolCallEntry>> = hit
                     .tool_calls_json
                     .as_deref()
-                    .and_then(|json| serde_json::from_str(json).ok());
+                    .and_then(|json| match serde_json::from_str(json) {
+                        Ok(tc) => Some(tc),
+                        Err(e) => {
+                            debug!(error = %e, "failed to deserialize cached tool calls");
+                            None
+                        }
+                    });
                 let choice = genesis_provider::ChatChoice {
                     index: 0,
                     message: ChatMessage {
@@ -1180,7 +1192,13 @@ impl AgentLoop {
                         .message
                         .tool_calls
                         .as_ref()
-                        .and_then(|tc| serde_json::to_string(tc).ok());
+                        .and_then(|tc| match serde_json::to_string(tc) {
+                            Ok(s) => Some(s),
+                            Err(e) => {
+                                debug!(error = %e, "failed to serialize tool calls for cache");
+                                None
+                            }
+                        });
                     let (in_tok, out_tok) = response
                         .usage
                         .as_ref()

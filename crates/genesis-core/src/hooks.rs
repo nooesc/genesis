@@ -81,11 +81,26 @@ fn run_hook(config: &HookConfig, context: &serde_json::Value) -> HookResult {
                     Ok(Some(status)) => break status.code().unwrap_or(-1),
                     Ok(None) if started.elapsed() >= timeout => {
                         let _ = child.kill();
-                        let status = child.wait().ok();
+                        let status = match child.wait() {
+                            Ok(s) => Some(s),
+                            Err(e) => {
+                                tracing::warn!(
+                                    command = %config.command,
+                                    error = %e,
+                                    "failed to wait on timed-out hook process"
+                                );
+                                None
+                            }
+                        };
                         break status.and_then(|s| s.code()).unwrap_or(-1);
                     }
                     Ok(None) => thread::sleep(Duration::from_millis(5)),
-                    Err(_) => {
+                    Err(e) => {
+                        tracing::warn!(
+                            command = %config.command,
+                            error = %e,
+                            "error polling hook process status"
+                        );
                         let _ = child.kill();
                         break -1;
                     }

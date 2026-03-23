@@ -603,7 +603,13 @@ impl<'a> SessionExecutionService<'a> {
     fn load_user_model_section(&self) -> Option<String> {
         let db_path = &self.loaded.config.storage.database_path;
         let store = UserModelStore::new(db_path);
-        let traits = store.confident_traits(0.5).ok()?;
+        let traits = match store.confident_traits(0.5) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load user model traits");
+                return None;
+            }
+        };
         format_user_traits(&traits)
     }
 
@@ -619,7 +625,13 @@ impl<'a> SessionExecutionService<'a> {
             return None;
         }
 
-        let memories = store.search(prompt, 5).ok()?;
+        let memories = match store.search(prompt, 5) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to search memories for recall");
+                return None;
+            }
+        };
         if memories.is_empty() {
             return None;
         }

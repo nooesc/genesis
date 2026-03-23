@@ -33,11 +33,13 @@ impl ToolHandler for SessionExportTool {
         let store = SessionStore::new(&db_path);
 
         // Load session title
-        let session_title = store
-            .get_session(&session_id)
-            .ok()
-            .flatten()
-            .and_then(|s| s.title);
+        let session_title = match store.get_session(&session_id) {
+            Ok(s) => s.and_then(|s| s.title),
+            Err(e) => {
+                tracing::warn!(error = %e, session_id = %session_id, "failed to load session title for export");
+                None
+            }
+        };
 
         // Load messages via storage layer
         let stored_messages =

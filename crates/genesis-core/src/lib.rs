@@ -890,8 +890,13 @@ impl ToolRuntime {
                             }
                         })?;
                         let arguments = call.arguments.get("arguments").and_then(|v| {
-                            serde_json::from_str::<std::collections::HashMap<String, String>>(v)
-                                .ok()
+                            match serde_json::from_str::<std::collections::HashMap<String, String>>(v) {
+                                Ok(args) => Some(args),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to parse MCP prompt arguments");
+                                    None
+                                }
+                            }
                         });
                         let result =
                             mcp.get_prompt(server, name, arguments).await.map_err(|e| {
