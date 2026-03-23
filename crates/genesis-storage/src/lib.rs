@@ -262,8 +262,6 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
                 FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
             );
-            CREATE INDEX IF NOT EXISTS idx_memory_links_edge_type
-                ON memory_links(edge_type);
             CREATE TABLE IF NOT EXISTS schedules (
                 id TEXT PRIMARY KEY,
                 cron_expression TEXT NOT NULL,
