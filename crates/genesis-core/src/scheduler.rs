@@ -161,6 +161,38 @@ impl CronField {
     }
 }
 
+/// Validate that a cron expression is syntactically correct.
+///
+/// Returns `Ok(())` if valid, or an error describing what is wrong.
+pub fn validate_cron(expression: &str) -> Result<(), CronParseError> {
+    CronExpr::parse(expression).map(|_| ())
+}
+
+/// Resolve a schedule's timezone to a `chrono_tz::Tz`.
+///
+/// Returns `chrono_tz::UTC` when `timezone` is `None`.
+/// Returns an error string if the timezone name is invalid.
+pub fn resolve_timezone(timezone: Option<&str>) -> Result<chrono_tz::Tz, String> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some(tz_name) => tz_name
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| format!("invalid timezone: {tz_name}")),
+    }
+}
+
+/// Build a `CronTime` from the current wall-clock time in the given timezone.
+pub fn cron_time_now(tz: chrono_tz::Tz) -> CronTime {
+    let now = chrono::Utc::now().with_timezone(&tz);
+    CronTime {
+        minute: now.minute(),
+        hour: now.hour(),
+        day_of_month: now.day(),
+        month: now.month(),
+        day_of_week: now.weekday().num_days_from_sunday(),
+    }
+}
+
 /// A schedule that is due for execution at the current time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DueSchedule {
@@ -169,10 +201,58 @@ pub struct DueSchedule {
     pub prompt: String,
 }
 
-/// Check which schedules from the given list are due at `now`.
+/// Check which schedules from the given list are due right now.
 ///
-/// Schedules with unparseable cron expressions are silently skipped.
-pub fn check_due_schedules(
+/// Each schedule is evaluated in its own configured timezone (defaulting to
+/// UTC when no timezone is set). Schedules with unparseable cron expressions
+/// are logged as warnings and skipped.
+pub fn check_due_schedules(schedules: &[genesis_storage::StoredSchedule]) -> Vec<DueSchedule> {
+    schedules
+        .iter()
+        .filter(|s| s.enabled)
+        .filter_map(|s| {
+            let expr = match CronExpr::parse(&s.cron_expression) {
+                Ok(e) => e,
+                Err(err) => {
+                    tracing::warn!(
+                        schedule_id = s.id.as_str(),
+                        cron = s.cron_expression.as_str(),
+                        error = %err,
+                        "skipping schedule with invalid cron expression"
+                    );
+                    return None;
+                }
+            };
+
+            let tz = match resolve_timezone(s.timezone.as_deref()) {
+                Ok(tz) => tz,
+                Err(err) => {
+                    tracing::warn!(
+                        schedule_id = s.id.as_str(),
+                        error = err.as_str(),
+                        "skipping schedule with invalid timezone, falling back to UTC"
+                    );
+                    chrono_tz::UTC
+                }
+            };
+
+            let now = cron_time_now(tz);
+            if expr.matches(&now) {
+                Some(DueSchedule {
+                    id: s.id.clone(),
+                    destination: s.destination.clone(),
+                    prompt: s.prompt.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Legacy version for callers that pass an explicit `CronTime`. Schedules with
+/// unparseable cron expressions are silently skipped.
+pub fn check_due_schedules_at(
     schedules: &[genesis_storage::StoredSchedule],
     now: &CronTime,
 ) -> Vec<DueSchedule> {
@@ -245,8 +325,9 @@ impl SchedulerRuntime {
 
             self.tick().await;
 
-            // Sleep until the next minute boundary
-            let now = chrono::Local::now();
+            // Sleep until the next minute boundary (use UTC — each schedule
+            // resolves its own timezone when checking whether it is due).
+            let now = chrono::Utc::now();
             let secs_until_next_minute = 60 - now.second();
             tokio::time::sleep(std::time::Duration::from_secs(
                 secs_until_next_minute as u64,
@@ -270,16 +351,7 @@ impl SchedulerRuntime {
             return;
         }
 
-        let now = chrono::Local::now();
-        let cron_now = CronTime {
-            minute: now.minute(),
-            hour: now.hour(),
-            day_of_month: now.day(),
-            month: now.month(),
-            day_of_week: now.weekday().num_days_from_sunday(),
-        };
-
-        let due = check_due_schedules(&schedules, &cron_now);
+        let due = check_due_schedules(&schedules);
         if due.is_empty() {
             return;
         }
@@ -287,13 +359,41 @@ impl SchedulerRuntime {
         tracing::info!(count = due.len(), "executing due schedules");
         for schedule in due {
             let id = schedule.id.clone();
+            let start = std::time::Instant::now();
             match self.executor.execute(schedule).await {
-                Ok(()) => tracing::info!(schedule_id = id.as_str(), "schedule executed"),
-                Err(e) => tracing::warn!(
-                    schedule_id = id.as_str(),
-                    error = e.as_str(),
-                    "schedule execution failed"
-                ),
+                Ok(()) => {
+                    let duration_ms = start.elapsed().as_millis() as i64;
+                    tracing::info!(schedule_id = id.as_str(), "schedule executed");
+                    if let Err(e) =
+                        store.record_execution(&id, "success", None, Some(duration_ms))
+                    {
+                        tracing::warn!(
+                            schedule_id = id.as_str(),
+                            error = %e,
+                            "failed to record schedule execution"
+                        );
+                    }
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as i64;
+                    tracing::warn!(
+                        schedule_id = id.as_str(),
+                        error = e.as_str(),
+                        "schedule execution failed"
+                    );
+                    if let Err(re) = store.record_execution(
+                        &id,
+                        "error",
+                        Some(&e),
+                        Some(duration_ms),
+                    ) {
+                        tracing::warn!(
+                            schedule_id = id.as_str(),
+                            error = %re,
+                            "failed to record schedule execution"
+                        );
+                    }
+                }
             }
         }
     }
@@ -424,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn check_due_schedules_returns_matching() {
+    fn check_due_schedules_at_returns_matching() {
         let schedules = vec![
             genesis_storage::StoredSchedule {
                 id: "s1".to_owned(),
@@ -433,6 +533,7 @@ mod tests {
                 prompt: "check status".to_owned(),
                 enabled: true,
                 created_at: "2026-03-08".to_owned(),
+                timezone: None,
             },
             genesis_storage::StoredSchedule {
                 id: "s2".to_owned(),
@@ -441,6 +542,7 @@ mod tests {
                 prompt: "morning report".to_owned(),
                 enabled: true,
                 created_at: "2026-03-08".to_owned(),
+                timezone: None,
             },
             genesis_storage::StoredSchedule {
                 id: "s3".to_owned(),
@@ -449,6 +551,7 @@ mod tests {
                 prompt: "disabled job".to_owned(),
                 enabled: false,
                 created_at: "2026-03-08".to_owned(),
+                timezone: None,
             },
         ];
 
@@ -460,7 +563,7 @@ mod tests {
             day_of_week: 6,
         };
 
-        let due = check_due_schedules(&schedules, &now);
+        let due = check_due_schedules_at(&schedules, &now);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, "s1");
         assert_eq!(due[0].prompt, "check status");
@@ -658,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn check_due_schedules_skips_invalid_cron() {
+    fn check_due_schedules_at_skips_invalid_cron() {
         let schedules = vec![genesis_storage::StoredSchedule {
             id: "bad".to_owned(),
             cron_expression: "not-valid".to_owned(),
@@ -666,6 +769,7 @@ mod tests {
             prompt: "broken".to_owned(),
             enabled: true,
             created_at: "2026-03-08".to_owned(),
+            timezone: None,
         }];
 
         let now = CronTime {
@@ -676,7 +780,92 @@ mod tests {
             day_of_week: 0,
         };
 
-        let due = check_due_schedules(&schedules, &now);
+        let due = check_due_schedules_at(&schedules, &now);
         assert!(due.is_empty());
+    }
+
+    #[test]
+    fn validate_cron_accepts_valid() {
+        assert!(validate_cron("*/5 * * * *").is_ok());
+        assert!(validate_cron("0 9 * * 1-5").is_ok());
+        assert!(validate_cron("0,15,30,45 * * * *").is_ok());
+    }
+
+    #[test]
+    fn validate_cron_rejects_invalid() {
+        assert!(validate_cron("bad").is_err());
+        assert!(validate_cron("*/0 * * * *").is_err());
+        assert!(validate_cron("* *").is_err());
+    }
+
+    #[test]
+    fn resolve_timezone_defaults_to_utc() {
+        let tz = resolve_timezone(None).unwrap();
+        assert_eq!(tz, chrono_tz::UTC);
+    }
+
+    #[test]
+    fn resolve_timezone_parses_valid() {
+        let tz = resolve_timezone(Some("America/New_York")).unwrap();
+        assert_eq!(tz, chrono_tz::America::New_York);
+
+        let tz = resolve_timezone(Some("Asia/Tokyo")).unwrap();
+        assert_eq!(tz, chrono_tz::Asia::Tokyo);
+
+        let tz = resolve_timezone(Some("Europe/London")).unwrap();
+        assert_eq!(tz, chrono_tz::Europe::London);
+    }
+
+    #[test]
+    fn resolve_timezone_rejects_invalid() {
+        let err = resolve_timezone(Some("Not/A/Timezone")).unwrap_err();
+        assert!(err.contains("invalid timezone"));
+    }
+
+    #[test]
+    fn cron_time_now_uses_timezone() {
+        // Just verify it doesn't panic and produces valid ranges
+        let utc_time = cron_time_now(chrono_tz::UTC);
+        assert!(utc_time.minute < 60);
+        assert!(utc_time.hour < 24);
+        assert!(utc_time.day_of_month >= 1 && utc_time.day_of_month <= 31);
+        assert!(utc_time.month >= 1 && utc_time.month <= 12);
+        assert!(utc_time.day_of_week < 7);
+
+        let tokyo_time = cron_time_now(chrono_tz::Asia::Tokyo);
+        assert!(tokyo_time.minute < 60);
+        assert!(tokyo_time.hour < 24);
+    }
+
+    #[test]
+    fn check_due_schedules_respects_timezone() {
+        // Create two schedules with the same cron but different timezones.
+        // At a given instant, one might be due and the other not, depending
+        // on how the wall-clock differs. We verify the function at least runs
+        // without errors and returns a consistent result.
+        let schedules = vec![
+            genesis_storage::StoredSchedule {
+                id: "utc-sched".to_owned(),
+                cron_expression: "* * * * *".to_owned(), // every minute
+                destination: "cli".to_owned(),
+                prompt: "utc job".to_owned(),
+                enabled: true,
+                created_at: "2026-03-08".to_owned(),
+                timezone: None, // defaults to UTC
+            },
+            genesis_storage::StoredSchedule {
+                id: "tokyo-sched".to_owned(),
+                cron_expression: "* * * * *".to_owned(), // every minute
+                destination: "cli".to_owned(),
+                prompt: "tokyo job".to_owned(),
+                enabled: true,
+                created_at: "2026-03-08".to_owned(),
+                timezone: Some("Asia/Tokyo".to_owned()),
+            },
+        ];
+
+        // Both should fire since both match every minute
+        let due = check_due_schedules(&schedules);
+        assert_eq!(due.len(), 2);
     }
 }

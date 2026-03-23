@@ -2069,6 +2069,9 @@ struct CreateScheduleRequest {
     pub cron_expression: String,
     pub destination: String,
     pub prompt: String,
+    /// IANA timezone name (e.g. "America/New_York"). Defaults to UTC.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2123,13 +2126,29 @@ async fn create_schedule_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    // Validate cron expression at creation time
+    if let Err(e) = genesis_core::scheduler::validate_cron(&request.cron_expression) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid cron expression: {e}"),
+        ));
+    }
+
+    // Validate timezone if provided
+    if let Some(ref tz) = request.timezone {
+        if let Err(e) = genesis_core::scheduler::resolve_timezone(Some(tz)) {
+            return Err((StatusCode::BAD_REQUEST, e));
+        }
+    }
+
     let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
     let schedule = store
-        .create(
+        .create_with_timezone(
             &request.id,
             &request.cron_expression,
             &request.destination,
             &request.prompt,
+            request.timezone.as_deref(),
         )
         .map_err(storage_err)?;
 

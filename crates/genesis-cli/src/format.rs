@@ -840,12 +840,17 @@ pub(crate) fn format_subagent(sub: &genesis_storage::StoredSubagent) -> String {
 }
 
 pub(crate) fn format_created_schedule(schedule: &StoredSchedule) -> String {
+    let tz_display = schedule
+        .timezone
+        .as_deref()
+        .unwrap_or("UTC");
     format!(
-        "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ncreated_at: {}",
+        "created schedule {}\ncron: {}\ndestination: {}\nprompt: {}\ntimezone: {}\ncreated_at: {}",
         schedule.id,
         schedule.cron_expression,
         schedule.destination,
         schedule.prompt,
+        tz_display,
         schedule.created_at
     )
 }
@@ -857,9 +862,10 @@ pub(crate) fn format_schedule_list(schedules: &[StoredSchedule]) -> String {
 
     let mut lines = vec!["genesis schedules".to_owned()];
     for schedule in schedules {
+        let tz = schedule.timezone.as_deref().unwrap_or("UTC");
         lines.push(format!(
-            "{}\t{}\t{}\t{}",
-            schedule.id, schedule.destination, schedule.cron_expression, schedule.created_at
+            "{}\t{}\t{}\t{}\t{}",
+            schedule.id, schedule.destination, schedule.cron_expression, tz, schedule.created_at
         ));
     }
     lines.join("\n")

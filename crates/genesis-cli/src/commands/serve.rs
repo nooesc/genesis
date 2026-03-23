@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Datelike, Local, Timelike};
 use genesis_config::{load, LoadedConfig};
 use genesis_core::execution::delivery_platform_from_str;
 use genesis_core::execution::PluginRuntimeOverrides;
 use genesis_core::execution::SessionTurnInput;
-use genesis_core::scheduler::{check_due_schedules, CronTime};
+use genesis_core::scheduler::check_due_schedules;
 use genesis_gateway::{build_router, AppState};
 use genesis_storage::{bootstrap, ScheduleStore};
 
@@ -27,7 +26,7 @@ pub(crate) async fn run_schedule_daemon(
     loop {
         let store = ScheduleStore::new(&loaded.config.storage.database_path);
         let schedules = store.list_enabled()?;
-        let due = check_due_schedules(&schedules, &cron_time_from_datetime(Local::now()));
+        let due = check_due_schedules(&schedules);
 
         for schedule in due {
             let session_id = default_schedule_session_id();
@@ -237,8 +236,12 @@ pub(crate) fn default_schedule_session_id() -> String {
     format!("sched-run-{timestamp}")
 }
 
-pub(crate) fn cron_time_from_datetime<Tz: chrono::TimeZone>(now: DateTime<Tz>) -> CronTime {
-    CronTime {
+#[cfg(test)]
+pub(crate) fn cron_time_from_datetime<Tz: chrono::TimeZone>(
+    now: chrono::DateTime<Tz>,
+) -> genesis_core::scheduler::CronTime {
+    use chrono::{Datelike, Timelike};
+    genesis_core::scheduler::CronTime {
         minute: now.minute(),
         hour: now.hour(),
         day_of_month: now.day(),

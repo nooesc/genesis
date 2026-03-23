@@ -1167,7 +1167,8 @@ pub fn default_registry() -> ToolRegistry {
                     "properties": {
                         "cron": { "type": "string", "description": "Cron expression (5 fields: minute hour day month weekday). Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am)." },
                         "prompt": { "type": "string", "description": "The prompt to execute on each trigger." },
-                        "destination": { "type": "string", "description": "Delivery destination: 'cli' (default), 'telegram', 'discord', 'slack'." }
+                        "destination": { "type": "string", "description": "Delivery destination: 'cli' (default), 'telegram', 'discord', 'slack'." },
+                        "timezone": { "type": "string", "description": "IANA timezone name (e.g. 'America/New_York', 'Asia/Tokyo'). Defaults to UTC." }
                     },
                     "required": ["cron", "prompt"]
                 })),
