@@ -35,6 +35,13 @@ pub enum FileCompletionAction {
 /// How long a cached file scan remains fresh before rescanning.
 const SCAN_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Cached result of a directory scan, combining the scanned directory and
+/// the wall-clock time the scan completed.
+struct ScanCache {
+    dir: PathBuf,
+    scanned_at: Instant,
+}
+
 /// Floating file completion popup.
 pub struct FileCompletion {
     /// Characters typed after `@` (the search query).
@@ -47,10 +54,8 @@ pub struct FileCompletion {
     selected: usize,
     /// Whether the popup is visible.
     visible: bool,
-    /// The directory used for the last file scan (for cache invalidation).
-    last_scan_dir: Option<PathBuf>,
-    /// When the last file scan completed (for TTL-based cache expiry).
-    last_scan_time: Option<Instant>,
+    /// Cached directory scan metadata (directory + timestamp).
+    last_scan: Option<ScanCache>,
 }
 
 impl FileCompletion {
@@ -61,8 +66,7 @@ impl FileCompletion {
             filtered: Vec::new(),
             selected: 0,
             visible: false,
-            last_scan_dir: None,
-            last_scan_time: None,
+            last_scan: None,
         }
     }
 
@@ -77,17 +81,21 @@ impl FileCompletion {
         self.query.clear();
 
         let cwd = std::env::current_dir().ok();
-        let cache_fresh = match (&self.last_scan_dir, &self.last_scan_time, &cwd) {
-            (Some(prev_dir), Some(prev_time), Some(cur_dir)) => {
-                prev_dir == cur_dir && prev_time.elapsed() < SCAN_CACHE_TTL
+        let cache_fresh = match (&self.last_scan, &cwd) {
+            (Some(cache), Some(cur_dir)) => {
+                cache.dir == *cur_dir && cache.scanned_at.elapsed() < SCAN_CACHE_TTL
             }
             _ => false,
         };
 
         if !cache_fresh {
             self.scan_files();
-            self.last_scan_dir = cwd;
-            self.last_scan_time = Some(Instant::now());
+            if let Some(dir) = cwd {
+                self.last_scan = Some(ScanCache {
+                    dir,
+                    scanned_at: Instant::now(),
+                });
+            }
         }
 
         self.refilter();

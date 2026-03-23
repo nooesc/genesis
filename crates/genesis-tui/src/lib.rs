@@ -200,8 +200,12 @@ pub async fn run_tui(
             .is_none_or(|v| v != "1");
     let no_color = genesis_config::env::is_present(genesis_config::env::NO_COLOR);
 
+    let right_info =
+        tokio::task::spawn_blocking(crate::widgets::status_bar::StatusBarWidget::detect_right_info)
+            .await
+            .unwrap_or_else(|_| String::new());
     let mut status_bar =
-        crate::widgets::status_bar::StatusBarWidget::new(config.provider.model.clone());
+        crate::widgets::status_bar::StatusBarWidget::new(config.provider.model.clone(), right_info);
     status_bar.set_effects_enabled(animations_enabled);
 
     let mut app = App {
