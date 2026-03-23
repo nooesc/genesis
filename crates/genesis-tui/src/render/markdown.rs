@@ -410,10 +410,9 @@ impl MarkdownWriter {
                     self.finish_line();
                     // Re-apply list indentation on continuation lines.
                     if !self.list_stack.is_empty() {
-                        let depth = self.list_stack.len().saturating_sub(1);
-                        let indent = "  ".repeat(depth);
-                        // Indent continuation lines to align with list item text.
-                        let prefix_width = indent.len() + 2; // "• " or "N. "
+                        let depth = self.list_stack.len();
+                        // Each nesting level uses 2 chars of indent, plus 2 for the bullet "• ".
+                        let prefix_width = depth * 2;
                         self.current_spans.push(Span::raw(" ".repeat(prefix_width)));
                     }
                 }
@@ -424,7 +423,7 @@ impl MarkdownWriter {
             }
 
             Event::Rule => {
-                let rule = "─".repeat(40);
+                let rule = "─".repeat(60);
                 self.current_spans
                     .push(Span::styled(rule, Style::default().fg(DIM)));
                 self.finish_line();
@@ -465,7 +464,7 @@ impl MarkdownWriter {
 
     /// Emit a `─[ lang ]────…` label line above a fenced code block.
     fn emit_code_lang_label(&mut self, lang: &str) {
-        const LABEL_WIDTH: usize = 40;
+        const LABEL_WIDTH: usize = 60;
         let lang_lower = lang.to_lowercase();
         // "─[ rust ]" = 1 dash + "[ " + lang + " ]" = 5 fixed chars + lang len
         let prefix_len = 1 + 2 + lang_lower.len() + 2; // "─" + "[ " + lang + " ]"

@@ -175,7 +175,9 @@ impl ModelPicker {
     pub fn handle_key(&mut self, key: KeyEvent, _visible_rows: u16) -> ModelPickerAction {
         match (key.code, key.modifiers) {
             // Close
-            (KeyCode::Esc, _) => ModelPickerAction::Close,
+            (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                ModelPickerAction::Close
+            }
 
             // Select
             (KeyCode::Enter, _) => {
