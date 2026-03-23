@@ -125,8 +125,9 @@ fn make_turn_future<'a>(
 /// The user's prompt text is moved into the future via [`make_turn_future`],
 /// so there is no separate `pending_text` variable that would create
 /// cross-borrow issues in the `select!` macro expansion.
-/// RAII guard that calls `terminal::restore()` on drop, ensuring the terminal
-/// is cleaned up even if `run_tui` returns early via `?`.
+// --
+// RAII guard that calls `terminal::restore()` on drop, ensuring the terminal
+// is cleaned up even if `run_tui` returns early via `?`.
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
