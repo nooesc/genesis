@@ -102,7 +102,7 @@ pub enum Command {
     Schedule(ScheduleCommand),
     #[command(about = "Start the HTTP API server")]
     Serve {
-        #[arg(long, default_value = "0.0.0.0", help = "Host to bind")]
+        #[arg(long, default_value = "127.0.0.1", help = "Host to bind")]
         host: String,
         #[arg(long, default_value = "3000", help = "Port to listen on")]
         port: u16,

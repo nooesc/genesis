@@ -105,6 +105,13 @@ pub(crate) async fn run_serve(
     let sched_cancel = scheduler.cancellation_handle();
     let sched_handle = tokio::spawn(scheduler.run());
 
+    if host != "127.0.0.1" && host != "localhost" && host != "::1" && !api_key_required {
+        eprintln!(
+            "WARNING: Serving on {host} without API key authentication. \
+             Set GENESIS_API_KEY or GENESIS_API_KEY_REQUIRED=true for network deployments."
+        );
+    }
+
     println!("genesis gateway listening on {addr}");
     let shutdown_state = std::sync::Arc::clone(&state);
     let serve_result = axum::serve(listener, router)
