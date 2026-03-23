@@ -387,17 +387,14 @@ async fn process_envelope(
             // For DMs, use the shared pipeline.
             let reply = if is_group {
                 // Groups bypass pairing -- run commands/agent directly.
-                let store = genesis_storage::SessionStore::new(
-                    &state.loaded.config.storage.database_path,
-                );
-                if let crate::commands::CommandResult::Reply(r) =
-                    crate::commands::handle_command(
-                        &prompt,
-                        &session_id,
-                        &store,
-                        &state.loaded.config,
-                    )
-                {
+                let store =
+                    genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
+                if let crate::commands::CommandResult::Reply(r) = crate::commands::handle_command(
+                    &prompt,
+                    &session_id,
+                    &store,
+                    &state.loaded.config,
+                ) {
                     r
                 } else {
                     crate::commands::check_session_expiry(
@@ -689,12 +686,13 @@ async fn send_rpc(
         });
     }
 
-    let rpc_resp: JsonRpcResponse = resp.json().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Signal,
-            source,
-        }
-    })?;
+    let rpc_resp: JsonRpcResponse =
+        resp.json()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Signal,
+                source,
+            })?;
 
     if let Some(err) = rpc_resp.error {
         return Err(super::PlatformError::ApiLogicError {

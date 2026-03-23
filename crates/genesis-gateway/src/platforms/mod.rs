@@ -108,7 +108,11 @@ pub async fn process_platform_message(
 
     // 4. Run the agent turn
     let service = state.session_service();
-    let title = format!("{}: {}", capitalize_platform(msg.platform_name), msg.user_name);
+    let title = format!(
+        "{}: {}",
+        capitalize_platform(msg.platform_name),
+        msg.user_name
+    );
     let result = service
         .run_turn(SessionTurnInput {
             session_id: msg.session_id,
@@ -586,9 +590,15 @@ mod tests {
             body: "bot was blocked".to_owned(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("telegram"), "should contain platform name: {msg}");
+        assert!(
+            msg.contains("telegram"),
+            "should contain platform name: {msg}"
+        );
         assert!(msg.contains("403"), "should contain status code: {msg}");
-        assert!(msg.contains("bot was blocked"), "should contain body: {msg}");
+        assert!(
+            msg.contains("bot was blocked"),
+            "should contain body: {msg}"
+        );
     }
 
     #[test]

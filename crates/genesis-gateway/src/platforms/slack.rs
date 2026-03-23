@@ -224,20 +224,18 @@ async fn post_message(
             source,
         })?;
 
-    let body: serde_json::Value = resp.json().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Slack,
-            source,
-        }
-    })?;
+    let body: serde_json::Value =
+        resp.json()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Slack,
+                source,
+            })?;
 
     if body["ok"].as_bool() != Some(true) {
         return Err(super::PlatformError::ApiLogicError {
             platform: DeliveryPlatform::Slack,
-            detail: body["error"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_owned(),
+            detail: body["error"].as_str().unwrap_or("unknown").to_owned(),
         });
     }
 

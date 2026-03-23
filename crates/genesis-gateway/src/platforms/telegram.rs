@@ -164,12 +164,13 @@ async fn telegram_fetch_file(
             source,
         })?;
 
-    let file_resp: GetFileResponse = resp.json().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Telegram,
-            source,
-        }
-    })?;
+    let file_resp: GetFileResponse =
+        resp.json()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Telegram,
+                source,
+            })?;
 
     if !file_resp.ok {
         return Err(super::PlatformError::ApiLogicError {
@@ -178,14 +179,13 @@ async fn telegram_fetch_file(
         });
     }
 
-    let file_path = file_resp
-        .result
-        .and_then(|r| r.file_path)
-        .ok_or_else(|| super::PlatformError::OperationFailed {
+    let file_path = file_resp.result.and_then(|r| r.file_path).ok_or_else(|| {
+        super::PlatformError::OperationFailed {
             platform: DeliveryPlatform::Telegram,
             operation: "getFile",
             detail: "no file_path in response".to_owned(),
-        })?;
+        }
+    })?;
 
     let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
     let download_resp = client.get(&download_url).send().await.map_err(|source| {
@@ -195,12 +195,14 @@ async fn telegram_fetch_file(
         }
     })?;
 
-    let file_bytes = download_resp.bytes().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Telegram,
-            source,
-        }
-    })?;
+    let file_bytes =
+        download_resp
+            .bytes()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Telegram,
+                source,
+            })?;
 
     if file_bytes.is_empty() {
         return Err(super::PlatformError::OperationFailed {
@@ -285,12 +287,14 @@ async fn transcribe_telegram_audio(
         });
     }
 
-    let result: WhisperResponse = whisper_resp.json().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Telegram,
-            source,
-        }
-    })?;
+    let result: WhisperResponse =
+        whisper_resp
+            .json()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Telegram,
+                source,
+            })?;
 
     Ok(result.text)
 }
@@ -689,12 +693,12 @@ async fn send_reply(
             })?;
 
         let api_resp: TelegramApiResponse =
-            resp.json().await.map_err(|source| {
-                super::PlatformError::ResponseParse {
+            resp.json()
+                .await
+                .map_err(|source| super::PlatformError::ResponseParse {
                     platform: DeliveryPlatform::Telegram,
                     source,
-                }
-            })?;
+                })?;
 
         if !api_resp.ok {
             return Err(super::PlatformError::ApiLogicError {
@@ -1030,7 +1034,12 @@ mod tests {
 
         let cache = StickerCacheStore::new(&db_path);
         cache
-            .set("unique-123", "A happy frog jumping", "\u{1F438}", "FrogPack")
+            .set(
+                "unique-123",
+                "A happy frog jumping",
+                "\u{1F438}",
+                "FrogPack",
+            )
             .expect("cache set");
 
         let cached = cache.get("unique-123").unwrap().unwrap();
