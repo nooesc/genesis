@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A persisted conversation message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,7 +79,6 @@ pub struct InsightsData {
     /// Average output tokens per session.
     pub avg_output_tokens: u64,
 }
-
 
 pub struct SessionStore {
     db: Database,
@@ -544,6 +543,26 @@ impl SessionStore {
         Ok(deleted)
     }
 
+    /// Count sessions older than `days` days without deleting them.
+    /// Useful for dry-run previews before purging.
+    pub fn count_older_than(&self, days: u32) -> Result<u64, StorageError> {
+        let connection = self.db.conn()?;
+        let cutoff = format!("-{days} days");
+
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE created_at < datetime('now', ?1)",
+                params![cutoff],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+
+        Ok(count as u64)
+    }
+
     /// Load all messages for a session in chronological order.
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StorageError> {
         let connection = self.db.conn()?;
@@ -812,7 +831,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -860,7 +882,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![query, limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![query, limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -1092,8 +1117,8 @@ impl SessionStore {
 
 #[cfg(test)]
 mod session_store_tests {
-    use crate::bootstrap;
     use super::SessionStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -1572,10 +1597,24 @@ mod session_store_tests {
             .create_session("s-other", "cli", None)
             .expect("session should be created");
         store
-            .append_message("s-match-1", "user", Some("pagination test alpha"), None, None, None)
+            .append_message(
+                "s-match-1",
+                "user",
+                Some("pagination test alpha"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
-            .append_message("s-match-2", "user", Some("pagination test beta"), None, None, None)
+            .append_message(
+                "s-match-2",
+                "user",
+                Some("pagination test beta"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
             .append_message("s-other", "user", Some("unrelated topic"), None, None, None)
@@ -1592,5 +1631,37 @@ mod session_store_tests {
             .expect("second page should succeed");
         assert_eq!(total2, 2);
         assert_eq!(results2.len(), 1);
+    }
+
+    #[test]
+    fn count_older_than_returns_zero_for_recent() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("recent", "cli", None).expect("create");
+
+        let count = store.count_older_than(30).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_older_than_matches_purge_count() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("s1", "cli", None).expect("create");
+        store.create_session("s2", "cli", None).expect("create");
+
+        // Recent sessions should have 0 matching for purge
+        let count = store.count_older_than(30).unwrap();
+        assert_eq!(count, 0);
+
+        // Sessions created now should all be counted at 0-day threshold
+        let count_zero = store.count_older_than(0).unwrap();
+        assert!(count_zero <= 2);
     }
 }

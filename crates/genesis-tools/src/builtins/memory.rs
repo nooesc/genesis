@@ -437,7 +437,11 @@ mod tests {
 
         // The result should have at most 2 memories
         let lines: Vec<&str> = output.content.lines().collect();
-        assert!(lines.len() <= 2, "should respect limit of 2, got {}", lines.len());
+        assert!(
+            lines.len() <= 2,
+            "should respect limit of 2, got {}",
+            lines.len()
+        );
         assert_eq!(output.metadata.get("limit").unwrap(), "2");
     }
 

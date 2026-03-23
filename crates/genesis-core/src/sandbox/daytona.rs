@@ -77,11 +77,17 @@ pub struct DaytonaSandbox {
 
 impl DaytonaSandbox {
     pub fn new() -> Result<Self, SandboxError> {
-        let api_key = genesis_config::env::get(genesis_config::env::DAYTONA_API_KEY).map_err(|_| SandboxError::AuthError {
-            reason: "DAYTONA_API_KEY env var not set".into(),
-        })?;
+        let api_key =
+            genesis_config::env::get(genesis_config::env::DAYTONA_API_KEY).map_err(|_| {
+                SandboxError::AuthError {
+                    reason: "DAYTONA_API_KEY env var not set".into(),
+                }
+            })?;
 
-        let base_url = genesis_config::env::get_or(genesis_config::env::DAYTONA_API_URL, "https://app.daytona.io/api");
+        let base_url = genesis_config::env::get_or(
+            genesis_config::env::DAYTONA_API_URL,
+            "https://app.daytona.io/api",
+        );
 
         let mut default_headers = HeaderMap::new();
         let auth_value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {

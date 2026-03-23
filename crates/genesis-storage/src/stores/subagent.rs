@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A stored subagent — a child agent loop spawned by a parent session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,8 +176,8 @@ impl SubagentStore {
 
 #[cfg(test)]
 mod subagent_store_tests {
-    use crate::bootstrap;
     use super::SubagentStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -380,4 +380,3 @@ mod subagent_store_tests {
         assert!(names.contains(&"reviewer"));
     }
 }
-

@@ -302,20 +302,13 @@ mod tests {
             .expect("second observe");
 
         // Confidence should increase with more observations
-        let conf1: f64 = output1
-            .metadata
-            .get("confidence")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let conf2: f64 = output2
-            .metadata
-            .get("confidence")
-            .unwrap()
-            .parse()
-            .unwrap();
+        let conf1: f64 = output1.metadata.get("confidence").unwrap().parse().unwrap();
+        let conf2: f64 = output2.metadata.get("confidence").unwrap().parse().unwrap();
 
-        assert!(conf2 >= conf1, "confidence should increase: {conf1} -> {conf2}");
+        assert!(
+            conf2 >= conf1,
+            "confidence should increase: {conf1} -> {conf2}"
+        );
     }
 
     #[test]

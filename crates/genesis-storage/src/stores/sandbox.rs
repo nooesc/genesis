@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A sandbox instance record persisted to SQLite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,10 +186,10 @@ impl SandboxStore {
 
 #[cfg(test)]
 mod sandbox_store_tests {
+    use super::SandboxStore;
     use crate::bootstrap;
     use crate::migrations::migrate_to_v9;
     use crate::util::open;
-    use super::SandboxStore;
     use rusqlite::params;
     use tempfile::tempdir;
 
@@ -335,4 +335,3 @@ mod sandbox_store_tests {
         assert_eq!(count, 0);
     }
 }
-

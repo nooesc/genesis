@@ -2,9 +2,9 @@ use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// Supporting files associated with a skill, stored in SQLite.
 pub struct SkillFileStore {
@@ -113,8 +113,8 @@ impl SkillFileStore {
 
 #[cfg(test)]
 mod skill_file_store_tests {
-    use crate::{bootstrap, SkillStore};
     use super::SkillFileStore;
+    use crate::{bootstrap, SkillStore};
     use tempfile::tempdir;
 
     /// Helper: create a skill so the foreign key constraint is satisfied.
@@ -244,4 +244,3 @@ mod skill_file_store_tests {
         assert_eq!(content_b, "content from B");
     }
 }
-
