@@ -3728,9 +3728,7 @@ tools = [{tools_list}]
         );
 
         // Simulate 5 failures — should trigger
-        agent
-            .tool_failure_counts
-            .insert("web_search".to_owned(), 5);
+        agent.tool_failure_counts.insert("web_search".to_owned(), 5);
         agent.maybe_inject_stuck_nudge();
         assert_eq!(
             agent.messages().len(),
@@ -3803,9 +3801,7 @@ tools = [{tools_list}]
         );
 
         // Re-add a failure count so we can verify record_tool_success clears it
-        agent
-            .tool_failure_counts
-            .insert("shell_exec".to_owned(), 2);
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 2);
 
         // Call the production code path that handles tool success
         agent.record_tool_success("shell_exec");

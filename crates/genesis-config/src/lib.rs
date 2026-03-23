@@ -378,7 +378,10 @@ pub struct RuntimeConfig {
     pub approval_mode: ApprovalMode,
     /// Number of consecutive failures for the same tool before injecting a
     /// "try a different approach" nudge. Default: 5.
-    #[serde(default = "default_stuck_loop_threshold", skip_serializing_if = "is_default_stuck_loop_threshold")]
+    #[serde(
+        default = "default_stuck_loop_threshold",
+        skip_serializing_if = "is_default_stuck_loop_threshold"
+    )]
     pub stuck_loop_threshold: usize,
 }
 
