@@ -236,4 +236,140 @@ mod tests {
         let err = UserObserveTool.run(&call, &ctx).unwrap_err();
         assert!(matches!(err, ToolError::MissingArgument { .. }));
     }
+
+    #[test]
+    fn observe_requires_category() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "user_observe".to_owned(),
+            arguments: BTreeMap::from([("trait_key".to_owned(), "likes_rust".to_owned())]),
+        };
+        let err = UserObserveTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "category",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn observe_requires_value() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "user_observe".to_owned(),
+            arguments: BTreeMap::from([
+                ("trait_key".to_owned(), "likes_rust".to_owned()),
+                ("category".to_owned(), "preference".to_owned()),
+            ]),
+        };
+        let err = UserObserveTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "value",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn observe_multiple_times_increases_confidence() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let make_call = || ToolCall {
+            name: "user_observe".to_owned(),
+            arguments: BTreeMap::from([
+                ("trait_key".to_owned(), "prefers_tabs".to_owned()),
+                ("category".to_owned(), "preference".to_owned()),
+                ("value".to_owned(), "Uses tabs over spaces".to_owned()),
+            ]),
+        };
+
+        let output1 = UserObserveTool
+            .run(&make_call(), &ctx)
+            .expect("first observe");
+        let output2 = UserObserveTool
+            .run(&make_call(), &ctx)
+            .expect("second observe");
+
+        // Confidence should increase with more observations
+        let conf1: f64 = output1
+            .metadata
+            .get("confidence")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let conf2: f64 = output2
+            .metadata
+            .get("confidence")
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        assert!(conf2 >= conf1, "confidence should increase: {conf1} -> {conf2}");
+    }
+
+    #[test]
+    fn user_model_min_confidence_filter() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        // Add a single observation (low confidence)
+        UserObserveTool
+            .run(
+                &ToolCall {
+                    name: "user_observe".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("trait_key".to_owned(), "low_conf".to_owned()),
+                        ("category".to_owned(), "preference".to_owned()),
+                        ("value".to_owned(), "Some preference".to_owned()),
+                    ]),
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        // Query with high min_confidence
+        let call = ToolCall {
+            name: "user_model".to_owned(),
+            arguments: BTreeMap::from([("min_confidence".to_owned(), "0.99".to_owned())]),
+        };
+        let output = UserModelTool.run(&call, &ctx).expect("recall");
+        // A single observation starts at 50% confidence, so filtering at 99% should be empty
+        assert!(
+            output.content.contains("No user model data"),
+            "high min_confidence should filter out low-confidence traits"
+        );
+    }
+
+    #[test]
+    fn observe_metadata_includes_confidence() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "user_observe".to_owned(),
+            arguments: BTreeMap::from([
+                ("trait_key".to_owned(), "test_key".to_owned()),
+                ("category".to_owned(), "test".to_owned()),
+                ("value".to_owned(), "test_value".to_owned()),
+            ]),
+        };
+        let output = UserObserveTool.run(&call, &ctx).expect("observe");
+        assert!(output.metadata.contains_key("confidence"));
+        assert!(output.metadata.contains_key("trait_key"));
+    }
 }

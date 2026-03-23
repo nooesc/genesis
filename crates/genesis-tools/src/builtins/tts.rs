@@ -120,4 +120,28 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn tts_requires_both_arguments() {
+        let tool = TextToSpeechTool;
+        let call = ToolCall {
+            name: "text_to_speech".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+
+        // "text" is checked first
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "text",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn default_voice_is_set() {
+        assert_eq!(DEFAULT_VOICE, "en-US-AriaNeural");
+    }
 }

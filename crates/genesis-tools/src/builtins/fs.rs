@@ -246,4 +246,186 @@ mod tests {
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
+
+    #[test]
+    fn read_file_requires_path() {
+        let tool = ReadFileTool;
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "path",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn write_file_requires_path() {
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([("content".to_owned(), "hello".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "path",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn write_file_requires_content() {
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), "/tmp/test.txt".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "content",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn list_dir_requires_path() {
+        let tool = ListDirTool;
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "path",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn list_dir_empty_directory() {
+        let dir = tempdir().unwrap();
+
+        let tool = ListDirTool;
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::from([(
+                "path".to_owned(),
+                dir.path().to_string_lossy().into_owned(),
+            )]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(output.content, "(empty directory)");
+    }
+
+    #[test]
+    fn read_file_metadata_includes_path() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("meta.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let tool = ReadFileTool;
+        let path_str = file_path.to_string_lossy().into_owned();
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), path_str.clone())]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(output.metadata.get("path").unwrap(), &path_str);
+        assert_eq!(output.metadata.get("tool").unwrap(), "read_file");
+    }
+
+    #[test]
+    fn write_file_metadata_includes_bytes_written() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("bytes.txt");
+
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), file_path.to_string_lossy().into_owned()),
+                ("content".to_owned(), "twelve chars".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(output.metadata.get("bytes_written").unwrap(), "12");
+    }
+
+    #[test]
+    fn write_file_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("overwrite.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), file_path.to_string_lossy().into_owned()),
+                ("content".to_owned(), "replaced".to_owned()),
+            ]),
+        };
+
+        tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "replaced");
+    }
+
+    #[test]
+    fn list_dir_sorts_entries() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("zebra.txt"), "").unwrap();
+        fs::write(dir.path().join("apple.txt"), "").unwrap();
+        fs::write(dir.path().join("mango.txt"), "").unwrap();
+
+        let tool = ListDirTool;
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::from([(
+                "path".to_owned(),
+                dir.path().to_string_lossy().into_owned(),
+            )]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        let lines: Vec<&str> = output.content.lines().collect();
+        assert_eq!(lines[0], "apple.txt");
+        assert_eq!(lines[1], "mango.txt");
+        assert_eq!(lines[2], "zebra.txt");
+    }
+
+    #[test]
+    fn list_dir_metadata_includes_entry_count() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "").unwrap();
+        fs::write(dir.path().join("b.txt"), "").unwrap();
+
+        let tool = ListDirTool;
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::from([(
+                "path".to_owned(),
+                dir.path().to_string_lossy().into_owned(),
+            )]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(output.metadata.get("entry_count").unwrap(), "2");
+    }
 }

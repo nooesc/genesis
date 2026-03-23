@@ -111,4 +111,77 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn ssh_exec_requires_both_arguments() {
+        let tool = SshExecTool;
+        let call = ToolCall {
+            name: "ssh_exec".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        // Host is checked first
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "host",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ssh_exec_to_unreachable_host_fails_gracefully() {
+        let tool = SshExecTool;
+        let call = ToolCall {
+            name: "ssh_exec".to_owned(),
+            arguments: BTreeMap::from([
+                ("host".to_owned(), "192.0.2.1".to_owned()), // TEST-NET, unreachable
+                ("command".to_owned(), "echo hello".to_owned()),
+                ("port".to_owned(), "22222".to_owned()),
+            ]),
+        };
+        // SSH to an unreachable host should either time out or fail without panic.
+        let result = tool.run(&call, &ctx());
+        match result {
+            Ok(output) => {
+                // SSH ran but couldn't connect
+                assert!(
+                    output.metadata.get("exit_code").unwrap() != "0",
+                    "should have non-zero exit code"
+                );
+            }
+            Err(ToolError::ExecutionFailed { .. }) => {
+                // SSH binary issue - also acceptable
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_exec_metadata_includes_user_prefix() {
+        // We can only test the metadata format since we cannot really SSH.
+        // A connection to a bogus host will include user@host in metadata.
+        let tool = SshExecTool;
+        let call = ToolCall {
+            name: "ssh_exec".to_owned(),
+            arguments: BTreeMap::from([
+                ("host".to_owned(), "192.0.2.1".to_owned()),
+                ("command".to_owned(), "whoami".to_owned()),
+                ("user".to_owned(), "admin".to_owned()),
+                ("port".to_owned(), "22222".to_owned()),
+            ]),
+        };
+        // The result will fail (unreachable) but we can check the metadata host field
+        let result = tool.run(&call, &ctx());
+        match result {
+            Ok(output) => {
+                assert_eq!(output.metadata.get("host").unwrap(), "admin@192.0.2.1");
+            }
+            Err(ToolError::ExecutionFailed { .. }) => {
+                // SSH binary missing - skip metadata check
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

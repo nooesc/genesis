@@ -420,4 +420,234 @@ mod tests {
         let output_b = tool.run(&call, &ctx_with_session("session-b")).unwrap();
         assert!(output_b.content.contains("task for B"));
     }
+
+    #[test]
+    fn todo_requires_action() {
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn todo_add_requires_text() {
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "add".to_owned())]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn todo_update_requires_id() {
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("status".to_owned(), "done".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn todo_update_requires_status() {
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("id".to_owned(), "1".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn todo_update_rejects_invalid_id() {
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("id".to_owned(), "abc".to_owned()),
+                ("status".to_owned(), "done".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn todo_update_rejects_invalid_status() {
+        clear_todos("test");
+        let tool = TodoTool;
+        // Add an item first
+        let add = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "item".to_owned()),
+            ]),
+        };
+        tool.run(&add, &ctx()).unwrap();
+
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("id".to_owned(), "1".to_owned()),
+                ("status".to_owned(), "completed".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("invalid status"));
+            }
+            _ => panic!("expected ExecutionFailed"),
+        }
+    }
+
+    #[test]
+    fn todo_update_nonexistent_id() {
+        clear_todos("test");
+        let tool = TodoTool;
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("id".to_owned(), "999".to_owned()),
+                ("status".to_owned(), "done".to_owned()),
+            ]),
+        };
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("no todo with id"));
+            }
+            _ => panic!("expected ExecutionFailed"),
+        }
+    }
+
+    #[test]
+    fn todo_in_progress_marker() {
+        clear_todos("test");
+        let tool = TodoTool;
+
+        let add = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "working on it".to_owned()),
+            ]),
+        };
+        tool.run(&add, &ctx()).unwrap();
+
+        let update = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "update".to_owned()),
+                ("id".to_owned(), "1".to_owned()),
+                ("status".to_owned(), "in_progress".to_owned()),
+            ]),
+        };
+        tool.run(&update, &ctx()).unwrap();
+
+        let list = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+        };
+        let output = tool.run(&list, &ctx()).unwrap();
+        assert!(output.content.contains("[~]"));
+        assert!(output.content.contains("1 in progress"));
+    }
+
+    #[test]
+    fn todo_clear_empty_list() {
+        clear_todos("test");
+        let tool = TodoTool;
+
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "clear".to_owned())]),
+        };
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(output.content.contains("cleared 0"));
+    }
+
+    #[test]
+    fn todo_add_returns_id_in_metadata() {
+        clear_todos("test");
+        let tool = TodoTool;
+
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "first".to_owned()),
+            ]),
+        };
+        let output = tool.run(&call, &ctx()).unwrap();
+        assert_eq!(output.metadata.get("id").unwrap(), "1");
+
+        let call = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "second".to_owned()),
+            ]),
+        };
+        let output = tool.run(&call, &ctx()).unwrap();
+        assert_eq!(output.metadata.get("id").unwrap(), "2");
+    }
+
+    #[test]
+    fn todo_list_summary_counts() {
+        clear_todos("test");
+        let tool = TodoTool;
+
+        // Add three items with mixed statuses
+        for text in &["task a", "task b", "task c"] {
+            let call = ToolCall {
+                name: "todo".to_owned(),
+                arguments: BTreeMap::from([
+                    ("action".to_owned(), "add".to_owned()),
+                    ("text".to_owned(), (*text).to_owned()),
+                ]),
+            };
+            tool.run(&call, &ctx()).unwrap();
+        }
+
+        // Mark #1 as done, #2 as in_progress
+        for (id, status) in &[("1", "done"), ("2", "in_progress")] {
+            let call = ToolCall {
+                name: "todo".to_owned(),
+                arguments: BTreeMap::from([
+                    ("action".to_owned(), "update".to_owned()),
+                    ("id".to_owned(), (*id).to_owned()),
+                    ("status".to_owned(), (*status).to_owned()),
+                ]),
+            };
+            tool.run(&call, &ctx()).unwrap();
+        }
+
+        let list = ToolCall {
+            name: "todo".to_owned(),
+            arguments: BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+        };
+        let output = tool.run(&list, &ctx()).unwrap();
+        assert!(output.content.contains("1 pending"));
+        assert!(output.content.contains("1 in progress"));
+        assert!(output.content.contains("1 done"));
+        assert_eq!(output.metadata.get("count").unwrap(), "3");
+    }
 }

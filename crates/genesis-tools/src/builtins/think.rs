@@ -84,4 +84,29 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn think_with_long_thought_succeeds() {
+        let tool = ThinkTool;
+        let long_thought = "a".repeat(10_000);
+        let call = ToolCall {
+            name: "think".to_owned(),
+            arguments: BTreeMap::from([("thought".to_owned(), long_thought)]),
+        };
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(output.content.is_empty());
+    }
+
+    #[test]
+    fn think_with_empty_thought_still_succeeds() {
+        // The think tool accepts any non-missing thought, even empty
+        let tool = ThinkTool;
+        let call = ToolCall {
+            name: "think".to_owned(),
+            arguments: BTreeMap::from([("thought".to_owned(), String::new())]),
+        };
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(output.content.is_empty());
+        assert!(output.metadata.is_empty());
+    }
 }

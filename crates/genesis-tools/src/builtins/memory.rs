@@ -320,4 +320,177 @@ mod tests {
         assert!(!keywords.contains(&"i".to_owned()));
         assert!(!keywords.contains(&"a".to_owned()));
     }
+
+    #[test]
+    fn memory_store_requires_key() {
+        let dir = tempdir().expect("tempdir");
+        let tool = MemoryStoreTool;
+        let call = ToolCall {
+            name: "memory_store".to_owned(),
+            arguments: BTreeMap::from([("value".to_owned(), "some value".to_owned())]),
+        };
+        let err = tool
+            .run(&call, &ctx(dir.path().to_string_lossy().as_ref()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::ToolError::MissingArgument {
+                argument: "key",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_store_requires_value() {
+        let dir = tempdir().expect("tempdir");
+        let tool = MemoryStoreTool;
+        let call = ToolCall {
+            name: "memory_store".to_owned(),
+            arguments: BTreeMap::from([("key".to_owned(), "some_key".to_owned())]),
+        };
+        let err = tool
+            .run(&call, &ctx(dir.path().to_string_lossy().as_ref()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::ToolError::MissingArgument {
+                argument: "value",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_recall_requires_query() {
+        let dir = tempdir().expect("tempdir");
+        let tool = MemoryRecallTool;
+        let call = ToolCall {
+            name: "memory_recall".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = tool
+            .run(&call, &ctx(dir.path().to_string_lossy().as_ref()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::ToolError::MissingArgument {
+                argument: "query",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_recall_returns_no_memories_when_empty() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let output = MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "anything".to_owned())]),
+                },
+                &context,
+            )
+            .expect("should succeed");
+
+        assert_eq!(output.content, "no memories found");
+    }
+
+    #[test]
+    fn memory_recall_respects_custom_limit() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Store multiple memories
+        for i in 0..5 {
+            MemoryStoreTool
+                .run(
+                    &ToolCall {
+                        name: "memory_store".to_owned(),
+                        arguments: BTreeMap::from([
+                            ("key".to_owned(), format!("fact_{i}")),
+                            ("value".to_owned(), format!("rust fact number {i}")),
+                        ]),
+                    },
+                    &context,
+                )
+                .unwrap();
+        }
+
+        let output = MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("query".to_owned(), "rust".to_owned()),
+                        ("limit".to_owned(), "2".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("should succeed");
+
+        // The result should have at most 2 memories
+        let lines: Vec<&str> = output.content.lines().collect();
+        assert!(lines.len() <= 2, "should respect limit of 2, got {}", lines.len());
+        assert_eq!(output.metadata.get("limit").unwrap(), "2");
+    }
+
+    #[test]
+    fn memory_recall_invalid_limit_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let err = MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("query".to_owned(), "test".to_owned()),
+                        ("limit".to_owned(), "not_a_number".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, crate::ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn extract_keywords_deduplicates() {
+        let keywords = super::extract_keywords("rust_lang", "rust is great");
+        // "rust" appears in both key and value but should only appear once
+        let rust_count = keywords.iter().filter(|k| *k == "rust").count();
+        assert_eq!(rust_count, 1, "keywords should be deduplicated");
+    }
+
+    #[test]
+    fn memory_store_metadata_includes_session_id() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let tool = MemoryStoreTool;
+
+        let output = tool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "test_key".to_owned()),
+                        ("value".to_owned(), "test_value".to_owned()),
+                    ]),
+                },
+                &ctx(dir.path().to_string_lossy().as_ref()),
+            )
+            .expect("should succeed");
+
+        assert_eq!(output.metadata.get("session_id").unwrap(), "session-42");
+        assert_eq!(output.metadata.get("key").unwrap(), "test_key");
+    }
 }
