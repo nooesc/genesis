@@ -101,9 +101,11 @@ fn make_turn_future<'a>(
                 StreamEvent::ClarificationNeeded { question } => {
                     let _ = agent_tx.send(AgentEvent::ClarificationNeeded(question.to_string()));
                 }
+                StreamEvent::Warning(msg) => {
+                    let _ = agent_tx.send(AgentEvent::Warning(msg.to_string()));
+                }
                 StreamEvent::TurnStarted
-                | StreamEvent::TokenUsage { .. }
-                | StreamEvent::Warning(_) => {}
+                | StreamEvent::TokenUsage { .. } => {}
             })
             .await
     })
@@ -139,6 +141,7 @@ pub async fn run_tui(
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (app_tx, mut app_rx) = mpsc::unbounded_channel::<AppEvent>();
     let (submission_tx, mut submission_rx) = mpsc::unbounded_channel::<Submission>();
+    let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
     let (draw_tx, mut draw_rx) = broadcast::channel::<()>(16);
 
     // Set up TUI-based tool approval handler.
@@ -204,6 +207,7 @@ pub async fn run_tui(
 
     let mut app = App {
         submission_tx,
+        cancel_tx,
         app_tx,
         frame_requester,
         turn_running: false,
@@ -300,7 +304,8 @@ pub async fn run_tui(
                         ));
                     }
                     Some(Submission::Interrupt) => {
-                        // Drop the turn future to cancel
+                        // Drop the turn future to cancel (fallback path —
+                        // normally cancelled via the dedicated cancel channel).
                         turn_future = None;
                     }
                     Some(Submission::ModelSwitch(_model_id)) => {
@@ -310,6 +315,21 @@ pub async fn run_tui(
                         pending_model_switch = Some(_model_id);
                     }
                     None => break,
+                }
+            }
+
+            // ── Cancel signal — always polled, even during active turns ──
+            _cancel = cancel_rx.recv() => {
+                if turn_future.is_some() {
+                    tracing::info!("cancelling running turn via Ctrl+C");
+                    // Drop the turn future, which aborts the in-flight agent
+                    // loop. The agent loop's async operations are cancelled
+                    // cooperatively by the Tokio runtime when the future is
+                    // dropped.
+                    turn_future = None;
+                    let _ = agent_tx.send(AgentEvent::Error(
+                        "Turn cancelled by user (Ctrl+C).".to_string(),
+                    ));
                 }
             }
 
