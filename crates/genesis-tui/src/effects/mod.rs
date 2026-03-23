@@ -321,6 +321,20 @@ impl GenesisEffects {
         self.manager.cancel_unique_effect(EffectId::IdleBreathing);
     }
 
+    /// Cancel all running effects because the viewport has been resized.
+    ///
+    /// Long-running effects (idle glow, breathing, active pulse) bake their
+    /// target [`Rect`] at creation time.  After a resize those coordinates are
+    /// stale and the effects would paint into the wrong region.  Clearing them
+    /// here lets the normal status-change / idle logic recreate them with
+    /// up-to-date coordinates on the next relevant event.
+    pub fn on_resize(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.cancel_all();
+    }
+
     /// Whether effects are enabled.
     pub fn enabled(&self) -> bool {
         self.enabled

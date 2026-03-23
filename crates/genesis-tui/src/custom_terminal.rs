@@ -52,9 +52,16 @@ impl CustomTerminal {
     }
 
     /// Update the viewport area and resize both buffers to match.
+    ///
+    /// The previous buffer is reset after resizing so that `draw_diff` treats
+    /// every cell as changed on the first post-resize frame. Without this,
+    /// stale pre-resize content in the previous buffer can suppress redraws
+    /// where cells happen to match by coincidence, producing ghost artifacts.
     pub fn set_viewport_area(&mut self, area: Rect) {
         self.buffers[self.current].resize(area);
         self.buffers[1 - self.current].resize(area);
+        // Force a full redraw on the next frame by clearing the previous buffer.
+        self.buffers[1 - self.current].reset();
         self.viewport_area = area;
     }
 

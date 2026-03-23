@@ -109,6 +109,25 @@ impl App {
             TuiEvent::Resize { width, height } => {
                 self.viewport_width = width;
                 self.viewport_height = height;
+
+                // Cancel all running effects — they hold stale coordinates
+                // from the pre-resize viewport and would paint into the wrong
+                // region.  They will be recreated on the next status change or
+                // idle transition.
+                self.effects.on_resize();
+
+                // Rebuild the transcript overlay if it is currently open so
+                // that lines are re-wrapped at the new width and scroll bounds
+                // reflect the new height.
+                if let Some(ActiveOverlay::Transcript(_)) = &self.overlay {
+                    let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+                    self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
+                        self.chat.committed_cells(),
+                        self.viewport_width,
+                        visible_rows,
+                    )));
+                }
+
                 self.frame_requester.schedule_frame();
             }
             TuiEvent::Draw | TuiEvent::FocusGained | TuiEvent::FocusLost => {}
@@ -331,10 +350,11 @@ impl App {
                 }
                 "/transcript" => {
                     self.command_popup.hide();
+                    let visible_rows = self.viewport_height.saturating_sub(2).max(1);
                     self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                         self.chat.committed_cells(),
                         self.viewport_width,
-                        24, // default visible rows
+                        visible_rows,
                     )));
                     self.frame_requester.schedule_frame();
                 }
