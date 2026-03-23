@@ -577,7 +577,7 @@ async fn send_message(
     recipient: &str,
     text: &str,
     quote_timestamp: Option<u64>,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
     let chunks = split_message(text, MAX_SIGNAL_MESSAGE_LEN);
 
     for (i, chunk) in chunks.iter().enumerate() {
@@ -615,7 +615,7 @@ async fn send_group_message(
     account: &str,
     group_id: &str,
     text: &str,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
     let chunks = split_message(text, MAX_SIGNAL_MESSAGE_LEN);
 
     for chunk in &chunks {
@@ -645,7 +645,7 @@ async fn send_typing_indicator(
     account: &str,
     recipient: &str,
     is_group: bool,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
     let mut params = serde_json::json!({
         "account": account,
     });
@@ -673,7 +673,7 @@ async fn send_typing_stop(
     account: &str,
     recipient: &str,
     is_group: bool,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
     let mut params = serde_json::json!({
         "account": account,
     });
@@ -699,7 +699,9 @@ async fn send_rpc(
     client: &reqwest::Client,
     base_url: &str,
     request: &JsonRpcRequest,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let url = format!("{}/api/v1/rpc", base_url.trim_end_matches('/'));
 
     let resp = client
@@ -707,24 +709,33 @@ async fn send_rpc(
         .json(request)
         .send()
         .await
-        .map_err(|e| format!("signal-cli RPC request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Signal,
+            source,
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("signal-cli RPC returned {status}: {body}"));
+        return Err(super::PlatformError::ApiError {
+            platform: DeliveryPlatform::Signal,
+            status,
+            body,
+        });
     }
 
-    let rpc_resp: JsonRpcResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse signal-cli RPC response: {e}"))?;
+    let rpc_resp: JsonRpcResponse = resp.json().await.map_err(|source| {
+        super::PlatformError::ResponseParse {
+            platform: DeliveryPlatform::Signal,
+            source,
+        }
+    })?;
 
     if let Some(err) = rpc_resp.error {
-        return Err(format!(
-            "signal-cli RPC error {}: {}",
-            err.code, err.message
-        ));
+        return Err(super::PlatformError::ApiLogicError {
+            platform: DeliveryPlatform::Signal,
+            detail: format!("RPC error {}: {}", err.code, err.message),
+        });
     }
 
     Ok(())

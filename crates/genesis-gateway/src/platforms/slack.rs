@@ -275,7 +275,9 @@ async fn post_message(
     channel: &str,
     text: &str,
     thread_ts: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let resp = client
         .post("https://slack.com/api/chat.postMessage")
         .bearer_auth(token)
@@ -286,18 +288,26 @@ async fn post_message(
         })
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Slack,
+            source,
+        })?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse response: {e}"))?;
+    let body: serde_json::Value = resp.json().await.map_err(|source| {
+        super::PlatformError::ResponseParse {
+            platform: DeliveryPlatform::Slack,
+            source,
+        }
+    })?;
 
     if body["ok"].as_bool() != Some(true) {
-        return Err(format!(
-            "Slack API error: {}",
-            body["error"].as_str().unwrap_or("unknown")
-        ));
+        return Err(super::PlatformError::ApiLogicError {
+            platform: DeliveryPlatform::Slack,
+            detail: body["error"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_owned(),
+        });
     }
 
     Ok(())

@@ -366,7 +366,9 @@ async fn send_reply(
     phone_number_id: &str,
     to: &str,
     text: &str,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let url = format!("https://graph.facebook.com/v21.0/{phone_number_id}/messages");
 
     // Truncate if needed (WhatsApp limit is ~4096 chars for text)
@@ -387,12 +389,19 @@ async fn send_reply(
         })
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::WhatsApp,
+            source,
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("WhatsApp API error {status}: {body}"));
+        return Err(super::PlatformError::ApiError {
+            platform: DeliveryPlatform::WhatsApp,
+            status,
+            body,
+        });
     }
 
     Ok(())

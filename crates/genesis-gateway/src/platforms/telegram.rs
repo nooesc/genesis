@@ -150,41 +150,64 @@ async fn telegram_fetch_file(
     client: &reqwest::Client,
     token: &str,
     file_id: &str,
-) -> Result<(Vec<u8>, String), String> {
+) -> Result<(Vec<u8>, String), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let get_file_url = format!("https://api.telegram.org/bot{token}/getFile");
     let resp = client
         .post(&get_file_url)
         .json(&serde_json::json!({ "file_id": file_id }))
         .send()
         .await
-        .map_err(|e| format!("getFile request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        })?;
 
-    let file_resp: GetFileResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse getFile response: {e}"))?;
+    let file_resp: GetFileResponse = resp.json().await.map_err(|source| {
+        super::PlatformError::ResponseParse {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        }
+    })?;
 
     if !file_resp.ok {
-        return Err("Telegram getFile returned not ok".to_owned());
+        return Err(super::PlatformError::ApiLogicError {
+            platform: DeliveryPlatform::Telegram,
+            detail: "getFile returned not ok".to_owned(),
+        });
     }
 
     let file_path = file_resp
         .result
         .and_then(|r| r.file_path)
-        .ok_or_else(|| "no file_path in getFile response".to_owned())?;
+        .ok_or_else(|| super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "getFile",
+            detail: "no file_path in response".to_owned(),
+        })?;
 
     let download_url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-    let file_bytes = client
-        .get(&download_url)
-        .send()
-        .await
-        .map_err(|e| format!("file download failed: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("failed to read file bytes: {e}"))?;
+    let download_resp = client.get(&download_url).send().await.map_err(|source| {
+        super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        }
+    })?;
+
+    let file_bytes = download_resp.bytes().await.map_err(|source| {
+        super::PlatformError::ResponseParse {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        }
+    })?;
 
     if file_bytes.is_empty() {
-        return Err("downloaded file is empty".to_owned());
+        return Err(super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "file download",
+            detail: "downloaded file is empty".to_owned(),
+        });
     }
 
     Ok((file_bytes.to_vec(), file_path))
@@ -198,12 +221,17 @@ async fn transcribe_telegram_audio(
     client: &reqwest::Client,
     token: &str,
     file_id: &str,
-) -> Result<String, String> {
+) -> Result<String, super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let (audio_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Transcribe via Whisper API.
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY not set, cannot transcribe".to_owned())?;
+    let api_key =
+        std::env::var("OPENAI_API_KEY").map_err(|_| super::PlatformError::ConfigMissing {
+            platform: DeliveryPlatform::Telegram,
+            detail: "OPENAI_API_KEY not set, cannot transcribe".to_owned(),
+        })?;
 
     let api_base =
         std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
@@ -223,7 +251,11 @@ async fn transcribe_telegram_audio(
     let file_part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
         .file_name(format!("voice.{ext}"))
         .mime_str(mime)
-        .map_err(|e| format!("failed to build multipart: {e}"))?;
+        .map_err(|e| super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "multipart build",
+            detail: e.to_string(),
+        })?;
 
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
@@ -238,18 +270,27 @@ async fn transcribe_telegram_audio(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| format!("Whisper API request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        })?;
 
     let status = whisper_resp.status();
     if !status.is_success() {
         let body = whisper_resp.text().await.unwrap_or_default();
-        return Err(format!("Whisper API returned {status}: {body}"));
+        return Err(super::PlatformError::ApiError {
+            platform: DeliveryPlatform::Telegram,
+            status,
+            body,
+        });
     }
 
-    let result: WhisperResponse = whisper_resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse Whisper response: {e}"))?;
+    let result: WhisperResponse = whisper_resp.json().await.map_err(|source| {
+        super::PlatformError::ResponseParse {
+            platform: DeliveryPlatform::Telegram,
+            source,
+        }
+    })?;
 
     Ok(result.text)
 }
@@ -329,7 +370,9 @@ async fn analyze_sticker_image(
     token: &str,
     file_id: &str,
     config: &genesis_config::GenesisConfig,
-) -> Result<String, String> {
+) -> Result<String, super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     let (image_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Determine MIME type from file extension.
@@ -355,8 +398,13 @@ async fn analyze_sticker_image(
         &env,
     );
 
-    let vision_client = genesis_provider::ChatClient::new(&provider)
-        .map_err(|e| format!("failed to create vision client: {e}"))?;
+    let vision_client = genesis_provider::ChatClient::new(&provider).map_err(|e| {
+        super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "vision client creation",
+            detail: e.to_string(),
+        }
+    })?;
 
     let request = genesis_provider::ChatCompletionRequest {
         model: String::new(), // ChatClient fills this from its config
@@ -379,10 +427,13 @@ async fn analyze_sticker_image(
         extra_body: config.provider.extra_body.clone(),
     };
 
-    let response = vision_client
-        .complete(request)
-        .await
-        .map_err(|e| format!("vision LLM call failed: {e}"))?;
+    let response = vision_client.complete(request).await.map_err(|e| {
+        super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "vision LLM call",
+            detail: e.to_string(),
+        }
+    })?;
 
     let description = response
         .choices
@@ -390,7 +441,11 @@ async fn analyze_sticker_image(
         .and_then(|c| c.message.content.as_ref())
         .and_then(|c| c.text())
         .map(|t| t.trim().to_owned())
-        .ok_or_else(|| "vision LLM returned empty response".to_owned())?;
+        .ok_or_else(|| super::PlatformError::OperationFailed {
+            platform: DeliveryPlatform::Telegram,
+            operation: "vision LLM call",
+            detail: "empty response".to_owned(),
+        })?;
 
     Ok(description)
 }
@@ -673,7 +728,9 @@ async fn send_reply(
     chat_id: i64,
     text: &str,
     reply_to: Option<i64>,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     // Telegram messages have a 4096 character limit.
     // Split long responses into chunks.
     let chunks = split_message(text, 4096);
@@ -693,18 +750,24 @@ async fn send_reply(
             })
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+            .map_err(|source| super::PlatformError::HttpRequest {
+                platform: DeliveryPlatform::Telegram,
+                source,
+            })?;
 
-        let api_resp: TelegramApiResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("failed to parse response: {e}"))?;
+        let api_resp: TelegramApiResponse =
+            resp.json().await.map_err(|source| {
+                super::PlatformError::ResponseParse {
+                    platform: DeliveryPlatform::Telegram,
+                    source,
+                }
+            })?;
 
         if !api_resp.ok {
-            return Err(format!(
-                "Telegram API error: {}",
-                api_resp.description.unwrap_or_default()
-            ));
+            return Err(super::PlatformError::ApiLogicError {
+                platform: DeliveryPlatform::Telegram,
+                detail: api_resp.description.unwrap_or_default(),
+            });
         }
     }
 

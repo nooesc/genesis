@@ -351,7 +351,9 @@ async fn edit_followup(
     application_id: &str,
     interaction_token: &str,
     content: &str,
-) -> Result<(), String> {
+) -> Result<(), super::PlatformError> {
+    use genesis_types::DeliveryPlatform;
+
     // Discord has a 2000 character limit for messages
     let truncated = if content.len() > 2000 {
         format!("{}...", &content[..1997])
@@ -369,12 +371,19 @@ async fn edit_followup(
         })
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|source| super::PlatformError::HttpRequest {
+            platform: DeliveryPlatform::Discord,
+            source,
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Discord API error {status}: {body}"));
+        return Err(super::PlatformError::ApiError {
+            platform: DeliveryPlatform::Discord,
+            status,
+            body,
+        });
     }
 
     Ok(())
