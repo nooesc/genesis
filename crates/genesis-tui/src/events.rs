@@ -14,6 +14,8 @@ pub enum TuiEvent {
     Paste(String),
     /// Terminal resized.
     Resize { width: u16, height: u16 },
+    /// Mouse scroll: positive = up, negative = down.
+    MouseScroll(i16),
     /// Frame timer tick — time to redraw.
     Draw,
     /// Terminal gained focus.

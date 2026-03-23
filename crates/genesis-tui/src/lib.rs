@@ -805,9 +805,16 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
             width: w,
             height: h,
         }),
+        CrosstermEvent::Mouse(mouse) => {
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => Some(TuiEvent::MouseScroll(3)),
+                MouseEventKind::ScrollDown => Some(TuiEvent::MouseScroll(-3)),
+                _ => None,
+            }
+        }
         CrosstermEvent::FocusGained => Some(TuiEvent::FocusGained),
         CrosstermEvent::FocusLost => Some(TuiEvent::FocusLost),
-        _ => None,
     }
 }
 

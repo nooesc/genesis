@@ -6,8 +6,9 @@
 use crossterm::{
     cursor,
     event::{
-        DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -42,6 +43,7 @@ pub fn init() -> io::Result<()> {
     );
 
     let _ = execute!(stdout(), EnableFocusChange);
+    let _ = execute!(stdout(), EnableMouseCapture);
 
     // Flush any buffered input from before raw mode
     flush_stdin();
@@ -54,6 +56,7 @@ pub fn init() -> io::Result<()> {
 /// Restore terminal to normal state. Safe to call multiple times.
 pub fn restore() -> io::Result<()> {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout(), DisableMouseCapture);
     let _ = execute!(stdout(), DisableBracketedPaste);
     let _ = execute!(stdout(), DisableFocusChange);
     let _ = execute!(stdout(), LeaveAlternateScreen);
