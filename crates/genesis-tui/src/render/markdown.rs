@@ -265,6 +265,12 @@ impl MarkdownWriter {
 
             // ── Code blocks ──────────────────────────────────────────────
             Event::Start(Tag::CodeBlock(kind)) => {
+                // Emit list prefix if this code block is the first content
+                // in a list item (e.g. `- ```rust\ncode\n```).
+                if self.at_list_item_start && !self.in_table {
+                    self.emit_list_prefix();
+                    self.at_list_item_start = false;
+                }
                 let lang = match kind {
                     CodeBlockKind::Fenced(lang) => lang.to_string(),
                     CodeBlockKind::Indented => String::new(),

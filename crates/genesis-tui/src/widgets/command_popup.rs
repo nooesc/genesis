@@ -374,9 +374,13 @@ fn build_item_line(cmd: &CommandDef, is_selected: bool, inner_width: usize) -> L
     };
 
     let name = cmd.name;
-    // Fixed name column width (longest name "/personality" = 12 chars + leading slash = 12).
-    // We reserve 14 chars for the name (padded with spaces).
-    let name_col_width = 14usize;
+    // Reserve 14 chars for the name column. On very narrow terminals, shrink
+    // the name column to leave at least 1 char for the description ellipsis.
+    let name_col_width = if inner_width > indicator.len() + 15 {
+        14usize
+    } else {
+        inner_width.saturating_sub(indicator.len() + 1).min(14)
+    };
     let name_padded = format!("{:<width$}", name, width = name_col_width);
 
     let name_style = if is_selected {
