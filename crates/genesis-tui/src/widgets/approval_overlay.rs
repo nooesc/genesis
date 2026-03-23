@@ -53,6 +53,9 @@ pub struct ApprovalOverlay {
     scroll: usize,
     /// When this overlay was created (for auto-deny countdown).
     created_at: Instant,
+    /// Modal width from the last `render()` call, used for accurate scroll
+    /// bounds in `handle_key()`. Defaults to the minimum modal width (30).
+    last_modal_width: u16,
 }
 
 impl ApprovalOverlay {
@@ -83,6 +86,7 @@ impl ApprovalOverlay {
             arg_lines,
             scroll: 0,
             created_at: Instant::now(),
+            last_modal_width: 30, // minimum modal width as default
         }
     }
 
@@ -116,7 +120,7 @@ impl ApprovalOverlay {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => ApprovalAction::Deny,
             // Scroll
             (KeyCode::Down | KeyCode::Char('j'), _) => {
-                let content_len = self.build_content_lines(80).len();
+                let content_len = self.build_content_lines(self.last_modal_width).len();
                 let max = content_len.saturating_sub(1);
                 self.scroll = self.scroll.saturating_add(1).min(max);
                 ApprovalAction::None
@@ -130,13 +134,14 @@ impl ApprovalOverlay {
     }
 
     /// Render the approval overlay as a centered modal.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width < 20 || area.height < 6 {
             return;
         }
 
         // Modal dimensions: 70% width, up to 60% height.
         let modal_width = (area.width * 7 / 10).clamp(30, 80);
+        self.last_modal_width = modal_width;
         let content_lines = self.build_content_lines(modal_width);
         let modal_height = (content_lines.len() as u16 + 4) // +4 for borders + header + footer
             .min(area.height * 6 / 10)
@@ -442,7 +447,7 @@ mod tests {
 
     #[test]
     fn countdown_text_rendered_in_footer() {
-        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        let mut overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
         let area = Rect {
             x: 0,
             y: 0,

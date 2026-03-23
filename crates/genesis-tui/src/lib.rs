@@ -675,7 +675,7 @@ fn render_frame(
     }
 
     // Render tool approval overlay as a modal on top of everything.
-    if let Some(approval) = &app.approval {
+    if let Some(approval) = &mut app.approval {
         approval.render(area, buf);
     }
 
