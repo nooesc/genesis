@@ -12,8 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::migrations::{
-    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v2, migrate_to_v3,
-    migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7, migrate_to_v8, migrate_to_v9,
+    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v14, migrate_to_v2,
+    migrate_to_v3, migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7, migrate_to_v8,
+    migrate_to_v9,
 };
 use crate::util::{exec_migration, first_existing_dir, first_existing_file, open};
 
@@ -41,7 +42,7 @@ pub use crate::stores::sticker_cache::{CachedSticker, StickerCacheStore};
 pub use crate::stores::subagent::{StoredSubagent, SubagentStore};
 pub use crate::stores::user_model::{format_user_traits, StoredUserTrait, UserModelStore};
 
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -252,11 +253,15 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
             CREATE TABLE IF NOT EXISTS memory_links (
                 source_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
+                edge_type TEXT NOT NULL DEFAULT 'semantic',
+                weight REAL NOT NULL DEFAULT 1.0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (source_id, target_id),
                 FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
                 FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_memory_links_edge_type
+                ON memory_links(edge_type);
             CREATE TABLE IF NOT EXISTS schedules (
                 id TEXT PRIMARY KEY,
                 cron_expression TEXT NOT NULL,
@@ -440,6 +445,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v11(&connection, database_path)?;
     migrate_to_v12(&connection, database_path)?;
     migrate_to_v13(&connection, database_path)?;
+    migrate_to_v14(&connection, database_path)?;
 
     connection
         .execute(
