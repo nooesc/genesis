@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use genesis_storage::MemoryStore;
+use genesis_tools::sandbox::PathValidator;
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
@@ -26,6 +27,9 @@ pub struct GenesisApi {
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
+    pub(crate) path_validator: Option<Arc<PathValidator>>,
+    pub(crate) working_dir: Option<PathBuf>,
+    pub(crate) http_client: Option<Arc<reqwest::blocking::Client>>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,11 +130,41 @@ impl UserData for SessionView {
     }
 }
 
+const ENV_ALLOWED_PREFIXES: &[&str] = &[
+    "GENESIS_",
+    "TELEGRAM_",
+    "SLACK_",
+    "DISCORD_",
+    "WHATSAPP_",
+    "SIGNAL_",
+    "OPENAI_",
+    "ANTHROPIC_",
+    "OPENROUTER_",
+    "HOMEASSISTANT_",
+    "GOOGLE_",
+    "ELEVENLABS_",
+    "DEEPGRAM_",
+];
+
 impl UserData for ConfigView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_function_get("get", |lua, ud| {
             let values = ud.borrow::<ConfigView>()?.values.clone();
             lua.create_function(move |_, key: String| Ok(values.get(&key).cloned()))
+        });
+        fields.add_field_function_get("env", |lua, _ud| {
+            lua.create_function(|lua, key: String| {
+                let allowed = ENV_ALLOWED_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix));
+                if !allowed {
+                    return Ok(Value::Nil);
+                }
+                match std::env::var(&key) {
+                    Ok(val) => Ok(Value::String(lua.create_string(&val)?)),
+                    Err(_) => Ok(Value::Nil),
+                }
+            })
         });
     }
 }
@@ -167,6 +201,72 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("memory", |lua, this| {
             make_memory_bridge(lua, this.database_path.clone(), Arc::clone(&this.session))
+        });
+        fields.add_field_method_get("json", |lua, _this| {
+            crate::primitives::json::make_json_bridge(lua)
+        });
+        fields.add_field_method_get("fs", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"fs".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::fs::make_fs_bridge(lua, this.path_validator.clone())
+                .map(mlua::Value::Table)
+        });
+        fields.add_field_method_get("process", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"process".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::process::make_process_bridge(
+                lua,
+                this.working_dir.clone(),
+                this.path_validator.clone(),
+            )
+            .map(mlua::Value::Table)
+        });
+        fields.add_field_method_get("http", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"http".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::http::make_http_bridge(lua, this.http_client.clone())
+                .map(mlua::Value::Table)
+        });
+        fields.add_field_method_get("search", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"search".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::search::make_search_bridge(
+                lua,
+                this.path_validator.clone(),
+                this.working_dir.clone(),
+            )
+            .map(mlua::Value::Table)
+        });
+        fields.add_field_method_get("storage", |lua, this| {
+            if let Some(ref ctx) = this.plugin_context {
+                if !ctx.permissions.trusted
+                    && !ctx.permissions.primitives.contains(&"storage".to_owned())
+                {
+                    return Ok(mlua::Value::Nil);
+                }
+            }
+            crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
+                .map(mlua::Value::Table)
         });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
@@ -271,6 +371,9 @@ pub(crate) fn install_genesis_api(
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
+    path_validator: Option<Arc<PathValidator>>,
+    working_dir: Option<PathBuf>,
+    http_client: Option<Arc<reqwest::blocking::Client>>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -289,6 +392,9 @@ pub(crate) fn install_genesis_api(
         host_tools,
         active_plugin,
         plugin_context,
+        path_validator,
+        working_dir,
+        http_client,
     })?)
 }
 

@@ -16,7 +16,7 @@ fn rg_available() -> bool {
 pub struct SearchFilesTool;
 
 impl ToolHandler for SearchFilesTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let pattern = call
             .arguments
             .get("pattern")
@@ -25,11 +25,17 @@ impl ToolHandler for SearchFilesTool {
                 argument: "pattern",
             })?;
 
-        let path = call
+        let path_arg = call
             .arguments
             .get("path")
             .map(|p| p.as_str())
             .unwrap_or(".");
+
+        let validated_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
+        let path = validated_path.to_string_lossy().into_owned();
+        let path = path.as_str();
 
         if !Path::new(path).exists() {
             return Err(ToolError::ExecutionFailed {

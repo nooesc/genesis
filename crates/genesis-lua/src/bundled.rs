@@ -99,3 +99,33 @@ pub const BUNDLED_PERSONALITIES: &[BundledPersonality] = &[
 pub fn bundled_personalities() -> &'static [BundledPersonality] {
     BUNDLED_PERSONALITIES
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundledTool {
+    pub name: &'static str,
+    pub source: &'static str,
+    pub primitives: &'static [&'static str],
+}
+
+/// Bundled tool plugins — populated in Phase 2-4 as tools migrate from Rust to Lua.
+pub const BUNDLED_TOOLS: &[BundledTool] = &[
+    BundledTool {
+        name: "utilities",
+        source: include_str!("../bundled/tools/utilities.lua"),
+        primitives: &[],
+    },
+    BundledTool {
+        name: "todo",
+        source: include_str!("../bundled/tools/todo.lua"),
+        primitives: &[],
+    },
+    BundledTool {
+        name: "messaging",
+        source: include_str!("../bundled/tools/messaging.lua"),
+        primitives: &["http", "config", "json"],
+    },
+];
+
+pub fn bundled_tools() -> &'static [BundledTool] {
+    BUNDLED_TOOLS
+}

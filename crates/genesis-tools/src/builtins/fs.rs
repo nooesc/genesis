@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -9,8 +8,8 @@ const MAX_READ_BYTES: usize = 128 * 1024;
 pub struct ReadFileTool;
 
 impl ToolHandler for ReadFileTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
@@ -18,9 +17,12 @@ impl ToolHandler for ReadFileTool {
                 argument: "path",
             })?;
 
-        let content = fs::read_to_string(path).map_err(|e| ToolError::ExecutionFailed {
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
+        let content = fs::read_to_string(&path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason: format!("failed to read `{path}`: {e}"),
+            reason: format!("failed to read `{}`: {e}", path.display()),
         })?;
 
         let content = crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
@@ -29,7 +31,7 @@ impl ToolHandler for ReadFileTool {
             content,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("path".to_owned(), path.clone()),
+                ("path".to_owned(), path.display().to_string()),
             ]),
         })
     }
@@ -38,8 +40,8 @@ impl ToolHandler for ReadFileTool {
 pub struct WriteFileTool;
 
 impl ToolHandler for WriteFileTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
@@ -55,26 +57,30 @@ impl ToolHandler for WriteFileTool {
                 argument: "content",
             })?;
 
+        // Validate path BEFORE creating directories (sandbox escape prevention).
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
         // Create parent directories if needed.
-        if let Some(parent) = Path::new(path).parent() {
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
-                    reason: format!("failed to create directories for `{path}`: {e}"),
+                    reason: format!("failed to create directories for `{}`: {e}", path.display()),
                 })?;
             }
         }
 
-        fs::write(path, content).map_err(|e| ToolError::ExecutionFailed {
+        fs::write(&path, content).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason: format!("failed to write `{path}`: {e}"),
+            reason: format!("failed to write `{}`: {e}", path.display()),
         })?;
 
         Ok(ToolOutput {
-            content: format!("wrote {} bytes to {path}", content.len()),
+            content: format!("wrote {} bytes to {}", content.len(), path.display()),
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("path".to_owned(), path.clone()),
+                ("path".to_owned(), path.display().to_string()),
                 ("bytes_written".to_owned(), content.len().to_string()),
             ]),
         })
@@ -84,8 +90,8 @@ impl ToolHandler for WriteFileTool {
 pub struct ListDirTool;
 
 impl ToolHandler for ListDirTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
@@ -93,9 +99,12 @@ impl ToolHandler for ListDirTool {
                 argument: "path",
             })?;
 
-        let entries = fs::read_dir(path).map_err(|e| ToolError::ExecutionFailed {
+        let path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
+        let entries = fs::read_dir(&path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
-            reason: format!("failed to list `{path}`: {e}"),
+            reason: format!("failed to list `{}`: {e}", path.display()),
         })?;
 
         let mut lines = Vec::new();
@@ -127,7 +136,7 @@ impl ToolHandler for ListDirTool {
             content,
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
-                ("path".to_owned(), path.clone()),
+                ("path".to_owned(), path.display().to_string()),
                 ("entry_count".to_owned(), lines.len().to_string()),
             ]),
         })
@@ -136,6 +145,8 @@ impl ToolHandler for ListDirTool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::ToolContext;
     use std::fs;
@@ -427,5 +438,107 @@ mod tests {
 
         let output = tool.run(&call, &ctx()).expect("should succeed");
         assert_eq!(output.metadata.get("entry_count").unwrap(), "2");
+    }
+
+    #[test]
+    fn read_file_blocks_sensitive_path() {
+        use std::sync::Arc;
+        let ctx = ToolContext {
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
+            ..crate::test_utils::test_ctx()
+        };
+        let tool = ReadFileTool;
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), "/home/user/.ssh/id_rsa".to_owned())]),
+        };
+        let result = tool.run(&call, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_file_blocks_sensitive_path() {
+        use std::sync::Arc;
+        let ctx = ToolContext {
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
+            ..crate::test_utils::test_ctx_destructive()
+        };
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                (
+                    "path".to_owned(),
+                    "/home/user/.ssh/authorized_keys".to_owned(),
+                ),
+                ("content".to_owned(), "malicious key".to_owned()),
+            ]),
+        };
+        let result = tool.run(&call, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_dir_blocks_sensitive_path() {
+        use std::sync::Arc;
+        let ctx = ToolContext {
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
+            ..crate::test_utils::test_ctx()
+        };
+        let tool = ListDirTool;
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), "/home/user/.ssh".to_owned())]),
+        };
+        let result = tool.run(&call, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_file_with_validator_allows_valid_path() {
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        let ctx = ToolContext {
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(Some(
+                dir.path().to_path_buf(),
+            )))),
+            ..crate::test_utils::test_ctx_destructive()
+        };
+        let file_path = dir.path().join("valid.txt");
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), file_path.to_string_lossy().into_owned()),
+                ("content".to_owned(), "safe content".to_owned()),
+            ]),
+        };
+        let result = tool.run(&call, &ctx);
+        assert!(result.is_ok());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "safe content");
+    }
+
+    #[test]
+    fn write_file_with_validator_blocks_outside_working_dir() {
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        let ctx = ToolContext {
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(Some(
+                dir.path().to_path_buf(),
+            )))),
+            ..crate::test_utils::test_ctx_destructive()
+        };
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), "/tmp/escape.txt".to_owned()),
+                ("content".to_owned(), "escaped".to_owned()),
+            ]),
+        };
+        let result = tool.run(&call, &ctx);
+        assert!(result.is_err());
+        // Verify the file was NOT created (create_dir_all runs after validation).
+        assert!(!PathBuf::from("/tmp/escape.txt").exists());
     }
 }

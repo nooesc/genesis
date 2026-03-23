@@ -17,6 +17,9 @@ pub struct PluginMetadata {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// When true, skip interactive trust prompts (used for bundled tool plugins).
+    #[serde(default)]
+    pub bundled: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +30,9 @@ pub struct PluginPermissions {
     pub hooks: Vec<String>,
     #[serde(default)]
     pub trusted: bool,
+    /// Which primitives this plugin can access: "fs", "process", "http", "storage", "search", "json", "config".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primitives: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +49,7 @@ impl PluginManifest {
                 version: "0.0.0".to_owned(),
                 description: None,
                 author: None,
+                bundled: false,
             },
             permissions: PluginPermissions::default(),
             genesis: PluginGenesis::default(),
@@ -87,6 +94,34 @@ min_version = "0.1.0"
         );
         assert!(manifest.permissions.trusted);
         assert_eq!(manifest.genesis.min_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn parses_primitives_and_bundled() {
+        let raw = r#"
+[plugin]
+name = "messaging"
+version = "0.1.0"
+bundled = true
+
+[permissions]
+primitives = ["http", "config"]
+"#;
+        let manifest: PluginManifest = toml::from_str(raw).expect("should parse");
+        assert!(manifest.plugin.bundled);
+        assert_eq!(manifest.permissions.primitives, vec!["http", "config"]);
+    }
+
+    #[test]
+    fn defaults_bundled_to_false_and_primitives_to_empty() {
+        let raw = r#"
+[plugin]
+name = "simple"
+version = "0.1.0"
+"#;
+        let manifest: PluginManifest = toml::from_str(raw).expect("should parse");
+        assert!(!manifest.plugin.bundled);
+        assert!(manifest.permissions.primitives.is_empty());
     }
 
     #[test]

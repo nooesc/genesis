@@ -1,6 +1,7 @@
 pub mod builtins;
 pub mod cache;
 pub mod http;
+pub mod sandbox;
 pub mod url_safety;
 
 use std::collections::BTreeMap;
@@ -175,6 +176,10 @@ pub struct ToolContext {
     /// When set, memory tools generate embeddings and perform deduplication.
     #[serde(skip)]
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
+    /// Filesystem path validator for sandbox enforcement.
+    /// When set, file-system tools validate paths against this before I/O.
+    #[serde(skip)]
+    pub path_validator: Option<Arc<sandbox::PathValidator>>,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -196,6 +201,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "embedding_service",
                 &self.embedding_service.as_ref().map(|_| ".."),
+            )
+            .field(
+                "path_validator",
+                &self.path_validator.as_ref().map(|_| ".."),
             )
             .field("approval_mode", &self.approval_mode)
             .finish()
@@ -643,22 +652,6 @@ pub fn default_registry() -> ToolRegistry {
     let process_registry = builtins::process_registry::ProcessRegistry::new();
 
     registry
-        .register(
-            ToolDefinition {
-                name: "echo".to_owned(),
-                description: "Echoes a message back into the runtime for local tool testing."
-                    .to_owned(),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string", "description": "The message to echo back." }
-                    },
-                    "required": ["message"]
-                })),
-            },
-            ApprovalPolicy::Never,
-            EchoTool,
-        )
         .register(
             ToolDefinition {
                 name: "session_info".to_owned(),
@@ -1136,24 +1129,6 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
-                name: "todo".to_owned(),
-                description: "In-memory task list for planning complex work. Use to decompose tasks, track progress, and report status. Actions: add (text), update (id, status), list, clear. Status values: pending, in_progress, done.".to_owned(),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "description": "Action to perform: add, update, list, or clear." },
-                        "text": { "type": "string", "description": "Text of the todo item (required for add)." },
-                        "id": { "type": "string", "description": "ID of the todo item (required for update)." },
-                        "status": { "type": "string", "description": "New status: pending, in_progress, or done (required for update)." }
-                    },
-                    "required": ["action"]
-                })),
-            },
-            ApprovalPolicy::Never,
-            builtins::todo::TodoTool,
-        )
-        .register(
-            ToolDefinition {
                 name: "spawn_subagent".to_owned(),
                 description: "Spawns a subagent to work on a task concurrently. The subagent runs its own agent loop in the background and can use all available tools. Use check_subagent to monitor progress.".to_owned(),
                 parameters: Some(json!({
@@ -1198,22 +1173,6 @@ pub fn default_registry() -> ToolRegistry {
         )
         .register(
             ToolDefinition {
-                name: "clarify".to_owned(),
-                description: "Ask the user a clarifying question when you need more information before proceeding. Use this instead of guessing when requirements are ambiguous.".to_owned(),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "question": { "type": "string", "description": "The question to ask the user." },
-                        "choices": { "type": "string", "description": "Optional comma-separated list of choices to present." }
-                    },
-                    "required": ["question"]
-                })),
-            },
-            ApprovalPolicy::Never,
-            builtins::clarify::ClarifyTool,
-        )
-        .register(
-            ToolDefinition {
                 name: "web_search".to_owned(),
                 description: "Searches the web and returns relevant results. Uses Brave Search API when BRAVE_API_KEY is set, otherwise falls back to DuckDuckGo.".to_owned(),
                 parameters: Some(json!({
@@ -1227,24 +1186,6 @@ pub fn default_registry() -> ToolRegistry {
             },
             ApprovalPolicy::Never,
             builtins::web_search::WebSearchTool,
-        )
-        .register(
-            ToolDefinition {
-                name: "send_message".to_owned(),
-                description: "Sends a message to a messaging platform (Slack, Telegram, Discord, WhatsApp, Home Assistant). Requires the corresponding API token environment variable to be set. Use list_channels first to discover available channel IDs.".to_owned(),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "platform": { "type": "string", "description": "Target platform: 'slack', 'telegram', 'discord', 'whatsapp', or 'homeassistant'." },
-                        "channel": { "type": "string", "description": "Channel or chat ID to send the message to. Slack: channel ID (e.g. C04XXXXXXX). Telegram: chat ID (numeric). Discord: channel ID (numeric)." },
-                        "message": { "type": "string", "description": "The message text to send." },
-                        "thread_id": { "type": "string", "description": "Optional thread/reply ID. Slack: thread_ts. Telegram: reply_to_message_id." }
-                    },
-                    "required": ["platform", "channel", "message"]
-                })),
-            },
-            ApprovalPolicy::Always,
-            builtins::send_message::SendMessageTool,
         )
         .register(
             ToolDefinition {
@@ -1934,26 +1875,6 @@ pub fn default_registry() -> ToolRegistry {
     registry
 }
 
-struct EchoTool;
-
-impl ToolHandler for EchoTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let content =
-            call.arguments
-                .get("message")
-                .cloned()
-                .ok_or_else(|| ToolError::MissingArgument {
-                    tool: call.name.clone(),
-                    argument: "message",
-                })?;
-
-        Ok(ToolOutput {
-            content,
-            metadata: BTreeMap::from([("tool".to_owned(), call.name.clone())]),
-        })
-    }
-}
-
 struct SessionInfoTool;
 
 impl ToolHandler for SessionInfoTool {
@@ -1989,6 +1910,7 @@ pub mod test_utils {
             default_working_dir: None,
             sandbox_manager: None,
             embedding_service: None,
+            path_validator: None,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }
@@ -2031,8 +1953,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 76);
-        assert!(definitions.iter().any(|tool| tool.name == "echo"));
+        assert_eq!(definitions.len(), 72);
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
         assert!(definitions.iter().any(|tool| tool.name == "process"));
@@ -2085,28 +2006,6 @@ mod tests {
         assert!(definitions
             .iter()
             .any(|tool| tool.name == "browser_console"));
-    }
-
-    #[test]
-    fn echo_tool_requires_message_argument() {
-        let registry = default_registry();
-        let error = registry
-            .execute(
-                &ToolCall {
-                    name: "echo".to_owned(),
-                    arguments: BTreeMap::new(),
-                },
-                &sample_context(),
-            )
-            .expect_err("echo should require a message argument");
-
-        assert_eq!(
-            error,
-            ToolError::MissingArgument {
-                tool: "echo".to_owned(),
-                argument: "message",
-            }
-        );
     }
 
     #[test]
@@ -2454,9 +2353,9 @@ mod tests {
     #[test]
     fn search_tools_finds_by_name() {
         let registry = super::default_registry();
-        let results = registry.search_tools("echo");
-        assert!(!results.is_empty(), "should find echo tool");
-        assert!(results.iter().any(|t| t.name == "echo"));
+        let results = registry.search_tools("session_info");
+        assert!(!results.is_empty(), "should find session_info tool");
+        assert!(results.iter().any(|t| t.name == "session_info"));
     }
 
     #[test]

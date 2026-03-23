@@ -16,7 +16,7 @@ use crate::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
     },
-    manifest::PluginManifest,
+    manifest::{PluginManifest, PluginMetadata, PluginPermissions},
     personality::{LuaPersonalityEntry, LuaPersonalityRegistry, LuaRegisteredPersonality},
     tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
@@ -43,6 +43,12 @@ pub struct LuaRuntimeConfig {
     pub disabled_plugins: Vec<String>,
     pub plugin_verbose: Option<bool>,
     pub config_values: BTreeMap<String, String>,
+    /// Sandbox path validator for the `genesis.fs` / `genesis.search` primitives.
+    pub path_validator: Option<Arc<genesis_tools::sandbox::PathValidator>>,
+    /// Working directory for `genesis.process` / `genesis.search` primitives.
+    pub working_dir: Option<PathBuf>,
+    /// Shared HTTP client for the `genesis.http` primitive.
+    pub http_client: Option<Arc<reqwest::blocking::Client>>,
 }
 
 pub struct LuaRuntime {
@@ -320,6 +326,9 @@ impl LuaRuntime {
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
             None,
+            config.path_validator.clone(),
+            config.working_dir.clone(),
+            config.http_client.clone(),
         )?;
         lua.globals().set("genesis", genesis)?;
         strip_unsafe_globals(&lua)?;
@@ -398,6 +407,7 @@ impl LuaRuntime {
         }
 
         self.load_bundled_personalities(config, &configured_disabled)?;
+        self.load_bundled_tools(config, &configured_disabled)?;
         Ok(())
     }
 
@@ -688,6 +698,53 @@ impl LuaRuntime {
         Ok(())
     }
 
+    fn load_bundled_tools(
+        &mut self,
+        config: &LuaRuntimeConfig,
+        configured_disabled: &HashSet<String>,
+    ) -> Result<(), LuaRuntimeError> {
+        for bundled in crate::bundled::bundled_tools() {
+            if configured_disabled.contains(bundled.name) {
+                self.disabled_plugins
+                    .lock()
+                    .expect("disabled plugins mutex should not be poisoned")
+                    .insert(bundled.name.to_owned());
+                continue;
+            }
+            // Skip if a user plugin already registered tools with the same plugin name.
+            if self.plugin_names.iter().any(|n| n == bundled.name) {
+                continue;
+            }
+
+            let permissions = PluginPermissions {
+                primitives: bundled.primitives.iter().map(|s| s.to_string()).collect(),
+                trusted: false,
+                ..Default::default()
+            };
+            let manifest = PluginManifest {
+                plugin: PluginMetadata {
+                    name: bundled.name.to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    description: None,
+                    author: None,
+                    bundled: true,
+                },
+                permissions,
+                genesis: Default::default(),
+            };
+            let bundled_path = PathBuf::from(format!("<bundled:{}>", bundled.name));
+            let plugin = crate::DiscoveredPlugin {
+                name: bundled.name.to_owned(),
+                kind: PluginKind::Bundled,
+                root: bundled_path.clone(),
+                entrypoint: bundled_path,
+                manifest,
+            };
+            self.load_plugin_source(config, &plugin, bundled.source, true);
+        }
+        Ok(())
+    }
+
     fn load_plugin_source(
         &mut self,
         config: &LuaRuntimeConfig,
@@ -750,6 +807,9 @@ impl LuaRuntime {
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
+            config.path_validator.clone(),
+            config.working_dir.clone(),
+            config.http_client.clone(),
         )?;
         env.set("genesis", plugin_genesis)?;
         env.set("_G", env.clone())?;

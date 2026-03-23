@@ -7,8 +7,10 @@ version.workspace = true
 [dependencies]
 genesis-config = { path = "../genesis-config" }
 genesis-storage = { path = "../genesis-storage" }
+genesis-tools = { path = "../genesis-tools" }
 genesis-types = { path = "../genesis-types" }
 mlua.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

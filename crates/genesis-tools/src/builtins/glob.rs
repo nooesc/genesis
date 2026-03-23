@@ -10,7 +10,7 @@ const DEFAULT_LIMIT: usize = 100;
 pub struct GlobSearchTool;
 
 impl ToolHandler for GlobSearchTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let pattern = call
             .arguments
             .get("pattern")
@@ -19,11 +19,17 @@ impl ToolHandler for GlobSearchTool {
                 argument: "pattern",
             })?;
 
-        let base_path = call
+        let path_arg = call
             .arguments
             .get("path")
             .map(|p| p.as_str())
             .unwrap_or(".");
+
+        let validated_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
+        let base_path_owned = validated_path.to_string_lossy().into_owned();
+        let base_path = base_path_owned.as_str();
 
         let type_filter = call
             .arguments
@@ -54,6 +60,20 @@ impl ToolHandler for GlobSearchTool {
                 tool: call.name.clone(),
                 reason: format!("path does not exist: {base_path}"),
             });
+        }
+
+        // If the glob pattern is an absolute path, validate its directory
+        // component through the path validator to prevent sandbox escapes.
+        if pattern.starts_with('/') {
+            let pattern_dir = Path::new(pattern).parent().unwrap_or(Path::new("/"));
+            if let Some(ref validator) = context.path_validator {
+                validator
+                    .validate(&pattern_dir.to_string_lossy())
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: call.name.clone(),
+                        reason: format!("absolute glob pattern blocked: {e}"),
+                    })?;
+            }
         }
 
         // Build the full glob pattern. If the pattern already starts with the

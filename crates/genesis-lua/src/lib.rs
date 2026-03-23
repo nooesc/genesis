@@ -4,10 +4,11 @@ pub mod discovery;
 pub mod hooks;
 pub mod manifest;
 pub mod personality;
+pub mod primitives;
 pub mod runtime;
 pub mod tools;
 
-pub use bundled::{bundled_personalities, BundledPersonality};
+pub use bundled::{bundled_personalities, bundled_tools, BundledPersonality, BundledTool};
 pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
 pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
 pub use personality::{LuaPersonalityRegistry, LuaRegisteredPersonality};
@@ -73,7 +74,10 @@ mod tests {
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["logger".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"logger".to_owned()),
+            "user plugin should be loaded"
+        );
     }
 
     #[test]
@@ -549,7 +553,10 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["logger".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"logger".to_owned()),
+            "user plugin should be loaded"
+        );
         assert_eq!(
             runtime.logs(),
             vec!["plugin booted".to_owned()],
@@ -597,14 +604,21 @@ genesis.register_tool({
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         let tools = runtime.registered_tools();
+        let user_tools: Vec<_> = tools
+            .iter()
+            .filter(|t| t.plugin_name == "word-tools")
+            .collect();
 
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].definition.name, "word_count");
-        assert_eq!(tools[0].definition.description, "Count words in a path");
-        assert_eq!(tools[0].plugin_name, "word-tools");
-        assert_eq!(tools[0].permissions.tools, vec!["read_file"]);
+        assert_eq!(user_tools.len(), 1);
+        assert_eq!(user_tools[0].definition.name, "word_count");
         assert_eq!(
-            tools[0].definition.parameters,
+            user_tools[0].definition.description,
+            "Count words in a path"
+        );
+        assert_eq!(user_tools[0].plugin_name, "word-tools");
+        assert_eq!(user_tools[0].permissions.tools, vec!["read_file"]);
+        assert_eq!(
+            user_tools[0].definition.parameters,
             Some(json!({
                 "type": "object",
                 "properties": {
@@ -818,6 +832,7 @@ genesis.register_personality({
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
                 config_values: BTreeMap::new(),
+                ..Default::default()
             })
             .build()
             .expect("runtime should build");
@@ -984,9 +999,14 @@ genesis.register_tool({
         .expect("plugin should write");
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
+        let echoer_tools: Vec<_> = runtime
+            .registered_tools()
+            .into_iter()
+            .filter(|t| t.definition.name == "echoer")
+            .collect();
 
-        assert_eq!(runtime.registered_tools().len(), 1);
-        assert_eq!(runtime.registered_tools()[0].plugin_name, "first");
+        assert_eq!(echoer_tools.len(), 1);
+        assert_eq!(echoer_tools[0].plugin_name, "first");
         assert!(
             runtime
                 .plugin_errors()
@@ -1018,7 +1038,10 @@ error("boom")
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
 
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "broken_tool"),
             "failed plugins must not leave registered tools behind"
         );
         assert!(
@@ -1056,7 +1079,10 @@ end)
 
         let runtime = test_runtime(dir.path(), BTreeMap::new()).expect("runtime should build");
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "late_tool"),
             "plugin load should not eagerly register the late tool"
         );
 
@@ -1069,7 +1095,10 @@ end)
             crate::hooks::PreHookOutcome::Allow("hello".to_owned())
         );
         assert!(
-            runtime.registered_tools().is_empty(),
+            !runtime
+                .registered_tools()
+                .iter()
+                .any(|t| t.definition.name == "late_tool"),
             "tool registration should stay closed after plugin load"
         );
         assert!(
@@ -1305,7 +1334,11 @@ end)
         )
         .expect("runtime should build");
 
-        assert_eq!(runtime.plugin_names(), vec!["enabled".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"enabled".to_owned()),
+            "enabled plugin should be loaded"
+        );
+        assert!(!runtime.plugin_names().contains(&"disabled".to_owned()));
         assert_eq!(runtime.logs(), vec!["enabled loaded".to_owned()]);
     }
 
@@ -1320,7 +1353,11 @@ end)
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"good".to_owned()),
+            "good plugin should be loaded"
+        );
+        assert!(!runtime.plugin_names().contains(&"broken".to_owned()));
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1351,7 +1388,10 @@ name = "broken"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["good".to_owned()]);
+        assert!(
+            runtime.plugin_names().contains(&"good".to_owned()),
+            "good plugin should be loaded"
+        );
         assert_eq!(runtime.logs(), vec!["good loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1385,9 +1425,14 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["alpha".to_owned(), "gamma".to_owned()],
+        let names = runtime.plugin_names();
+        assert!(
+            names.contains(&"alpha".to_owned()),
+            "alpha should be loaded"
+        );
+        assert!(
+            names.contains(&"gamma".to_owned()),
+            "gamma should be loaded"
         );
         assert_eq!(
             runtime.logs(),
@@ -1415,10 +1460,9 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["first".to_owned(), "second".to_owned()]
-        );
+        let names = runtime.plugin_names();
+        assert!(names.contains(&"first".to_owned()));
+        assert!(names.contains(&"second".to_owned()));
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -1444,10 +1488,9 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(
-            runtime.plugin_names(),
-            vec!["first".to_owned(), "second".to_owned()]
-        );
+        let names = runtime.plugin_names();
+        assert!(names.contains(&"first".to_owned()));
+        assert!(names.contains(&"second".to_owned()));
         assert_eq!(runtime.logs(), vec!["second loaded".to_owned()]);
         assert!(
             runtime.plugin_errors().is_empty(),
@@ -1473,7 +1516,8 @@ version = "0.1.0"
         let runtime =
             test_runtime(dir.path(), BTreeMap::new()).expect("runtime should still build");
 
-        assert_eq!(runtime.plugin_names(), vec!["observer".to_owned()]);
+        assert!(runtime.plugin_names().contains(&"observer".to_owned()));
+        assert!(!runtime.plugin_names().contains(&"mutator".to_owned()));
         assert_eq!(runtime.logs(), vec!["observer loaded".to_owned()]);
         assert_eq!(runtime.plugin_errors().len(), 1);
         assert!(
@@ -1529,6 +1573,70 @@ version = "0.1.0"
         assert_eq!(runtime.tool_timeout_ms(), 11);
 
         std::env::remove_var("GENESIS_PLUGIN_TOOL_TIMEOUT_MS");
+    }
+
+    #[test]
+    fn config_env_returns_allowed_var() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("GENESIS_TEST_VAR", "hello");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('GENESIS_TEST_VAR')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!("hello"));
+
+        std::env::remove_var("GENESIS_TEST_VAR");
+    }
+
+    #[test]
+    fn config_env_blocks_disallowed_var() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("DATABASE_URL", "secret");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('DATABASE_URL')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!(null));
+
+        std::env::remove_var("DATABASE_URL");
+    }
+
+    #[test]
+    fn config_env_returns_nil_for_missing() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::remove_var("GENESIS_NONEXISTENT_VAR_12345");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let runtime = build_test_runtime_with_disabled_plugins_and_verbose(
+            dir.path(),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+        .expect("runtime should build");
+
+        let value = runtime
+            .eval_string("return genesis.config.env('GENESIS_NONEXISTENT_VAR_12345')")
+            .expect("config env should evaluate");
+        assert_eq!(value, json!(null));
     }
 
     fn write_package_plugin(
@@ -1665,7 +1773,372 @@ tools = [{tools_list}]
                 disabled_plugins,
                 plugin_verbose,
                 config_values,
+                ..Default::default()
             })
             .build()
+    }
+
+    #[test]
+    fn integration_lua_tool_uses_fs_read_and_json_encode() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let test_file = dir.path().join("sample.txt");
+        fs::write(&test_file, "Hello from Genesis!").expect("write should succeed");
+
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+
+        // Write a trusted package plugin that registers a tool using primitives.
+        let package_dir = plugin_dir.join("file_reader");
+        fs::create_dir_all(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_tool({
+    name = "file_to_json",
+    description = "Read a file and return its content as JSON",
+    parameters = {
+        path = { type = "string", description = "File path", required = true },
+    },
+    run = function(args)
+        local content = genesis.fs.read(args.path)
+        return genesis.json.encode({ content = content, length = #content })
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "file_reader"
+version = "0.1.0"
+
+[permissions]
+trusted = true
+"#,
+        )
+        .expect("manifest should write");
+
+        let validator = Arc::new(genesis_tools::sandbox::PathValidator::new(Some(
+            dir.path().to_path_buf(),
+        )));
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: plugin_dir.clone(),
+                session: LuaSessionContext {
+                    id: "integration-test".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                path_validator: Some(validator),
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        // Verify the tool was registered.
+        let tools = runtime.registered_tools();
+        assert!(
+            tools.iter().any(|t| t.definition.name == "file_to_json"),
+            "file_to_json tool should be registered; tools: {:?}",
+            tools.iter().map(|t| &t.definition.name).collect::<Vec<_>>()
+        );
+
+        // Invoke the tool.
+        let output = runtime
+            .invoke_tool(
+                "file_to_json",
+                BTreeMap::from([("path".to_owned(), test_file.to_string_lossy().into_owned())]),
+            )
+            .expect("tool invocation should succeed");
+
+        // The tool returns a JSON-encoded string via genesis.json.encode,
+        // so the output is a Text variant containing a JSON string.
+        let text = match &output {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            crate::LuaToolOutput::Json(v) => v.to_string(),
+            crate::LuaToolOutput::TextWithMetadata { content, .. } => content.clone(),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("output should be valid JSON");
+        assert_eq!(parsed["content"], json!("Hello from Genesis!"));
+        assert_eq!(parsed["length"], json!(19));
+    }
+
+    fn build_bundled_test_runtime() -> crate::LuaRuntime {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-bundled".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build")
+    }
+
+    #[test]
+    fn bundled_echo_tool_returns_message() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "echo",
+                BTreeMap::from([("message".to_owned(), "hello world".to_owned())]),
+            )
+            .expect("echo tool should succeed");
+        match result {
+            crate::LuaToolOutput::Text(text) => assert_eq!(text, "hello world"),
+            other => panic!("expected Text output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_think_tool_returns_empty() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "think",
+                BTreeMap::from([("thought".to_owned(), "analyzing the problem...".to_owned())]),
+            )
+            .expect("think tool should succeed");
+        match result {
+            crate::LuaToolOutput::Text(text) => assert!(text.is_empty()),
+            other => panic!("expected empty Text output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_clarify_tool_formats_question() {
+        let rt = build_bundled_test_runtime();
+        let result = rt
+            .invoke_tool(
+                "clarify",
+                BTreeMap::from([
+                    ("question".to_owned(), "Which database?".to_owned()),
+                    ("choices".to_owned(), "PostgreSQL, MySQL, SQLite".to_owned()),
+                ]),
+            )
+            .expect("clarify tool should succeed");
+        match result {
+            crate::LuaToolOutput::TextWithMetadata { content, metadata } => {
+                assert!(
+                    content.contains("[Clarification needed]"),
+                    "should contain header"
+                );
+                assert!(
+                    content.contains("Which database?"),
+                    "should contain question"
+                );
+                assert!(content.contains("1. PostgreSQL"), "should list option 1");
+                assert!(content.contains("2. MySQL"), "should list option 2");
+                assert!(content.contains("3. SQLite"), "should list option 3");
+                assert_eq!(
+                    metadata.get("requires_input").map(|s| s.as_str()),
+                    Some("true"),
+                    "should have requires_input metadata"
+                );
+            }
+            other => panic!("expected TextWithMetadata output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_todo_add_and_list() {
+        let rt = build_bundled_test_runtime();
+        // Add an item
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([
+                    ("action".to_owned(), "add".to_owned()),
+                    ("text".to_owned(), "Write tests".to_owned()),
+                ]),
+            )
+            .expect("todo add should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(text.contains("Added item #1"), "should confirm add: {text}");
+
+        // List items
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+            )
+            .expect("todo list should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("[ ] #1: Write tests"),
+            "should show pending item: {text}"
+        );
+        assert!(text.contains("1 pending"), "should show summary: {text}");
+    }
+
+    #[test]
+    fn bundled_todo_update_status() {
+        let rt = build_bundled_test_runtime();
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "Task A".to_owned()),
+            ]),
+        )
+        .expect("todo add should succeed");
+
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([
+                    ("action".to_owned(), "update".to_owned()),
+                    ("id".to_owned(), "1".to_owned()),
+                    ("status".to_owned(), "done".to_owned()),
+                ]),
+            )
+            .expect("todo update should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("Updated item #1 to done"),
+            "should confirm update: {text}"
+        );
+    }
+
+    #[test]
+    fn bundled_todo_clear() {
+        let rt = build_bundled_test_runtime();
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([
+                ("action".to_owned(), "add".to_owned()),
+                ("text".to_owned(), "Task".to_owned()),
+            ]),
+        )
+        .expect("todo add should succeed");
+
+        rt.invoke_tool(
+            "todo",
+            BTreeMap::from([("action".to_owned(), "clear".to_owned())]),
+        )
+        .expect("todo clear should succeed");
+
+        let result = rt
+            .invoke_tool(
+                "todo",
+                BTreeMap::from([("action".to_owned(), "list".to_owned())]),
+            )
+            .expect("todo list should succeed");
+        let text = match &result {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            other => panic!("expected Text output, got {other:?}"),
+        };
+        assert!(
+            text.contains("No items"),
+            "should show empty list after clear: {text}"
+        );
+    }
+
+    /// Build a bundled test runtime while holding the env lock, returning both
+    /// the runtime and the lock guard so env-dependent invocations stay protected.
+    fn build_bundled_test_runtime_with_env_guard(
+    ) -> (crate::LuaRuntime, std::sync::MutexGuard<'static, ()>) {
+        let guard = env_lock().lock().expect("env lock should not be poisoned");
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let rt = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-messaging".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+        (rt, guard)
+    }
+
+    #[test]
+    fn bundled_send_message_unknown_platform_errors() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "unknown_platform".to_owned()),
+                ("channel".to_owned(), "test".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "unknown platform should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unsupported platform"),
+            "error should mention unsupported platform: {err}"
+        );
+    }
+
+    #[test]
+    fn bundled_send_message_slack_requires_token() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("SLACK_BOT_TOKEN");
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "slack".to_owned()),
+                ("channel".to_owned(), "C123".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "slack without token should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SLACK_BOT_TOKEN"),
+            "error should mention SLACK_BOT_TOKEN: {err}"
+        );
+    }
+
+    #[test]
+    fn bundled_send_message_telegram_requires_token() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "telegram".to_owned()),
+                ("channel".to_owned(), "123456".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "telegram without token should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("TELEGRAM_BOT_TOKEN"),
+            "error should mention TELEGRAM_BOT_TOKEN: {err}"
+        );
     }
 }

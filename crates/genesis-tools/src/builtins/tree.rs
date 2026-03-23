@@ -10,14 +10,19 @@ const MAX_ENTRIES: usize = 2000;
 pub struct ListTreeTool;
 
 impl ToolHandler for ListTreeTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
                 tool: call.name.clone(),
                 argument: "path",
             })?;
+
+        let validated_path =
+            crate::sandbox::validate_tool_path(path_arg, &call.name, &context.path_validator)?;
+
+        let path = &validated_path.to_string_lossy().into_owned();
 
         let max_depth: usize = call
             .arguments

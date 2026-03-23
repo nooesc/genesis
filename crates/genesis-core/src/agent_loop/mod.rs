@@ -1372,6 +1372,7 @@ mod tests {
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
                 config_values: BTreeMap::new(),
+                ..Default::default()
             })
             .build()
             .expect("lua runtime should build");
@@ -1787,7 +1788,7 @@ tools = [{tools_list}]
     #[tokio::test]
     async fn execute_tool_call_suggests_similar_name() {
         let agent = test_agent();
-        // "ech" is close to "echo" — should suggest it
+        // "session_inf" is close to "session_info" — should suggest it
         let result = execute_single_tool(
             &agent.tools,
             &agent.subagent_spawner,
@@ -1795,7 +1796,7 @@ tools = [{tools_list}]
                 id: "tool-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "ech".to_owned(),
+                    name: "session_inf".to_owned(),
                     arguments: "{}".to_owned(),
                 },
             },
@@ -1804,7 +1805,7 @@ tools = [{tools_list}]
 
         let (msg, _) = result.expect("should be recoverable");
         assert!(msg.contains("Did you mean"));
-        assert!(msg.contains("echo"));
+        assert!(msg.contains("session_info"));
     }
 
     #[tokio::test]
@@ -1817,7 +1818,7 @@ tools = [{tools_list}]
                 id: "tool-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
+                    name: "read_file".to_owned(),
                     arguments: "{}".to_owned(),
                 },
             },
@@ -1839,7 +1840,7 @@ tools = [{tools_list}]
                 id: "tool-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
+                    name: "session_info".to_owned(),
                     arguments: "not valid json at all".to_owned(),
                 },
             },
@@ -1866,7 +1867,7 @@ tools = [{tools_list}]
                 id: "tool-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
+                    name: "session_info".to_owned(),
                     arguments: "[1,2,3]".to_owned(),
                 },
             },
@@ -1886,16 +1887,16 @@ tools = [{tools_list}]
                 id: "call-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
-                    arguments: r#"{"message":"first"}"#.to_owned(),
+                    name: "session_info".to_owned(),
+                    arguments: "{}".to_owned(),
                 },
             },
             ToolCallEntry {
                 id: "call-2".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
-                    arguments: r#"{"message":"second"}"#.to_owned(),
+                    name: "session_info".to_owned(),
+                    arguments: "{}".to_owned(),
                 },
             },
         ];
@@ -1913,12 +1914,12 @@ tools = [{tools_list}]
 
         assert_eq!(results.len(), 2);
         assert!(
-            results[0].0.contains("first"),
-            "first result should contain 'first'"
+            results[0].0.contains("session="),
+            "first result should contain session info"
         );
         assert!(
-            results[1].0.contains("second"),
-            "second result should contain 'second'"
+            results[1].0.contains("session="),
+            "second result should contain session info"
         );
     }
 
@@ -1929,8 +1930,8 @@ tools = [{tools_list}]
             id: "call-1".to_owned(),
             call_type: "function".to_owned(),
             function: genesis_provider::FunctionCall {
-                name: "echo".to_owned(),
-                arguments: r#"{"message":"solo"}"#.to_owned(),
+                name: "session_info".to_owned(),
+                arguments: "{}".to_owned(),
             },
         }];
 
@@ -1946,7 +1947,7 @@ tools = [{tools_list}]
         .expect("single-item parallel should succeed");
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].0.contains("solo"));
+        assert!(results[0].0.contains("session="));
     }
 
     #[tokio::test]
@@ -1957,8 +1958,8 @@ tools = [{tools_list}]
                 id: "call-1".to_owned(),
                 call_type: "function".to_owned(),
                 function: genesis_provider::FunctionCall {
-                    name: "echo".to_owned(),
-                    arguments: r#"{"message":"ok"}"#.to_owned(),
+                    name: "session_info".to_owned(),
+                    arguments: "{}".to_owned(),
                 },
             },
             ToolCallEntry {
@@ -1984,7 +1985,7 @@ tools = [{tools_list}]
         // ToolNotFound is now recoverable, so the parallel execution should succeed
         let results = result.expect("should recover from ToolNotFound");
         assert_eq!(results.len(), 2);
-        assert!(results[0].0.contains("ok")); // echo succeeded
+        assert!(results[0].0.contains("session=")); // session_info succeeded
         assert!(results[1].0.contains("not found")); // helpful error message
     }
 
@@ -2430,8 +2431,8 @@ tools = [{tools_list}]
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "echo",
-                            "arguments": "{\"message\":\"hi\"}"
+                            "name": "session_info",
+                            "arguments": "{}"
                         }
                     }]
                 },
@@ -2498,8 +2499,8 @@ tools = [{tools_list}]
             .find(|result| result.event == HookEvent::PostToolCall)
             .expect("post tool hook");
 
-        assert!(pre.stdout.contains("\"tool_name\":\"echo\""));
-        assert!(post.stdout.contains("\"tool_name\":\"echo\""));
+        assert!(pre.stdout.contains("\"tool_name\":\"session_info\""));
+        assert!(post.stdout.contains("\"tool_name\":\"session_info\""));
         assert!(post.stdout.contains("\"success\":true"));
     }
 
@@ -2681,8 +2682,8 @@ end)
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "echo",
-                            "arguments": "{\"message\":\"hi\"}"
+                            "name": "session_info",
+                            "arguments": "{}"
                         }
                     }]
                 },
@@ -2816,8 +2817,8 @@ genesis.register_personality({
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "echo",
-                            "arguments": "{\"message\":\"hi\"}"
+                            "name": "session_info",
+                            "arguments": "{}"
                         }
                     }]
                 },
@@ -2940,8 +2941,8 @@ end)
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "echo",
-                            "arguments": "{\"message\":\"hi\"}"
+                            "name": "session_info",
+                            "arguments": "{}"
                         }
                     }]
                 },
@@ -3197,8 +3198,8 @@ end)
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "echo",
-                            "arguments": "{\"message\":\"hi\"}"
+                            "name": "session_info",
+                            "arguments": "{}"
                         }
                     }]
                 },
