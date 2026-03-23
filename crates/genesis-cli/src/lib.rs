@@ -5,7 +5,7 @@ mod format;
 mod slash;
 
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -483,6 +483,8 @@ pub enum EvalCommand {
             help = "Delete duplicate files, keeping the first file in each group"
         )]
         remove: bool,
+        #[arg(long, help = "Skip confirmation prompt when --remove is used")]
+        force: bool,
     },
     #[command(about = "Filter trajectories by criteria and copy matching files to output")]
     Filter {
@@ -637,6 +639,8 @@ pub enum MemoryCommand {
     Delete {
         /// Memory ID to delete
         id: String,
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
     },
 }
 
@@ -751,6 +755,8 @@ pub enum SessionsCommand {
     Delete {
         #[arg(help = "Session ID to delete")]
         id: String,
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
     },
     #[command(about = "Show aggregate usage statistics across all sessions")]
     Stats,
@@ -758,6 +764,10 @@ pub enum SessionsCommand {
     Purge {
         #[arg(long, help = "Delete sessions older than N days (e.g. 30)")]
         older_than: u32,
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
+        #[arg(long, help = "Preview what would be deleted without actually deleting")]
+        dry_run: bool,
     },
     #[command(about = "Rename a session (set its title)")]
     Rename {
@@ -793,6 +803,8 @@ pub enum SkillsCommand {
     Delete {
         #[arg(help = "Skill name to delete")]
         name: String,
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
     },
     #[command(about = "Export all skills as JSON")]
     Export,
@@ -939,6 +951,8 @@ pub enum ScheduleCommand {
     Delete {
         #[arg(help = "Schedule id to delete")]
         id: String,
+        #[arg(long, help = "Skip confirmation prompt")]
+        force: bool,
     },
 }
 
@@ -1029,6 +1043,38 @@ pub enum CliError {
     Tui(String),
     #[error("{0}")]
     Other(String),
+    #[error("operation cancelled")]
+    Aborted,
+}
+
+/// Prompt the user for confirmation before a destructive operation.
+///
+/// When `force` is `true` the prompt is skipped and the function returns `Ok(())`.
+/// When stdin is not a terminal (piped/non-interactive), the operation is rejected
+/// unless `force` is `true`.
+///
+/// `message` should describe what will happen, e.g. "Delete session abc123?".
+fn confirm_destructive(message: &str, force: bool) -> Result<(), CliError> {
+    if force {
+        return Ok(());
+    }
+
+    if !io::stdin().is_terminal() {
+        return Err(CliError::Other(
+            "destructive operation requires --force when stdin is not a terminal".into(),
+        ));
+    }
+
+    eprint!("{message} [y/N] ");
+    let _ = io::stderr().flush();
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).map_err(CliError::Io)?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError::Aborted)
+    }
 }
 
 pub async fn run(cli: Cli) -> Result<String, CliError> {
@@ -1376,7 +1422,22 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 dir,
                 recursive,
                 remove,
-            } => commands::eval::run_eval_deduplicate(&dir, recursive, remove, cli.json),
+                force,
+            } => {
+                if remove {
+                    // Preview duplicate count before confirming
+                    let preview =
+                        commands::eval::run_eval_deduplicate(&dir, recursive, false, false)?;
+                    // Only prompt if there are actual duplicates to remove
+                    if !preview.contains("No duplicate") {
+                        confirm_destructive(
+                            "Remove duplicate trajectory files?",
+                            force,
+                        )?;
+                    }
+                }
+                commands::eval::run_eval_deduplicate(&dir, recursive, remove, cli.json)
+            }
             EvalCommand::Filter {
                 dir,
                 output,
@@ -1525,7 +1586,15 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_session_list(&results, &ui))
                     }
                 }
-                SessionsCommand::Delete { id } => {
+                SessionsCommand::Delete { id, force } => {
+                    // Verify the session exists before prompting
+                    if store.get_session(&id)?.is_none() {
+                        return Err(CliError::SessionNotFound(id));
+                    }
+                    confirm_destructive(
+                        &format!("Delete session {id} and all its messages?"),
+                        force,
+                    )?;
                     let deleted = store.delete_session(&id)?;
                     if deleted {
                         Ok(format!("Deleted session {id}"))
@@ -1541,7 +1610,28 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_usage_stats(&stats))
                     }
                 }
-                SessionsCommand::Purge { older_than } => {
+                SessionsCommand::Purge {
+                    older_than,
+                    force,
+                    dry_run,
+                } => {
+                    let count = store.count_older_than(older_than)?;
+                    if dry_run {
+                        return Ok(format!(
+                            "Would purge {count} session(s) older than {older_than} days"
+                        ));
+                    }
+                    if count == 0 {
+                        return Ok(format!(
+                            "No sessions older than {older_than} days to purge"
+                        ));
+                    }
+                    confirm_destructive(
+                        &format!(
+                            "Purge {count} session(s) older than {older_than} days?"
+                        ),
+                        force,
+                    )?;
                     let deleted = store.purge_older_than(older_than)?;
                     Ok(format!(
                         "Purged {deleted} session(s) older than {older_than} days"
@@ -1585,7 +1675,15 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_skill(&skill))
                     }
                 }
-                SkillsCommand::Delete { name } => {
+                SkillsCommand::Delete { name, force } => {
+                    // Verify the skill exists before prompting
+                    if store.get(&name)?.is_none() {
+                        return Err(CliError::SkillNotFound(name));
+                    }
+                    confirm_destructive(
+                        &format!("Delete skill '{name}'?"),
+                        force,
+                    )?;
                     if !store.delete(&name)? {
                         return Err(CliError::SkillNotFound(name));
                     }
@@ -1711,7 +1809,15 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                 ScheduleCommand::Run => {
                     commands::serve::run_schedule_daemon(&loaded, runtime_overrides).await
                 }
-                ScheduleCommand::Delete { id } => {
+                ScheduleCommand::Delete { id, force } => {
+                    // Verify the schedule exists before prompting
+                    if store.get(&id)?.is_none() {
+                        return Err(CliError::ScheduleNotFound(id));
+                    }
+                    confirm_destructive(
+                        &format!("Delete schedule {id}?"),
+                        force,
+                    )?;
                     if !store.delete(&id)? {
                         return Err(CliError::ScheduleNotFound(id));
                     }
@@ -1884,7 +1990,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         Ok(format::format_memory_list(&memories))
                     }
                 }
-                MemoryCommand::Delete { id } => {
+                MemoryCommand::Delete { id, force } => {
+                    confirm_destructive(
+                        &format!("Delete memory {id}?"),
+                        force,
+                    )?;
                     if store.delete(&id)? {
                         Ok(format!("deleted memory {id}"))
                     } else {
@@ -2268,7 +2378,7 @@ mod tests {
             .expect("skills delete command should parse");
 
         match cli.command {
-            Command::Skills(SkillsCommand::Delete { name }) => {
+            Command::Skills(SkillsCommand::Delete { name, .. }) => {
                 assert_eq!(name, "memory_store");
             }
             other => panic!("unexpected command parsed: {other:?}"),
@@ -2387,7 +2497,7 @@ mod tests {
             .expect("schedule delete command should parse");
 
         match cli.command {
-            Command::Schedule(ScheduleCommand::Delete { id }) => {
+            Command::Schedule(ScheduleCommand::Delete { id, .. }) => {
                 assert_eq!(id, "sched-123");
             }
             other => panic!("unexpected command parsed: {other:?}"),
@@ -2862,7 +2972,7 @@ storage:
             .expect("sessions delete should parse");
 
         match cli.command {
-            Command::Sessions(SessionsCommand::Delete { id }) => {
+            Command::Sessions(SessionsCommand::Delete { id, .. }) => {
                 assert_eq!(id, "session-42");
             }
             other => panic!("unexpected command parsed: {other:?}"),
@@ -3363,7 +3473,7 @@ storage:
         let cli = Cli::try_parse_from(["genesis", "sessions", "purge", "--older-than", "30"])
             .expect("sessions purge should parse");
         match cli.command {
-            Command::Sessions(SessionsCommand::Purge { older_than }) => {
+            Command::Sessions(SessionsCommand::Purge { older_than, .. }) => {
                 assert_eq!(older_than, 30);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -4129,6 +4239,7 @@ trusted = true
                 dir,
                 recursive,
                 remove,
+                ..
             }) => {
                 assert_eq!(dir, "trajectories");
                 assert!(recursive);
@@ -4748,7 +4859,7 @@ trusted = true
         let cli = Cli::try_parse_from(["genesis", "memory", "delete", "mem-123"])
             .expect("memory delete should parse");
         match cli.command {
-            Command::Memory(MemoryCommand::Delete { id }) => {
+            Command::Memory(MemoryCommand::Delete { id, .. }) => {
                 assert_eq!(id, "mem-123");
             }
             other => panic!("unexpected command: {other:?}"),
@@ -7033,6 +7144,205 @@ trusted = true
                 assert_eq!(sort, "newest");
                 assert_eq!(limit, 20);
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    // ── confirm_destructive tests ──────────────────────────────────────
+
+    #[test]
+    fn confirm_destructive_force_skips_prompt() {
+        // With force=true, confirm_destructive always succeeds regardless of tty state
+        assert!(confirm_destructive("Delete everything?", true).is_ok());
+    }
+
+    #[test]
+    fn confirm_destructive_non_interactive_requires_force() {
+        // In CI / piped stdin, confirm_destructive without force should fail.
+        // We can only test this when stdin is NOT a terminal (which is the case in CI).
+        if !io::stdin().is_terminal() {
+            let result = confirm_destructive("Delete everything?", false);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("--force"),
+                "error should mention --force: {err}"
+            );
+        }
+    }
+
+    // ── CLI flag parsing tests for --force / --dry-run ─────────────────
+
+    #[test]
+    fn sessions_delete_parses_force_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "sessions",
+            "delete",
+            "sess-123",
+            "--force",
+        ])
+        .expect("sessions delete --force should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Delete { id, force }) => {
+                assert_eq!(id, "sess-123");
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sessions_delete_defaults_force_false() {
+        let cli =
+            Cli::try_parse_from(["genesis", "sessions", "delete", "sess-123"])
+                .expect("sessions delete should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Delete { force, .. }) => {
+                assert!(!force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sessions_purge_parses_force_and_dry_run() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "sessions",
+            "purge",
+            "--older-than",
+            "30",
+            "--force",
+            "--dry-run",
+        ])
+        .expect("sessions purge --force --dry-run should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Purge {
+                older_than,
+                force,
+                dry_run,
+            }) => {
+                assert_eq!(older_than, 30);
+                assert!(force);
+                assert!(dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sessions_purge_defaults_no_force_no_dry_run() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "sessions",
+            "purge",
+            "--older-than",
+            "7",
+        ])
+        .expect("sessions purge should parse");
+
+        match cli.command {
+            Command::Sessions(SessionsCommand::Purge {
+                older_than,
+                force,
+                dry_run,
+            }) => {
+                assert_eq!(older_than, 7);
+                assert!(!force);
+                assert!(!dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skills_delete_parses_force_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "skills",
+            "delete",
+            "my-skill",
+            "--force",
+        ])
+        .expect("skills delete --force should parse");
+
+        match cli.command {
+            Command::Skills(SkillsCommand::Delete { name, force }) => {
+                assert_eq!(name, "my-skill");
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_delete_parses_force_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "memory",
+            "delete",
+            "mem-42",
+            "--force",
+        ])
+        .expect("memory delete --force should parse");
+
+        match cli.command {
+            Command::Memory(MemoryCommand::Delete { id, force }) => {
+                assert_eq!(id, "mem-42");
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_deduplicate_parses_force_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "eval",
+            "deduplicate",
+            "/tmp/trajectories",
+            "--remove",
+            "--force",
+        ])
+        .expect("eval deduplicate --remove --force should parse");
+
+        match cli.command {
+            Command::Eval(EvalCommand::Deduplicate {
+                dir,
+                recursive,
+                remove,
+                force,
+            }) => {
+                assert_eq!(dir, "/tmp/trajectories");
+                assert!(!recursive);
+                assert!(remove);
+                assert!(force);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schedule_delete_parses_force_flag() {
+        let cli = Cli::try_parse_from([
+            "genesis",
+            "schedule",
+            "delete",
+            "sched-1",
+            "--force",
+        ])
+        .expect("schedule delete --force should parse");
+
+        match cli.command {
+            Command::Schedule(ScheduleCommand::Delete { id, force }) => {
+                assert_eq!(id, "sched-1");
+                assert!(force);
             }
             other => panic!("unexpected command: {other:?}"),
         }

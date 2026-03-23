@@ -223,6 +223,19 @@ mod session_store_tests {
     }
 
     #[test]
+    fn count_older_than_returns_zero_for_recent_sessions() {
+        let dir = tempdir().expect("tempdir should exist");
+        let database_path = dir.path().join("genesis.db");
+        bootstrap(&database_path).expect("bootstrap should succeed");
+
+        let store = SessionStore::new(&database_path);
+        store.create_session("recent", "cli", None).expect("create");
+
+        let count = store.count_older_than(30).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn append_mirror_message_stores_mirror_fields() {
         let dir = tempdir().expect("tempdir should exist");
         let database_path = dir.path().join("genesis.db");
@@ -2027,6 +2040,23 @@ impl SessionStore {
             })?;
 
         Ok(new_session_id.to_owned())
+    }
+
+    /// Count sessions older than `days` days (without deleting them).
+    pub fn count_older_than(&self, days: u32) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        let cutoff = format!("-{days} days");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE created_at < datetime('now', ?1)",
+                params![cutoff],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(count as u64)
     }
 
     /// Delete sessions (and their messages/FTS entries) older than `days` days.
