@@ -88,6 +88,23 @@ fn is_piped_download_to_shell(command: &str) -> bool {
     false
 }
 
+/// Truncate a command string to a safe preview length for error messages.
+/// Uses `char_indices()` for UTF-8 safety — never slices mid-codepoint.
+pub fn truncate_command_preview(command: &str) -> String {
+    const MAX_PREVIEW: usize = 80;
+    if command.len() <= MAX_PREVIEW {
+        return command.to_owned();
+    }
+    // Find the last char boundary at or before position 77 (leaving room for "...")
+    let end = command
+        .char_indices()
+        .take_while(|&(i, _)| i <= 77)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    format!("{}...", &command[..end])
+}
+
 /// Build the appropriate Command based on the configured terminal backend.
 pub fn build_command(
     command: &str,
@@ -228,11 +245,7 @@ impl ToolHandler for ShellExecTool {
                     tool: call.name.clone(),
                     reason: format!(
                         "command blocked: {danger}. Command: `{}`",
-                        if command.len() > 80 {
-                            format!("{}...", &command[..77])
-                        } else {
-                            command.clone()
-                        }
+                        truncate_command_preview(command)
                     ),
                 });
             }
@@ -846,5 +859,34 @@ mod tests {
             port: None,
             identity_file: None,
         })));
+    }
+
+    #[test]
+    fn truncate_command_preview_short_command_unchanged() {
+        assert_eq!(truncate_command_preview("ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn truncate_command_preview_long_command_truncated() {
+        let long = "a".repeat(100);
+        let result = truncate_command_preview(&long);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 83); // 80 chars max + "..."
+    }
+
+    #[test]
+    fn truncate_command_preview_utf8_safe() {
+        // Multi-byte chars: each emoji is 4 bytes. 21 emojis = 84 bytes,
+        // which exceeds the 80-byte limit and must not split a codepoint.
+        let emoji_cmd = "\u{1F600}".repeat(21); // 84 bytes
+        let result = truncate_command_preview(&emoji_cmd);
+        assert!(result.ends_with("..."));
+        // Verify the result is valid UTF-8 (would panic otherwise)
+        let _ = result.as_bytes();
+        // The truncated portion must end on a char boundary and be shorter
+        // than the original (some emojis were removed).
+        let without_dots = result.trim_end_matches("...");
+        assert!(without_dots.len() < emoji_cmd.len());
+        assert!(emoji_cmd.is_char_boundary(without_dots.len()));
     }
 }
