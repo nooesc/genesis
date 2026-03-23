@@ -1,6 +1,7 @@
 pub mod builtins;
 pub mod cache;
 pub mod http;
+pub mod sandbox;
 pub mod url_safety;
 
 use std::collections::BTreeMap;
