@@ -22,9 +22,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use genesis_core::agent_loop::StreamEvent;
+use genesis_core::agent_loop::{AgentError, StreamEvent};
 use genesis_core::execution::{
-    delivery_platform_from_str, SessionExecutionService, SessionTurnInput,
+    delivery_platform_from_str, SessionExecutionError, SessionExecutionService, SessionTurnInput,
 };
 use genesis_storage::{
     EmbeddingStore, MemoryStore, PairingStore, ScheduleStore, SessionStore, SkillStore,
@@ -428,10 +428,23 @@ impl ApiError {
     }
 
     /// Build an error with a custom status code and code string.
+    ///
+    /// 5xx errors are logged server-side so upstream failures are always
+    /// captured even when the caller constructs the error directly.
     pub fn with_status(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+        let error = message.into();
+        let code = code.into();
+        if status.is_server_error() {
+            error!(
+                status = status.as_u16(),
+                code = code.as_str(),
+                error = error.as_str(),
+                "server error response"
+            );
+        }
         Self {
-            error: message.into(),
-            code: code.into(),
+            error,
+            code,
             status,
         }
     }
@@ -439,11 +452,8 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = serde_json::json!({
-            "error": self.error,
-            "code": self.code,
-        });
-        (self.status, Json(body)).into_response()
+        let status = self.status;
+        (status, Json(self)).into_response()
     }
 }
 
@@ -452,6 +462,71 @@ impl IntoResponse for ApiError {
 /// Internal error details are logged server-side but never returned to clients.
 fn storage_err(e: impl std::fmt::Display) -> ApiError {
     ApiError::internal(format!("storage operation failed: {e}"))
+}
+
+/// Map a [`SessionExecutionError`] into an appropriate [`ApiError`].
+///
+/// Known, actionable failures (missing API key, circuit breaker open) are
+/// preserved in the response so that callers can take corrective action.
+/// Unknown failures remain generic 500s.
+fn map_execution_error(e: SessionExecutionError) -> ApiError {
+    use genesis_provider::ProviderError;
+
+    match e {
+        SessionExecutionError::Provider(ProviderError::MissingApiKey { ref env_var }) => {
+            ApiError::with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "missing_api_key",
+                format!("provider API key not configured (set {env_var})"),
+            )
+        }
+        SessionExecutionError::Provider(ProviderError::CircuitOpen {
+            failures,
+            cooldown_secs,
+        }) => ApiError::with_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "circuit_open",
+            format!(
+                "provider circuit breaker is open ({failures} consecutive failures, cooldown {cooldown_secs}s)"
+            ),
+        ),
+        SessionExecutionError::Provider(ProviderError::ApiError { status, ref body }) => {
+            let http_status =
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            ApiError::with_status(http_status, "provider_error", format!("provider returned error: {body}"))
+        }
+        SessionExecutionError::Agent(AgentError::BudgetExceeded { used, limit }) => {
+            ApiError::with_status(
+                StatusCode::PAYMENT_REQUIRED,
+                "budget_exceeded",
+                format!("budget exceeded: ${used:.4} / ${limit:.4}"),
+            )
+        }
+        SessionExecutionError::Agent(AgentError::MaxTurnsExceeded(max)) => {
+            ApiError::with_status(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "max_turns_exceeded",
+                format!("agent loop exceeded maximum of {max} turns"),
+            )
+        }
+        SessionExecutionError::Agent(AgentError::IterationsExhausted { used, limit }) => {
+            ApiError::with_status(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "iterations_exhausted",
+                format!("iteration budget exhausted: {used} / {limit} iterations"),
+            )
+        }
+        SessionExecutionError::Agent(AgentError::Cancelled) => ApiError::with_status(
+            StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+            "cancelled",
+            "agent loop was cancelled",
+        ),
+        _ => ApiError::with_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "execution_error",
+            "agent execution failed",
+        ),
+    }
 }
 
 /// Response body from the `/chat` endpoint.
@@ -1644,7 +1719,14 @@ async fn search_messages_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let results = store
         .search_messages(&params.q, params.limit)
-        .map_err(|e| ApiError::internal(format!("search error: {e}")))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("fts5") || msg.contains("MATCH") || msg.contains("syntax") {
+                ApiError::validation(format!("invalid search query syntax: {msg}"))
+            } else {
+                ApiError::internal(format!("search error: {e}"))
+            }
+        })?;
 
     Ok(Json(serde_json::json!({
         "query": params.q,
@@ -2953,11 +3035,7 @@ async fn chat_handler(
                     error = %e,
                     "chat request failed"
                 );
-                ApiError::with_status(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "execution_error",
-                    "agent execution failed",
-                )
+                map_execution_error(e)
             })?;
         info!(
             request_id = request_id.as_str(),
@@ -3094,11 +3172,7 @@ async fn openai_blocking_response(
             .await
             .map_err(|e| {
                 error!(error = %e, "OpenAI-compat request failed");
-                ApiError::with_status(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "execution_error",
-                    "agent execution failed",
-                )
+                map_execution_error(e)
             })?;
 
         let body = serde_json::json!({
