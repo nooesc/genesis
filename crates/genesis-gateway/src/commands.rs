@@ -425,6 +425,7 @@ mod tests {
                 batch: None,
                 tool_policy_path: None,
                 approval_mode: genesis_config::ApprovalMode::default(),
+                stuck_loop_threshold: 5,
             },
             gateway: None,
             plugins: genesis_config::PluginsConfig::default(),

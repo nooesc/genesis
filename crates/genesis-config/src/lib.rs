@@ -375,6 +375,18 @@ pub struct RuntimeConfig {
     /// interactive confirmation before execution.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
+    /// Number of consecutive failures for the same tool before injecting a
+    /// "try a different approach" nudge. Default: 5.
+    #[serde(default = "default_stuck_loop_threshold", skip_serializing_if = "is_default_stuck_loop_threshold")]
+    pub stuck_loop_threshold: usize,
+}
+
+const fn default_stuck_loop_threshold() -> usize {
+    5
+}
+
+fn is_default_stuck_loop_threshold(val: &usize) -> bool {
+    *val == default_stuck_loop_threshold()
 }
 
 /// Batch API routing configuration.
@@ -971,6 +983,8 @@ struct FileRuntimeConfig {
     tool_policy_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_mode: Option<ApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stuck_loop_threshold: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -1060,6 +1074,7 @@ pub fn example_config(config_path_override: Option<&Path>) -> Result<GenesisConf
             batch: None,
             tool_policy_path: None,
             approval_mode: ApprovalMode::default(),
+            stuck_loop_threshold: default_stuck_loop_threshold(),
         },
         plugins: PluginsConfig::default(),
         gateway: None,
@@ -1229,6 +1244,12 @@ pub fn load_from_map(
         batch: rt.and_then(|r| r.batch.clone()),
         tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
         approval_mode: rt.and_then(|r| r.approval_mode).unwrap_or_default(),
+        stuck_loop_threshold: parse_env(
+            env,
+            "GENESIS_STUCK_LOOP_THRESHOLD",
+            rt.and_then(|r| r.stuck_loop_threshold)
+                .unwrap_or_else(default_stuck_loop_threshold),
+        )?,
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

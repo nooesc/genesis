@@ -229,6 +229,9 @@ pub struct AgentLoopConfig {
     /// Compiled tool policy for permission scoping. When set, tool calls
     /// are checked against allow/deny rules before execution.
     pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
+    /// Number of consecutive failures for the same tool before injecting a
+    /// stuck-loop nudge. Default: 5.
+    pub stuck_loop_threshold: usize,
 }
 
 /// Default number of tool calls between memory consolidation nudges.
@@ -270,6 +273,7 @@ impl Default for AgentLoopConfig {
             core_tools: None,
             routing: None,
             tool_policy: None,
+            stuck_loop_threshold: DEFAULT_STUCK_LOOP_THRESHOLD,
         }
     }
 }
@@ -410,11 +414,14 @@ pub struct AgentLoop {
     /// Tools discovered via `find_tools` during this session. These are added
     /// to the core set for subsequent LLM requests.
     discovered_tools: HashSet<String>,
+    /// Tools that have already been nudged about. If the agent calls a nudged
+    /// tool and it fails again, a stronger escalation message is injected.
+    nudged_tools: HashSet<String>,
 }
 
-/// Number of consecutive failures for the same tool before injecting a
-/// "try a different approach" nudge.
-const STUCK_LOOP_THRESHOLD: usize = genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
+/// Default number of consecutive failures for the same tool before injecting
+/// a "try a different approach" nudge (overrides the centralized default of 3).
+const DEFAULT_STUCK_LOOP_THRESHOLD: usize = 5;
 
 impl AgentLoop {
     pub fn new(
@@ -484,6 +491,7 @@ impl AgentLoop {
             cache_misses: 0,
             compiled_guardrails,
             discovered_tools: HashSet::new(),
+            nudged_tools: HashSet::new(),
         }
     }
 
@@ -1338,6 +1346,7 @@ impl AgentLoop {
                             *count += 1;
                         } else {
                             self.tool_failure_counts.remove(&tc.function.name);
+                            self.nudged_tools.remove(&tc.function.name);
                         }
                         self.hooks.on_tool_call_end(
                             &hook_session,
@@ -1869,6 +1878,7 @@ impl AgentLoop {
                                 *count += 1;
                             } else {
                                 self.tool_failure_counts.remove(&tc.function.name);
+                                self.nudged_tools.remove(&tc.function.name);
                                 // Auto-discover tools called outside core set.
                                 if self.config.core_tools.is_some() {
                                     self.discover_tool(&tc.function.name);
@@ -2109,6 +2119,7 @@ impl AgentLoop {
                                     *count += 1;
                                 } else {
                                     self.tool_failure_counts.remove(&tc.function.name);
+                                    self.nudged_tools.remove(&tc.function.name);
                                 }
                                 self.fire_shell_hooks(
                                     HookEvent::PostToolCall,
@@ -2243,11 +2254,16 @@ impl AgentLoop {
 
     /// Check if any tool has failed too many times in a row and inject a
     /// system nudge telling the LLM to try a different approach.
+    ///
+    /// If a tool was already nudged (i.e. it hit the threshold before and
+    /// was given guidance) and continues to fail past the threshold again,
+    /// an escalated warning is injected instead.
     fn maybe_inject_stuck_nudge(&mut self) {
+        let threshold = self.config.stuck_loop_threshold;
         let stuck_tools: Vec<String> = self
             .tool_failure_counts
             .iter()
-            .filter(|(_, count)| **count >= STUCK_LOOP_THRESHOLD)
+            .filter(|(_, count)| **count >= threshold)
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -2256,26 +2272,53 @@ impl AgentLoop {
         }
 
         let hook_session = self.session_id_str().to_owned();
+
+        // Separate tools into first-time nudges vs. escalations.
+        let mut first_nudge_tools = Vec::new();
+        let mut escalated_tools = Vec::new();
+
         for tool in &stuck_tools {
             let count = self.tool_failure_counts[tool];
             warn!(
                 tool_name = tool.as_str(),
                 failure_count = count,
+                previously_nudged = self.nudged_tools.contains(tool),
                 "tool has repeated failures, injecting stuck-loop nudge",
             );
             self.hooks.on_stuck_loop(&hook_session, tool, count);
-            // Reset the counter so we don't spam nudges
+            // Reset the counter so we don't spam nudges every turn.
             self.tool_failure_counts.remove(tool);
+
+            if self.nudged_tools.contains(tool) {
+                escalated_tools.push(tool.clone());
+            } else {
+                self.nudged_tools.insert(tool.clone());
+                first_nudge_tools.push(tool.clone());
+            }
         }
 
-        let tools_list = stuck_tools.join(", ");
-        let nudge = format!(
-            "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
-             Stop retrying the same approach. Consider: (1) using a different tool, \
-             (2) modifying the arguments, (3) breaking the task into smaller steps, or \
-             (4) asking the user for clarification."
-        );
-        let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
+        if !first_nudge_tools.is_empty() {
+            let tools_list = first_nudge_tools.join(", ");
+            let nudge = format!(
+                "[Stuck loop detected] The tool(s) {tools_list} have failed multiple times in a row. \
+                 Stop retrying the same approach. Consider: (1) using a different tool, \
+                 (2) modifying the arguments, (3) breaking the task into smaller steps, or \
+                 (4) asking the user for clarification."
+            );
+            let _ = self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&nudge));
+        }
+
+        if !escalated_tools.is_empty() {
+            let tools_list = escalated_tools.join(", ");
+            let escalation = format!(
+                "[CRITICAL: Repeated stuck loop] The tool(s) {tools_list} continue to fail after \
+                 previous guidance was given. You MUST stop using these tools entirely for this task. \
+                 Use completely different tools or ask the user for help. Continuing to call these \
+                 tools will not produce a different result."
+            );
+            let _ =
+                self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&escalation));
+        }
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
@@ -3660,8 +3703,8 @@ tools = [{tools_list}]
         let mut agent = test_agent();
         let initial_len = agent.messages().len();
 
-        // Simulate 2 failures — not enough to trigger
-        agent.tool_failure_counts.insert("web_search".to_owned(), 2);
+        // Default threshold is 5 — simulate 4 failures (not enough)
+        agent.tool_failure_counts.insert("web_search".to_owned(), 4);
         agent.maybe_inject_stuck_nudge();
         assert_eq!(
             agent.messages().len(),
@@ -3669,8 +3712,10 @@ tools = [{tools_list}]
             "no nudge below threshold"
         );
 
-        // Simulate 3 failures — should trigger
-        agent.tool_failure_counts.insert("web_search".to_owned(), 3);
+        // Simulate 5 failures — should trigger
+        agent
+            .tool_failure_counts
+            .insert("web_search".to_owned(), 5);
         agent.maybe_inject_stuck_nudge();
         assert_eq!(
             agent.messages().len(),
@@ -3687,6 +3732,33 @@ tools = [{tools_list}]
     }
 
     #[test]
+    fn stuck_loop_nudge_uses_configurable_threshold() {
+        let mut agent = test_agent();
+        agent.config.stuck_loop_threshold = 2; // Lower threshold
+        let initial_len = agent.messages().len();
+
+        // 1 failure — below custom threshold
+        agent.tool_failure_counts.insert("web_search".to_owned(), 1);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len,
+            "no nudge below custom threshold"
+        );
+
+        // 2 failures — meets custom threshold
+        agent.tool_failure_counts.insert("web_search".to_owned(), 2);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 1,
+            "nudge injected at custom threshold"
+        );
+        let last = agent.messages().last().unwrap();
+        assert!(last.content_text().unwrap().contains("Stuck loop"));
+    }
+
+    #[test]
     fn tool_success_resets_failure_count() {
         let mut agent = test_agent();
 
@@ -3697,6 +3769,85 @@ tools = [{tools_list}]
         // A success should clear the counter
         agent.tool_failure_counts.remove("shell_exec");
         assert!(!agent.tool_failure_counts.contains_key("shell_exec"));
+    }
+
+    #[test]
+    fn tool_success_resets_failure_count_and_nudged_status() {
+        let mut agent = test_agent();
+
+        // Simulate failures + nudge
+        agent.tool_failure_counts.insert("shell_exec".to_owned(), 5);
+        agent.maybe_inject_stuck_nudge();
+        assert!(
+            agent.nudged_tools.contains("shell_exec"),
+            "tool should be in nudged set after nudge"
+        );
+        assert!(
+            !agent.tool_failure_counts.contains_key("shell_exec"),
+            "failure count reset after nudge"
+        );
+
+        // Simulate a success — should clear nudged status
+        agent.tool_failure_counts.remove("shell_exec");
+        agent.nudged_tools.remove("shell_exec");
+        assert!(
+            !agent.nudged_tools.contains("shell_exec"),
+            "nudged status cleared on success"
+        );
+    }
+
+    #[test]
+    fn post_nudge_escalation_on_repeated_failure() {
+        let mut agent = test_agent();
+        let initial_len = agent.messages().len();
+
+        // First round: hit threshold, get a normal nudge
+        agent.tool_failure_counts.insert("web_search".to_owned(), 5);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 1,
+            "first nudge injected"
+        );
+        let first_nudge = agent.messages().last().unwrap();
+        assert!(
+            first_nudge.content_text().unwrap().contains("Stuck loop"),
+            "first nudge is a standard stuck loop message"
+        );
+        assert!(
+            agent.nudged_tools.contains("web_search"),
+            "tool should be tracked as nudged"
+        );
+
+        // Second round: same tool fails again after nudge — should escalate
+        agent.tool_failure_counts.insert("web_search".to_owned(), 5);
+        agent.maybe_inject_stuck_nudge();
+        assert_eq!(
+            agent.messages().len(),
+            initial_len + 2,
+            "escalation injected"
+        );
+        let escalation = agent.messages().last().unwrap();
+        assert!(
+            escalation.content_text().unwrap().contains("CRITICAL"),
+            "escalation message should contain CRITICAL"
+        );
+        assert!(
+            escalation
+                .content_text()
+                .unwrap()
+                .contains("stop using these tools"),
+            "escalation should tell the agent to stop"
+        );
+    }
+
+    #[test]
+    fn default_stuck_loop_threshold_is_five() {
+        let config = AgentLoopConfig::default();
+        assert_eq!(
+            config.stuck_loop_threshold, 5,
+            "default threshold should be 5"
+        );
     }
 
     #[test]
