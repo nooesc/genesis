@@ -487,33 +487,35 @@ impl AgentLoop {
     }
 
     /// Filter tool definitions to the core set + discovered tools.
-    /// When `core_tools` is None, returns all tools (backwards compatible).
-    fn filter_tool_defs(&self, all_defs: Vec<ChatTool>) -> Vec<ChatTool> {
+    /// Takes a reference to avoid cloning the entire Vec; only clones kept items.
+    fn filter_tool_defs(&self, all_defs: &[ChatTool]) -> Vec<ChatTool> {
         let core = match &self.config.core_tools {
             Some(core) if !core.is_empty() => core,
             Some(_) => {
                 // Empty list = use defaults
                 let defaults: HashSet<&str> = DEFAULT_CORE_TOOLS.iter().copied().collect();
                 return all_defs
-                    .into_iter()
+                    .iter()
                     .filter(|t| {
                         defaults.contains(t.function.name.as_str())
                             || self.discovered_tools.contains(&t.function.name)
                     })
+                    .cloned()
                     .collect();
             }
-            None => return all_defs, // No core set = send everything
+            None => return all_defs.to_vec(), // No core set = send everything
         };
 
         let mut core_set: HashSet<&str> = core.iter().map(String::as_str).collect();
         // Always include find_tools when filtering is active so discovery works.
         core_set.insert("find_tools");
         all_defs
-            .into_iter()
+            .iter()
             .filter(|t| {
                 core_set.contains(t.function.name.as_str())
                     || self.discovered_tools.contains(&t.function.name)
             })
+            .cloned()
             .collect()
     }
 
@@ -716,6 +718,9 @@ impl AgentLoop {
 
     /// Try a blocking completion against the active client, falling back to
     /// each fallback client in order if the primary fails.
+    ///
+    /// The request is only cloned when fallback providers are actually tried,
+    /// avoiding an expensive clone in the common (no-fallback) success path.
     async fn complete_with_failover(
         &self,
         request: ChatCompletionRequest,
@@ -723,12 +728,18 @@ impl AgentLoop {
         let client = self.active_client().clone();
         let model = client.model().to_owned();
 
+        if self.fallback_clients.is_empty() {
+            // Fast path: no fallbacks configured, skip the clone entirely.
+            return client
+                .complete(request)
+                .await
+                .map(|response| (response, model));
+        }
+
+        // Fallbacks exist — clone for the primary attempt, keep original for retries.
         match client.complete(request.clone()).await {
             Ok(response) => return Ok((response, model)),
             Err(err) => {
-                if self.fallback_clients.is_empty() {
-                    return Err(err);
-                }
                 warn!(
                     model = model.as_str(),
                     error = %err,
@@ -768,6 +779,9 @@ impl AgentLoop {
 
     /// Try a streaming completion against the active client, falling back to
     /// each fallback client in order if the primary fails to connect.
+    ///
+    /// The request is only cloned when fallback providers are actually tried,
+    /// avoiding an expensive clone in the common (no-fallback) success path.
     async fn complete_stream_with_failover(
         &self,
         request: ChatCompletionRequest,
@@ -775,12 +789,18 @@ impl AgentLoop {
         let client = self.active_client().clone();
         let model = client.model().to_owned();
 
+        if self.fallback_clients.is_empty() {
+            // Fast path: no fallbacks configured, skip the clone entirely.
+            return client
+                .complete_stream(request)
+                .await
+                .map(|stream| (stream, model));
+        }
+
+        // Fallbacks exist — clone for the primary attempt, keep original for retries.
         match client.complete_stream(request.clone()).await {
             Ok(stream) => return Ok((stream, model)),
             Err(err) => {
-                if self.fallback_clients.is_empty() {
-                    return Err(err);
-                }
                 warn!(
                     model = model.as_str(),
                     error = %err,
@@ -940,9 +960,9 @@ impl AgentLoop {
 
         loop {
             // When core set filtering is active, recompute the filtered set
-            // each iteration (discovered set may grow). Otherwise use all tools.
+            // each iteration (discovered set may grow). Otherwise clone all tools.
             let tool_defs = if self.config.core_tools.is_some() {
-                self.filter_tool_defs(all_tool_defs.clone())
+                self.filter_tool_defs(&all_tool_defs)
             } else {
                 all_tool_defs.clone()
             };
@@ -1023,7 +1043,7 @@ impl AgentLoop {
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
-            request.tools = tool_defs.clone();
+            request.tools = tool_defs;
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
@@ -1049,7 +1069,7 @@ impl AgentLoop {
                 } else {
                     &request.model
                 };
-                Some(self.compute_cache_key(model_for_cache, &tool_defs))
+                Some(self.compute_cache_key(model_for_cache, &request.tools))
             } else {
                 None
             };
@@ -1526,7 +1546,7 @@ impl AgentLoop {
 
         loop {
             let tool_defs = if self.config.core_tools.is_some() {
-                self.filter_tool_defs(all_tool_defs.clone())
+                self.filter_tool_defs(&all_tool_defs)
             } else {
                 all_tool_defs.clone()
             };
@@ -1610,7 +1630,7 @@ impl AgentLoop {
 
             self.prune_context().await;
             let mut request = ChatCompletionRequest::new("", self.messages.clone());
-            request.tools = tool_defs.clone();
+            request.tools = tool_defs;
             request.temperature = self.config.temperature;
             request.max_tokens = self.config.max_tokens;
             request.thinking = self.config.thinking.clone();
@@ -1725,7 +1745,7 @@ impl AgentLoop {
 
                         let (effective_tool_calls, veto_reasons) =
                             self.prepare_tool_calls(&hook_session, &streamed_tool_calls, true);
-                        streamed_tool_calls = effective_tool_calls.clone();
+                        streamed_tool_calls = effective_tool_calls;
                         // Emit start events and execute tool calls.
                         tool_calls_made += streamed_tool_calls.len();
                         for tc in &streamed_tool_calls {
@@ -5322,7 +5342,7 @@ end)
             make_chat_tool("read_file"),
             make_chat_tool("web_request"),
         ];
-        let filtered = agent.filter_tool_defs(all.clone());
+        let filtered = agent.filter_tool_defs(&all);
         assert_eq!(
             filtered.len(),
             3,
@@ -5341,7 +5361,7 @@ end)
             make_chat_tool("web_request"),
             make_chat_tool("memory_store"),
         ];
-        let filtered = agent.filter_tool_defs(all);
+        let filtered = agent.filter_tool_defs(&all);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
         assert!(filtered.iter().any(|t| t.function.name == "read_file"));
@@ -5360,7 +5380,7 @@ end)
             make_chat_tool("web_request"),
             make_chat_tool("memory_store"),
         ];
-        let filtered = agent.filter_tool_defs(all);
+        let filtered = agent.filter_tool_defs(&all);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|t| t.function.name == "shell_exec"));
         assert!(filtered.iter().any(|t| t.function.name == "web_request"));
@@ -5377,7 +5397,7 @@ end)
             make_chat_tool("web_request"),
             make_chat_tool("find_tools"),
         ];
-        let filtered = agent.filter_tool_defs(all);
+        let filtered = agent.filter_tool_defs(&all);
         // shell_exec, read_file, find_tools are in DEFAULT_CORE_TOOLS; web_request is not
         assert_eq!(filtered.len(), 3);
         assert!(!filtered.iter().any(|t| t.function.name == "web_request"));
