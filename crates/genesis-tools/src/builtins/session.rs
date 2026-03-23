@@ -321,4 +321,111 @@ mod tests {
         let output = SessionHistoryTool.run(&call, &ctx).expect("history");
         assert!(output.content.contains("..."));
     }
+
+    #[test]
+    fn session_search_requires_query() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "session_search".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = SessionSearchTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn session_history_requires_session_id() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "session_history".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = SessionHistoryTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::MissingArgument { .. }));
+    }
+
+    #[test]
+    fn session_history_invalid_limit_returns_error() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "session_history".to_owned(),
+            arguments: BTreeMap::from([
+                ("session_id".to_owned(), "s-1".to_owned()),
+                ("limit".to_owned(), "not_a_number".to_owned()),
+            ]),
+        };
+        let err = SessionHistoryTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn session_search_metadata_includes_count() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let store = SessionStore::new(&db_path);
+        store
+            .create_session("s-meta", "cli", Some("Metadata test"))
+            .expect("create session");
+        store
+            .append_message(
+                "s-meta",
+                "user",
+                Some("Metadata is important for tracking"),
+                None,
+                None,
+                None,
+            )
+            .expect("append");
+
+        let call = ToolCall {
+            name: "session_search".to_owned(),
+            arguments: BTreeMap::from([("query".to_owned(), "Metadata".to_owned())]),
+        };
+        let output = SessionSearchTool.run(&call, &ctx).expect("search");
+        let count = output.metadata.get("count").unwrap();
+        assert_eq!(count, "1");
+    }
+
+    #[test]
+    fn session_history_metadata_includes_total_messages() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let store = SessionStore::new(&db_path);
+        store
+            .create_session("s-meta2", "cli", None)
+            .expect("create session");
+        for i in 0..3 {
+            store
+                .append_message(
+                    "s-meta2",
+                    "user",
+                    Some(&format!("Message {i}")),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("append");
+        }
+
+        let call = ToolCall {
+            name: "session_history".to_owned(),
+            arguments: BTreeMap::from([("session_id".to_owned(), "s-meta2".to_owned())]),
+        };
+        let output = SessionHistoryTool.run(&call, &ctx).expect("history");
+        assert_eq!(output.metadata.get("total_messages").unwrap(), "3");
+    }
 }

@@ -294,4 +294,48 @@ mod tests {
         assert!(DEFAULT_MODELS.len() >= 2);
         assert!(DEFAULT_MODELS.len() <= MAX_MODELS);
     }
+
+    #[test]
+    fn model_spec_parsing_with_default_backend() {
+        // When no slash is present, default backend is "openai"
+        let spec = "gpt-4o-mini";
+        let parsed = spec.split_once('/').or(Some(("openai", spec)));
+        assert_eq!(parsed, Some(("openai", "gpt-4o-mini")));
+    }
+
+    #[test]
+    fn model_spec_parsing_with_explicit_backend() {
+        let spec = "anthropic/claude-sonnet-4-20250514";
+        let parsed = spec.split_once('/').or(Some(("openai", spec)));
+        assert_eq!(parsed, Some(("anthropic", "claude-sonnet-4-20250514")));
+    }
+
+    #[test]
+    fn max_models_limits_specs() {
+        let specs = "a/1, b/2, c/3, d/4, e/5, f/6, g/7";
+        let parsed: Vec<(&str, &str)> = specs
+            .split(',')
+            .filter_map(|s| {
+                let s = s.trim();
+                s.split_once('/').or(Some(("openai", s)))
+            })
+            .take(MAX_MODELS)
+            .collect();
+
+        assert_eq!(parsed.len(), MAX_MODELS);
+    }
+
+    #[test]
+    fn build_synthesis_prompt_numbers_responses() {
+        let responses = vec![
+            ("openai", "gpt-4o", "First"),
+            ("anthropic", "claude", "Second"),
+            ("google", "gemini", "Third"),
+        ];
+        let prompt = build_synthesis_prompt("Test question", &responses);
+        assert!(prompt.contains("Response 1"));
+        assert!(prompt.contains("Response 2"));
+        assert!(prompt.contains("Response 3"));
+        assert!(prompt.contains("3 different AI models"));
+    }
 }

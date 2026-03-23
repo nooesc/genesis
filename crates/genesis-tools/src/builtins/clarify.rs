@@ -117,4 +117,56 @@ mod tests {
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
+
+    #[test]
+    fn clarify_without_choices_has_no_options() {
+        let tool = ClarifyTool;
+        let call = ToolCall {
+            name: "clarify".to_owned(),
+            arguments: BTreeMap::from([(
+                "question".to_owned(),
+                "What format do you want?".to_owned(),
+            )]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(!output.content.contains("Options:"));
+    }
+
+    #[test]
+    fn clarify_metadata_flags_requires_input() {
+        let tool = ClarifyTool;
+        let call = ToolCall {
+            name: "clarify".to_owned(),
+            arguments: BTreeMap::from([(
+                "question".to_owned(),
+                "Are you sure?".to_owned(),
+            )]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert_eq!(
+            output.metadata.get("requires_input").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            output.metadata.get("tool").map(String::as_str),
+            Some("clarify")
+        );
+    }
+
+    #[test]
+    fn clarify_single_choice() {
+        let tool = ClarifyTool;
+        let call = ToolCall {
+            name: "clarify".to_owned(),
+            arguments: BTreeMap::from([
+                ("question".to_owned(), "Continue?".to_owned()),
+                ("choices".to_owned(), "Yes".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx()).expect("should succeed");
+        assert!(output.content.contains("1. Yes"));
+    }
 }

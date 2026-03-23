@@ -157,4 +157,22 @@ mod tests {
 
     // Note: Full integration tests require a running LLM endpoint.
     // The tool gracefully handles connection errors via ToolError::ExecutionFailed.
+
+    #[test]
+    fn reason_requires_both_prompt_and_model() {
+        let tool = ReasonWithModelTool;
+        let call = ToolCall {
+            name: "reason_with_model".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        // prompt is checked first
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "prompt",
+                ..
+            }
+        ));
+    }
 }

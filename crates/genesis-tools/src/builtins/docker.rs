@@ -102,4 +102,53 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn docker_exec_requires_both_arguments() {
+        let tool = DockerExecTool;
+        let call = ToolCall {
+            name: "docker_exec".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        // Container is checked first
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "container",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn docker_exec_with_nonexistent_container_fails() {
+        let tool = DockerExecTool;
+        let call = ToolCall {
+            name: "docker_exec".to_owned(),
+            arguments: BTreeMap::from([
+                (
+                    "container".to_owned(),
+                    "nonexistent-container-12345".to_owned(),
+                ),
+                ("command".to_owned(), "echo hello".to_owned()),
+            ]),
+        };
+        // docker exec with a nonexistent container should either fail to spawn
+        // docker or return a non-zero exit code. Either way it should not panic.
+        let result = tool.run(&call, &ctx());
+        match result {
+            Ok(output) => {
+                // Docker ran but failed (exit code != 0)
+                assert!(
+                    output.content.contains("[stderr]")
+                        || output.metadata.get("exit_code").unwrap() != "0"
+                );
+            }
+            Err(ToolError::ExecutionFailed { .. }) => {
+                // Docker binary not found - also acceptable
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

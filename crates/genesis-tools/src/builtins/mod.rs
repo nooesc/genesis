@@ -57,3 +57,44 @@ pub(crate) fn combine_command_output(stdout: &str, stderr: &str, exit_code: i32)
         content
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::combine_command_output;
+
+    #[test]
+    fn combine_stdout_only() {
+        let result = combine_command_output("hello world", "", 0);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn combine_stderr_only() {
+        let result = combine_command_output("", "error occurred", 1);
+        assert_eq!(result, "[stderr]\nerror occurred");
+    }
+
+    #[test]
+    fn combine_both_stdout_and_stderr() {
+        let result = combine_command_output("output", "warning", 0);
+        assert_eq!(result, "output\n[stderr]\nwarning");
+    }
+
+    #[test]
+    fn combine_empty_returns_exit_code() {
+        let result = combine_command_output("", "", 42);
+        assert_eq!(result, "(no output, exit code 42)");
+    }
+
+    #[test]
+    fn combine_empty_zero_exit() {
+        let result = combine_command_output("", "", 0);
+        assert_eq!(result, "(no output, exit code 0)");
+    }
+
+    #[test]
+    fn combine_negative_exit_code() {
+        let result = combine_command_output("", "", -1);
+        assert_eq!(result, "(no output, exit code -1)");
+    }
+}

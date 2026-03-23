@@ -569,4 +569,246 @@ mod tests {
         let err = SkillRecordUsageTool.run(&usage_call, &ctx).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
+
+    #[test]
+    fn skill_create_requires_description() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([("name".to_owned(), "test".to_owned())]),
+        };
+        let err = SkillCreateTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "description",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_create_requires_instructions() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "test".to_owned()),
+                ("description".to_owned(), "desc".to_owned()),
+            ]),
+        };
+        let err = SkillCreateTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "instructions",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_get_requires_name() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_get".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = SkillGetTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_delete_requires_name() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_delete".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let err = SkillDeleteTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_delete_nonexistent_returns_not_found() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_delete".to_owned(),
+            arguments: BTreeMap::from([("name".to_owned(), "nonexistent".to_owned())]),
+        };
+        let output = SkillDeleteTool.run(&call, &ctx).expect("should succeed");
+        assert!(output.content.contains("not found"));
+    }
+
+    #[test]
+    fn skill_upsert_increments_version() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let make_call = |version_hint: &str| ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "evolving".to_owned()),
+                ("description".to_owned(), format!("Version {version_hint}")),
+                ("instructions".to_owned(), format!("Steps for v{version_hint}")),
+            ]),
+        };
+
+        let output1 = SkillCreateTool
+            .run(&make_call("1"), &ctx)
+            .expect("first create");
+        assert!(output1.content.contains("version 1"));
+
+        let output2 = SkillCreateTool
+            .run(&make_call("2"), &ctx)
+            .expect("second create");
+        assert!(output2.content.contains("version 2"));
+    }
+
+    #[test]
+    fn skill_get_includes_trigger_hint() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let create_call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "greeting".to_owned()),
+                ("description".to_owned(), "Greet user".to_owned()),
+                ("instructions".to_owned(), "Say hello nicely".to_owned()),
+                ("trigger_hint".to_owned(), "when user says hi".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&create_call, &ctx).expect("create");
+
+        let get_call = ToolCall {
+            name: "skill_get".to_owned(),
+            arguments: BTreeMap::from([("name".to_owned(), "greeting".to_owned())]),
+        };
+        let output = SkillGetTool.run(&get_call, &ctx).expect("get");
+        assert!(output.content.contains("when user says hi"));
+        assert!(output.content.contains("**Trigger:**"));
+    }
+
+    #[test]
+    fn skill_get_includes_tags() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let create_call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "tagged".to_owned()),
+                ("description".to_owned(), "Tagged skill".to_owned()),
+                ("instructions".to_owned(), "Do tagged thing".to_owned()),
+                ("tags".to_owned(), "rust, dev, testing".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&create_call, &ctx).expect("create");
+
+        let get_call = ToolCall {
+            name: "skill_get".to_owned(),
+            arguments: BTreeMap::from([("name".to_owned(), "tagged".to_owned())]),
+        };
+        let output = SkillGetTool.run(&get_call, &ctx).expect("get");
+        assert!(output.content.contains("**Tags:**"));
+        assert!(output.content.contains("rust"));
+        assert!(output.content.contains("dev"));
+        assert!(output.content.contains("testing"));
+    }
+
+    #[test]
+    fn skill_record_usage_requires_skill_name() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([("outcome".to_owned(), "success".to_owned())]),
+        };
+        let err = SkillRecordUsageTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "skill_name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_record_usage_requires_outcome() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_record_usage".to_owned(),
+            arguments: BTreeMap::from([("skill_name".to_owned(), "test".to_owned())]),
+        };
+        let err = SkillRecordUsageTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "outcome",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn skill_list_with_tags_shows_tag_info() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "skill_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("name".to_owned(), "tagged_skill".to_owned()),
+                ("description".to_owned(), "A tagged skill".to_owned()),
+                ("instructions".to_owned(), "Do something".to_owned()),
+                ("tags".to_owned(), "rust, testing".to_owned()),
+            ]),
+        };
+        SkillCreateTool.run(&call, &ctx).expect("create");
+
+        let list_call = ToolCall {
+            name: "skill_list".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+        let output = SkillListTool.run(&list_call, &ctx).expect("list");
+        assert!(output.content.contains("[rust, testing]"));
+        assert_eq!(output.metadata.get("count").unwrap(), "1");
+    }
 }

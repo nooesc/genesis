@@ -355,4 +355,127 @@ mod tests {
         let err = SpawnSubagentTool.run(&call, &ctx).unwrap_err();
         assert!(matches!(err, ToolError::MissingArgument { .. }));
     }
+
+    #[test]
+    fn check_requires_subagent_id() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "check_subagent".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+
+        let err = CheckSubagentTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::MissingArgument {
+                argument: "subagent_id",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn check_nonexistent_subagent_errors() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        let call = ToolCall {
+            name: "check_subagent".to_owned(),
+            arguments: BTreeMap::from([("subagent_id".to_owned(), "nonexistent".to_owned())]),
+        };
+
+        let err = CheckSubagentTool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    #[test]
+    fn spawn_uses_default_name_when_not_provided() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        SessionStore::new(&db_path)
+            .create_session("parent-session", "cli", None)
+            .expect("parent session");
+
+        let call = ToolCall {
+            name: "spawn_subagent".to_owned(),
+            arguments: BTreeMap::from([(
+                "task".to_owned(),
+                "Do something".to_owned(),
+            )]),
+        };
+
+        let output = SpawnSubagentTool.run(&call, &ctx).expect("spawn");
+        assert!(output.content.contains("subagent"));
+    }
+
+    #[test]
+    fn check_shows_error_for_failed_subagent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        SessionStore::new(&db_path)
+            .create_session("parent-session", "cli", None)
+            .expect("parent session");
+        SessionStore::new(&db_path)
+            .create_session("child-err", "subagent", None)
+            .expect("child session");
+
+        let store = SubagentStore::new(&db_path);
+        store
+            .create("sub-err", "parent-session", "child-err", "worker", "fail task")
+            .expect("create");
+        store
+            .set_failed("sub-err", "something went wrong")
+            .expect("fail");
+
+        let call = ToolCall {
+            name: "check_subagent".to_owned(),
+            arguments: BTreeMap::from([("subagent_id".to_owned(), "sub-err".to_owned())]),
+        };
+
+        let output = CheckSubagentTool.run(&call, &ctx).expect("check");
+        assert!(output.content.contains("failed"));
+        assert!(output.content.contains("something went wrong"));
+    }
+
+    #[test]
+    fn list_shows_completed_result_truncated() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let ctx = ctx_with_dir(&dir.path().display().to_string());
+
+        SessionStore::new(&db_path)
+            .create_session("parent-session", "cli", None)
+            .expect("parent session");
+        SessionStore::new(&db_path)
+            .create_session("child-done", "subagent", None)
+            .expect("child session");
+
+        let store = SubagentStore::new(&db_path);
+        store
+            .create("sub-done", "parent-session", "child-done", "worker", "big task")
+            .expect("create");
+        store
+            .set_completed("sub-done", "Result of the big task")
+            .expect("complete");
+
+        let call = ToolCall {
+            name: "list_subagents".to_owned(),
+            arguments: BTreeMap::new(),
+        };
+
+        let output = ListSubagentsTool.run(&call, &ctx).expect("list");
+        assert!(output.content.contains("[completed]"));
+        assert!(output.content.contains("Result of the big task"));
+    }
 }
