@@ -6,7 +6,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::StorageError;
-use crate::stores::embedding::embedding_to_blob;
+use crate::stores::embedding::{embedding_to_blob, EmbeddingStore};
 use crate::util::{
     collect_rows, decayed_importance, edge_type_weight, exec_migration,
     memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders,
@@ -826,6 +826,204 @@ impl MemoryStore {
             source,
         })?;
         Ok(rows > 0)
+    }
+
+    /// Mark memories as consolidated, pointing to a summary note.
+    pub fn mark_consolidated(
+        &self,
+        memory_ids: &[&str],
+        summary_id: &str,
+    ) -> Result<(), StorageError> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.db.conn()?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        for id in memory_ids {
+            tx.execute(
+                "UPDATE memories SET consolidated = 1, parent_summary_id = ?2 WHERE id = ?1",
+                params![id, summary_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        }
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })
+    }
+
+    /// List memories with importance below threshold, not accessed in `min_stale_days` days.
+    pub fn list_stale(
+        &self,
+        importance_threshold: f32,
+        min_stale_days: i64,
+    ) -> Result<Vec<StoredMemory>, StorageError> {
+        let connection = self.db.conn()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at FROM memories
+                 WHERE importance < ?1 AND consolidated = 0
+                 AND julianday('now') - julianday(accessed_at) > ?2
+                 ORDER BY importance ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(
+                params![importance_threshold, min_stale_days],
+                Self::row_to_memory,
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        collect_rows(rows, self.db.path())
+    }
+
+    /// Find clusters of unconsolidated memories that are semantically similar.
+    pub fn find_consolidation_clusters(
+        &self,
+        threshold: f64,
+        min_cluster_size: usize,
+    ) -> Result<Vec<Vec<String>>, StorageError> {
+        let embedding_store = EmbeddingStore::with_db(self.db.clone());
+        let all = embedding_store.all_embeddings()?;
+
+        let connection = self.db.conn()?;
+        let unconsolidated: HashSet<String> = {
+            let mut stmt = connection
+                .prepare("SELECT id FROM memories WHERE consolidated = 0")
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            collect_rows(rows, self.db.path())?
+                .into_iter()
+                .collect()
+        };
+        drop(connection);
+
+        let embeddings: Vec<(String, Vec<f32>)> = all
+            .into_iter()
+            .filter(|(id, _)| unconsolidated.contains(id))
+            .collect();
+
+        if embeddings.len() < min_cluster_size {
+            return Ok(Vec::new());
+        }
+
+        let mut assigned: HashSet<usize> = HashSet::new();
+        let mut clusters = Vec::new();
+        for i in 0..embeddings.len() {
+            if assigned.contains(&i) {
+                continue;
+            }
+            let mut cluster = vec![i];
+            for j in (i + 1)..embeddings.len() {
+                if assigned.contains(&j) {
+                    continue;
+                }
+                if cosine_similarity(&embeddings[i].1, &embeddings[j].1) >= threshold as f32 {
+                    cluster.push(j);
+                }
+            }
+            if cluster.len() >= min_cluster_size {
+                for &idx in &cluster {
+                    assigned.insert(idx);
+                }
+                clusters.push(
+                    cluster
+                        .into_iter()
+                        .map(|idx| embeddings[idx].0.clone())
+                        .collect(),
+                );
+            }
+        }
+        Ok(clusters)
+    }
+
+    /// Create a summary note for a cluster, mark members consolidated, create consolidation edges.
+    pub fn consolidate_cluster(
+        &self,
+        member_ids: &[&str],
+        summary_content: &str,
+        keywords: Vec<String>,
+    ) -> Result<StoredMemory, StorageError> {
+        // Get max importance from members
+        let connection = self.db.conn()?;
+        let max_importance: f32 = if member_ids.is_empty() {
+            0.5
+        } else {
+            let mut stmt = connection
+                .prepare(&format!(
+                    "SELECT COALESCE(MAX(importance), 0.5) FROM memories WHERE id IN ({})",
+                    sql_placeholders(member_ids.len()),
+                ))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            stmt.query_row(params_from_iter(member_ids.iter()), |row| row.get(0))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?
+        };
+        drop(connection);
+
+        let summary_id = format!("summary-{}", memory_unique_suffix());
+        let summary = self.create_note(NewMemoryNote {
+            id: summary_id.clone(),
+            session_id: None,
+            kind: "consolidated_summary".to_owned(),
+            content: summary_content.to_owned(),
+            keywords,
+            tags: vec!["consolidated".to_owned()],
+            linked_ids: Vec::new(),
+            importance: max_importance,
+        })?;
+
+        self.mark_consolidated(member_ids, &summary_id)?;
+        for member_id in member_ids {
+            self.create_link(member_id, &summary_id, "consolidation", 1.0)?;
+            self.create_link(&summary_id, member_id, "consolidation", 0.5)?;
+        }
+        Ok(summary)
+    }
+}
+
+/// Cosine similarity between two vectors.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let d = na.sqrt() * nb.sqrt();
+    if d == 0.0 {
+        0.0
+    } else {
+        dot / d
     }
 }
 
@@ -1695,5 +1893,285 @@ mod memory_store_tests {
             )
             .unwrap();
         assert_eq!(edge_type, "temporal");
+    }
+
+    #[test]
+    fn mark_consolidated_sets_flag_and_parent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        // Create a summary memory that can be referenced by parent_summary_id FK.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('summary-1', 's1', 'consolidated_summary', 'summary', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .mark_consolidated(&["mem1", "mem2"], "summary-1")
+            .expect("mark_consolidated should succeed");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (consolidated, parent): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mem1 should have consolidated columns");
+        assert_eq!(consolidated, 1);
+        assert_eq!(parent, "summary-1");
+
+        let (consolidated2, parent2): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mem2 should have consolidated columns");
+        assert_eq!(consolidated2, 1);
+        assert_eq!(parent2, "summary-1");
+    }
+
+    #[test]
+    fn mark_consolidated_empty_ids_is_noop() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .mark_consolidated(&[], "summary-1")
+            .expect("empty ids should be a no-op");
+    }
+
+    #[test]
+    fn list_stale_returns_low_importance_old_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.05, accessed_at = '2025-01-01T00:00:00Z' WHERE id = 'mem1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.9, accessed_at = '2025-01-01T00:00:00Z' WHERE id = 'mem2'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let stale = store.list_stale(0.1, 90).expect("list_stale should succeed");
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, "mem1");
+    }
+
+    #[test]
+    fn list_stale_excludes_consolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.05, accessed_at = '2025-01-01T00:00:00Z', consolidated = 1 WHERE id = 'mem1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let stale = store.list_stale(0.1, 90).expect("list_stale should succeed");
+        assert!(stale.is_empty(), "consolidated memory should not appear in stale list");
+    }
+
+    #[test]
+    fn find_consolidation_clusters_groups_similar_unconsolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cluster.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, content) in [
+            ("mem1", "note one"),
+            ("mem3", "note three"),
+            ("mem4", "note four"),
+            ("mem5", "note five"),
+            ("mem6", "note six"),
+            ("mem7", "note seven"),
+        ] {
+            conn.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, content],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        // Cluster A: very similar vectors
+        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem3", &[0.95, 0.05, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem4", &[0.9, 0.1, 0.0, 0.0], "test").unwrap();
+        // Cluster B: similar to each other, different from A
+        embeddings.store("mem5", &[0.0, 1.0, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem6", &[0.0, 0.95, 0.05, 0.0], "test").unwrap();
+        // Outlier
+        embeddings.store("mem7", &[0.0, 0.0, 0.0, 1.0], "test").unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let clusters = store
+            .find_consolidation_clusters(0.85, 2)
+            .expect("find_consolidation_clusters should succeed");
+
+        assert!(
+            clusters.len() >= 2,
+            "should find at least 2 clusters, found {}",
+            clusters.len()
+        );
+
+        // Check that cluster A and cluster B are found
+        let all_cluster_ids: Vec<&String> = clusters.iter().flatten().collect();
+        assert!(all_cluster_ids.contains(&&"mem1".to_owned()));
+        assert!(all_cluster_ids.contains(&&"mem5".to_owned()));
+        // Outlier should not be in any cluster
+        assert!(!all_cluster_ids.contains(&&"mem7".to_owned()));
+    }
+
+    #[test]
+    fn find_consolidation_clusters_ignores_consolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cluster2.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, consolidated)
+             VALUES ('mem1', 's1', 'fact', 'note one', CURRENT_TIMESTAMP, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'fact', 'note two', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem2", &[0.99, 0.01, 0.0, 0.0], "test").unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let clusters = store
+            .find_consolidation_clusters(0.85, 2)
+            .expect("should succeed");
+        // mem1 is consolidated, so only mem2 is unconsolidated — not enough for a cluster of 2
+        assert!(
+            clusters.is_empty(),
+            "consolidated memory should be excluded from clustering"
+        );
+    }
+
+    #[test]
+    fn consolidate_cluster_creates_summary_and_marks_members() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("consolidate.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "rust is fast".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .unwrap();
+        store
+            .create_note(NewMemoryNote {
+                id: "mem2".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "rust is safe".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.9,
+            })
+            .unwrap();
+
+        let summary = store
+            .consolidate_cluster(
+                &["mem1", "mem2"],
+                "Combined knowledge about Rust",
+                vec!["rust".to_owned()],
+            )
+            .expect("consolidate_cluster should succeed");
+
+        // Verify summary note
+        assert!(summary.id.starts_with("summary-"));
+        assert_eq!(summary.kind, "consolidated_summary");
+        assert_eq!(summary.content, "Combined knowledge about Rust");
+
+        // Verify members are marked consolidated
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (c1, p1): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c1, 1);
+        assert_eq!(p1, summary.id);
+
+        let (c2, p2): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c2, 1);
+        assert_eq!(p2, summary.id);
+
+        // Verify importance is max(0.7, 0.9) = 0.9
+        let importance: f32 = conn
+            .query_row(
+                "SELECT importance FROM memories WHERE id = ?1",
+                rusqlite::params![&summary.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((importance - 0.9).abs() < f32::EPSILON);
+
+        // Verify consolidation edges exist
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'consolidation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // 2 from members→summary + 2 from summary→members = 4
+        assert_eq!(edge_count, 4);
     }
 }
