@@ -1,18 +1,26 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+mod compression;
+mod hooks;
+mod streaming;
+mod tools;
+mod types;
+
+// Re-export the full public API (unchanged).
+pub use types::{
+    AgentError, AgentHooks, AgentLoopConfig, AgentResult, NoopHooks, StreamEvent,
+    SubagentSpawner, DEFAULT_CORE_TOOLS,
+};
+
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use genesis_provider::{
-    ChatClient, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, ContentPart,
-    MessageContent, ProviderError, ToolCallEntry,
+    ChatClient, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent, ProviderError,
+    ToolCallEntry,
 };
-use genesis_tools::{ToolCall, ToolError};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
-use tracing::{debug, info, info_span, warn};
+use tracing::{debug, info, warn};
 
 use crate::cost::{BudgetStatus, SessionCost};
 use crate::hooks::{HookEvent, HookResult, HookRunner};
@@ -20,401 +28,59 @@ use crate::nudge::SKILL_CREATION_NUDGE;
 use crate::sanitize;
 use crate::trajectory::TrajectoryRecorder;
 use crate::ToolRuntime;
-use genesis_lua::hooks::{PostHookOutcome, PreHookOutcome};
+use genesis_lua::hooks::PreHookOutcome;
 use genesis_lua::LuaRuntime;
 
-const DEFAULT_MAX_TURNS: usize = 20;
-
-/// Events emitted during streaming execution.
-#[derive(Debug, Clone)]
-pub enum StreamEvent<'a> {
-    /// A text content chunk from the LLM.
-    Chunk(&'a str),
-    /// A new agent turn (LLM call) is starting.
-    TurnStarted,
-    /// A tool call is about to be executed.
-    ToolCallStart {
-        name: &'a str,
-        /// The provider-assigned tool call ID (e.g. `call_abc123`).
-        call_id: &'a str,
-        /// Short summary of the arguments (max ~40 chars).
-        /// Owned `String` (not `&'a str`) because it's derived/truncated
-        /// from the raw JSON args by `summarize_args()`.
-        args_summary: String,
-    },
-    /// A tool call finished executing.
-    ToolCallEnd {
-        name: &'a str,
-        /// The provider-assigned tool call ID.
-        call_id: &'a str,
-        /// How long the tool call took to execute in milliseconds.
-        duration_ms: u64,
-        /// Whether the tool call succeeded (no `Error:` prefix in output).
-        success: bool,
-    },
-    /// Cumulative token usage for the current streaming turn.
-    TokenUsage {
-        input_tokens: u32,
-        output_tokens: u32,
-    },
-    /// The agent is requesting clarification from the user.
-    ClarificationNeeded { question: &'a str },
-    /// A non-fatal warning (e.g. budget approaching, context pruned).
-    Warning(&'a str),
-}
-
-/// Produce a short summary string (max ~40 chars) from a tool call's JSON
-/// arguments. Tries to show the first key-value pair; falls back to truncating
-/// the raw string.
-fn summarize_args(args_json: &str) -> String {
-    if args_json.is_empty() || args_json == "{}" {
-        return String::new();
-    }
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(args_json)
-    {
-        if let Some((key, val)) = map.iter().next() {
-            let v = match val {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            let combined = format!("{key}: {v}");
-            if combined.len() <= 40 {
-                return combined;
-            }
-            let truncated: String = combined.chars().take(37).collect();
-            return format!("{truncated}...");
-        }
-    }
-    let raw = args_json.trim_matches(|c| c == '{' || c == '}').trim();
-    if raw.len() <= 40 {
-        return raw.to_owned();
-    }
-    let truncated: String = raw.chars().take(37).collect();
-    format!("{truncated}...")
-}
-
-fn message_image_count(message: &ChatMessage) -> usize {
-    match message.content.as_ref() {
-        Some(MessageContent::Parts(parts)) => parts
-            .iter()
-            .filter(|part| matches!(part, ContentPart::ImageUrl { .. }))
-            .count(),
-        _ => 0,
-    }
-}
-
-fn set_message_text(message: &mut ChatMessage, text: String) {
-    match message.content.as_mut() {
-        Some(MessageContent::Text(current)) => *current = text,
-        Some(MessageContent::Parts(parts)) => {
-            if let Some(ContentPart::Text { text: current }) = parts
-                .iter_mut()
-                .find(|part| matches!(part, ContentPart::Text { .. }))
-            {
-                *current = text;
-            } else {
-                parts.insert(0, ContentPart::Text { text });
-            }
-        }
-        None => {
-            message.content = Some(MessageContent::Text(text));
-        }
-    }
-}
-
-fn suppress_message_text(message: &mut ChatMessage) -> bool {
-    if message
-        .tool_calls
-        .as_ref()
-        .is_some_and(|tool_calls| !tool_calls.is_empty())
-    {
-        message.content = None;
-        return true;
-    }
-
-    match message.content.as_mut() {
-        Some(MessageContent::Parts(parts)) => {
-            parts.retain(|part| !matches!(part, ContentPart::Text { .. }));
-            !parts.is_empty()
-        }
-        _ => false,
-    }
-}
-
-/// Result of a complete agent turn (user message → final assistant response).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentResult {
-    pub response: String,
-    pub turns_used: usize,
-    pub tool_calls_made: usize,
-    pub finished_naturally: bool,
-    pub total_input_tokens: u32,
-    pub total_output_tokens: u32,
-    /// Estimated cost in USD for this turn, if pricing is available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub estimated_cost: Option<f64>,
-    /// If set, the agent is paused waiting for user clarification.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_clarification: Option<String>,
-}
-
-/// Configuration for the agent loop.
-#[derive(Debug, Clone)]
-pub struct AgentLoopConfig {
-    pub system_prompt: Option<String>,
-    pub max_turns: usize,
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<u32>,
-    /// Maximum number of conversation messages to keep in context (excluding
-    /// the system prompt). When the history exceeds this limit, the oldest
-    /// non-system messages are dropped. Set to `None` for unlimited.
-    pub max_context_messages: Option<usize>,
-    /// Optional budget limit in USD. When exceeded, the agent loop stops early.
-    pub budget_limit: Option<f64>,
-    /// Maximum number of tool calls to execute concurrently (default: 4).
-    pub max_concurrency: usize,
-    /// After this many tool calls, inject a memory consolidation nudge asking
-    /// the agent to save useful observations. Set to `None` to disable.
-    /// Default: 15 tool calls.
-    pub memory_nudge_interval: Option<usize>,
-    /// Maximum input tokens before context compression triggers. When the last
-    /// API response reports prompt_tokens above this threshold, the middle
-    /// portion of the conversation is summarized and replaced. Protects the
-    /// first 3 and last 4 non-system messages. Set to `None` to disable.
-    pub max_context_tokens: Option<u32>,
-    /// Enable trajectory recording for agent training data capture.
-    pub enable_trajectory: bool,
-    /// Directory to save trajectory files. When set with enable_trajectory,
-    /// trajectories are auto-saved after each turn. Files are written to
-    /// `{trajectory_dir}/{session_id}.json`.
-    pub trajectory_dir: Option<String>,
-    /// Session ID for trajectory file naming.
-    pub session_id: Option<String>,
-    /// Extended thinking configuration. When set, requests include reasoning
-    /// parameters for providers that support it (e.g. Claude, o1/o3).
-    pub thinking: Option<genesis_provider::ThinkingConfig>,
-    /// Optional response format constraint (e.g. json_object, json_schema).
-    /// When set, every chat completion request includes this format directive.
-    pub response_format: Option<genesis_provider::ResponseFormat>,
-    /// Timeout for individual tool calls in seconds. When a tool exceeds this
-    /// duration, it is cancelled and the LLM receives a timeout error. Default: 120s.
-    pub tool_timeout_secs: u64,
-    /// Maximum number of iterations (LLM calls) across the lifetime of this
-    /// agent loop. Unlike `max_turns` which resets per user message, this is a
-    /// hard cap on total LLM round-trips. Useful for autonomous/batch agents
-    /// that run many turns. `None` means unlimited.
-    pub max_iterations: Option<usize>,
-    /// Tool call parser for models that embed tool calls in text content.
-    /// When set, responses are normalized to extract tool calls from text.
-    /// Auto-detected from model name when `None`.
-    pub tool_call_parser: Option<String>,
-    /// Reasoning effort level. Injected into the request as `reasoning_effort`
-    /// for providers that support it (OpenRouter, some custom providers).
-    pub reasoning_effort: Option<genesis_config::ReasoningEffort>,
-    /// Response cache configuration. When set, identical LLM requests are
-    /// served from a SQLite cache instead of calling the provider.
-    pub cache: Option<genesis_config::CacheConfig>,
-    /// Guardrails configuration. When set, user input is validated before
-    /// processing and agent output is validated before returning.
-    pub guardrails: Option<crate::guardrails::GuardrailConfig>,
-    /// Core tool set. When set, only these tools (plus any discovered via
-    /// `find_tools`) are sent in the LLM request. Other tools remain
-    /// available in the registry and can be discovered at runtime.
-    /// Reduces input tokens by 85-96% for large tool registries.
-    pub core_tools: Option<Vec<String>>,
-    /// Adaptive model routing configuration. When enabled, the router
-    /// classifies each turn's complexity and selects the appropriate model
-    /// tier (cheap/mid/top) to optimize cost while maintaining quality.
-    pub routing: Option<genesis_config::RoutingConfig>,
-    /// Compiled tool policy for permission scoping. When set, tool calls
-    /// are checked against allow/deny rules before execution.
-    pub tool_policy: Option<crate::tool_policy::ToolPolicy>,
-}
-
-/// Default number of tool calls between memory consolidation nudges.
-const DEFAULT_MEMORY_NUDGE_INTERVAL: usize = 15;
-
-/// The memory nudge message injected as a system message.
-const MEMORY_NUDGE: &str = "\
-[Memory consolidation reminder] You've been working for a while. \
-Consider saving any useful observations, patterns, or user preferences \
-you've noticed using `memory_create`. Focus on durable insights that \
-would be valuable in future sessions — not session-specific details.";
-
-/// Number of tool calls in a single turn that triggers a skill creation nudge.
-const SKILL_CREATION_THRESHOLD: usize = 8;
-
-impl Default for AgentLoopConfig {
-    fn default() -> Self {
-        Self {
-            system_prompt: None,
-            max_turns: DEFAULT_MAX_TURNS,
-            temperature: None,
-            max_tokens: None,
-            max_context_messages: None,
-            max_context_tokens: None,
-            budget_limit: None,
-            max_concurrency: 4,
-            memory_nudge_interval: Some(DEFAULT_MEMORY_NUDGE_INTERVAL),
-            enable_trajectory: false,
-            trajectory_dir: None,
-            session_id: None,
-            thinking: None,
-            response_format: None,
-            tool_timeout_secs: 120,
-            max_iterations: None,
-            tool_call_parser: None,
-            reasoning_effort: None,
-            cache: None,
-            guardrails: None,
-            core_tools: None,
-            routing: None,
-            tool_policy: None,
-        }
-    }
-}
-
-/// Default core tool set — the minimum set of tools always available.
-/// When `core_tools` is `None`, all tools are sent (backwards compatible).
-/// When `core_tools` is `Some(vec![])`, this default set is used.
-pub const DEFAULT_CORE_TOOLS: &[&str] = &[
-    "shell_exec",
-    "read_file",
-    "write_file",
-    "patch",
-    "list_dir",
-    "list_tree",
-    "search_files",
-    "find_tools",
-    "memory_recall",
-    "clarify",
-];
-
-#[derive(Debug, Error)]
-pub enum AgentError {
-    #[error("provider error: {0}")]
-    Provider(#[from] ProviderError),
-    #[error("tool error: {0}")]
-    Tool(#[from] ToolError),
-    #[error("failed to parse tool call arguments: {0}")]
-    ArgumentParse(String),
-    #[error("agent loop exceeded maximum of {0} turns")]
-    MaxTurnsExceeded(usize),
-    #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
-    BudgetExceeded { used: f64, limit: f64 },
-    #[error("iteration budget exhausted: {used} / {limit} iterations")]
-    IterationsExhausted { used: usize, limit: usize },
-    #[error("agent loop was cancelled")]
-    Cancelled,
-}
-
-/// Callback for spawning subagent workstreams. Called when the agent
-/// invokes the `spawn_subagent` tool with the child session ID and task.
-pub trait SubagentSpawner: Send + Sync {
-    fn spawn(&self, child_session_id: &str, subagent_id: &str, task: &str);
-}
-
-/// Lifecycle hooks for the agent loop.
-///
-/// All methods have default no-op implementations, so consumers only need
-/// to override the events they care about. Hooks are called synchronously
-/// and should return quickly — expensive work should be spawned.
-///
-/// Errors in hooks are logged but never propagate to the agent loop.
-pub trait AgentHooks: Send + Sync {
-    /// Called when a user turn begins, before the first LLM call.
-    fn on_turn_start(&self, _session_id: &str, _user_message: &str) {}
-
-    /// Called when a user turn completes (naturally or by limit/budget).
-    fn on_turn_end(&self, _session_id: &str, _result: &AgentResult) {}
-
-    /// Called before each tool is executed.
-    fn on_tool_call_start(&self, _session_id: &str, _tool_name: &str) {}
-
-    /// Called after a tool finishes executing (success or failure).
-    fn on_tool_call_end(
-        &self,
-        _session_id: &str,
-        _tool_name: &str,
-        _success: bool,
-        _duration_ms: u64,
-    ) {
-    }
-
-    /// Called before each LLM API request.
-    fn on_llm_request(&self, _session_id: &str, _model: &str, _turn: usize) {}
-
-    /// Called after each LLM API response with token counts.
-    fn on_llm_response(
-        &self,
-        _session_id: &str,
-        _model: &str,
-        _input_tokens: u32,
-        _output_tokens: u32,
-    ) {
-    }
-
-    /// Called when context compression is triggered.
-    fn on_context_prune(&self, _session_id: &str, _messages_before: usize, _messages_after: usize) {
-    }
-
-    /// Called when a tool is detected in a stuck loop.
-    fn on_stuck_loop(&self, _session_id: &str, _tool_name: &str, _failure_count: usize) {}
-}
-
-/// No-op hook implementation (default).
-pub struct NoopHooks;
-impl AgentHooks for NoopHooks {}
+use tools::execute_tool_calls_parallel;
+use types::{
+    format_blocked_reasons, MEMORY_NUDGE, SKILL_CREATION_THRESHOLD, STUCK_LOOP_THRESHOLD,
+};
 
 /// The core agent loop that wires provider (LLM) and tool execution together.
 ///
 /// Flow: user message → LLM → [tool_calls → execute → LLM]* → final text
 pub struct AgentLoop {
-    client: ChatClient,
+    pub(crate) client: ChatClient,
     /// Optional cheaper client for tool-calling turns. When set, turns that
     /// follow tool results use this client while turns following user messages
     /// use the primary `client`.
-    tool_client: Option<ChatClient>,
+    pub(crate) tool_client: Option<ChatClient>,
     /// Fallback clients tried in order when the primary (or active) client fails.
     /// Each entry pairs a client with its per-provider timeout.
-    fallback_clients: Vec<(ChatClient, Duration)>,
-    tools: ToolRuntime,
-    config: AgentLoopConfig,
-    messages: Vec<ChatMessage>,
-    subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
-    hooks: Arc<dyn AgentHooks>,
-    hook_runner: HookRunner,
-    hook_results: Vec<HookResult>,
-    lua_runtime: Option<Arc<LuaRuntime>>,
-    cost: SessionCost,
-    trajectory: TrajectoryRecorder,
+    pub(crate) fallback_clients: Vec<(ChatClient, Duration)>,
+    pub(crate) tools: ToolRuntime,
+    pub(crate) config: AgentLoopConfig,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    pub(crate) hooks: Arc<dyn AgentHooks>,
+    pub(crate) hook_runner: HookRunner,
+    pub(crate) hook_results: Vec<HookResult>,
+    pub(crate) lua_runtime: Option<Arc<LuaRuntime>>,
+    pub(crate) cost: SessionCost,
+    pub(crate) trajectory: TrajectoryRecorder,
     /// Last reported prompt token count from the API. Used for token-aware
     /// context compression.
-    last_prompt_tokens: u32,
+    pub(crate) last_prompt_tokens: u32,
     /// Tracks consecutive failures per tool name. When a tool fails
     /// `STUCK_LOOP_THRESHOLD` times in a row, a system nudge tells the LLM
     /// to try a different approach.
-    tool_failure_counts: HashMap<String, usize>,
+    pub(crate) tool_failure_counts: HashMap<String, usize>,
     /// Total number of LLM iterations consumed across all user turns.
     /// Checked against `config.max_iterations` at each loop boundary.
-    iterations_used: usize,
+    pub(crate) iterations_used: usize,
     /// Cancellation flag. When set to `true`, the loop exits gracefully
     /// at the next turn boundary.
-    cancelled: Arc<AtomicBool>,
+    pub(crate) cancelled: Arc<AtomicBool>,
     /// Optional response cache for deduplicating identical LLM calls.
-    response_cache: Option<genesis_storage::ResponseCacheStore>,
-    cache_hits: u32,
-    cache_misses: u32,
+    pub(crate) response_cache: Option<genesis_storage::ResponseCacheStore>,
+    pub(crate) cache_hits: u32,
+    pub(crate) cache_misses: u32,
     /// Pre-compiled guardrails (avoids recompiling regexes on every check).
-    compiled_guardrails: Option<crate::guardrails::CompiledGuardrails>,
+    pub(crate) compiled_guardrails: Option<crate::guardrails::CompiledGuardrails>,
     /// Tools discovered via `find_tools` during this session. These are added
     /// to the core set for subsequent LLM requests.
-    discovered_tools: HashSet<String>,
+    pub(crate) discovered_tools: HashSet<String>,
 }
-
-/// Number of consecutive failures for the same tool before injecting a
-/// "try a different approach" nudge.
-const STUCK_LOOP_THRESHOLD: usize = genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
 
 impl AgentLoop {
     pub fn new(
@@ -427,7 +93,7 @@ impl AgentLoop {
     }
 
     /// Return the session ID as a `&str`, defaulting to `""` when unset.
-    fn session_id_str(&self) -> &str {
+    pub(crate) fn session_id_str(&self) -> &str {
         self.config.session_id.as_deref().unwrap_or_default()
     }
 
@@ -489,7 +155,7 @@ impl AgentLoop {
 
     /// Filter tool definitions to the core set + discovered tools.
     /// Takes a reference to avoid cloning the entire Vec; only clones kept items.
-    fn filter_tool_defs(&self, all_defs: &[ChatTool]) -> Vec<ChatTool> {
+    pub(crate) fn filter_tool_defs(&self, all_defs: &[ChatTool]) -> Vec<ChatTool> {
         let core = match &self.config.core_tools {
             Some(core) if !core.is_empty() => core,
             Some(_) => {
@@ -521,7 +187,7 @@ impl AgentLoop {
     }
 
     /// Add a tool name to the discovered set so it's included in future requests.
-    fn discover_tool(&mut self, name: &str) {
+    pub(crate) fn discover_tool(&mut self, name: &str) {
         if self.discovered_tools.insert(name.to_owned()) {
             debug!(tool = name, "tool discovered and added to active set");
         }
@@ -615,7 +281,7 @@ impl AgentLoop {
     }
 
     /// Resolve the tool call parser: explicit config takes priority, then auto-detect.
-    fn resolve_parser(
+    pub(crate) fn resolve_parser(
         &self,
         model: &str,
     ) -> Option<Box<dyn genesis_provider::parsers::ToolCallParser>> {
@@ -628,7 +294,7 @@ impl AgentLoop {
 
     /// Apply tool call parser to normalize responses from models that embed
     /// tool calls in text content rather than using the native tool_calls field.
-    fn apply_tool_call_parser(
+    pub(crate) fn apply_tool_call_parser(
         &self,
         response: &mut genesis_provider::ChatCompletionResponse,
         model: &str,
@@ -639,7 +305,7 @@ impl AgentLoop {
     }
 
     /// Inject reasoning effort into the request's extra_body if configured.
-    fn inject_reasoning_effort(&self, request: &mut ChatCompletionRequest) {
+    pub(crate) fn inject_reasoning_effort(&self, request: &mut ChatCompletionRequest) {
         if let Some(ref effort) = self.config.reasoning_effort {
             let effort_str = match effort {
                 genesis_config::ReasoningEffort::High => "high",
@@ -662,7 +328,7 @@ impl AgentLoop {
 
     /// Apply adaptive routing to the request by overriding the model based on
     /// context classification. Returns the selected tier name for logging.
-    fn apply_routing(
+    pub(crate) fn apply_routing(
         &self,
         request: &mut ChatCompletionRequest,
         user_message: &str,
@@ -708,7 +374,7 @@ impl AgentLoop {
     /// the most recent message is a tool result (the agent is processing tool
     /// output and will likely make more tool calls). Falls back to the primary
     /// client otherwise.
-    fn active_client(&self) -> &ChatClient {
+    pub(crate) fn active_client(&self) -> &ChatClient {
         if let Some(ref tool_client) = self.tool_client {
             let last_role = self.messages.last().map(|m| m.role.as_str());
             if last_role == Some("tool") {
@@ -725,7 +391,7 @@ impl AgentLoop {
     ///
     /// The request is only cloned when fallback providers are actually tried,
     /// avoiding an expensive clone in the common (no-fallback) success path.
-    async fn complete_with_failover(
+    pub(crate) async fn complete_with_failover(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<(genesis_provider::ChatCompletionResponse, String), ProviderError> {
@@ -796,7 +462,7 @@ impl AgentLoop {
     ///
     /// The request is only cloned when fallback providers are actually tried,
     /// avoiding an expensive clone in the common (no-fallback) success path.
-    async fn complete_stream_with_failover(
+    pub(crate) async fn complete_stream_with_failover(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<(genesis_provider::ChatCompletionChunkStream, String), ProviderError> {
@@ -1461,774 +1127,9 @@ impl AgentLoop {
         }
     }
 
-    pub async fn run_turn_streaming<F>(
-        &mut self,
-        user_message: &str,
-        on_event: F,
-    ) -> Result<AgentResult, AgentError>
-    where
-        F: FnMut(StreamEvent<'_>),
-    {
-        self.run_turn_streaming_with_images(user_message, Vec::new(), on_event)
-            .await
-    }
-
-    /// Run a streaming turn with optional image attachments.
-    pub async fn run_turn_streaming_with_images<F>(
-        &mut self,
-        user_message: &str,
-        images: Vec<genesis_provider::ImageUrl>,
-        mut on_event: F,
-    ) -> Result<AgentResult, AgentError>
-    where
-        F: FnMut(StreamEvent<'_>),
-    {
-        let hook_session = self.session_id_str().to_owned();
-        let lua_pre_turn = self.run_lua_pre_turn(user_message);
-        let user_message = match lua_pre_turn {
-            PreHookOutcome::Allow(message) => {
-                self.fire_shell_hooks(
-                    HookEvent::PreTurn,
-                    serde_json::json!({
-                        "session_id": hook_session,
-                        "user_message": message,
-                        "image_count": images.len(),
-                        "streaming": true,
-                    }),
-                );
-                message
-            }
-            PreHookOutcome::Veto { reason } => {
-                self.fire_shell_hooks(
-                    HookEvent::PreTurn,
-                    serde_json::json!({
-                        "session_id": hook_session,
-                        "user_message": user_message,
-                        "image_count": images.len(),
-                        "streaming": true,
-                        "lua_vetoed": true,
-                        "lua_reason": reason.as_deref(),
-                    }),
-                );
-                let result = AgentResult {
-                    response: format!(
-                        "Your input was blocked by Lua hook: {}",
-                        reason.unwrap_or_else(|| "request rejected".to_owned())
-                    ),
-                    turns_used: 0,
-                    tool_calls_made: 0,
-                    finished_naturally: true,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    estimated_cost: None,
-                    pending_clarification: None,
-                };
-                return Ok(self.finalize_turn(&hook_session, result, false));
-            }
-        };
-
-        // Run input guardrails if configured (streaming path)
-        let user_message = if let Some(ref cg) = self.compiled_guardrails {
-            let result = cg.check_input(&user_message);
-            if !result.passed {
-                let agent_result = AgentResult {
-                    response: format!(
-                        "Your input was blocked by guardrails: {}",
-                        format_blocked_reasons(&result)
-                    ),
-                    turns_used: 0,
-                    tool_calls_made: 0,
-                    finished_naturally: true,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    estimated_cost: None,
-                    pending_clarification: None,
-                };
-                return Ok(self.finalize_turn(&hook_session, agent_result, false));
-            }
-            result.content
-        } else {
-            user_message.to_owned()
-        };
-
-        let user_message = if images.is_empty() {
-            self.push_message_with_lua_hooks(&hook_session, ChatMessage::user(&user_message))
-                .and_then(|message| message.content_text().map(str::to_owned))
-                .unwrap_or_default()
-        } else {
-            self.push_message_with_lua_hooks(
-                &hook_session,
-                ChatMessage::user_with_images(user_message.clone(), images),
-            )
-            .and_then(|message| message.content_text().map(str::to_owned))
-            .unwrap_or_default()
-        };
-
-        if !user_message.is_empty() {
-            self.trajectory.record_user_message(&user_message);
-        }
-
-        // Fire turn-start hook (streaming)
-        self.hooks.on_turn_start(&hook_session, &user_message);
-        on_event(StreamEvent::TurnStarted);
-
-        let all_tool_defs: Vec<ChatTool> = self
-            .tools
-            .definitions_async()
-            .await
-            .iter()
-            .map(ChatTool::from)
-            .collect();
-
-        let mut turns_used = 0;
-        let mut tool_calls_made = 0;
-        let mut total_input_tokens = 0u32;
-        let mut total_output_tokens = 0u32;
-
-        loop {
-            let tool_defs = if self.config.core_tools.is_some() {
-                self.filter_tool_defs(&all_tool_defs)
-            } else {
-                all_tool_defs.clone()
-            };
-
-            if self.cancelled.load(Ordering::Relaxed) {
-                info!("agent loop cancelled by external signal (streaming)");
-                self.save_trajectory();
-                let result = AgentResult {
-                    response: "The operation was cancelled.".to_owned(),
-                    turns_used,
-                    tool_calls_made,
-                    finished_naturally: false,
-                    total_input_tokens,
-                    total_output_tokens,
-                    estimated_cost: Some(self.cost.total_cost),
-                    pending_clarification: None,
-                };
-                return Ok(self.finalize_turn(&hook_session, result, false));
-            }
-
-            turns_used += 1;
-            if turns_used > self.config.max_turns {
-                warn!(
-                    max_turns = self.config.max_turns,
-                    "agent loop reached turn limit (streaming)"
-                );
-                let msg = format!(
-                    "I've reached the maximum of {} turns for this request. \
-                     The work so far has been saved. You can continue by sending another message.",
-                    self.config.max_turns
-                );
-                on_event(StreamEvent::Chunk(&msg));
-                self.save_trajectory();
-                let result = AgentResult {
-                    response: msg,
-                    turns_used: turns_used - 1,
-                    tool_calls_made,
-                    finished_naturally: false,
-                    total_input_tokens,
-                    total_output_tokens,
-                    estimated_cost: Some(self.cost.total_cost),
-                    pending_clarification: None,
-                };
-                return Ok(self.finalize_turn(&hook_session, result, false));
-            }
-
-            // Check iteration budget (lifetime cap across all user turns)
-            if let Some(limit) = self.config.max_iterations {
-                if self.iterations_used >= limit {
-                    warn!(
-                        iterations = self.iterations_used,
-                        limit, "iteration budget exhausted (streaming)"
-                    );
-                    let msg = format!(
-                        "Iteration budget exhausted ({limit} iterations). \
-                         The work so far has been saved."
-                    );
-                    on_event(StreamEvent::Chunk(&msg));
-                    self.save_trajectory();
-                    let result = AgentResult {
-                        response: msg,
-                        turns_used,
-                        tool_calls_made,
-                        finished_naturally: false,
-                        total_input_tokens,
-                        total_output_tokens,
-                        estimated_cost: Some(self.cost.total_cost),
-                        pending_clarification: None,
-                    };
-                    return Ok(self.finalize_turn(&hook_session, result, false));
-                }
-            }
-            self.iterations_used += 1;
-
-            debug!(
-                turn = turns_used,
-                mode = "streaming",
-                prompt_version = crate::prompt::PROMPT_VERSION,
-                "starting agent turn iteration"
-            );
-
-            self.prune_context().await;
-            let mut request = ChatCompletionRequest::new("", self.messages.clone());
-            request.tools = tool_defs;
-            request.temperature = self.config.temperature;
-            request.max_tokens = self.config.max_tokens;
-            request.thinking = self.config.thinking.clone();
-            request.response_format = self.config.response_format.clone();
-            self.inject_reasoning_effort(&mut request);
-
-            // Adaptive routing: classify and override model if enabled.
-            let had_failure = self.tool_failure_counts.values().any(|&c| c > 0);
-            self.apply_routing(
-                &mut request,
-                &user_message,
-                tool_calls_made,
-                turns_used,
-                had_failure,
-            );
-
-            self.hooks
-                .on_llm_request(&hook_session, self.active_client().model(), turns_used);
-            let stream_result = self.complete_stream_with_failover(request.clone()).await;
-            match stream_result {
-                Ok((mut stream, active_model)) => {
-                    let mut response_text = String::new();
-                    let mut streamed_tool_calls = Vec::new();
-                    let mut finished_naturally = true;
-                    let mut turn_input_tokens = 0u32;
-                    let mut turn_output_tokens = 0u32;
-                    let mut streamed_provider_metadata: Option<serde_json::Value> = None;
-
-                    while let Some(chunk) = stream.next().await {
-                        let chunk = match chunk {
-                            Ok(chunk) => chunk,
-                            Err(err) => {
-                                return Err(self.report_error(
-                                    &hook_session,
-                                    "stream_chunk",
-                                    err.into(),
-                                ));
-                            }
-                        };
-                        let update = collect_stream_update(chunk);
-
-                        for content in update.contents {
-                            on_event(StreamEvent::Chunk(&content));
-                            response_text.push_str(&content);
-                        }
-
-                        if let Some(reason) = update.finish_reason {
-                            finished_naturally =
-                                !matches!(reason.as_str(), "length" | "incomplete");
-                        }
-
-                        if let Some(usage) = update.usage {
-                            turn_input_tokens =
-                                turn_input_tokens.saturating_add(usage.prompt_tokens);
-                            turn_output_tokens =
-                                turn_output_tokens.saturating_add(usage.completion_tokens);
-                        }
-
-                        if update.provider_metadata.is_some() {
-                            streamed_provider_metadata = update.provider_metadata;
-                        }
-
-                        merge_streamed_tool_calls(&mut streamed_tool_calls, update.tool_calls);
-                    }
-
-                    total_input_tokens = total_input_tokens.saturating_add(turn_input_tokens);
-                    total_output_tokens = total_output_tokens.saturating_add(turn_output_tokens);
-                    self.last_prompt_tokens = turn_input_tokens;
-                    if let Err(err) = self.record_usage_with_model(
-                        &active_model,
-                        turns_used,
-                        turn_input_tokens,
-                        turn_output_tokens,
-                    ) {
-                        return Err(self.report_error(&hook_session, "usage_record", err));
-                    }
-                    self.hooks.on_llm_response(
-                        &hook_session,
-                        &active_model,
-                        turn_input_tokens,
-                        turn_output_tokens,
-                    );
-                    on_event(StreamEvent::TokenUsage {
-                        input_tokens: total_input_tokens,
-                        output_tokens: total_output_tokens,
-                    });
-
-                    // If streaming didn't produce native tool calls, try parsing from text
-                    if streamed_tool_calls.is_empty() && !response_text.is_empty() {
-                        if let Some(parser) = self.resolve_parser(&active_model) {
-                            if let Some(result) = parser.parse(&response_text) {
-                                streamed_tool_calls = result.tool_calls;
-                                response_text = result.content.unwrap_or_default();
-                            }
-                        }
-                    }
-
-                    if !streamed_tool_calls.is_empty() {
-                        // Propagate provider_metadata (e.g. reasoning items) from
-                        // the streaming completion event for multi-turn continuity.
-                        let mut msg = ChatMessage::assistant_with_tool_calls(
-                            if response_text.is_empty() {
-                                None
-                            } else {
-                                Some(MessageContent::Text(response_text.clone()))
-                            },
-                            streamed_tool_calls.clone(),
-                        );
-                        // Only response.completed emits provider_metadata today; last write wins is intentional.
-                        msg.provider_metadata = streamed_provider_metadata;
-                        if let Some(message) = self.push_message_with_lua_hooks(
-                            &hook_session,
-                            msg,
-                        ) {
-                            if let Some(text) = message.content_text() {
-                                if !text.is_empty() {
-                                    self.trajectory.record_assistant_message(text);
-                                }
-                            }
-                        }
-
-                        let (effective_tool_calls, veto_reasons) =
-                            self.prepare_tool_calls(&hook_session, &streamed_tool_calls, true);
-                        streamed_tool_calls = effective_tool_calls;
-                        // Emit start events and execute tool calls.
-                        tool_calls_made += streamed_tool_calls.len();
-                        for tc in &streamed_tool_calls {
-                            on_event(StreamEvent::ToolCallStart {
-                                name: &tc.function.name,
-                                call_id: &tc.id,
-                                args_summary: summarize_args(&tc.function.arguments),
-                            });
-                        }
-
-                        let executable_tool_calls: Vec<ToolCallEntry> = streamed_tool_calls
-                            .iter()
-                            .zip(veto_reasons.iter())
-                            .filter(|(_, veto)| veto.is_none())
-                            .map(|(tc, _)| tc.clone())
-                            .collect();
-                        let tool_exec_start = Instant::now();
-                        let executed_results = if executable_tool_calls.is_empty() {
-                            Vec::new()
-                        } else {
-                            match execute_tool_calls_parallel(
-                                &self.tools,
-                                &self.subagent_spawner,
-                                &executable_tool_calls,
-                                self.config.max_concurrency,
-                                self.config.tool_timeout_secs,
-                                self.config.tool_policy.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(results) => results,
-                                Err(err) => {
-                                    return Err(self.report_error(
-                                        &hook_session,
-                                        "tool_execution",
-                                        err,
-                                    ));
-                                }
-                            }
-                        };
-                        let tool_exec_duration = tool_exec_start.elapsed();
-
-                        let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
-                        let mut clarification = None;
-                        let mut executed_results = executed_results.into_iter();
-                        for (tc, veto_reason) in
-                            streamed_tool_calls.iter().zip(veto_reasons.into_iter())
-                        {
-                            let lua_vetoed = veto_reason.is_some();
-                            let (mut result, requires_input) = match veto_reason {
-                                Some(reason) => (
-                                    format!("Error: tool call blocked by Lua hook: {reason}"),
-                                    false,
-                                ),
-                                None => executed_results.next().expect(
-                                    "executed tool results should align with allowed calls",
-                                ),
-                            };
-                            result = sanitize::sanitize_credentials(&result);
-                            // Extract discovered tool names from find_tools results
-                            // (only when core set filtering is active).
-                            if self.config.core_tools.is_some()
-                                && tc.function.name == "find_tools"
-                                && !result.starts_with("Error:")
-                                && !result.starts_with("No tools")
-                            {
-                                for line in result.lines() {
-                                    let trimmed = line.trim();
-                                    if let Some(rest) = trimmed.strip_prefix("**") {
-                                        if let Some(name_end) = rest.find("**") {
-                                            self.discover_tool(&rest[..name_end]);
-                                        }
-                                    }
-                                }
-                            }
-                            let tool_success = !result.starts_with("Error:");
-                            let result = self.run_lua_post_tool_call(&tc.function.name, &result);
-                            on_event(StreamEvent::ToolCallEnd {
-                                name: &tc.function.name,
-                                call_id: &tc.id,
-                                duration_ms: tool_exec_duration_ms,
-                                success: tool_success,
-                            });
-                            if !tool_success {
-                                let count = self
-                                    .tool_failure_counts
-                                    .entry(tc.function.name.clone())
-                                    .or_insert(0);
-                                *count += 1;
-                            } else {
-                                self.tool_failure_counts.remove(&tc.function.name);
-                                // Auto-discover tools called outside core set.
-                                if self.config.core_tools.is_some() {
-                                    self.discover_tool(&tc.function.name);
-                                }
-                            }
-                            self.fire_shell_hooks(
-                                HookEvent::PostToolCall,
-                                serde_json::json!({
-                                    "session_id": hook_session,
-                                    "tool_name": tc.function.name,
-                                    "tool_call_id": tc.id,
-                                    "success": tool_success,
-                                    "result": result,
-                                    "requires_input": requires_input,
-                                    "streaming": true,
-                                    "lua_vetoed": lua_vetoed,
-                                }),
-                            );
-                            let result = self
-                                .push_message_with_lua_hooks(
-                                    &hook_session,
-                                    ChatMessage::tool_result(&tc.id, result),
-                                )
-                                .and_then(|message| message.content_text().map(str::to_owned))
-                                .unwrap_or_default();
-                            self.trajectory
-                                .record_tool_result(&tc.function.name, &result);
-                            if requires_input {
-                                on_event(StreamEvent::ClarificationNeeded { question: &result });
-                                clarification = Some(result.clone());
-                            }
-                        }
-
-                        self.maybe_inject_stuck_nudge();
-
-                        if let Some(question) = clarification {
-                            self.save_trajectory();
-                            let result = AgentResult {
-                                response: String::new(),
-                                turns_used,
-                                tool_calls_made,
-                                finished_naturally: false,
-                                total_input_tokens,
-                                total_output_tokens,
-                                estimated_cost: Some(self.cost.total_cost),
-                                pending_clarification: Some(question),
-                            };
-                            return Ok(self.finalize_turn(&hook_session, result, false));
-                        }
-
-                        self.maybe_inject_memory_nudge(tool_calls_made);
-                        continue;
-                    }
-
-                    let mut text_msg = ChatMessage::assistant(&response_text);
-                    text_msg.provider_metadata = streamed_provider_metadata;
-                    let response_text = self
-                        .push_message_with_lua_hooks(
-                            &hook_session,
-                            text_msg,
-                        )
-                        .and_then(|message| message.content_text().map(str::to_owned))
-                        .unwrap_or_default();
-                    if !response_text.is_empty() {
-                        self.trajectory.record_assistant_message(&response_text);
-                    }
-
-                    self.maybe_inject_skill_nudge(tool_calls_made);
-                    self.save_trajectory();
-                    let result = AgentResult {
-                        response: response_text,
-                        turns_used,
-                        tool_calls_made,
-                        finished_naturally,
-                        total_input_tokens,
-                        total_output_tokens,
-                        estimated_cost: Some(self.cost.total_cost),
-                        pending_clarification: None,
-                    };
-                    return Ok(self.finalize_turn(&hook_session, result, true));
-                }
-                Err(_) => {
-                    warn!(
-                        turn = turns_used,
-                        "streaming provider request failed; falling back to blocking completion"
-                    );
-                    let (mut response, fb_model) = match self.complete_with_failover(request).await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            return Err(self.report_error(
-                                &hook_session,
-                                "llm_request_fallback",
-                                err.into(),
-                            ));
-                        }
-                    };
-
-                    // Apply tool call parser for models that embed tool calls in text
-                    self.apply_tool_call_parser(&mut response, &fb_model);
-
-                    if let Some(usage) = &response.usage {
-                        total_input_tokens = total_input_tokens.saturating_add(usage.prompt_tokens);
-                        total_output_tokens =
-                            total_output_tokens.saturating_add(usage.completion_tokens);
-                        self.last_prompt_tokens = usage.prompt_tokens;
-                        if let Err(err) = self.record_usage_with_model(
-                            &fb_model,
-                            turns_used,
-                            usage.prompt_tokens,
-                            usage.completion_tokens,
-                        ) {
-                            return Err(self.report_error(&hook_session, "usage_record", err));
-                        }
-                        on_event(StreamEvent::TokenUsage {
-                            input_tokens: total_input_tokens,
-                            output_tokens: total_output_tokens,
-                        });
-                    }
-
-                    let choice = response.choices.first().ok_or_else(|| {
-                        self.report_error(
-                            &hook_session,
-                            "empty_response",
-                            AgentError::Provider(ProviderError::EmptyChoices),
-                        )
-                    })?;
-                    let assistant_msg = &choice.message;
-
-                    if let Some(tool_calls) = &assistant_msg.tool_calls {
-                        if !tool_calls.is_empty() {
-                            let (effective_tool_calls, veto_reasons) =
-                                self.prepare_tool_calls(&hook_session, tool_calls, false);
-                            let tool_calls = effective_tool_calls;
-
-                            let mut msg = ChatMessage::assistant_with_tool_calls(
-                                assistant_msg.content.clone(),
-                                tool_calls.clone(),
-                            );
-                            msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                            if let Some(message) =
-                                self.push_message_with_lua_hooks(&hook_session, msg)
-                            {
-                                if let Some(text) = message.content_text() {
-                                    if !text.is_empty() {
-                                        self.trajectory.record_assistant_message(text);
-                                    }
-                                }
-                            }
-
-                            // Emit start events.
-                            for tc in tool_calls.iter() {
-                                on_event(StreamEvent::ToolCallStart {
-                                    name: &tc.function.name,
-                                    call_id: &tc.id,
-                                    args_summary: summarize_args(&tc.function.arguments),
-                                });
-                            }
-
-                            // Execute tool calls in parallel.
-                            tool_calls_made += tool_calls.len();
-                            let executable_tool_calls: Vec<ToolCallEntry> = tool_calls
-                                .iter()
-                                .zip(veto_reasons.iter())
-                                .filter(|(_, veto)| veto.is_none())
-                                .map(|(tc, _)| tc.clone())
-                                .collect();
-                            let tool_exec_start = Instant::now();
-                            let executed_results = if executable_tool_calls.is_empty() {
-                                Vec::new()
-                            } else {
-                                match execute_tool_calls_parallel(
-                                    &self.tools,
-                                    &self.subagent_spawner,
-                                    &executable_tool_calls,
-                                    self.config.max_concurrency,
-                                    self.config.tool_timeout_secs,
-                                    self.config.tool_policy.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok(results) => results,
-                                    Err(err) => {
-                                        return Err(self.report_error(
-                                            &hook_session,
-                                            "tool_execution",
-                                            err,
-                                        ));
-                                    }
-                                }
-                            };
-                            let tool_exec_duration = tool_exec_start.elapsed();
-                            let tool_exec_duration_ms = tool_exec_duration.as_millis() as u64;
-
-                            let mut clarification = None;
-                            let mut executed_results = executed_results.into_iter();
-                            for (tc, veto_reason) in tool_calls.iter().zip(veto_reasons.into_iter())
-                            {
-                                let lua_vetoed = veto_reason.is_some();
-                                let (mut result, requires_input) = match veto_reason {
-                                    Some(reason) => (
-                                        format!("Error: tool call blocked by Lua hook: {reason}"),
-                                        false,
-                                    ),
-                                    None => executed_results.next().expect(
-                                        "executed tool results should align with allowed calls",
-                                    ),
-                                };
-                                result = sanitize::sanitize_credentials(&result);
-                                if self.config.core_tools.is_some()
-                                    && tc.function.name == "find_tools"
-                                    && !result.starts_with("Error:")
-                                    && !result.starts_with("No tools")
-                                {
-                                    for line in result.lines() {
-                                        let trimmed = line.trim();
-                                        if let Some(rest) = trimmed.strip_prefix("**") {
-                                            if let Some(name_end) = rest.find("**") {
-                                                self.discover_tool(&rest[..name_end]);
-                                            }
-                                        }
-                                    }
-                                }
-                                let tool_success = !result.starts_with("Error:");
-                                let result =
-                                    self.run_lua_post_tool_call(&tc.function.name, &result);
-                                on_event(StreamEvent::ToolCallEnd {
-                                    name: &tc.function.name,
-                                    call_id: &tc.id,
-                                    duration_ms: tool_exec_duration_ms,
-                                    success: tool_success,
-                                });
-                                if !tool_success {
-                                    let count = self
-                                        .tool_failure_counts
-                                        .entry(tc.function.name.clone())
-                                        .or_insert(0);
-                                    *count += 1;
-                                } else {
-                                    self.tool_failure_counts.remove(&tc.function.name);
-                                }
-                                self.fire_shell_hooks(
-                                    HookEvent::PostToolCall,
-                                    serde_json::json!({
-                                        "session_id": hook_session,
-                                        "tool_name": tc.function.name,
-                                        "tool_call_id": tc.id,
-                                        "success": tool_success,
-                                        "result": result,
-                                        "requires_input": requires_input,
-                                        "streaming": false,
-                                        "lua_vetoed": lua_vetoed,
-                                    }),
-                                );
-                                let result = self
-                                    .push_message_with_lua_hooks(
-                                        &hook_session,
-                                        ChatMessage::tool_result(&tc.id, result),
-                                    )
-                                    .and_then(|message| message.content_text().map(str::to_owned))
-                                    .unwrap_or_default();
-                                self.trajectory
-                                    .record_tool_result(&tc.function.name, &result);
-                                if requires_input {
-                                    on_event(StreamEvent::ClarificationNeeded {
-                                        question: &result,
-                                    });
-                                    clarification = Some(result.clone());
-                                }
-                            }
-
-                            self.maybe_inject_stuck_nudge();
-
-                            if let Some(question) = clarification {
-                                self.save_trajectory();
-                                let result = AgentResult {
-                                    response: String::new(),
-                                    turns_used,
-                                    tool_calls_made,
-                                    finished_naturally: false,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    estimated_cost: Some(self.cost.total_cost),
-                                    pending_clarification: Some(question),
-                                };
-                                return Ok(self.finalize_turn(&hook_session, result, false));
-                            }
-
-                            self.maybe_inject_memory_nudge(tool_calls_made);
-                            continue;
-                        }
-                    }
-
-                    let mut response_text = assistant_msg.content_text().unwrap_or("").to_owned();
-
-                    // Run output guardrails if configured (streaming path)
-                    if let Some(ref cg) = self.compiled_guardrails {
-                        let gr = cg.check_output(&response_text);
-                        if !gr.passed {
-                            response_text = format!(
-                                "Response blocked by guardrails: {}",
-                                format_blocked_reasons(&gr)
-                            );
-                        } else {
-                            response_text = gr.content;
-                        }
-                    }
-
-                    let mut msg = ChatMessage::assistant(&response_text);
-                    msg.provider_metadata = assistant_msg.provider_metadata.clone();
-                    let response_text = self
-                        .push_message_with_lua_hooks(&hook_session, msg)
-                        .and_then(|message| message.content_text().map(str::to_owned))
-                        .unwrap_or_default();
-                    if !response_text.is_empty() {
-                        self.trajectory.record_assistant_message(&response_text);
-                    }
-
-                    self.maybe_inject_skill_nudge(tool_calls_made);
-                    self.save_trajectory();
-                    let result = AgentResult {
-                        response: response_text,
-                        turns_used,
-                        tool_calls_made,
-                        finished_naturally: !matches!(
-                            choice.finish_reason.as_deref(),
-                            Some("length") | Some("incomplete")
-                        ),
-                        total_input_tokens,
-                        total_output_tokens,
-                        estimated_cost: Some(self.cost.total_cost),
-                        pending_clarification: None,
-                    };
-                    return Ok(self.finalize_turn(&hook_session, result, true));
-                }
-            }
-        }
-    }
-
     /// Inject a memory nudge system message if enough tool calls have
     /// accumulated since the last nudge.
-    fn maybe_inject_memory_nudge(&mut self, tool_calls_made: usize) {
+    pub(crate) fn maybe_inject_memory_nudge(&mut self, tool_calls_made: usize) {
         if let Some(interval) = self.config.memory_nudge_interval {
             if interval > 0 && tool_calls_made > 0 && tool_calls_made.is_multiple_of(interval) {
                 debug!(
@@ -2244,7 +1145,7 @@ impl AgentLoop {
 
     /// Inject a skill creation nudge if the turn involved many tool calls,
     /// suggesting the agent save the procedure as a reusable skill.
-    fn maybe_inject_skill_nudge(&mut self, tool_calls_made: usize) {
+    pub(crate) fn maybe_inject_skill_nudge(&mut self, tool_calls_made: usize) {
         if tool_calls_made >= SKILL_CREATION_THRESHOLD {
             debug!(
                 tool_calls_made,
@@ -2261,7 +1162,7 @@ impl AgentLoop {
 
     /// Check if any tool has failed too many times in a row and inject a
     /// system nudge telling the LLM to try a different approach.
-    fn maybe_inject_stuck_nudge(&mut self) {
+    pub(crate) fn maybe_inject_stuck_nudge(&mut self) {
         let stuck_tools: Vec<String> = self
             .tool_failure_counts
             .iter()
@@ -2297,7 +1198,7 @@ impl AgentLoop {
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
-    fn save_trajectory(&self) {
+    pub(crate) fn save_trajectory(&self) {
         if let Some(dir) = &self.config.trajectory_dir {
             let session_id = self.config.session_id.as_deref().unwrap_or("unknown");
             let path = std::path::Path::new(dir).join(format!("{session_id}.json"));
@@ -2327,285 +1228,6 @@ impl AgentLoop {
         &mut self.trajectory
     }
 
-    fn fire_shell_hooks(&mut self, event: HookEvent, context: serde_json::Value) {
-        let results = self.hook_runner.run_hooks(event, &context);
-        self.hook_results.extend(results);
-    }
-
-    fn run_lua_on_message(
-        &self,
-        role: &str,
-        content: &str,
-        tool_call_count: usize,
-        image_count: usize,
-    ) -> PreHookOutcome<String> {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return PreHookOutcome::Allow(content.to_owned());
-        };
-
-        match runtime.run_on_message(role, content, tool_call_count, image_count) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                warn!(error = %error, role = %role, "lua on_message hook failed");
-                PreHookOutcome::Allow(content.to_owned())
-            }
-        }
-    }
-
-    fn run_lua_pre_turn(&self, user_message: &str) -> PreHookOutcome<String> {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return PreHookOutcome::Allow(user_message.to_owned());
-        };
-
-        match runtime.run_pre_turn(user_message) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                warn!(error = %error, "lua pre-turn hook failed");
-                PreHookOutcome::Allow(user_message.to_owned())
-            }
-        }
-    }
-
-    fn run_lua_pre_tool_call(&self, tool_name: &str, arguments: &str) -> PreHookOutcome<String> {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return PreHookOutcome::Allow(arguments.to_owned());
-        };
-
-        match runtime.run_pre_tool_call(tool_name, arguments) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                warn!(error = %error, tool_name = %tool_name, "lua pre-tool-call hook failed");
-                PreHookOutcome::Allow(arguments.to_owned())
-            }
-        }
-    }
-
-    fn run_lua_post_tool_call(&self, tool_name: &str, output: &str) -> String {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return output.to_owned();
-        };
-
-        match runtime.run_post_tool_call(tool_name, output) {
-            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
-            Err(error) => {
-                warn!(error = %error, tool_name = %tool_name, "lua post-tool-call hook failed");
-                output.to_owned()
-            }
-        }
-    }
-
-    fn run_lua_post_turn(&self, response: &str) -> String {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return response.to_owned();
-        };
-
-        match runtime.run_post_turn(response) {
-            Ok(PostHookOutcome::Keep(current)) | Ok(PostHookOutcome::Rewrite(current)) => current,
-            Err(error) => {
-                warn!(error = %error, "lua post-turn hook failed");
-                response.to_owned()
-            }
-        }
-    }
-
-    fn run_lua_personality_transform(&self, response: &str) -> String {
-        let Some(runtime) = self.lua_runtime.as_ref() else {
-            return response.to_owned();
-        };
-
-        runtime.transform_personality_response(response)
-    }
-
-    fn record_lua_completed_turn(&self, result: &AgentResult) {
-        if let Some(runtime) = &self.lua_runtime {
-            runtime.record_completed_turn(
-                result
-                    .total_input_tokens
-                    .saturating_add(result.total_output_tokens),
-            );
-        }
-    }
-
-    fn run_lua_on_error(&self, stage: &str, error: &AgentError) {
-        if let Some(runtime) = &self.lua_runtime {
-            if let Err(lua_error) = runtime.run_on_error(stage, &error.to_string()) {
-                warn!(error = %lua_error, stage = %stage, "lua on_error hook failed");
-            }
-        }
-    }
-
-    fn run_lua_on_complete(&self) {
-        if let Some(runtime) = &self.lua_runtime {
-            if let Err(error) = runtime.run_on_complete() {
-                warn!(error = %error, "lua on_complete hook failed");
-            }
-        }
-    }
-
-    fn push_message_with_lua_hooks(
-        &mut self,
-        session_id: &str,
-        mut message: ChatMessage,
-    ) -> Option<ChatMessage> {
-        let Some(original_content) = message.content_text().map(str::to_owned) else {
-            self.messages.push(message.clone());
-            return Some(message);
-        };
-        let tool_call_count = message.tool_calls.as_ref().map_or(0, Vec::len);
-        let image_count = message_image_count(&message);
-
-        match self.run_lua_on_message(
-            &message.role,
-            &original_content,
-            tool_call_count,
-            image_count,
-        ) {
-            PreHookOutcome::Allow(rewritten) => {
-                set_message_text(&mut message, rewritten.clone());
-                self.fire_shell_hooks(
-                    HookEvent::OnMessage,
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "role": &message.role,
-                        "content": rewritten,
-                        "tool_call_count": tool_call_count,
-                        "image_count": image_count,
-                        "lua_vetoed": false,
-                    }),
-                );
-                self.messages.push(message.clone());
-                Some(message)
-            }
-            PreHookOutcome::Veto { reason } => {
-                self.fire_shell_hooks(
-                    HookEvent::OnMessage,
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "role": &message.role,
-                        "content": original_content,
-                        "tool_call_count": tool_call_count,
-                        "image_count": image_count,
-                        "lua_vetoed": true,
-                        "lua_reason": reason,
-                    }),
-                );
-
-                if suppress_message_text(&mut message) {
-                    self.messages.push(message.clone());
-                    Some(message)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn finalize_turn(
-        &mut self,
-        session_id: &str,
-        mut result: AgentResult,
-        fire_complete: bool,
-    ) -> AgentResult {
-        self.record_lua_completed_turn(&result);
-        result.response = self.run_lua_post_turn(&result.response);
-        result.response = self.run_lua_personality_transform(&result.response);
-        self.fire_shell_hooks(
-            HookEvent::PostTurn,
-            self.turn_result_context(session_id, &result),
-        );
-        if fire_complete {
-            self.run_lua_on_complete();
-            self.fire_shell_hooks(
-                HookEvent::OnComplete,
-                self.turn_result_context(session_id, &result),
-            );
-        }
-        self.hooks.on_turn_end(session_id, &result);
-        result
-    }
-
-    fn prepare_tool_calls(
-        &mut self,
-        hook_session: &str,
-        tool_calls: &[ToolCallEntry],
-        streaming: bool,
-    ) -> (Vec<ToolCallEntry>, Vec<Option<String>>) {
-        let mut effective_calls = Vec::with_capacity(tool_calls.len());
-        let mut veto_reasons = Vec::with_capacity(tool_calls.len());
-
-        for tc in tool_calls {
-            self.trajectory
-                .record_tool_call(&tc.function.name, &tc.function.arguments);
-            self.hooks
-                .on_tool_call_start(hook_session, &tc.function.name);
-
-            match self.run_lua_pre_tool_call(&tc.function.name, &tc.function.arguments) {
-                PreHookOutcome::Allow(arguments) => {
-                    let mut effective = tc.clone();
-                    effective.function.arguments = arguments;
-                    self.fire_shell_hooks(
-                        HookEvent::PreToolCall,
-                        serde_json::json!({
-                            "session_id": hook_session,
-                            "tool_name": &effective.function.name,
-                            "tool_call_id": &effective.id,
-                            "arguments": &effective.function.arguments,
-                            "lua_vetoed": false,
-                            "streaming": streaming,
-                        }),
-                    );
-                    effective_calls.push(effective);
-                    veto_reasons.push(None);
-                }
-                PreHookOutcome::Veto { reason } => {
-                    self.fire_shell_hooks(
-                        HookEvent::PreToolCall,
-                        serde_json::json!({
-                            "session_id": hook_session,
-                            "tool_name": &tc.function.name,
-                            "tool_call_id": &tc.id,
-                            "arguments": &tc.function.arguments,
-                            "lua_vetoed": true,
-                            "lua_reason": reason,
-                            "streaming": streaming,
-                        }),
-                    );
-                    effective_calls.push(tc.clone());
-                    veto_reasons.push(reason);
-                }
-            }
-        }
-
-        (effective_calls, veto_reasons)
-    }
-
-    fn report_error(&mut self, session_id: &str, stage: &str, error: AgentError) -> AgentError {
-        self.run_lua_on_error(stage, &error);
-        self.fire_shell_hooks(
-            HookEvent::OnError,
-            serde_json::json!({
-                "session_id": session_id,
-                "stage": stage,
-                "error": error.to_string(),
-            }),
-        );
-        error
-    }
-
-    fn turn_result_context(&self, session_id: &str, result: &AgentResult) -> serde_json::Value {
-        serde_json::json!({
-            "session_id": session_id,
-            "response": result.response,
-            "turns_used": result.turns_used,
-            "tool_calls_made": result.tool_calls_made,
-            "finished_naturally": result.finished_naturally,
-            "total_input_tokens": result.total_input_tokens,
-            "total_output_tokens": result.total_output_tokens,
-            "estimated_cost": result.estimated_cost,
-            "pending_clarification": result.pending_clarification,
-        })
-    }
-
     /// Record token usage from an LLM turn and check the budget.
     #[cfg(test)]
     fn record_usage(
@@ -2618,7 +1240,7 @@ impl AgentLoop {
         self.record_usage_with_model(&model, turn, input_tokens, output_tokens)
     }
 
-    fn record_usage_with_model(
+    pub(crate) fn record_usage_with_model(
         &mut self,
         model: &str,
         turn: usize,
@@ -2643,669 +1265,6 @@ impl AgentLoop {
             BudgetStatus::Ok => Ok(()),
         }
     }
-
-    /// Replace old tool result content with a compact placeholder to reduce
-    /// token usage without an LLM call. Preserves tool call (assistant)
-    /// messages so the reasoning chain remains intact.
-    ///
-    /// Based on "The Complexity Trap" (NeurIPS 2025): observation masking
-    /// achieves ~52% cost reduction while maintaining or improving solve rate.
-    fn mask_old_tool_outputs(&mut self) {
-        /// Number of recent messages to protect from masking (approximately
-        /// the last 4 assistant + tool result pairs).
-        const PROTECT_RECENT: usize = 8;
-        /// Only mask tool outputs longer than this many bytes.
-        const MIN_CONTENT_LEN: usize = 200;
-
-        let has_system = self.messages.first().is_some_and(|m| m.role == "system");
-        let start = if has_system { 1 } else { 0 };
-        let end = self.messages.len().saturating_sub(PROTECT_RECENT);
-
-        if end <= start {
-            return;
-        }
-
-        let mut masked_count = 0u32;
-        for msg in &mut self.messages[start..end] {
-            if msg.role == "tool" {
-                if let Some(ref content) = msg.content {
-                    let text_len = match content {
-                        MessageContent::Text(t) => t.len(),
-                        MessageContent::Parts(parts) => {
-                            // Skip masking if any part is non-text (e.g. images)
-                            // to avoid silently discarding non-text content.
-                            let all_text =
-                                parts.iter().all(|p| matches!(p, ContentPart::Text { .. }));
-                            if !all_text {
-                                continue;
-                            }
-                            parts
-                                .iter()
-                                .map(|p| match p {
-                                    ContentPart::Text { text } => text.len(),
-                                    _ => 0,
-                                })
-                                .sum()
-                        }
-                    };
-                    if text_len > MIN_CONTENT_LEN {
-                        msg.content = Some(MessageContent::Text(
-                            "[Tool output masked — see preceding tool call for context]".to_owned(),
-                        ));
-                        masked_count += 1;
-                    }
-                }
-            }
-        }
-
-        if masked_count > 0 {
-            info!(
-                masked_count,
-                "masked old tool outputs to reduce context tokens"
-            );
-        }
-    }
-
-    /// Prune messages to stay within context limits, preserving the system
-    /// prompt at index 0 (if present) and the most recent messages.
-    ///
-    /// Two triggers:
-    /// 1. **Message count**: `max_context_messages` caps total non-system messages.
-    /// 2. **Token count**: `max_context_tokens` triggers when the last API call's
-    ///    prompt_tokens exceeds 85% of the limit, compressing the middle of the
-    ///    conversation while protecting the first 3 and last 4 non-system messages.
-    ///
-    /// Before dropping old messages, the agent calls the LLM to produce a
-    /// concise summary. This summary is inserted as a system message right
-    /// after the main system prompt so the agent retains awareness of context.
-    async fn prune_context(&mut self) {
-        let has_system = self.messages.first().is_some_and(|m| m.role == "system");
-        let drop_start = if has_system { 1 } else { 0 };
-        let non_system_count = self.messages.len() - drop_start;
-
-        // Determine how many messages to drop.
-        let drop_count = self.compute_drop_count(non_system_count, drop_start);
-
-        if drop_count == 0 {
-            return;
-        }
-
-        // Lightweight first pass: mask old tool outputs (no LLM call).
-        // Only runs when context is actually under pressure (drop_count > 0).
-        self.mask_old_tool_outputs();
-
-        // Extract the messages we're about to drop and summarize them.
-        let to_drop: Vec<ChatMessage> = self.messages[drop_start..drop_start + drop_count].to_vec();
-
-        info!(
-            drop_count,
-            remaining = non_system_count - drop_count,
-            trigger = if self.token_compression_needed() {
-                "tokens"
-            } else {
-                "messages"
-            },
-            "pruning conversation context"
-        );
-
-        let summary = self.summarize_messages(&to_drop).await;
-
-        let messages_before = self.messages.len();
-        // Remove the old messages.
-        self.messages.drain(drop_start..drop_start + drop_count);
-
-        // Inject the summary right after the system prompt (or at position 0).
-        if let Some(text) = summary {
-            let summary_msg = ChatMessage::system(format!("[Prior conversation summary]\n{text}"));
-            self.messages.insert(drop_start, summary_msg);
-        }
-
-        let hook_session = self.session_id_str().to_owned();
-        self.hooks
-            .on_context_prune(&hook_session, messages_before, self.messages.len());
-    }
-
-    /// Check if token-based compression should trigger (>85% of max_context_tokens).
-    fn token_compression_needed(&self) -> bool {
-        if let Some(max_tokens) = self.config.max_context_tokens {
-            let threshold = (max_tokens as f64
-                * genesis_config::defaults::limits::CONTEXT_COMPRESSION_THRESHOLD)
-                as u32;
-            self.last_prompt_tokens > threshold
-        } else {
-            false
-        }
-    }
-
-    /// Compute how many messages to drop. Returns 0 if no pruning needed.
-    ///
-    /// Prefers token-based compression (protects first 3 + last 4) over
-    /// simple message-count pruning. If both triggers fire, uses whichever
-    /// drops more messages.
-    fn compute_drop_count(&self, non_system_count: usize, _drop_start: usize) -> usize {
-        let mut drop = 0;
-
-        // Message-count trigger.
-        if let Some(limit) = self.config.max_context_messages {
-            if non_system_count > limit {
-                drop = non_system_count - limit;
-            }
-        }
-
-        // Token-count trigger: protect first 3 and last 4 non-system messages.
-        if self.token_compression_needed() {
-            let protect_head = 3usize;
-            let protect_tail = 4usize;
-            let protected = protect_head + protect_tail;
-            if non_system_count > protected {
-                let token_drop = non_system_count - protected;
-                // Use whichever drops more to aggressively reclaim context.
-                drop = drop.max(token_drop);
-            }
-        }
-
-        drop
-    }
-
-    /// Ask the LLM to produce a compact summary of a slice of conversation
-    /// messages. Returns `None` on any failure so the caller can degrade
-    /// gracefully to plain pruning.
-    async fn summarize_messages(&self, messages: &[ChatMessage]) -> Option<String> {
-        if messages.is_empty() {
-            return None;
-        }
-
-        // Build a transcript for the summarizer.
-        let mut transcript = String::new();
-        for msg in messages {
-            let role = &msg.role;
-            let content = msg.content_text().unwrap_or("[tool call]");
-            // Truncate very long tool results to keep the summarization prompt small.
-            let truncated = match content.char_indices().nth(500) {
-                Some((i, _)) => format!("{}...", &content[..i]),
-                None => content.to_owned(),
-            };
-            transcript.push_str(&format!("{role}: {truncated}\n"));
-        }
-
-        let prompt = format!(
-            "Summarize the following conversation excerpt in 2-4 sentences. \
-             Focus on: key decisions made, tasks completed, important facts \
-             established, and any open questions. Be factual and concise.\n\n\
-             ---\n{transcript}---"
-        );
-
-        let request = ChatCompletionRequest {
-            model: String::new(), // client fills this in
-            messages: vec![ChatMessage::user(&prompt)],
-            tools: Vec::new(),
-            temperature: Some(0.3),
-            max_tokens: Some(256),
-            stream: None,
-            stream_options: None,
-            response_format: None,
-            tool_choice: None,
-            thinking: None,
-            extra_body: None,
-        };
-
-        match self.client.complete(request).await {
-            Ok(response) => {
-                let text = response
-                    .choices
-                    .first()
-                    .and_then(|c| c.message.content_text().map(|s| s.to_owned()))
-                    .unwrap_or_default();
-                if text.is_empty() {
-                    None
-                } else {
-                    info!(
-                        summary_len = text.len(),
-                        dropped_messages = messages.len(),
-                        "summarized pruned context"
-                    );
-                    Some(text)
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "context summarization failed; dropping messages without summary");
-                None
-            }
-        }
-    }
-}
-
-struct StreamUpdate {
-    contents: Vec<String>,
-    tool_calls: Vec<ToolCallEntry>,
-    finish_reason: Option<String>,
-    usage: Option<genesis_provider::ChatUsage>,
-    provider_metadata: Option<serde_json::Value>,
-}
-
-fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
-    let mut contents = Vec::new();
-    let mut tool_calls = Vec::new();
-    let mut finish_reason = None;
-
-    for choice in chunk.choices {
-        if let Some(content) = choice.delta.content {
-            contents.push(content);
-        }
-        if let Some(delta_tool_calls) = choice.delta.tool_calls {
-            tool_calls.extend(delta_tool_calls);
-        }
-        if choice.finish_reason.is_some() {
-            finish_reason = choice.finish_reason;
-        }
-    }
-
-    StreamUpdate {
-        contents,
-        tool_calls,
-        finish_reason,
-        usage: chunk.usage,
-        provider_metadata: chunk.provider_metadata,
-    }
-}
-
-/// Merge streaming tool call deltas into the accumulated tool calls list.
-///
-/// In SSE streaming (both Chat Completions and Responses API), tool calls
-/// arrive as incremental chunks:
-///   1. First chunk: `id` + `name` + empty `arguments` → new entry
-///   2. Subsequent chunks: empty `id` + empty `name` + argument fragment → append
-///
-/// This function appends argument fragments to the last matching tool call
-/// instead of creating separate ghost entries with empty names.
-fn merge_streamed_tool_calls(accumulated: &mut Vec<ToolCallEntry>, deltas: Vec<ToolCallEntry>) {
-    for delta in deltas {
-        if !delta.id.is_empty() && !delta.function.name.is_empty() {
-            // New tool call — push as a new entry
-            accumulated.push(delta);
-        } else if !delta.function.arguments.is_empty() {
-            // Argument fragment — append to the last tool call
-            if let Some(last) = accumulated.last_mut() {
-                last.function.arguments.push_str(&delta.function.arguments);
-            }
-        }
-        // Ignore entries with empty id, empty name, AND empty arguments
-    }
-}
-
-/// Parse a JSON arguments string into a flat BTreeMap<String, String>.
-///
-/// LLM tool call arguments come as a JSON string like `{"message":"hello"}`.
-/// We flatten all values to their string representation for the ToolCall struct.
-/// Execute multiple tool calls concurrently up to the given concurrency limit.
-///
-/// Results are returned in the same order as the input `tool_calls`, preserving
-/// the tool-call-to-result correspondence required by the LLM message format.
-/// If any tool call fails with a hard error (e.g., tool not found), that error
-/// is propagated and the remaining results are discarded.
-async fn execute_tool_calls_parallel(
-    tools: &ToolRuntime,
-    subagent_spawner: &Option<Arc<dyn SubagentSpawner>>,
-    tool_calls: &[ToolCallEntry],
-    max_concurrency: usize,
-    timeout_secs: u64,
-    policy: Option<&crate::tool_policy::ToolPolicy>,
-) -> Result<Vec<(String, bool)>, AgentError> {
-    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-
-    if tool_calls.len() == 1 {
-        // Check tool policy before execution.
-        if let Some(policy) = policy {
-            if let Some(denial) = check_tool_policy(policy, &tool_calls[0]) {
-                return Ok(vec![(denial, false)]);
-            }
-        }
-
-        // Fast path: avoid semaphore overhead for single tool calls.
-        // execute_single_tool converts all errors to soft "Error:" content,
-        // so the Ok(r) branch always succeeds and timeouts are the only
-        // additional failure mode to handle.
-        let result = match tokio::time::timeout(
-            timeout_duration,
-            execute_single_tool(tools, subagent_spawner, &tool_calls[0]),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => {
-                // Defensive: execute_single_tool should never return Err
-                // after error-as-data conversion, but handle it gracefully.
-                (
-                    format!(
-                        "Error: tool `{}` encountered an unexpected error. \
-                         Try a different approach.",
-                        tool_calls[0].function.name
-                    ),
-                    false,
-                )
-            }
-            Err(_) => {
-                warn!(
-                    tool_name = tool_calls[0].function.name.as_str(),
-                    timeout_secs, "tool call timed out"
-                );
-                (
-                    format!(
-                        "Error: tool `{}` timed out after {timeout_secs}s. \
-                         The operation took too long. Try a simpler approach \
-                         or break the task into smaller steps.",
-                        tool_calls[0].function.name
-                    ),
-                    false,
-                )
-            }
-        };
-        return Ok(vec![result]);
-    }
-
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency.max(1)));
-    let futs: Vec<_> = tool_calls
-        .iter()
-        .map(|tc| {
-            let sem = Arc::clone(&semaphore);
-            let tool_name = tc.function.name.clone();
-            // Pre-check tool policy so denied calls never reach execution.
-            let denial = policy.and_then(|p| check_tool_policy(p, tc));
-            async move {
-                if let Some(denial_msg) = denial {
-                    return Ok((denial_msg, false));
-                }
-                let Ok(_permit) = sem.acquire().await else {
-                    return Ok((
-                        format!("Error: tool `{tool_name}` skipped — concurrency semaphore closed"),
-                        false,
-                    ));
-                };
-                match tokio::time::timeout(
-                    timeout_duration,
-                    execute_single_tool(tools, subagent_spawner, tc),
-                )
-                .await
-                {
-                    Ok(r) => r,
-                    Err(_) => {
-                        warn!(
-                            tool_name = tool_name.as_str(),
-                            timeout_secs, "tool call timed out"
-                        );
-                        Ok((
-                            format!(
-                                "Error: tool `{tool_name}` timed out after {timeout_secs}s. \
-                                 The operation took too long. Try a simpler approach \
-                                 or break the task into smaller steps."
-                            ),
-                            false,
-                        ))
-                    }
-                }
-            }
-        })
-        .collect();
-
-    let results = futures_util::future::join_all(futs).await;
-
-    // Collect results, short-circuiting on the first hard error.
-    results.into_iter().collect()
-}
-
-/// Check a single tool call against the policy, returning a denial message
-/// if the call is blocked, or `None` if it is allowed.
-fn check_tool_policy(
-    policy: &crate::tool_policy::ToolPolicy,
-    tc: &ToolCallEntry,
-) -> Option<String> {
-    let parse_result = serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(
-        &tc.function.arguments,
-    );
-    let raw_map = match parse_result {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(
-                tool = %tc.function.name,
-                error = %e,
-                "failed to parse tool arguments for policy check; denying call"
-            );
-            return Some(format!(
-                "Error: tool `{}` denied: could not parse arguments for policy evaluation",
-                tc.function.name
-            ));
-        }
-    };
-    let args: std::collections::BTreeMap<String, String> = raw_map
-        .into_iter()
-        .map(|(k, v)| {
-            let s = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            (k, s)
-        })
-        .collect();
-    let decision = policy.evaluate(&tc.function.name, &args);
-    match decision {
-        crate::tool_policy::PolicyDecision::Deny(reason) => {
-            warn!(
-                tool = tc.function.name.as_str(),
-                reason = reason.as_str(),
-                "tool call blocked by policy"
-            );
-            Some(format!("Error: {reason}"))
-        }
-        crate::tool_policy::PolicyDecision::Allow => None,
-    }
-}
-
-/// Execute a single tool call against the provided runtime, returning the
-/// content string for the LLM and whether the tool requests user input.
-///
-/// This is a free function (not a method) so it can be used for concurrent
-/// execution from `&mut self` methods via field-level borrow splitting.
-async fn execute_single_tool(
-    tools: &ToolRuntime,
-    subagent_spawner: &Option<Arc<dyn SubagentSpawner>>,
-    tc: &ToolCallEntry,
-) -> Result<(String, bool), AgentError> {
-    let span = info_span!(
-        "agent.tool_call",
-        tool_name = tc.function.name.as_str(),
-        tool_call_id = tc.id.as_str()
-    );
-    let started_at = Instant::now();
-    let tool_name = &tc.function.name;
-
-    // Parse arguments — malformed JSON from the LLM is a recoverable error
-    // (feed it back so the model can self-correct) rather than a hard failure.
-    let arguments = {
-        let _entered = span.enter();
-        match parse_tool_arguments(&tc.function.arguments) {
-            Ok(args) => {
-                debug!(argument_count = args.len(), "parsed tool arguments");
-                args
-            }
-            Err(e) => {
-                warn!(
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    tool_name = tool_name.as_str(),
-                    error = %e,
-                    "tool argument parse failed, feeding error back to LLM"
-                );
-                return Ok((
-                    format!(
-                        "Error: tool `{tool_name}` received invalid arguments: {e}\n\n\
-                         Please fix the JSON arguments and try again."
-                    ),
-                    false,
-                ));
-            }
-        }
-    };
-
-    let call = ToolCall {
-        name: tool_name.clone(),
-        arguments,
-    };
-
-    match tools.execute_async(&call).await {
-        Ok(output) => {
-            info!(
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                output_bytes = output.content.len(),
-                "tool call succeeded"
-            );
-            // Check for subagent spawn metadata.
-            if let Some(spawner) = subagent_spawner {
-                if output.metadata.get("__subagent_spawn").map(String::as_str) == Some("true") {
-                    if let (Some(child_session_id), Some(subagent_id), Some(task)) = (
-                        output.metadata.get("child_session_id"),
-                        output.metadata.get("subagent_id"),
-                        output.metadata.get("task"),
-                    ) {
-                        info!(
-                            subagent_id = subagent_id.as_str(),
-                            child_session_id = child_session_id.as_str(),
-                            "spawning subagent workstream"
-                        );
-                        spawner.spawn(child_session_id, subagent_id, task);
-                    }
-                }
-            }
-            let requires_input = output
-                .metadata
-                .get("requires_input")
-                .map(|v| v == "true")
-                .unwrap_or(false);
-            Ok((output.content, requires_input))
-        }
-        Err(err) => {
-            warn!(
-                elapsed_ms = started_at.elapsed().as_millis() as u64,
-                tool_name = tool_name.as_str(),
-                error = %err,
-                "tool call failed, feeding error back to LLM"
-            );
-            match &err {
-                ToolError::ToolNotFound(name) => {
-                    let suggestions = suggest_similar_tools(name, tools);
-                    let msg = if suggestions.is_empty() {
-                        format!(
-                            "Error: tool `{name}` not found. \
-                             Use only tools listed in the system prompt."
-                        )
-                    } else {
-                        format!(
-                            "Error: tool `{name}` not found. Did you mean: {}?\n\n\
-                             Try calling one of the suggested tools instead.",
-                            suggestions.join(", ")
-                        )
-                    };
-                    Ok((msg, false))
-                }
-                ToolError::MissingArgument { tool, argument } => Ok((
-                    format!(
-                        "Error: tool `{tool}` is missing required argument `{argument}`.\n\n\
-                         Please include the `{argument}` parameter and try again."
-                    ),
-                    false,
-                )),
-                ToolError::ApprovalDenied { tool, reason } => Ok((
-                    format!(
-                        "Error: tool `{tool}` was denied: {reason}\n\n\
-                         Try a different approach that doesn't require this operation."
-                    ),
-                    false,
-                )),
-                ToolError::ExecutionFailed { tool, reason } => Ok((
-                    format!(
-                        "Error: tool `{tool}` execution failed: {reason}\n\n\
-                         You can try a different approach or use an alternative tool."
-                    ),
-                    false,
-                )),
-            }
-        }
-    }
-}
-
-fn parse_tool_arguments(raw: &str) -> Result<BTreeMap<String, String>, AgentError> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| AgentError::ArgumentParse(format!("{raw}: {e}")))?;
-
-    let obj = value
-        .as_object()
-        .ok_or_else(|| AgentError::ArgumentParse(format!("expected JSON object, got: {raw}")))?;
-
-    Ok(obj
-        .iter()
-        .map(|(k, v)| {
-            let string_value = match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            (k.clone(), string_value)
-        })
-        .collect())
-}
-
-/// Suggest tool names similar to `name` using edit distance.
-/// Returns up to 3 suggestions sorted by similarity.
-fn suggest_similar_tools(name: &str, tools: &ToolRuntime) -> Vec<String> {
-    let name_lower = name.to_lowercase();
-    let mut scored: Vec<(String, usize)> = tools
-        .definitions()
-        .iter()
-        .filter_map(|def| {
-            let def_lower = def.name.to_lowercase();
-            let dist = edit_distance(&name_lower, &def_lower);
-            let max_len = name.len().max(def.name.len());
-            // Only suggest if within 40% edit distance
-            if max_len > 0 && dist <= max_len * 2 / 5 {
-                Some((def.name.clone(), dist))
-            } else {
-                // Also match if one is a substring of the other
-                if def_lower.contains(&name_lower) || name_lower.contains(&def_lower) {
-                    Some((def.name.clone(), dist))
-                } else {
-                    None
-                }
-            }
-        })
-        .collect();
-    scored.sort_by_key(|(_, d)| *d);
-    scored.truncate(3);
-    scored.into_iter().map(|(n, _)| format!("`{n}`")).collect()
-}
-
-/// Simple Levenshtein edit distance.
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let (m, n) = (a.len(), b.len());
-    let mut prev = (0..=n).collect::<Vec<_>>();
-    let mut curr = vec![0; n + 1];
-    for i in 1..=m {
-        curr[0] = i;
-        for j in 1..=n {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[n]
-}
-
-fn format_blocked_reasons(result: &crate::guardrails::GuardrailResult) -> String {
-    result
-        .violations
-        .iter()
-        .filter(|v| v.action == crate::guardrails::ViolationAction::Block)
-        .map(|v| v.message.as_str())
-        .collect::<Vec<&str>>()
-        .join("; ")
 }
 
 #[cfg(test)]
@@ -3313,10 +1272,14 @@ mod tests {
     use super::*;
     use crate::hooks::HookConfig;
     use genesis_lua::{LuaRuntime, LuaRuntimeConfig, LuaSessionContext};
+    use genesis_provider::ChatCompletionChunk;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{Read as IoRead, Write as IoWrite};
     use std::sync::{Arc, Mutex};
+
+    use streaming::collect_stream_update;
+    use tools::{execute_single_tool, parse_tool_arguments, summarize_args};
 
     fn test_agent() -> AgentLoop {
         let provider = genesis_provider::ResolvedProvider {
@@ -5369,22 +3332,22 @@ end)
 
         agent.mask_old_tool_outputs();
 
-        // Message [3] (tool, long, old) → masked
+        // Message [3] (tool, long, old) -> masked
         assert_eq!(
             agent.messages()[3].content_text().unwrap(),
             "[Tool output masked — see preceding tool call for context]"
         );
 
-        // Message [7] (tool, short, old) → NOT masked (below threshold)
+        // Message [7] (tool, short, old) -> NOT masked (below threshold)
         assert_eq!(agent.messages()[7].content_text().unwrap(), short_output,);
 
-        // Message [11] (tool, long, recent/protected) → NOT masked
+        // Message [11] (tool, long, recent/protected) -> NOT masked
         assert_eq!(
             agent.messages()[11].content_text().unwrap(),
             long_output.as_str(),
         );
 
-        // Message [15] (tool, long, recent/protected) → NOT masked
+        // Message [15] (tool, long, recent/protected) -> NOT masked
         assert_eq!(
             agent.messages()[15].content_text().unwrap(),
             long_output.as_str(),
@@ -5394,7 +3357,7 @@ end)
         assert_eq!(agent.messages()[0].role, "system");
     }
 
-    // ── Core tool set filtering tests ──────────────────────────────────
+    // -- Core tool set filtering tests --
 
     fn make_chat_tool(name: &str) -> ChatTool {
         ChatTool {
