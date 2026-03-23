@@ -327,20 +327,34 @@ async fn resolve_sticker_prompt(
         );
     }
 
-    // Check the cache first.
-    let cache = StickerCacheStore::new(&config.storage.database_path);
-    match cache.get(&sticker.file_unique_id) {
-        Ok(Some(cached)) => {
+    // Check the cache first (on blocking thread).
+    let db_path = config.storage.database_path.clone();
+    let file_unique_id = sticker.file_unique_id.clone();
+    let cached_result = {
+        let db_path = db_path.clone();
+        let file_unique_id = file_unique_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let cache = StickerCacheStore::new(&db_path);
+            cache.get(&file_unique_id)
+        })
+        .await
+    };
+
+    match cached_result {
+        Ok(Ok(Some(cached))) => {
             debug!(
                 file_unique_id = sticker.file_unique_id.as_str(),
                 "sticker cache hit"
             );
             return format_sticker_context(&cached.emoji, &cached.sticker_set, &cached.description);
         }
-        Ok(None) => {}
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(error = %e, "sticker cache lookup failed, proceeding with analysis");
         }
+        Err(e) => {
+            warn!(error = %e, "sticker cache blocking task failed, proceeding with analysis");
+        }
+        Ok(Ok(None)) => {}
     }
 
     // Download and analyze the sticker via vision LLM.
@@ -350,10 +364,19 @@ async fn resolve_sticker_prompt(
                 file_unique_id = sticker.file_unique_id.as_str(),
                 "sticker analyzed via vision"
             );
-            // Cache the result.
-            if let Err(e) = cache.set(&sticker.file_unique_id, &description, emoji, set_name) {
-                warn!(error = %e, "failed to cache sticker description");
-            }
+            // Cache the result (on blocking thread).
+            let desc_clone = description.clone();
+            let emoji_owned = emoji.to_owned();
+            let set_name_owned = set_name.to_owned();
+            let _ = tokio::task::spawn_blocking(move || {
+                let cache = StickerCacheStore::new(&db_path);
+                if let Err(e) =
+                    cache.set(&file_unique_id, &desc_clone, &emoji_owned, &set_name_owned)
+                {
+                    warn!(error = %e, "failed to cache sticker description");
+                }
+            })
+            .await;
             format_sticker_context(emoji, set_name, &description)
         }
         Err(e) => {

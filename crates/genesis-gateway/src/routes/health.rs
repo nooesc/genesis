@@ -81,15 +81,21 @@ pub(crate) struct MetricsJsonResponse {
 // ---------------------------------------------------------------------------
 
 /// Shared DB stats used by health, metrics, and prometheus handlers.
-pub(crate) fn fetch_db_stats(db_path: &std::path::Path) -> (usize, usize) {
-    let total_sessions = genesis_storage::SessionStore::new(db_path)
-        .session_count()
-        .unwrap_or(0) as usize;
-    let active_schedules = genesis_storage::ScheduleStore::new(db_path)
-        .list_enabled()
-        .map(|s| s.len())
-        .unwrap_or(0);
-    (total_sessions, active_schedules)
+///
+/// Runs on a blocking thread to avoid starving the async executor.
+pub(crate) async fn fetch_db_stats(db_path: std::path::PathBuf) -> (usize, usize) {
+    tokio::task::spawn_blocking(move || {
+        let total_sessions = genesis_storage::SessionStore::new(&db_path)
+            .session_count()
+            .unwrap_or(0) as usize;
+        let active_schedules = genesis_storage::ScheduleStore::new(&db_path)
+            .list_enabled()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        (total_sessions, active_schedules)
+    })
+    .await
+    .unwrap_or((0, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +108,7 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> Json<H
         None => 0,
     };
     let (total_sessions, active_schedules) =
-        fetch_db_stats(&state.loaded.config.storage.database_path);
+        fetch_db_stats(state.loaded.config.storage.database_path.clone()).await;
     let mcp_tools = match &state.mcp {
         Some(mcp) => mcp.tool_count().await,
         None => 0,
@@ -232,8 +238,8 @@ pub(crate) async fn prometheus_metrics_handler(State(state): State<Arc<AppState>
     let output_tokens = state.output_tokens_total.load(Ordering::Relaxed);
     let stream_reqs = state.stream_requests_total.load(Ordering::Relaxed);
 
-    let db_path = &state.loaded.config.storage.database_path;
-    let (total_sessions, active_schedules_usize) = fetch_db_stats(db_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let (total_sessions, active_schedules_usize) = fetch_db_stats(db_path.clone()).await;
     let total_sessions = total_sessions as u64;
     let active_schedules = active_schedules_usize as u64;
 
@@ -242,8 +248,22 @@ pub(crate) async fn prometheus_metrics_handler(State(state): State<Arc<AppState>
         None => 0,
     };
 
-    let cache_store = genesis_storage::ResponseCacheStore::new(db_path);
-    let (cache_entries, cache_hits) = cache_store.stats().unwrap_or((0, 0));
+    let (cache_entries, cache_hits, audit_total) = {
+        let db_path_blocking = db_path;
+        tokio::task::spawn_blocking(move || {
+            let cache_store = genesis_storage::ResponseCacheStore::new(&db_path_blocking);
+            let (ce, ch) = cache_store.stats().unwrap_or((0, 0));
+            let at: i64 = genesis_storage::AuditLogStore::new(&db_path_blocking)
+                .stats()
+                .unwrap_or_default()
+                .iter()
+                .map(|(_, c)| c)
+                .sum();
+            (ce, ch, at)
+        })
+        .await
+        .unwrap_or((0, 0, 0))
+    };
 
     let model = format!(
         "{}/{}",
@@ -252,14 +272,6 @@ pub(crate) async fn prometheus_metrics_handler(State(state): State<Arc<AppState>
 
     // Webhook delivery metrics
     let (wh_delivered, wh_retried, wh_failed) = state.webhooks.metrics();
-
-    // Audit log total
-    let audit_total: i64 = genesis_storage::AuditLogStore::new(db_path)
-        .stats()
-        .unwrap_or_default()
-        .iter()
-        .map(|(_, c)| c)
-        .sum();
 
     // Request duration histogram
     let duration_histogram = if let Ok(hist) = state.request_duration_histogram.lock() {
@@ -338,7 +350,7 @@ pub(crate) async fn metrics_json_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<MetricsJsonResponse> {
     let (total_sessions, active_schedules) =
-        fetch_db_stats(&state.loaded.config.storage.database_path);
+        fetch_db_stats(state.loaded.config.storage.database_path.clone()).await;
 
     Json(MetricsJsonResponse {
         uptime_seconds: state.started_at.elapsed().as_secs(),

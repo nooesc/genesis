@@ -60,98 +60,128 @@ pub(crate) async fn list_skills_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let (skills, total) = store
-        .list_all_paginated(limit, offset)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    let has_more = (offset + skills.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(SkillListResponse {
-            skills,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillStore::new(&path);
+        let (skills, total) = store
+            .list_all_paginated(limit, offset)
+            .map_err(storage_err)?;
+
+        let has_more = (offset + skills.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(SkillListResponse {
+                skills,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn get_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skill = store.get(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    match skill {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            ApiError::internal(format!("serialization error: {e}"))
-        })?)),
-        None => Err(ApiError::not_found(format!("skill '{name}' not found"))),
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillStore::new(&path);
+        let skill = store.get(&name).map_err(storage_err)?;
+
+        match skill {
+            Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization error: {e}"))
+            })?)),
+            None => Err(ApiError::not_found(format!("skill '{name}' not found"))),
+        }
+    })
+    .await
 }
 
 pub(crate) async fn upsert_skill_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UpsertSkillRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
-    let skill = store
-        .upsert(
-            &request.name,
-            &request.description,
-            &request.instructions,
-            request.trigger_hint.as_deref(),
-            &tag_refs,
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::to_value(skill).map_err(|e| {
-        ApiError::internal(format!("serialization error: {e}"))
-    })?))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillStore::new(&path);
+        let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
+        let skill = store
+            .upsert(
+                &request.name,
+                &request.description,
+                &request.instructions,
+                request.trigger_hint.as_deref(),
+                &tag_refs,
+            )
+            .map_err(storage_err)?;
+
+        Ok(Json(serde_json::to_value(skill).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?))
+    })
+    .await
 }
 
 pub(crate) async fn delete_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if deleted {
-        Ok(Json(serde_json::json!({"deleted": true, "name": name})))
-    } else {
-        Err(ApiError::not_found(format!("skill '{name}' not found")))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillStore::new(&path);
+        let deleted = store.delete(&name).map_err(storage_err)?;
+
+        if deleted {
+            Ok(Json(serde_json::json!({"deleted": true, "name": name})))
+        } else {
+            Err(ApiError::not_found(format!("skill '{name}' not found")))
+        }
+    })
+    .await
 }
 
 pub(crate) async fn search_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    let count = skills.len();
-    Ok(Json(serde_json::json!({
-        "skills": skills,
-        "count": count,
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillStore::new(&path);
+        let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
+
+        let count = skills.len();
+        Ok(Json(serde_json::json!({
+            "skills": skills,
+            "count": count,
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn skill_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.stats(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        ApiError::internal(format!("serialization error: {e}"))
-    })?))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillUsageStore::new(&path);
+        let stats = store.stats(&name).map_err(storage_err)?;
+
+        Ok(Json(serde_json::to_value(stats).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?))
+    })
+    .await
 }
 
 pub(crate) async fn skill_usage_recent_handler(
@@ -159,15 +189,20 @@ pub(crate) async fn skill_usage_recent_handler(
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<SkillUsageRecentQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
-    let usages = store
-        .recent_usages(&name, params.limit)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    let count = usages.len();
-    Ok(Json(serde_json::json!({
-        "skill_name": name,
-        "usages": usages,
-        "count": count,
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SkillUsageStore::new(&path);
+        let usages = store
+            .recent_usages(&name, params.limit)
+            .map_err(storage_err)?;
+
+        let count = usages.len();
+        Ok(Json(serde_json::json!({
+            "skill_name": name,
+            "usages": usages,
+            "count": count,
+        })))
+    })
+    .await
 }

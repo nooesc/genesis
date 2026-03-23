@@ -123,11 +123,21 @@ pub async fn webhook_handler(
 
     info!(parent: &span, "received home assistant webhook");
 
-    // Handle gateway slash commands before reaching the agent.
-    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-    if let crate::commands::CommandResult::Reply(reply) =
-        crate::commands::handle_command(&request.message, &session_id, &store, &state.loaded.config)
-    {
+    // Handle gateway slash commands before reaching the agent (on blocking thread).
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let msg_clone = request.message.clone();
+    let sid_clone = session_id.clone();
+    let config_clone = state.loaded.config.clone();
+    let cmd_result = tokio::task::spawn_blocking(move || {
+        let store = genesis_storage::SessionStore::new(&db_path);
+        let cmd = crate::commands::handle_command(&msg_clone, &sid_clone, &store, &config_clone);
+        crate::commands::check_session_expiry(&sid_clone, &store, config_clone.gateway.as_ref());
+        cmd
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("blocking task panicked: {e}")))?;
+
+    if let crate::commands::CommandResult::Reply(reply) = cmd_result {
         return Ok(Json(HomeAssistantResponse {
             response: reply,
             session_id,
@@ -135,13 +145,6 @@ pub async fn webhook_handler(
             tool_calls_made: 0,
         }));
     }
-
-    // Auto-reset expired sessions before processing.
-    crate::commands::check_session_expiry(
-        &session_id,
-        &store,
-        state.loaded.config.gateway.as_ref(),
-    );
 
     let service = state.session_service();
 

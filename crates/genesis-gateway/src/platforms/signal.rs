@@ -389,42 +389,61 @@ async fn process_envelope(
             // For DMs, use the shared pipeline.
             let reply = if is_group {
                 // Groups bypass pairing -- run commands/agent directly.
-                let store =
-                    genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-                if let crate::commands::CommandResult::Reply(r) = crate::commands::handle_command(
-                    &prompt,
-                    &session_id,
-                    &store,
-                    &state.loaded.config,
-                ) {
-                    r
-                } else {
-                    crate::commands::check_session_expiry(
-                        &session_id,
+                let db_path = state.loaded.config.storage.database_path.clone();
+                let prompt_clone = prompt.clone();
+                let session_id_clone = session_id.clone();
+                let config_clone = state.loaded.config.clone();
+                let cmd_result = tokio::task::spawn_blocking(move || {
+                    let store = genesis_storage::SessionStore::new(&db_path);
+                    let cmd = crate::commands::handle_command(
+                        &prompt_clone,
+                        &session_id_clone,
                         &store,
-                        state.loaded.config.gateway.as_ref(),
+                        &config_clone,
                     );
-                    let service = state.session_service();
-                    let title = format!("Signal: {user_name}");
-                    let result = service
-                        .run_turn(genesis_core::execution::SessionTurnInput {
-                            session_id: &session_id,
-                            session_platform: "signal",
-                            delivery_platform: DeliveryPlatform::Signal,
-                            prompt: &prompt,
-                            title: Some(&title),
-                            images: Vec::new(),
+                    crate::commands::check_session_expiry(
+                        &session_id_clone,
+                        &store,
+                        config_clone.gateway.as_ref(),
+                    );
+                    cmd
+                })
+                .await;
+                match cmd_result {
+                    Ok(crate::commands::CommandResult::Reply(r)) => r,
+                    Err(e) => {
+                        error!(error = %e, "signal blocking command handler panicked");
+                        "Sorry, an internal error occurred.".to_owned()
+                    }
+                    _ => {
+                        let service = state.session_service();
+                        let title = format!("Signal: {user_name}");
+                        let result = service
+                            .run_turn(genesis_core::execution::SessionTurnInput {
+                                session_id: &session_id,
+                                session_platform: "signal",
+                                delivery_platform: DeliveryPlatform::Signal,
+                                prompt: &prompt,
+                                title: Some(&title),
+                                images: Vec::new(),
+                            })
+                            .await;
+                        let reply_text = super::extract_reply(result, "signal");
+                        let db_path = state.loaded.config.storage.database_path.clone();
+                        let chat_id_clone = chat_id.clone();
+                        let reply_clone = reply_text.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::mirror::append_delivery_mirror(
+                                &db_path,
+                                "signal",
+                                &chat_id_clone,
+                                &reply_clone,
+                                "signal",
+                            );
                         })
                         .await;
-                    let reply_text = super::extract_reply(result, "signal");
-                    crate::mirror::append_delivery_mirror(
-                        &state.loaded.config.storage.database_path,
-                        "signal",
-                        &chat_id,
-                        &reply_text,
-                        "signal",
-                    );
-                    reply_text
+                        reply_text
+                    }
                 }
             } else {
                 match super::process_platform_message(&state, &msg).await {

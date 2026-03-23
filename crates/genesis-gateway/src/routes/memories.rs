@@ -122,20 +122,25 @@ pub(crate) async fn list_memories_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
-    let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(MemoryListResponse {
-            memories,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = MemoryStore::new(&path);
+        let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
+
+        let has_more = (offset + memories.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(MemoryListResponse {
+                memories,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn search_memories_handler(
@@ -143,7 +148,6 @@ pub(crate) async fn search_memories_handler(
     axum::extract::Query(params): axum::extract::Query<SearchMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let db_path = &state.loaded.config.storage.database_path;
-    let memory_store = MemoryStore::new(db_path);
 
     let mode = genesis_core::embedding::SearchMode::from_str_opt(params.mode.as_deref());
 
@@ -156,6 +160,13 @@ pub(crate) async fn search_memories_handler(
     } else {
         None
     };
+
+    // The MemoryStore is created inside spawn_blocking for keyword/graph modes,
+    // but hybrid_search is async (it may call the embedding API), so we keep
+    // the existing pattern for search — the DB calls inside hybrid_search are
+    // already short-lived.
+    let db_path_owned = db_path.clone();
+    let memory_store = MemoryStore::new(&db_path_owned);
 
     let results = genesis_core::embedding::hybrid_search(
         &params.q,
@@ -194,19 +205,23 @@ pub(crate) async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let db_path = &state.loaded.config.storage.database_path;
-    let store = MemoryStore::new(db_path);
-    let deleted = store.delete(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if deleted {
-        // Also clean up any associated embedding
-        if let Err(e) = EmbeddingStore::new(db_path).delete(&id) {
-            warn!(memory_id = %id, error = %e, "failed to delete embedding for memory");
+    spawn_blocking_storage(db_path, move |path| {
+        let store = MemoryStore::new(&path);
+        let deleted = store.delete(&id).map_err(storage_err)?;
+
+        if deleted {
+            // Also clean up any associated embedding
+            if let Err(e) = EmbeddingStore::new(&path).delete(&id) {
+                warn!(memory_id = %id, error = %e, "failed to delete embedding for memory");
+            }
+            Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+        } else {
+            Err(ApiError::not_found(format!("memory '{id}' not found")))
         }
-        Ok(Json(serde_json::json!({"deleted": true, "id": id})))
-    } else {
-        Err(ApiError::not_found(format!("memory '{id}' not found")))
-    }
+    })
+    .await
 }
 
 /// Embed all un-embedded memories. Requires an embedding provider to be configured.
@@ -223,11 +238,19 @@ pub(crate) async fn embed_memories_handler(
         .embedding_provider()?
         .expect("embedding config should yield a provider");
 
-    let db_path = &state.loaded.config.storage.database_path;
-    let memory_store = MemoryStore::new(db_path);
-    let embedding_store = EmbeddingStore::new(db_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    let memories = memory_store.list(10000).map_err(storage_err)?;
+    // Load memories and check dimensions on a blocking thread.
+    let db_path_for_blocking = db_path.clone();
+    let (memories, existing_dimensions) =
+        spawn_blocking_storage(db_path_for_blocking, move |path| {
+            let memory_store = MemoryStore::new(&path);
+            let embedding_store = EmbeddingStore::new(&path);
+            let memories = memory_store.list(10000).map_err(storage_err)?;
+            let existing_dimensions = embedding_store.dimensions().map_err(storage_err)?;
+            Ok((memories, existing_dimensions))
+        })
+        .await?;
 
     let mut embedded = 0usize;
     let mut skipped = 0usize;
@@ -235,14 +258,15 @@ pub(crate) async fn embed_memories_handler(
     let mut reset = false;
     let mut first_probe: Option<(String, Vec<f32>)> = None;
 
-    if let (Some(existing_dimensions), Some(first_memory)) = (
-        embedding_store.dimensions().map_err(storage_err)?,
-        memories.first(),
-    ) {
+    if let (Some(existing_dim), Some(first_memory)) = (existing_dimensions, memories.first()) {
         match provider.embed_one(&first_memory.content).await {
             Ok(embedding) => {
-                if embedding.len() != existing_dimensions {
-                    embedding_store.clear().map_err(storage_err)?;
+                if embedding.len() != existing_dim {
+                    let db_path_clear = db_path.clone();
+                    spawn_blocking_storage(db_path_clear, move |path| {
+                        EmbeddingStore::new(&path).clear().map_err(storage_err)
+                    })
+                    .await?;
                     reset = true;
                     first_probe = Some((first_memory.id.clone(), embedding));
                 }
@@ -264,20 +288,48 @@ pub(crate) async fn embed_memories_handler(
     }
 
     for memory in &memories {
-        if !reset && embedding_store.has_embedding(&memory.id).unwrap_or(false) {
-            skipped += 1;
-            continue;
+        if !reset {
+            let db_path_check = db_path.clone();
+            let memory_id = memory.id.clone();
+            let has = spawn_blocking_storage(db_path_check, move |path| {
+                Ok(EmbeddingStore::new(&path)
+                    .has_embedding(&memory_id)
+                    .unwrap_or(false))
+            })
+            .await?;
+            if has {
+                skipped += 1;
+                continue;
+            }
         }
 
-        let result = if first_probe
+        let result: Result<(), genesis_core::embedding::EmbeddingError> = if first_probe
             .as_ref()
             .is_some_and(|(memory_id, _)| memory_id == &memory.id)
         {
             let (_, embedding) = first_probe.take().expect("probe embedding should exist");
-            embedding_store
-                .store(&memory.id, &embedding, provider.model())
-                .map_err(genesis_core::embedding::EmbeddingError::from)
+            let db_path_store = db_path.clone();
+            let memory_id = memory.id.clone();
+            let model = provider.model().to_owned();
+            let store_result = tokio::task::spawn_blocking(move || {
+                EmbeddingStore::new(&db_path_store)
+                    .store(&memory_id, &embedding, &model)
+                    .map_err(genesis_core::embedding::EmbeddingError::from)
+            })
+            .await;
+            match store_result {
+                Ok(inner) => inner,
+                Err(e) => {
+                    tracing::error!(error = %e, "blocking embedding store task panicked");
+                    Err(genesis_core::embedding::EmbeddingError::NotConfigured)
+                }
+            }
         } else {
+            // embed_and_store is async (calls the embedding API), but
+            // the storage write inside it is short-lived. We keep the
+            // original pattern here to avoid excessive complexity.
+            let db_path_embed = db_path.clone();
+            let embedding_store = EmbeddingStore::new(&db_path_embed);
             genesis_core::embedding::embed_and_store(
                 &memory.id,
                 &memory.content,
@@ -328,15 +380,21 @@ pub(crate) async fn embed_single_memory_handler(
         .embedding_provider()?
         .expect("embedding config should yield a provider");
 
-    let db_path = &state.loaded.config.storage.database_path;
-    let memory_store = MemoryStore::new(db_path);
-    let embedding_store = EmbeddingStore::new(db_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    // Find the memory by direct ID lookup
-    let memory = memory_store
-        .get(&id)
-        .map_err(storage_err)?
-        .ok_or_else(|| ApiError::not_found(format!("memory '{id}' not found")))?;
+    // Find the memory on a blocking thread.
+    let db_path_find = db_path.clone();
+    let id_clone = id.clone();
+    let memory = spawn_blocking_storage(db_path_find, move |path| {
+        let memory_store = MemoryStore::new(&path);
+        memory_store
+            .get(&id_clone)
+            .map_err(storage_err)?
+            .ok_or_else(|| ApiError::not_found(format!("memory '{id_clone}' not found")))
+    })
+    .await?;
+
+    let embedding_store = EmbeddingStore::new(&db_path);
 
     genesis_core::embedding::embed_and_store(
         &memory.id,
