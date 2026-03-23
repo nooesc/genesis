@@ -70,6 +70,10 @@ pub struct ChatWidget {
     /// A tool group is identified by the index of its first cell in `committed_cells`.
     /// Groups not present in this set are rendered as a single collapsed summary line.
     pub expanded_tool_groups: HashSet<usize>,
+    /// Number of rows scrolled back from the bottom (0 = pinned to bottom).
+    scroll_offset: usize,
+    /// True when the user has scrolled up and auto-scroll is disabled.
+    scroll_locked: bool,
 }
 
 impl ChatWidget {
@@ -82,7 +86,37 @@ impl ChatWidget {
             input: InputWidget::new(),
             active_cell_cache: None,
             expanded_tool_groups: HashSet::new(),
+            scroll_offset: 0,
+            scroll_locked: false,
         }
+    }
+
+    // ── Scroll ────────────────────────────────────────────────────────────
+
+    /// Scroll the chat view up by `rows` rows.
+    pub fn scroll_up(&mut self, rows: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(rows);
+        self.scroll_locked = true;
+    }
+
+    /// Scroll the chat view down by `rows` rows. Re-enables auto-scroll
+    /// when the offset reaches zero.
+    pub fn scroll_down(&mut self, rows: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+        if self.scroll_offset == 0 {
+            self.scroll_locked = false;
+        }
+    }
+
+    /// Jump to the bottom and re-enable auto-scroll.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+        self.scroll_locked = false;
+    }
+
+    /// Whether the user has scrolled up from the bottom.
+    pub fn is_scrolled_up(&self) -> bool {
+        self.scroll_locked
     }
 
     // ── Turn management ───────────────────────────────────────────────────
@@ -363,13 +397,15 @@ impl ChatWidget {
         let mut bottom_y = area.y + area.height;
 
         // ── Active cell (if any) ───────────────────────────────────────
-        // Extract text_len while holding the immutable borrow, then drop it
-        // before we potentially update the cache (which requires &mut self).
-        let active_text_info: Option<(usize, u16)> = self
-            .active_cell
-            .as_ref()
-            .filter(|a| !a.text_buffer.is_empty())
-            .map(|a| (a.text_buffer.len(), area.width));
+        // Only show the active streaming cell when not scrolled up.
+        let active_text_info: Option<(usize, u16)> = if !self.scroll_locked {
+            self.active_cell
+                .as_ref()
+                .filter(|a| !a.text_buffer.is_empty())
+                .map(|a| (a.text_buffer.len(), area.width))
+        } else {
+            None
+        };
 
         if let Some((text_len, width)) = active_text_info {
             // Re-parse markdown only when the buffer or width has changed.
@@ -573,6 +609,41 @@ impl ChatWidget {
             used += 1;
         }
 
+        // ── Apply scroll offset ────────────────────────────────────────
+        // When the user has scrolled up, skip rows from the bottom of the
+        // entries list (which is ordered newest-first at this point).
+        // Entries are newest-first, so removing from the front removes
+        // the most recent content.
+        let mut rows_to_skip = self.scroll_offset as u16;
+        while rows_to_skip > 0 && !entries.is_empty() {
+            let entry_cost = entries[0].height + if entries[0].separator_after { 1 } else { 0 };
+            if entry_cost <= rows_to_skip {
+                rows_to_skip -= entry_cost;
+                used -= entry_cost;
+                entries.remove(0);
+            } else {
+                // Partial skip — just reduce scroll_offset overshoot
+                break;
+            }
+        }
+        // Clamp scroll_offset to avoid scrolling past all content.
+        let total_committed_rows: u16 = self
+            .committed_cells
+            .iter()
+            .map(|c| c.height(area.width).max(1))
+            .sum();
+        if self.scroll_offset > total_committed_rows as usize {
+            // Note: can't mutate self.scroll_offset during render, so we
+            // just display what we can.
+        }
+
+        let below_count = if self.scroll_locked {
+            // Count entries that were skipped at the bottom
+            self.scroll_offset.min(total_committed_rows as usize)
+        } else {
+            0
+        };
+
         // Render from oldest to newest (reverse the reversed list).
         entries.reverse();
         let mut row_cursor = bottom_y.saturating_sub(used);
@@ -608,13 +679,34 @@ impl ChatWidget {
         }
 
         // ── Overflow indicator ────────────────────────────────────────
-        // When committed messages were clipped, show a hint on the first row.
+        let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+
+        // Show scrolled-up indicator at the bottom when content is below.
+        if self.scroll_locked && below_count > 0 {
+            let hint = " \u{2193} scrolled up \u{00b7} PgDn/End to return".to_string();
+            let hint_line = Line::from(Span::styled(hint, dim_style));
+            let hint_area = Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            };
+            Paragraph::new(hint_line).render(hint_area, buf);
+        }
+
+        // Show overflow indicator at the top when messages are clipped above.
         if skipped_message_count > 0 {
-            let hint = format!(
-                " \u{2191} {} more \u{00b7} Ctrl+T for transcript",
-                skipped_message_count
-            );
-            let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+            let hint = if self.scroll_locked {
+                format!(
+                    " \u{2191} {} more \u{00b7} PgUp to scroll",
+                    skipped_message_count
+                )
+            } else {
+                format!(
+                    " \u{2191} {} more \u{00b7} PgUp to scroll, Ctrl+T for transcript",
+                    skipped_message_count
+                )
+            };
             let hint_line = Line::from(Span::styled(hint, dim_style));
             let hint_area = Rect {
                 x: area.x,
