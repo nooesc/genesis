@@ -898,8 +898,11 @@ impl<'a> SessionExecutionService<'a> {
             );
         }
 
-        // Set up fallback providers for automatic failover
+        // Set up fallback providers for automatic failover (sequential, config order).
         if !self.loaded.config.fallback_providers.is_empty() {
+            use std::time::Duration;
+
+            let default_timeout = Duration::from_secs(30);
             let mut fallbacks = Vec::new();
             for fp in &self.loaded.config.fallback_providers {
                 let fb_cb = fp.circuit_breaker.as_ref();
@@ -912,7 +915,11 @@ impl<'a> SessionExecutionService<'a> {
                     fb_cb.map(|c| c.cooldown_secs),
                 )
                 .await?;
-                fallbacks.push(fb_client);
+                let timeout = fp
+                    .timeout_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or(default_timeout);
+                fallbacks.push((fb_client, timeout));
             }
             agent.set_fallback_clients(fallbacks);
             debug!(
@@ -2228,6 +2235,7 @@ tools = [{tools_list}]
                     extra_body: None,
                     tool_call_parser: None,
                     circuit_breaker: None,
+                    timeout_secs: None,
                 },
                 tool_provider: None,
                 fallback_providers: Vec::new(),

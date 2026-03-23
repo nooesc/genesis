@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use genesis_provider::{
@@ -376,7 +376,8 @@ pub struct AgentLoop {
     /// use the primary `client`.
     tool_client: Option<ChatClient>,
     /// Fallback clients tried in order when the primary (or active) client fails.
-    fallback_clients: Vec<ChatClient>,
+    /// Each entry pairs a client with its per-provider timeout.
+    fallback_clients: Vec<(ChatClient, Duration)>,
     tools: ToolRuntime,
     config: AgentLoopConfig,
     messages: Vec<ChatMessage>,
@@ -538,7 +539,8 @@ impl AgentLoop {
     }
 
     /// Set fallback clients to try when the primary provider fails.
-    pub fn set_fallback_clients(&mut self, clients: Vec<ChatClient>) {
+    /// Each entry pairs a client with its per-provider timeout.
+    pub fn set_fallback_clients(&mut self, clients: Vec<(ChatClient, Duration)>) {
         self.fallback_clients = clients;
     }
 
@@ -717,7 +719,9 @@ impl AgentLoop {
     }
 
     /// Try a blocking completion against the active client, falling back to
-    /// each fallback client in order if the primary fails.
+    /// each fallback client **sequentially** (in config order) if the primary
+    /// fails. Each fallback is capped by its per-provider timeout so a slow
+    /// provider does not block the remaining fallbacks indefinitely.
     ///
     /// The request is only cloned when fallback providers are actually tried,
     /// avoiding an expensive clone in the common (no-fallback) success path.
@@ -744,59 +748,51 @@ impl AgentLoop {
                     model = model.as_str(),
                     error = %err,
                     fallback_count = self.fallback_clients.len(),
-                    "primary provider failed, trying fallbacks concurrently"
+                    "primary provider failed, trying fallbacks in order"
                 );
             }
         }
 
-        // Race all fallback providers concurrently.
-        let fallback_count = self.fallback_clients.len();
-        let futures: Vec<_> = self
-            .fallback_clients
-            .iter()
-            .enumerate()
-            .map(|(i, fallback)| {
-                let fb = fallback.clone();
-                let req = request.clone();
-                Box::pin(async move {
-                    let fb_model = fb.model().to_owned();
-                    match fb.complete(req).await {
-                        Ok(response) => {
-                            info!(
-                                fallback_index = i,
-                                model = fb_model.as_str(),
-                                "fallback provider succeeded"
-                            );
-                            Ok((response, fb_model))
-                        }
-                        Err(err) => {
-                            warn!(
-                                fallback_index = i,
-                                model = fb_model.as_str(),
-                                error = %err,
-                                "fallback provider failed"
-                            );
-                            Err(err)
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        match futures_util::future::select_ok(futures).await {
-            Ok((result, _remaining)) => Ok(result),
-            Err(last_err) => {
-                // select_ok returns the last error when all futures fail.
-                warn!(error = %last_err, "all fallback providers failed");
-                Err(ProviderError::AllProvidersFailed {
-                    count: 1 + fallback_count,
-                })
+        // Try each fallback provider sequentially, respecting config order.
+        let mut attempted = 1_usize; // primary was already attempted
+        for (i, (fallback, timeout)) in self.fallback_clients.iter().enumerate() {
+            let fb_model = fallback.model().to_owned();
+            attempted += 1;
+            match tokio::time::timeout(*timeout, fallback.complete(request.clone())).await {
+                Ok(Ok(response)) => {
+                    info!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        "fallback provider succeeded"
+                    );
+                    return Ok((response, fb_model));
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        error = %err,
+                        "fallback provider failed"
+                    );
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        timeout_secs = timeout.as_secs(),
+                        "fallback provider timed out"
+                    );
+                }
             }
         }
+
+        warn!("all {attempted} providers failed (primary + fallbacks)");
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Try a streaming completion against the active client, falling back to
-    /// each fallback client in order if the primary fails to connect.
+    /// each fallback client **sequentially** (in config order) if the primary
+    /// fails to connect. Each fallback is capped by its per-provider timeout.
     ///
     /// The request is only cloned when fallback providers are actually tried,
     /// avoiding an expensive clone in the common (no-fallback) success path.
@@ -823,54 +819,45 @@ impl AgentLoop {
                     model = model.as_str(),
                     error = %err,
                     fallback_count = self.fallback_clients.len(),
-                    "primary provider stream failed, trying fallbacks concurrently"
+                    "primary provider stream failed, trying fallbacks in order"
                 );
             }
         }
 
-        // Race all fallback providers concurrently.
-        let fallback_count = self.fallback_clients.len();
-        let futures: Vec<_> = self
-            .fallback_clients
-            .iter()
-            .enumerate()
-            .map(|(i, fallback)| {
-                let fb = fallback.clone();
-                let req = request.clone();
-                Box::pin(async move {
-                    let fb_model = fb.model().to_owned();
-                    match fb.complete_stream(req).await {
-                        Ok(stream) => {
-                            info!(
-                                fallback_index = i,
-                                model = fb_model.as_str(),
-                                "fallback provider stream succeeded"
-                            );
-                            Ok((stream, fb_model))
-                        }
-                        Err(err) => {
-                            warn!(
-                                fallback_index = i,
-                                model = fb_model.as_str(),
-                                error = %err,
-                                "fallback provider stream failed"
-                            );
-                            Err(err)
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        match futures_util::future::select_ok(futures).await {
-            Ok((result, _remaining)) => Ok(result),
-            Err(last_err) => {
-                warn!(error = %last_err, "all fallback providers failed");
-                Err(ProviderError::AllProvidersFailed {
-                    count: 1 + fallback_count,
-                })
+        let mut attempted = 1_usize; // primary was already attempted
+        for (i, (fallback, timeout)) in self.fallback_clients.iter().enumerate() {
+            let fb_model = fallback.model().to_owned();
+            attempted += 1;
+            match tokio::time::timeout(*timeout, fallback.complete_stream(request.clone())).await {
+                Ok(Ok(stream)) => {
+                    info!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        "fallback provider stream succeeded"
+                    );
+                    return Ok((stream, fb_model));
+                }
+                Ok(Err(err)) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        error = %err,
+                        "fallback provider stream failed"
+                    );
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        fallback_index = i,
+                        model = fb_model.as_str(),
+                        timeout_secs = timeout.as_secs(),
+                        "fallback provider stream timed out"
+                    );
+                }
             }
         }
+
+        warn!("all {attempted} providers failed (primary + fallbacks)");
+        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Run a single user turn through the agent loop.

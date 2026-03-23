@@ -244,6 +244,9 @@ pub(crate) async fn run_batch_item(
     }
 
     if !loaded.config.fallback_providers.is_empty() {
+        use std::time::Duration;
+
+        let default_timeout = Duration::from_secs(30);
         let mut fallbacks = Vec::new();
         for fp in &loaded.config.fallback_providers {
             let fb_client = genesis_provider::client_from_config(
@@ -253,7 +256,11 @@ pub(crate) async fn run_batch_item(
                 fp.api_key_env.as_deref(),
             )
             .await?;
-            fallbacks.push(fb_client);
+            let timeout = fp
+                .timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(default_timeout);
+            fallbacks.push((fb_client, timeout));
         }
         agent.set_fallback_clients(fallbacks);
     }
