@@ -431,7 +431,11 @@ impl ApiError {
     ///
     /// 5xx errors are logged server-side so upstream failures are always
     /// captured even when the caller constructs the error directly.
-    pub fn with_status(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn with_status(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         let error = message.into();
         let code = code.into();
         if status.is_server_error() {
@@ -1341,7 +1345,9 @@ async fn get_session_handler(
     let session = store.get_session(&id).map_err(storage_err)?;
 
     match session {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?)),
         None => Err(ApiError::not_found(format!("session '{id}' not found"))),
     }
 }
@@ -1742,7 +1748,9 @@ async fn insights_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let data = store.insights(params.days).map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(data).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(data).map_err(|e| {
+        ApiError::internal(format!("serialization error: {e}"))
+    })?))
 }
 
 async fn usage_handler(
@@ -1751,7 +1759,9 @@ async fn usage_handler(
     let store = SessionStore::new(&state.loaded.config.storage.database_path);
     let stats = store.usage_stats().map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| {
+        ApiError::internal(format!("serialization error: {e}"))
+    })?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1797,7 +1807,9 @@ async fn get_skill_handler(
     let skill = store.get(&name).map_err(storage_err)?;
 
     match skill {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?)),
         None => Err(ApiError::not_found(format!("skill '{name}' not found"))),
     }
 }
@@ -1818,7 +1830,9 @@ async fn upsert_skill_handler(
         )
         .map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(skill).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(skill).map_err(|e| {
+        ApiError::internal(format!("serialization error: {e}"))
+    })?))
 }
 
 async fn delete_skill_handler(
@@ -1905,8 +1919,13 @@ fn embedding_provider_error(
 
     match error {
         genesis_core::embedding::EmbeddingError::ApiError { status, body } => {
-            let http_status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            ApiError::with_status(http_status, "embedding_error", format!("embedding provider error: {body}"))
+            let http_status =
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            ApiError::with_status(
+                http_status,
+                "embedding_error",
+                format!("embedding provider error: {body}"),
+            )
         }
         other => ApiError::internal(format!("embedding provider error: {other}")),
     }
@@ -1933,8 +1952,13 @@ fn embedding_runtime_error(
 
     match error {
         genesis_core::embedding::EmbeddingError::ApiError { status, body } => {
-            let http_status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            ApiError::with_status(http_status, "embedding_error", format!("{context} error: {body}"))
+            let http_status =
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            ApiError::with_status(
+                http_status,
+                "embedding_error",
+                format!("{context} error: {body}"),
+            )
         }
         other => ApiError::internal(format!("{context} error: {other}")),
     }
@@ -2137,9 +2161,7 @@ async fn embed_single_memory_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if state.loaded.config.embedding.is_none() {
-        return Err(ApiError::validation(
-            "no embedding provider configured",
-        ));
+        return Err(ApiError::validation("no embedding provider configured"));
     }
 
     let provider = state
@@ -2221,7 +2243,9 @@ async fn get_schedule_handler(
     let schedule = store.get(&id).map_err(storage_err)?;
 
     match schedule {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?)),
         None => Err(ApiError::not_found(format!("schedule '{id}' not found"))),
     }
 }
@@ -2242,7 +2266,10 @@ async fn create_schedule_handler(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::to_value(schedule).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?),
+        Json(
+            serde_json::to_value(schedule)
+                .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ),
     ))
 }
 
@@ -2326,7 +2353,9 @@ async fn get_user_trait_handler(
     let user_trait = store.get(&key).map_err(storage_err)?;
 
     match user_trait {
-        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?)),
+        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?)),
         None => Err(ApiError::not_found(format!("trait '{key}' not found"))),
     }
 }
@@ -2347,7 +2376,10 @@ async fn observe_user_trait_handler(
 
     Ok((
         StatusCode::OK,
-        Json(serde_json::to_value(observed).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?),
+        Json(
+            serde_json::to_value(observed)
+                .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ),
     ))
 }
 
@@ -2375,7 +2407,9 @@ async fn get_subagent_handler(
     let subagent = store.get(&id).map_err(storage_err)?;
 
     match subagent {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?)),
+        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?)),
         None => Err(ApiError::not_found(format!("subagent '{id}' not found"))),
     }
 }
@@ -2414,7 +2448,9 @@ async fn skill_usage_stats_handler(
     let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
     let stats = store.stats(&name).map_err(storage_err)?;
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| ApiError::internal(format!("serialization error: {e}")))?))
+    Ok(Json(serde_json::to_value(stats).map_err(|e| {
+        ApiError::internal(format!("serialization error: {e}"))
+    })?))
 }
 
 async fn skill_usage_recent_handler(
@@ -3579,10 +3615,8 @@ struct OpenAiCompletionsRequest {
 async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
-) -> Result<
-    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
-    ApiError,
-> {
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
+{
     let session_id = request.session_id.unwrap_or_else(default_api_session_id);
     let request_id = default_request_id();
     info!(
@@ -3803,9 +3837,7 @@ async fn chat_batch_handler(
     Json(request): Json<BatchRequest>,
 ) -> Result<Json<BatchResponse>, ApiError> {
     if request.items.is_empty() {
-        return Err(ApiError::validation(
-            "batch must contain at least one item",
-        ));
+        return Err(ApiError::validation("batch must contain at least one item"));
     }
     if request.items.len() > MAX_BATCH_SIZE {
         return Err(ApiError::validation(format!(
@@ -5414,10 +5446,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&body).expect("error body must be valid JSON");
         assert_eq!(json["code"], "not_found");
-        assert!(json["error"]
-            .as_str()
-            .unwrap()
-            .contains("not found"));
+        assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 
     #[tokio::test]
@@ -5479,10 +5508,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&body).expect("error body must be valid JSON");
         assert_eq!(json["code"], "not_found");
-        assert!(json["error"]
-            .as_str()
-            .unwrap()
-            .contains("not found"));
+        assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 
     #[tokio::test]
