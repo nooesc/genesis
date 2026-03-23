@@ -839,8 +839,9 @@ impl<'a> SessionExecutionService<'a> {
         }
 
         // Wire auto-consolidation threshold from memory config
-        tool_runtime
-            .set_auto_consolidation_threshold(self.loaded.config.memory.auto_consolidation_threshold);
+        tool_runtime.set_auto_consolidation_threshold(
+            self.loaded.config.memory.auto_consolidation_threshold,
+        );
 
         // Start filesystem watcher for tool result cache.
         // Uses the working directory (or worktree dir) as the watch root.
@@ -3188,10 +3189,7 @@ end)
     #[test]
     fn parse_keyword_json_plain_array() {
         let result = super::parse_keyword_json(r#"["rust", "memory", "keywords"]"#);
-        assert_eq!(
-            result.unwrap(),
-            vec!["rust", "memory", "keywords"]
-        );
+        assert_eq!(result.unwrap(), vec!["rust", "memory", "keywords"]);
     }
 
     #[test]

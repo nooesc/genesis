@@ -738,8 +738,18 @@ impl MemoryStore {
             if candidate.score < threshold {
                 break;
             }
-            self.create_link(memory_id, &candidate.memory.id, crate::util::edge_type::SEMANTIC, candidate.score)?;
-            self.create_link(&candidate.memory.id, memory_id, crate::util::edge_type::SEMANTIC, candidate.score)?;
+            self.create_link(
+                memory_id,
+                &candidate.memory.id,
+                crate::util::edge_type::SEMANTIC,
+                candidate.score,
+            )?;
+            self.create_link(
+                &candidate.memory.id,
+                memory_id,
+                crate::util::edge_type::SEMANTIC,
+                candidate.score,
+            )?;
             linked += 1;
             if linked >= max_links {
                 break;
@@ -893,8 +903,18 @@ impl MemoryStore {
         let mut linked = 0;
         for (rank, target_id) in recent_ids.iter().enumerate() {
             let weight = 1.0 / (rank as f64 + 1.0);
-            self.create_link(memory_id, target_id, crate::util::edge_type::TEMPORAL, weight)?;
-            self.create_link(target_id, memory_id, crate::util::edge_type::TEMPORAL, weight)?;
+            self.create_link(
+                memory_id,
+                target_id,
+                crate::util::edge_type::TEMPORAL,
+                weight,
+            )?;
+            self.create_link(
+                target_id,
+                memory_id,
+                crate::util::edge_type::TEMPORAL,
+                weight,
+            )?;
             linked += 1;
         }
         Ok(linked)
@@ -953,8 +973,18 @@ impl MemoryStore {
 
         let mut linked = 0;
         for (target_id, overlap) in &matches {
-            self.create_link(memory_id, target_id, crate::util::edge_type::ENTITY, *overlap as f64)?;
-            self.create_link(target_id, memory_id, crate::util::edge_type::ENTITY, *overlap as f64)?;
+            self.create_link(
+                memory_id,
+                target_id,
+                crate::util::edge_type::ENTITY,
+                *overlap as f64,
+            )?;
+            self.create_link(
+                target_id,
+                memory_id,
+                crate::util::edge_type::ENTITY,
+                *overlap as f64,
+            )?;
             linked += 1;
         }
         Ok(linked)
@@ -1212,8 +1242,18 @@ impl MemoryStore {
 
         self.mark_consolidated(member_ids, &summary_id)?;
         for member_id in member_ids {
-            self.create_link(member_id, &summary_id, crate::util::edge_type::CONSOLIDATION, 1.0)?;
-            self.create_link(&summary_id, member_id, crate::util::edge_type::CONSOLIDATION, 0.5)?;
+            self.create_link(
+                member_id,
+                &summary_id,
+                crate::util::edge_type::CONSOLIDATION,
+                1.0,
+            )?;
+            self.create_link(
+                &summary_id,
+                member_id,
+                crate::util::edge_type::CONSOLIDATION,
+                0.5,
+            )?;
         }
         Ok(summary)
     }
@@ -2591,7 +2631,10 @@ mod memory_store_tests {
                 |row| row.get(0),
             )
             .expect("mem1→mem2 entity edge should exist");
-        assert!((w12 - 1.0).abs() < f64::EPSILON, "mem2 shares 1 keyword (rust)");
+        assert!(
+            (w12 - 1.0).abs() < f64::EPSILON,
+            "mem2 shares 1 keyword (rust)"
+        );
 
         // mem2 → mem1 (reverse)
         let w21: f64 = conn
@@ -2611,7 +2654,10 @@ mod memory_store_tests {
                 |row| row.get(0),
             )
             .expect("mem1→mem3 entity edge should exist");
-        assert!((w13 - 1.0).abs() < f64::EPSILON, "mem3 shares 1 keyword (memory)");
+        assert!(
+            (w13 - 1.0).abs() < f64::EPSILON,
+            "mem3 shares 1 keyword (memory)"
+        );
 
         // mem3 → mem1 (reverse)
         let w31: f64 = conn
@@ -2681,11 +2727,8 @@ mod memory_store_tests {
 
         // Mark one as consolidated
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE memories SET consolidated = 1 WHERE id = 'mem0'",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE memories SET consolidated = 1 WHERE id = 'mem0'", [])
+            .unwrap();
         drop(conn);
 
         assert_eq!(store.count_unconsolidated().unwrap(), 2);

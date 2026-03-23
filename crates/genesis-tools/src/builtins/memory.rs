@@ -83,10 +83,9 @@ impl ToolHandler for MemoryStoreTool {
                             {
                                 tracing::warn!(error = %e, "failed to temporally link merged memory");
                             }
-                            let merged_keywords = extract_or_enrich_keywords(context, &best_kind, &merged.content);
-                            if let Err(e) =
-                                store.auto_link_entity(&best_id, &merged_keywords, 5)
-                            {
+                            let merged_keywords =
+                                extract_or_enrich_keywords(context, &best_kind, &merged.content);
+                            if let Err(e) = store.auto_link_entity(&best_id, &merged_keywords, 5) {
                                 tracing::warn!(error = %e, "failed to auto-link merged memory by entity");
                             }
                         }
@@ -273,11 +272,12 @@ impl ToolHandler for MemoryConsolidateTool {
 
         let mut summaries = Vec::new();
         for cluster in &clusters {
-            let count = consolidate_single_cluster(&store, cluster)
-                .map_err(|error| ToolError::ExecutionFailed {
+            let count = consolidate_single_cluster(&store, cluster).map_err(|error| {
+                ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("failed to consolidate: {error}"),
-                })?;
+                }
+            })?;
             summaries.push(format!("- {count} memories consolidated"));
         }
 
@@ -401,7 +401,12 @@ fn create_causal_links(store: &MemoryStore, context: &ToolContext, new_memory_id
         if recalled_id == new_memory_id {
             continue;
         }
-        if let Err(e) = store.create_link(recalled_id, new_memory_id, genesis_storage::edge_type::CAUSAL, 1.0) {
+        if let Err(e) = store.create_link(
+            recalled_id,
+            new_memory_id,
+            genesis_storage::edge_type::CAUSAL,
+            1.0,
+        ) {
             tracing::warn!(error = %e, recalled_id, new_memory_id, "failed to create causal link");
         }
     }
@@ -1568,7 +1573,10 @@ mod tests {
                     name: "memory_store".to_owned(),
                     arguments: BTreeMap::from([
                         ("key".to_owned(), "fact_b".to_owned()),
-                        ("value".to_owned(), "Rust compiles to native code".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust compiles to native code".to_owned(),
+                        ),
                     ]),
                 },
                 &context,
@@ -1659,7 +1667,10 @@ mod tests {
                     name: "memory_store".to_owned(),
                     arguments: BTreeMap::from([
                         ("key".to_owned(), "fact_b".to_owned()),
-                        ("value".to_owned(), "Rust compiles to native code".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust compiles to native code".to_owned(),
+                        ),
                     ]),
                 },
                 &context,
@@ -1697,7 +1708,10 @@ mod tests {
             )
             .unwrap();
 
-        assert!(causal_after_first > 0, "first store should create causal links");
+        assert!(
+            causal_after_first > 0,
+            "first store should create causal links"
+        );
         assert!(
             causal_after_second > causal_after_first,
             "second store should also create causal links (recalled IDs persist within a turn)"
