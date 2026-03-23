@@ -1,8 +1,16 @@
 use std::collections::BTreeMap;
 
+use genesis_storage::cron::validate_cron;
 use genesis_storage::ScheduleStore;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
+
+/// Validate an IANA timezone name. Returns an error message if invalid.
+fn validate_timezone(tz: &str) -> Result<(), String> {
+    tz.parse::<chrono_tz::Tz>()
+        .map(|_| ())
+        .map_err(|_| format!("invalid timezone: {tz}"))
+}
 
 /// Creates a new scheduled prompt.
 pub struct ScheduleCreateTool;
@@ -31,29 +39,37 @@ impl ToolHandler for ScheduleCreateTool {
             .map(|s| s.as_str())
             .unwrap_or("cli");
 
-        // Validate the cron expression before creating
-        if cron.split_whitespace().count() != 5 {
-            return Err(ToolError::ExecutionFailed {
+        let timezone = call.arguments.get("timezone").map(|s| s.as_str());
+
+        // Validate the cron expression using the full parser
+        validate_cron(cron).map_err(|e| ToolError::ExecutionFailed {
+            tool: call.name.clone(),
+            reason: format!("invalid cron expression '{cron}': {e}"),
+        })?;
+
+        // Validate timezone if provided
+        if let Some(tz) = timezone {
+            validate_timezone(tz).map_err(|e| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
-                reason: format!(
-                    "invalid cron expression '{cron}': expected 5 fields (minute hour day month weekday)"
-                ),
-            });
+                reason: e,
+            })?;
         }
 
         let id = format!("sched-{}", &uuid_v4()[..8]);
         let store = ScheduleStore::new(&context.db_path());
-        let schedule = store.create(&id, cron, destination, prompt).map_err(|e| {
-            ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to create schedule: {e}"),
-            }
-        })?;
+        let schedule =
+            store
+                .create_with_timezone(&id, cron, destination, prompt, timezone)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to create schedule: {e}"),
+                })?;
 
+        let tz_display = schedule.timezone.as_deref().unwrap_or("UTC");
         Ok(ToolOutput {
             content: format!(
-                "Created schedule '{}': runs '{}' with cron '{}'",
-                schedule.id, schedule.prompt, schedule.cron_expression
+                "Created schedule '{}': runs '{}' with cron '{}' (timezone: {})",
+                schedule.id, schedule.prompt, schedule.cron_expression, tz_display
             ),
             metadata: BTreeMap::from([
                 ("tool".to_owned(), call.name.clone()),
@@ -84,9 +100,10 @@ impl ToolHandler for ScheduleListTool {
         let mut content = format!("{} schedule(s):\n", schedules.len());
         for s in &schedules {
             let status = if s.enabled { "enabled" } else { "disabled" };
+            let tz = s.timezone.as_deref().unwrap_or("UTC");
             content.push_str(&format!(
-                "\n- [{}] {} | cron: {} | dest: {} | prompt: {}",
-                status, s.id, s.cron_expression, s.destination, s.prompt
+                "\n- [{}] {} | cron: {} | tz: {} | dest: {} | prompt: {}",
+                status, s.id, s.cron_expression, tz, s.destination, s.prompt
             ));
         }
 
@@ -185,7 +202,46 @@ mod tests {
         let output = tool.run(&call, &ctx).expect("should succeed");
         assert!(output.content.contains("Created schedule"));
         assert!(output.content.contains("check status"));
+        assert!(output.content.contains("timezone: UTC"));
         assert!(output.metadata.contains_key("schedule_id"));
+    }
+
+    #[test]
+    fn create_schedule_with_timezone() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(dir.path());
+
+        let tool = ScheduleCreateTool;
+        let call = ToolCall {
+            name: "schedule_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("cron".to_owned(), "0 9 * * *".to_owned()),
+                ("prompt".to_owned(), "morning report".to_owned()),
+                ("timezone".to_owned(), "America/New_York".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx).expect("should succeed");
+        assert!(output.content.contains("timezone: America/New_York"));
+    }
+
+    #[test]
+    fn create_schedule_rejects_invalid_timezone() {
+        let dir = tempdir().expect("tempdir");
+        let ctx = ctx_with_dir(dir.path());
+
+        let tool = ScheduleCreateTool;
+        let call = ToolCall {
+            name: "schedule_create".to_owned(),
+            arguments: BTreeMap::from([
+                ("cron".to_owned(), "0 9 * * *".to_owned()),
+                ("prompt".to_owned(), "test".to_owned()),
+                ("timezone".to_owned(), "Not/A/Timezone".to_owned()),
+            ]),
+        };
+
+        let err = tool.run(&call, &ctx).unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
     }
 
     #[test]
@@ -298,5 +354,20 @@ mod tests {
 
         let output = tool.run(&call, &ctx).expect("should succeed");
         assert!(output.content.contains("Created schedule"));
+    }
+
+    #[test]
+    fn validate_cron_rejects_zero_step() {
+        assert!(validate_cron("*/0 * * * *").is_err());
+    }
+
+    #[test]
+    fn validate_cron_rejects_inverted_range() {
+        assert!(validate_cron("0 17-9 * * *").is_err());
+    }
+
+    #[test]
+    fn validate_cron_accepts_complex() {
+        assert!(validate_cron("0,15,30,45 9-17 * * 1-5").is_ok());
     }
 }

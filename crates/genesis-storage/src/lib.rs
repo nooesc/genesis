@@ -1,3 +1,5 @@
+pub mod cron;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +10,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 static SQLITE_VEC_REGISTERED: OnceLock<()> = OnceLock::new();
 
@@ -841,7 +843,17 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 destination TEXT NOT NULL,
                 prompt TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                timezone TEXT
+            );
+            CREATE TABLE IF NOT EXISTS schedule_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id TEXT NOT NULL,
+                executed_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                duration_ms INTEGER,
+                FOREIGN KEY(schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1007,6 +1019,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v10(&connection, database_path)?;
     migrate_to_v11(&connection, database_path)?;
     migrate_to_v12(&connection, database_path)?;
+    migrate_to_v13(&connection, database_path)?;
 
     connection
         .execute(
@@ -1249,6 +1262,31 @@ fn migrate_to_v12(connection: &Connection, database_path: &Path) -> Result<(), S
             target_id TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (source_id, target_id)
+        );",
+    )
+}
+
+/// Migrate v12 → v13: add timezone to schedules and schedule execution history.
+fn migrate_to_v13(connection: &Connection, database_path: &Path) -> Result<(), StorageError> {
+    if !column_exists(connection, "schedules", "timezone") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE schedules ADD COLUMN timezone TEXT;",
+        )?;
+    }
+
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE TABLE IF NOT EXISTS schedule_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schedule_id TEXT NOT NULL,
+            executed_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            duration_ms INTEGER,
+            FOREIGN KEY(schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
         );",
     )
 }
@@ -2421,6 +2459,21 @@ pub struct StoredSchedule {
     pub prompt: String,
     pub enabled: bool,
     pub created_at: String,
+    /// IANA timezone name (e.g. "America/New_York"). `None` means UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// A record of a schedule execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduleExecution {
+    pub id: i64,
+    pub schedule_id: String,
+    pub executed_at: String,
+    /// "success" or "error"
+    pub status: String,
+    pub error_message: Option<String>,
+    pub duration_ms: Option<i64>,
 }
 
 /// Schedule persistence layer.
@@ -2443,12 +2496,24 @@ impl ScheduleStore {
         destination: &str,
         prompt: &str,
     ) -> Result<StoredSchedule, StorageError> {
+        self.create_with_timezone(id, cron_expression, destination, prompt, None)
+    }
+
+    /// Create a new scheduled job with an explicit timezone.
+    pub fn create_with_timezone(
+        &self,
+        id: &str,
+        cron_expression: &str,
+        destination: &str,
+        prompt: &str,
+        timezone: Option<&str>,
+    ) -> Result<StoredSchedule, StorageError> {
         let connection = open(&self.database_path)?;
         connection
             .execute(
-                "INSERT INTO schedules (id, cron_expression, destination, prompt, enabled, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, CURRENT_TIMESTAMP)",
-                params![id, cron_expression, destination, prompt],
+                "INSERT INTO schedules (id, cron_expression, destination, prompt, enabled, created_at, timezone)
+                 VALUES (?1, ?2, ?3, ?4, 1, CURRENT_TIMESTAMP, ?5)",
+                params![id, cron_expression, destination, prompt, timezone],
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.database_path.clone(),
@@ -2466,7 +2531,7 @@ impl ScheduleStore {
         let connection = open(&self.database_path)?;
         connection
             .query_row(
-                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
                  FROM schedules WHERE id = ?1",
                 params![id],
                 |row| {
@@ -2477,6 +2542,7 @@ impl ScheduleStore {
                         prompt: row.get(3)?,
                         enabled: row.get::<_, i64>(4)? != 0,
                         created_at: row.get(5)?,
+                        timezone: row.get(6)?,
                     })
                 },
             )
@@ -2492,7 +2558,7 @@ impl ScheduleStore {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
-                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
                  FROM schedules WHERE enabled = 1
                  ORDER BY created_at ASC",
             )
@@ -2510,6 +2576,7 @@ impl ScheduleStore {
                     prompt: row.get(3)?,
                     enabled: row.get::<_, i64>(4)? != 0,
                     created_at: row.get(5)?,
+                    timezone: row.get(6)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -2525,7 +2592,7 @@ impl ScheduleStore {
         let connection = open(&self.database_path)?;
         let mut stmt = connection
             .prepare(
-                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
                  FROM schedules
                  ORDER BY created_at ASC",
             )
@@ -2543,6 +2610,7 @@ impl ScheduleStore {
                     prompt: row.get(3)?,
                     enabled: row.get::<_, i64>(4)? != 0,
                     created_at: row.get(5)?,
+                    timezone: row.get(6)?,
                 })
             })
             .map_err(|source| StorageError::Sqlite {
@@ -2578,6 +2646,65 @@ impl ScheduleStore {
                 source,
             })?;
         Ok(rows_changed > 0)
+    }
+
+    /// Record an execution of a schedule.
+    pub fn record_execution(
+        &self,
+        schedule_id: &str,
+        status: &str,
+        error_message: Option<&str>,
+        duration_ms: Option<i64>,
+    ) -> Result<(), StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .execute(
+                "INSERT INTO schedule_executions (schedule_id, executed_at, status, error_message, duration_ms)
+                 VALUES (?1, CURRENT_TIMESTAMP, ?2, ?3, ?4)",
+                params![schedule_id, status, error_message, duration_ms],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// List recent executions for a schedule, most recent first.
+    pub fn list_executions(
+        &self,
+        schedule_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ScheduleExecution>, StorageError> {
+        let connection = open(&self.database_path)?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, schedule_id, executed_at, status, error_message, duration_ms
+                 FROM schedule_executions WHERE schedule_id = ?1
+                 ORDER BY executed_at DESC LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![schedule_id, limit as i64], |row| {
+                Ok(ScheduleExecution {
+                    id: row.get(0)?,
+                    schedule_id: row.get(1)?,
+                    executed_at: row.get(2)?,
+                    status: row.get(3)?,
+                    error_message: row.get(4)?,
+                    duration_ms: row.get(5)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        collect_rows(rows, &self.database_path)
     }
 }
 
@@ -6181,6 +6308,77 @@ mod tests {
         assert!(store.delete("s1").unwrap());
         assert!(store.get("s1").unwrap().is_none());
         assert!(!store.delete("s1").unwrap()); // already deleted
+    }
+
+    #[test]
+    fn schedule_store_creates_with_timezone() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        let schedule = store
+            .create_with_timezone("tz-1", "0 9 * * *", "cli", "morning", Some("America/New_York"))
+            .expect("create should work");
+
+        assert_eq!(schedule.id, "tz-1");
+        assert_eq!(schedule.timezone.as_deref(), Some("America/New_York"));
+
+        let fetched = store.get("tz-1").unwrap().unwrap();
+        assert_eq!(fetched.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn schedule_store_timezone_defaults_to_none() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        let schedule = store
+            .create("no-tz", "*/5 * * * *", "cli", "job")
+            .expect("create should work");
+
+        assert_eq!(schedule.timezone, None);
+    }
+
+    #[test]
+    fn schedule_store_records_and_lists_executions() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        store.create("exec-test", "*/5 * * * *", "cli", "job").unwrap();
+
+        store
+            .record_execution("exec-test", "success", None, Some(150))
+            .expect("record should work");
+        store
+            .record_execution("exec-test", "error", Some("timeout"), Some(30000))
+            .expect("record should work");
+
+        let execs = store
+            .list_executions("exec-test", 10)
+            .expect("list should work");
+        assert_eq!(execs.len(), 2);
+
+        let statuses: Vec<&str> = execs.iter().map(|e| e.status.as_str()).collect();
+        assert!(statuses.contains(&"success"));
+        assert!(statuses.contains(&"error"));
+
+        let error_exec = execs.iter().find(|e| e.status == "error").unwrap();
+        assert_eq!(error_exec.error_message.as_deref(), Some("timeout"));
+        assert_eq!(error_exec.duration_ms, Some(30000));
+
+        let success_exec = execs.iter().find(|e| e.status == "success").unwrap();
+        assert_eq!(success_exec.error_message, None);
+        assert_eq!(success_exec.duration_ms, Some(150));
+    }
+
+    #[test]
+    fn schedule_store_execution_history_empty_for_unknown_schedule() {
+        let (_dir, _session_store) = bootstrapped_store();
+        let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
+
+        let execs = store
+            .list_executions("nonexistent", 10)
+            .expect("list should work");
+        assert!(execs.is_empty());
     }
 
     #[test]

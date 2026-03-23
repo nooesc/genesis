@@ -928,6 +928,8 @@ pub enum ScheduleCommand {
         destination: String,
         #[arg(long, help = "Prompt to execute when the schedule triggers")]
         prompt: String,
+        #[arg(long, help = "IANA timezone name (e.g. America/New_York). Defaults to UTC")]
+        timezone: Option<String>,
     },
     #[command(about = "List schedules")]
     List,
@@ -1670,12 +1672,26 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     cron,
                     destination,
                     prompt,
+                    timezone,
                 } => {
-                    let schedule = store.create(
+                    // Validate cron expression at creation time
+                    genesis_core::scheduler::validate_cron(&cron).map_err(|e| {
+                        CliError::Other(format!("invalid cron expression: {e}"))
+                    })?;
+
+                    // Validate timezone if provided
+                    if let Some(ref tz) = timezone {
+                        genesis_core::scheduler::resolve_timezone(Some(tz)).map_err(|e| {
+                            CliError::Other(e)
+                        })?;
+                    }
+
+                    let schedule = store.create_with_timezone(
                         &commands::serve::default_schedule_id(),
                         &cron,
                         &destination,
                         &prompt,
+                        timezone.as_deref(),
                     )?;
 
                     if cli.json {
@@ -2306,10 +2322,11 @@ mod tests {
             prompt: "check status".to_owned(),
             enabled: true,
             created_at: "2026-03-08 12:00:00".to_owned(),
+            timezone: None,
         }]);
 
         assert!(output.contains("genesis schedules"));
-        assert!(output.contains("sched-123\tcli\t*/5 * * * *\t2026-03-08 12:00:00"));
+        assert!(output.contains("sched-123\tcli\t*/5 * * * *\tUTC\t2026-03-08 12:00:00"));
     }
 
     #[tokio::test]
@@ -2332,10 +2349,12 @@ mod tests {
                 cron,
                 destination,
                 prompt,
+                timezone,
             }) => {
                 assert_eq!(cron, "*/5 * * * *");
                 assert_eq!(destination, "cli");
                 assert_eq!(prompt, "check status");
+                assert_eq!(timezone, None);
             }
             other => panic!("unexpected command parsed: {other:?}"),
         }

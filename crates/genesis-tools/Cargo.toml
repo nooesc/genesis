@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 base64.workspace = true
+chrono-tz.workspace = true
 genesis-config = { path = "../genesis-config" }
 genesis-provider = { path = "../genesis-provider" }
 genesis-storage = { path = "../genesis-storage" }
