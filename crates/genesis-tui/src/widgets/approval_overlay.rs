@@ -15,7 +15,9 @@ use ratatui::{
     widgets::{Paragraph, Widget as _},
 };
 
-use crate::history::rgb;
+use unicode_width::UnicodeWidthStr as _;
+
+use crate::history::{rgb, user_cell::word_wrap};
 
 /// How long the approval overlay waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -53,6 +55,9 @@ pub struct ApprovalOverlay {
     scroll: usize,
     /// When this overlay was created (for auto-deny countdown).
     created_at: Instant,
+    /// Modal width from the last `render()` call, used for accurate scroll
+    /// bounds in `handle_key()`. Defaults to the minimum modal width (30).
+    last_modal_width: u16,
 }
 
 impl ApprovalOverlay {
@@ -83,6 +88,7 @@ impl ApprovalOverlay {
             arg_lines,
             scroll: 0,
             created_at: Instant::now(),
+            last_modal_width: 30, // minimum modal width as default
         }
     }
 
@@ -116,7 +122,7 @@ impl ApprovalOverlay {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => ApprovalAction::Deny,
             // Scroll
             (KeyCode::Down | KeyCode::Char('j'), _) => {
-                let content_len = self.build_content_lines(80).len();
+                let content_len = self.build_content_lines(self.last_modal_width).len();
                 let max = content_len.saturating_sub(1);
                 self.scroll = self.scroll.saturating_add(1).min(max);
                 ApprovalAction::None
@@ -130,13 +136,14 @@ impl ApprovalOverlay {
     }
 
     /// Render the approval overlay as a centered modal.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width < 20 || area.height < 6 {
             return;
         }
 
         // Modal dimensions: 70% width, up to 60% height.
         let modal_width = (area.width * 7 / 10).clamp(30, 80);
+        self.last_modal_width = modal_width;
         let content_lines = self.build_content_lines(modal_width);
         let modal_height = (content_lines.len() as u16 + 4) // +4 for borders + header + footer
             .min(area.height * 6 / 10)
@@ -241,7 +248,11 @@ impl ApprovalOverlay {
         }
     }
 
-    pub(crate) fn build_content_lines(&self, _width: u16) -> Vec<Line<'static>> {
+    pub(crate) fn build_content_lines(&self, width: u16) -> Vec<Line<'static>> {
+        // The content area has 4 columns of padding (2 each side), so the
+        // usable width for text is `width - 4`.
+        let inner = width.saturating_sub(4);
+
         let mut lines = Vec::new();
 
         // Shell tools: highlight command prominently.
@@ -256,25 +267,22 @@ impl ApprovalOverlay {
                 .iter()
                 .find(|(k, _)| k == "command" || k == "cmd")
             {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  $ ",
-                        Style::default()
-                            .fg(SHELL_COLOR)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(cmd.clone(), Style::default().fg(TEXT)),
-                ]));
+                let prefix = "  $ ";
+                let prefix_style = Style::default()
+                    .fg(SHELL_COLOR)
+                    .add_modifier(Modifier::BOLD);
+                push_wrapped(
+                    &mut lines,
+                    prefix,
+                    prefix_style,
+                    cmd,
+                    Style::default().fg(TEXT),
+                    inner,
+                );
                 // Show other args below if any.
                 for (key, value) in &self.arg_lines {
                     if key != "command" && key != "cmd" {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  {key}: "),
-                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(value.clone(), Style::default().fg(DIM)),
-                        ]));
+                        push_wrapped_kv(&mut lines, key, value, inner);
                     }
                 }
                 return lines_or_empty(lines);
@@ -290,15 +298,16 @@ impl ApprovalOverlay {
         if is_file_edit {
             // Show path prominently.
             if let Some((_, path)) = self.arg_lines.iter().find(|(k, _)| k == "path") {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        path.clone(),
-                        Style::default()
-                            .fg(WRITE_COLOR)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ),
-                ]));
+                push_wrapped(
+                    &mut lines,
+                    "  ",
+                    Style::default(),
+                    path,
+                    Style::default()
+                        .fg(WRITE_COLOR)
+                        .add_modifier(Modifier::UNDERLINED),
+                    inner,
+                );
             }
             // Show old_text/new_text as a mini diff.
             let old_text = self
@@ -313,23 +322,15 @@ impl ApprovalOverlay {
                 .map(|(_, v)| v.as_str());
             if let (Some(old), Some(new)) = (old_text, new_text) {
                 lines.push(Line::default()); // spacer
+                let del_prefix_style = Style::default().fg(DEL_COLOR).add_modifier(Modifier::BOLD);
+                let del_style = Style::default().fg(DEL_COLOR);
                 for line in old.lines().take(10) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  - ",
-                            Style::default().fg(DEL_COLOR).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(line.to_owned(), Style::default().fg(DEL_COLOR)),
-                    ]));
+                    push_wrapped(&mut lines, "  - ", del_prefix_style, line, del_style, inner);
                 }
+                let add_prefix_style = Style::default().fg(ADD_COLOR).add_modifier(Modifier::BOLD);
+                let add_style = Style::default().fg(ADD_COLOR);
                 for line in new.lines().take(10) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  + ",
-                            Style::default().fg(ADD_COLOR).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(line.to_owned(), Style::default().fg(ADD_COLOR)),
-                    ]));
+                    push_wrapped(&mut lines, "  + ", add_prefix_style, line, add_style, inner);
                 }
                 if old.lines().count() > 10 || new.lines().count() > 10 {
                     lines.push(Line::from(Span::styled(
@@ -340,13 +341,7 @@ impl ApprovalOverlay {
                 // Show remaining non-path/old/new args.
                 for (key, value) in &self.arg_lines {
                     if key != "path" && key != "old_text" && key != "new_text" && key != "content" {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  {key}: "),
-                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(value.clone(), Style::default().fg(DIM)),
-                        ]));
+                        push_wrapped_kv(&mut lines, key, value, inner);
                     }
                 }
                 return lines_or_empty(lines);
@@ -355,11 +350,16 @@ impl ApprovalOverlay {
             if let Some((_, content)) = self.arg_lines.iter().find(|(k, _)| k == "content") {
                 let preview_lines: Vec<&str> = content.lines().take(10).collect();
                 lines.push(Line::default());
+                let content_style = Style::default().fg(DIM);
                 for line in &preview_lines {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled((*line).to_owned(), Style::default().fg(DIM)),
-                    ]));
+                    push_wrapped(
+                        &mut lines,
+                        "  ",
+                        Style::default(),
+                        line,
+                        content_style,
+                        inner,
+                    );
                 }
                 if content.lines().count() > 10 {
                     lines.push(Line::from(Span::styled(
@@ -374,13 +374,7 @@ impl ApprovalOverlay {
             // Show remaining non-path args and return without falling through to generic.
             for (key, value) in &self.arg_lines {
                 if key != "path" {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {key}: "),
-                            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(value.clone(), Style::default().fg(DIM)),
-                    ]));
+                    push_wrapped_kv(&mut lines, key, value, inner);
                 }
             }
             return lines_or_empty(lines);
@@ -388,13 +382,7 @@ impl ApprovalOverlay {
 
         // Default: generic key-value rendering.
         for (key, value) in &self.arg_lines {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {key}: "),
-                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(value.clone(), Style::default().fg(DIM)),
-            ]));
+            push_wrapped_kv(&mut lines, key, value, inner);
         }
 
         lines_or_empty(lines)
@@ -416,6 +404,58 @@ fn lines_or_empty(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     } else {
         lines
     }
+}
+
+/// Push a prefix+value line, word-wrapping the value if it exceeds
+/// `max_width`.  Continuation lines are indented to the prefix width.
+fn push_wrapped(
+    out: &mut Vec<Line<'static>>,
+    prefix: &str,
+    prefix_style: Style,
+    value: &str,
+    value_style: Style,
+    max_width: u16,
+) {
+    let prefix_w = prefix.width() as u16;
+    let value_width = max_width.saturating_sub(prefix_w);
+
+    if value_width == 0 || value.width() as u16 <= value_width {
+        // Fits on one line — no wrapping needed.
+        out.push(Line::from(vec![
+            Span::styled(prefix.to_owned(), prefix_style),
+            Span::styled(value.to_owned(), value_style),
+        ]));
+        return;
+    }
+
+    let wrapped = word_wrap(value, value_width);
+    let indent = " ".repeat(prefix_w as usize);
+    for (i, piece) in wrapped.iter().enumerate() {
+        if i == 0 {
+            out.push(Line::from(vec![
+                Span::styled(prefix.to_owned(), prefix_style),
+                Span::styled(piece.clone(), value_style),
+            ]));
+        } else {
+            out.push(Line::from(vec![
+                Span::styled(indent.clone(), Style::default()),
+                Span::styled(piece.clone(), value_style),
+            ]));
+        }
+    }
+}
+
+/// Convenience wrapper for the common key-value argument pattern.
+fn push_wrapped_kv(out: &mut Vec<Line<'static>>, key: &str, value: &str, max_width: u16) {
+    let prefix = format!("  {key}: ");
+    push_wrapped(
+        out,
+        &prefix,
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        value,
+        Style::default().fg(DIM),
+        max_width,
+    );
 }
 
 #[cfg(test)]
@@ -442,7 +482,7 @@ mod tests {
 
     #[test]
     fn countdown_text_rendered_in_footer() {
-        let overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
+        let mut overlay = ApprovalOverlay::new("shell_exec".to_owned(), &BTreeMap::new());
         let area = Rect {
             x: 0,
             y: 0,

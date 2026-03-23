@@ -10,6 +10,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
 };
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::rgb;
 
@@ -112,13 +113,24 @@ impl InputWidget {
         self.saved_input = None;
     }
 
-    /// Number of visual lines the content occupies (for dynamic layout).
+    /// Number of visual rows the content occupies (for dynamic layout).
     ///
-    /// Returns the number of `\n`-delimited lines in the buffer (minimum 1).
-    /// The caller adds border rows on top of this.
-    pub fn height(&self, _width: u16) -> u16 {
-        let line_count = self.buffer.matches('\n').count() + 1;
-        (line_count as u16).clamp(1, MAX_INPUT_ROWS)
+    /// Accounts for both explicit newlines and visual wrapping when a
+    /// logical line is wider than the available columns. The first line
+    /// has fewer usable columns because of the `you> ` prefix; continuation
+    /// lines are indented by the same prefix width.
+    pub fn height(&self, width: u16) -> u16 {
+        let usable = width.saturating_sub(PREFIX_WIDTH as u16).max(1) as usize;
+        let mut rows: usize = 0;
+        for logical_line in self.buffer.split('\n') {
+            let line_w = logical_line.width();
+            if line_w == 0 {
+                rows += 1;
+            } else {
+                rows += (line_w.saturating_sub(1) / usable) + 1;
+            }
+        }
+        (rows as u16).clamp(1, MAX_INPUT_ROWS)
     }
 
     /// Whether the buffer contains multiple lines.
@@ -1130,6 +1142,43 @@ mod tests {
         assert!(
             first_line.contains("x"),
             "expected typed char, got: {first_line}"
+        );
+    }
+
+    // ── Visual wrapping height tests ──────────────────────────────────
+
+    #[test]
+    fn height_accounts_for_visual_wrapping() {
+        let mut w = InputWidget::new();
+        // With width=20 and prefix "you> " (5 cols), usable = 15.
+        // A 30-char string with no newlines needs ceil(30/15) = 2 rows.
+        w.handle_paste("aaaaabbbbbcccccdddddeeeeefffff");
+        assert!(
+            w.height(20) >= 2,
+            "long single line should wrap; got height {}",
+            w.height(20)
+        );
+    }
+
+    #[test]
+    fn height_single_short_line_is_one() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hi");
+        assert_eq!(w.height(80), 1);
+    }
+
+    #[test]
+    fn height_combines_newlines_and_wrapping() {
+        let mut w = InputWidget::new();
+        // Two logical lines, first wraps at width 20 (usable 15).
+        // "aaaaabbbbbccccc" (15 chars) + "ddddd" (5 chars) → 2 visual rows.
+        // "short" → 1 visual row.
+        // Total: 3 visual rows.
+        w.handle_paste("aaaaabbbbbcccccddddd\nshort");
+        assert!(
+            w.height(20) >= 3,
+            "expected at least 3 rows from wrapping + newline; got {}",
+            w.height(20)
         );
     }
 }

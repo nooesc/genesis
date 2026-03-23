@@ -65,8 +65,8 @@ impl UserCell {
 }
 
 /// Simple word-wrap: split `text` into lines that fit within `max_width` columns.
-/// Splits on space boundaries; individual words wider than `max_width` are kept as-is.
-/// Returns at least one (possibly empty) element.
+/// Splits on any Unicode whitespace boundary; individual words wider than
+/// `max_width` are kept as-is. Returns at least one (possibly empty) element.
 pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
@@ -77,7 +77,7 @@ pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     let mut current = String::new();
     let mut current_width: usize = 0;
 
-    for word in text.split(' ') {
+    for word in text.split(char::is_whitespace) {
         let word_w = word.width();
         if current.is_empty() {
             current.push_str(word);
@@ -163,5 +163,22 @@ mod tests {
     fn word_wrap_empty_string() {
         let result = word_wrap("", 40);
         assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn word_wrap_splits_on_tab() {
+        // Tab should be treated as a word boundary, not part of a word.
+        let result = word_wrap("hello\tworld", 40);
+        assert_eq!(result.len(), 1);
+        // Both words are present (tab replaced by space as separator).
+        assert!(result[0].contains("hello"));
+        assert!(result[0].contains("world"));
+    }
+
+    #[test]
+    fn word_wrap_splits_on_non_breaking_space() {
+        // Non-breaking space (U+00A0) should also split.
+        let result = word_wrap("hello\u{00A0}world", 6);
+        assert_eq!(result.len(), 2, "expected 2 lines, got: {result:?}");
     }
 }

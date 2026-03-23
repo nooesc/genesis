@@ -12,6 +12,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget as _},
 };
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::cell::HistoryCell;
 
@@ -161,8 +162,8 @@ impl TranscriptOverlay {
         let pos_span = Span::styled(pos_text.clone(), Style::default().fg(Color::DarkGray));
 
         // Compute how much padding is needed between hint and position.
-        let hint_len = hint.len() as u16;
-        let pos_len = pos_text.len() as u16;
+        let hint_len = hint.width() as u16;
+        let pos_len = pos_text.width() as u16;
         let total = area.width;
         let pad = total.saturating_sub(hint_len + pos_len);
         let padding = Span::raw(" ".repeat(pad as usize));

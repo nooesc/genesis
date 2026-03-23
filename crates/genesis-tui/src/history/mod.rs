@@ -28,22 +28,50 @@ pub(crate) const fn rgb(c: (u8, u8, u8)) -> Color {
 
 /// Count the total rows these lines would occupy when wrapped at `wrap_width`.
 ///
-/// Uses simple character-width division (not word-aware wrapping). This is a
-/// conservative lower bound — `Paragraph::wrap()` may produce more rows when
-/// it breaks at word boundaries. Callers that use `Paragraph::wrap()` should
-/// add a small margin or use this as a minimum estimate.
+/// Simulates word-boundary wrapping (matching ratatui `Paragraph::wrap`) by
+/// splitting each line on whitespace and tracking how words fill each row.
+/// Words wider than the wrap width are placed on their own row (matching
+/// ratatui behaviour). This produces a much closer estimate than simple
+/// character-width division.
 pub(crate) fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
-    let width = wrap_width.max(1) as usize;
+    let max_w = wrap_width.max(1) as usize;
     let mut rows: usize = 0;
+
     for line in lines {
-        let line_width: usize = line.spans.iter().map(|s| s.content.width()).sum();
-        let wrapped = if line_width == 0 {
-            1
-        } else {
-            (line_width.saturating_sub(1) / width) + 1
-        };
-        rows = rows.saturating_add(wrapped);
+        // Collect the full text of the line for word splitting.
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        if text.is_empty() {
+            rows += 1;
+            continue;
+        }
+
+        // Walk words and simulate how ratatui fills rows.
+        let mut col: usize = 0;
+        let mut line_rows: usize = 1;
+        for word in text.split(char::is_whitespace) {
+            let w = word.width();
+            if col == 0 {
+                // First word on a row — always placed (even if oversized).
+                col = w;
+            } else if col + 1 + w <= max_w {
+                // Fits on current row with a space separator.
+                col += 1 + w;
+            } else {
+                // Doesn't fit — start a new row.
+                line_rows += 1;
+                col = w;
+            }
+            // If the word itself is wider than max_w it may span multiple rows.
+            // Account for the extra rows beyond the first.
+            if w > max_w {
+                let extra = w.saturating_sub(1) / max_w;
+                line_rows += extra;
+                col = w - extra * max_w;
+            }
+        }
+        rows = rows.saturating_add(line_rows);
     }
+
     rows.try_into().unwrap_or(u16::MAX)
 }
 
