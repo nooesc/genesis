@@ -43,6 +43,12 @@ pub struct LuaRuntimeConfig {
     pub disabled_plugins: Vec<String>,
     pub plugin_verbose: Option<bool>,
     pub config_values: BTreeMap<String, String>,
+    /// Sandbox path validator for the `genesis.fs` / `genesis.search` primitives.
+    pub path_validator: Option<Arc<genesis_tools::sandbox::PathValidator>>,
+    /// Working directory for `genesis.process` / `genesis.search` primitives.
+    pub working_dir: Option<String>,
+    /// Shared HTTP client for the `genesis.http` primitive.
+    pub http_client: Option<Arc<reqwest::blocking::Client>>,
 }
 
 pub struct LuaRuntime {
@@ -320,9 +326,9 @@ impl LuaRuntime {
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
             None,
-            None,
-            None,
-            None,
+            config.path_validator.clone(),
+            config.working_dir.clone(),
+            config.http_client.clone(),
         )?;
         lua.globals().set("genesis", genesis)?;
         strip_unsafe_globals(&lua)?;

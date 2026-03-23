@@ -445,6 +445,7 @@ impl<'a> SessionExecutionService<'a> {
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
+            ..Default::default()
         }
     }
 
@@ -1420,6 +1421,7 @@ impl ExecutionSubagentSpawner {
             disabled_plugins: self.loaded.config.plugins.disabled.clone(),
             plugin_verbose: self.plugin_runtime_overrides.plugin_verbose,
             config_values,
+            ..Default::default()
         };
 
         match LuaRuntime::builder().with_config(config).build() {

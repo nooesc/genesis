@@ -1372,6 +1372,7 @@ mod tests {
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
                 config_values: BTreeMap::new(),
+                ..Default::default()
             })
             .build()
             .expect("lua runtime should build");

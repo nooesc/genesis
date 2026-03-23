@@ -120,6 +120,7 @@ mod tests {
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
                 config_values,
+                ..Default::default()
             })
             .build()
             .expect("test runtime should build")

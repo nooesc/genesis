@@ -819,6 +819,7 @@ genesis.register_personality({
                 disabled_plugins: Vec::new(),
                 plugin_verbose: None,
                 config_values: BTreeMap::new(),
+                ..Default::default()
             })
             .build()
             .expect("runtime should build");
@@ -1730,7 +1731,100 @@ tools = [{tools_list}]
                 disabled_plugins,
                 plugin_verbose,
                 config_values,
+                ..Default::default()
             })
             .build()
+    }
+
+    #[test]
+    fn integration_lua_tool_uses_fs_read_and_json_encode() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let test_file = dir.path().join("sample.txt");
+        fs::write(&test_file, "Hello from Genesis!").expect("write should succeed");
+
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+
+        // Write a trusted package plugin that registers a tool using primitives.
+        let package_dir = plugin_dir.join("file_reader");
+        fs::create_dir_all(&package_dir).expect("package dir should exist");
+        fs::write(
+            package_dir.join("init.lua"),
+            r#"
+genesis.register_tool({
+    name = "file_to_json",
+    description = "Read a file and return its content as JSON",
+    parameters = {
+        path = { type = "string", description = "File path", required = true },
+    },
+    run = function(args)
+        local content = genesis.fs.read(args.path)
+        return genesis.json.encode({ content = content, length = #content })
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+        fs::write(
+            package_dir.join("plugin.toml"),
+            r#"
+[plugin]
+name = "file_reader"
+version = "0.1.0"
+
+[permissions]
+trusted = true
+"#,
+        )
+        .expect("manifest should write");
+
+        let validator = Arc::new(genesis_tools::sandbox::PathValidator::new(Some(
+            dir.path().to_path_buf(),
+        )));
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: plugin_dir.clone(),
+                session: LuaSessionContext {
+                    id: "integration-test".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                path_validator: Some(validator),
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        // Verify the tool was registered.
+        let tools = runtime.registered_tools();
+        assert!(
+            tools.iter().any(|t| t.definition.name == "file_to_json"),
+            "file_to_json tool should be registered; tools: {:?}",
+            tools.iter().map(|t| &t.definition.name).collect::<Vec<_>>()
+        );
+
+        // Invoke the tool.
+        let output = runtime
+            .invoke_tool(
+                "file_to_json",
+                BTreeMap::from([("path".to_owned(), test_file.to_string_lossy().into_owned())]),
+            )
+            .expect("tool invocation should succeed");
+
+        // The tool returns a JSON-encoded string via genesis.json.encode,
+        // so the output is a Text variant containing a JSON string.
+        let text = match &output {
+            crate::LuaToolOutput::Text(s) => s.clone(),
+            crate::LuaToolOutput::Json(v) => v.to_string(),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("output should be valid JSON");
+        assert_eq!(parsed["content"], json!("Hello from Genesis!"));
+        assert_eq!(parsed["length"], json!(19));
     }
 }
