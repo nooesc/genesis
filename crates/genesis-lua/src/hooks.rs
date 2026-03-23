@@ -16,6 +16,8 @@ pub enum HookEvent {
     OnError,
     OnComplete,
     OnPluginLoad,
+    OnSessionStart,
+    OnSessionResume,
 }
 
 impl HookEvent {
@@ -29,6 +31,8 @@ impl HookEvent {
             "OnError" | "on_error" => Some(Self::OnError),
             "OnComplete" | "on_complete" => Some(Self::OnComplete),
             "OnPluginLoad" | "on_plugin_load" => Some(Self::OnPluginLoad),
+            "OnSessionStart" | "on_session_start" => Some(Self::OnSessionStart),
+            "OnSessionResume" | "on_session_resume" => Some(Self::OnSessionResume),
             _ => None,
         }
     }
@@ -121,5 +125,34 @@ pub(crate) fn parse_post_hook_result(
         None | Some(Value::Nil) | Some(Value::Boolean(true)) => Ok(PostHookOutcome::Keep(current)),
         Some(Value::String(s)) => Ok(PostHookOutcome::Rewrite(s.to_str()?.to_owned())),
         Some(other) => Ok(PostHookOutcome::Rewrite(other.to_string()?)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HookEvent;
+
+    #[test]
+    fn parses_on_session_start() {
+        assert_eq!(
+            HookEvent::from_name("OnSessionStart"),
+            Some(HookEvent::OnSessionStart)
+        );
+        assert_eq!(
+            HookEvent::from_name("on_session_start"),
+            Some(HookEvent::OnSessionStart)
+        );
+    }
+
+    #[test]
+    fn parses_on_session_resume() {
+        assert_eq!(
+            HookEvent::from_name("OnSessionResume"),
+            Some(HookEvent::OnSessionResume)
+        );
+        assert_eq!(
+            HookEvent::from_name("on_session_resume"),
+            Some(HookEvent::OnSessionResume)
+        );
     }
 }
