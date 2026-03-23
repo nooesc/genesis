@@ -112,6 +112,8 @@ pub struct StatusBarWidget {
     agent_mode: AgentMode,
     /// Shimmer phase (0.0..1.0), advances each tick for the cosine-wave sweep.
     shimmer_phase: f64,
+    /// Transient warning message shown briefly in the center section.
+    transient_warning: Option<(String, Instant)>,
 }
 
 impl StatusBarWidget {
@@ -137,6 +139,7 @@ impl StatusBarWidget {
             heartbeat: Pattern::Flatline,
             agent_mode: AgentMode::default(),
             shimmer_phase: 0.0,
+            transient_warning: None,
         }
     }
 
@@ -168,6 +171,13 @@ impl StatusBarWidget {
             };
         } else if !was_idle && is_idle {
             self.heartbeat = Pattern::Flatline;
+
+            // Reset warning TTL when returning to Idle so it counts from the
+            // moment the warning actually becomes visible (build_center only
+            // renders warnings in the Idle state).
+            if let Some((_msg, shown_at)) = &mut self.transient_warning {
+                *shown_at = Instant::now();
+            }
         }
     }
 
@@ -207,6 +217,21 @@ impl StatusBarWidget {
     /// Update the agent operating mode (Act / Plan).
     pub fn set_agent_mode(&mut self, mode: AgentMode) {
         self.agent_mode = mode;
+    }
+
+    /// Show a transient warning message in the center of the status bar.
+    ///
+    /// The warning auto-expires after 8 seconds. Only the most recent warning
+    /// is displayed; calling this again replaces any existing warning.
+    pub fn show_transient_warning(&mut self, msg: &str) {
+        self.transient_warning = Some((msg.to_owned(), Instant::now()));
+    }
+
+    /// Returns `true` if a non-expired transient warning is active.
+    pub fn has_transient_warning(&self) -> bool {
+        self.transient_warning
+            .as_ref()
+            .is_some_and(|(_, created)| created.elapsed() < Duration::from_secs(8))
     }
 
     /// Whether the status bar is in an animated state (needs periodic redraws).
@@ -480,7 +505,19 @@ impl StatusBarWidget {
 
     fn build_center(&self, bg: Color) -> Vec<Span<'static>> {
         match &self.state {
-            StatusState::Idle => vec![],
+            StatusState::Idle => {
+                // Show transient warning if one is active and hasn't expired.
+                if let Some((msg, created)) = &self.transient_warning {
+                    const WARNING_TTL: Duration = Duration::from_secs(8);
+                    if created.elapsed() < WARNING_TTL {
+                        return vec![Span::styled(
+                            format!(" \u{26a0} {msg} "),
+                            Style::default().fg(Color::Rgb(214, 180, 90)).bg(bg),
+                        )];
+                    }
+                }
+                vec![]
+            }
 
             StatusState::Thinking => {
                 let frame = self.sprite_frame % EVE_SPRITES.len();
@@ -736,6 +773,7 @@ mod tests {
             heartbeat: Pattern::Flatline,
             agent_mode: AgentMode::default(),
             shimmer_phase: 0.0,
+            transient_warning: None,
         }
     }
 
@@ -1013,5 +1051,35 @@ mod tests {
         let old_phase = widget.shimmer_phase;
         widget.tick();
         assert!(widget.shimmer_phase > old_phase, "shimmer should advance");
+    }
+
+    #[test]
+    fn transient_warning_shows_in_center_when_idle() {
+        let mut widget = make_widget();
+        widget.show_transient_warning("context at 85%");
+        assert!(widget.has_transient_warning());
+        let line = widget.to_line();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("context at 85%"),
+            "warning should appear in status bar, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn transient_warning_not_shown_when_expired() {
+        let mut widget = make_widget();
+        // Set a warning in the past (9 seconds ago) so it's expired.
+        widget.transient_warning = Some((
+            "old warning".to_string(),
+            Instant::now() - Duration::from_secs(9),
+        ));
+        assert!(!widget.has_transient_warning());
+        let line = widget.to_line();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("old warning"),
+            "expired warning should not appear, got: {text:?}"
+        );
     }
 }

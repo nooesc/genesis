@@ -51,6 +51,8 @@ pub enum AgentEvent {
     },
     /// Agent needs clarification from user.
     ClarificationNeeded(String),
+    /// The running turn was cancelled by the user (Ctrl+C).
+    Cancelled,
     /// Agent encountered an error.
     Error(String),
     /// Non-fatal warning from agent.
@@ -130,6 +132,10 @@ pub enum Submission {
     /// Send a message to the agent.
     UserMessage { text: String, images: Vec<String> },
     /// Interrupt the current turn (Ctrl+C).
+    ///
+    /// NOTE: This is only received when no turn future is active (used for
+    /// cleanup). For immediate cancellation during a running turn, use the
+    /// dedicated `cancel_tx` channel instead.
     Interrupt,
     /// Switch the active model (from model picker).
     /// Format: "backend/model" (e.g. "anthropic/claude-sonnet-4-6").

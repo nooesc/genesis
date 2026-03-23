@@ -44,6 +44,10 @@ pub enum ActiveOverlay {
 /// forwarding derived events to the appropriate channel.
 pub struct App {
     pub submission_tx: mpsc::UnboundedSender<Submission>,
+    /// Dedicated cancel channel — always polled in the event loop, even during
+    /// an active turn. Bypasses the `turn_future.is_none()` guard on
+    /// `submission_rx` so Ctrl+C can interrupt a running agent turn immediately.
+    pub cancel_tx: mpsc::UnboundedSender<()>,
     pub app_tx: mpsc::UnboundedSender<AppEvent>,
     pub frame_requester: FrameRequester,
     pub turn_running: bool,
@@ -222,14 +226,36 @@ impl App {
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
                 let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
-            AgentEvent::Error(_err) => {
+            AgentEvent::Cancelled => {
+                self.chat.append_text("\n\n*Turn cancelled.*");
                 self.chat.complete_turn();
                 self.turn_running = false;
                 self.turn_start = None;
                 self.status_bar.turn_elapsed = None;
                 let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+                let _ = self.app_tx.send(AppEvent::CommitHistory);
             }
-            AgentEvent::Warning(_) => {}
+            AgentEvent::Error(err) => {
+                self.chat.append_text(&format!("\n\n**Error:** {err}"));
+                let chat_area = ratatui::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: self.viewport_width,
+                    height: self.viewport_height.saturating_sub(1),
+                };
+                self.effects.flash_error(chat_area);
+
+                self.chat.complete_turn();
+                self.turn_running = false;
+                self.turn_start = None;
+                self.status_bar.turn_elapsed = None;
+                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+                let _ = self.app_tx.send(AppEvent::CommitHistory);
+            }
+            AgentEvent::Warning(msg) => {
+                tracing::warn!(warning = %msg, "agent warning");
+                self.status_bar.show_transient_warning(&msg);
+            }
         }
     }
 
@@ -587,7 +613,9 @@ impl App {
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if self.turn_running {
-                    let _ = self.submission_tx.send(Submission::Interrupt);
+                    // Send on the dedicated cancel channel which is always
+                    // polled by the event loop (not guarded by turn_future).
+                    let _ = self.cancel_tx.send(());
                 } else {
                     // Pass to input widget — InputAction::Interrupt is a no-op
                     // when nothing is running.
@@ -621,7 +649,7 @@ impl App {
                     InputAction::Exit => self.should_exit = true,
                     InputAction::Interrupt => {
                         if self.turn_running {
-                            let _ = self.submission_tx.send(Submission::Interrupt);
+                            let _ = self.cancel_tx.send(());
                         }
                     }
                     InputAction::None => {}
@@ -700,8 +728,10 @@ mod tests {
         App,
         mpsc::UnboundedReceiver<Submission>,
         mpsc::UnboundedReceiver<AppEvent>,
+        mpsc::UnboundedReceiver<()>,
     ) {
         let (submission_tx, submission_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel();
         let (app_tx, app_rx) = mpsc::unbounded_channel();
         let (draw_tx, _draw_rx) = broadcast::channel(16);
         let frame_requester = FrameRequester::new(draw_tx);
@@ -721,6 +751,7 @@ mod tests {
         );
         let app = App {
             submission_tx,
+            cancel_tx,
             app_tx,
             frame_requester,
             turn_running: false,
@@ -753,41 +784,43 @@ mod tests {
             agent_mode: AgentMode::default(),
             active_theme: crate::theme::theme_by_name("eve"),
         };
-        (app, submission_rx, app_rx)
+        (app, submission_rx, app_rx, cancel_rx)
     }
 
     #[tokio::test]
     async fn ctrl_d_sets_should_exit() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         app.handle_tui_event(TuiEvent::Key(key));
         assert!(app.should_exit);
     }
 
     #[tokio::test]
-    async fn ctrl_c_sends_interrupt_when_running() {
-        let (mut app, mut sub_rx, _app_rx) = make_app();
+    async fn ctrl_c_sends_cancel_when_running() {
+        let (mut app, _sub_rx, _app_rx, mut cancel_rx) = make_app();
         app.turn_running = true;
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         app.handle_tui_event(TuiEvent::Key(key));
-        match sub_rx.try_recv() {
-            Ok(Submission::Interrupt) => {}
-            other => panic!("expected Submission::Interrupt, got {:?}", other),
+        // Cancel is sent on the dedicated cancel channel, not the submission channel.
+        match cancel_rx.try_recv() {
+            Ok(()) => {}
+            other => panic!("expected cancel signal, got {:?}", other),
         }
     }
 
     #[tokio::test]
     async fn ctrl_c_does_nothing_when_idle() {
-        let (mut app, mut sub_rx, _app_rx) = make_app();
+        let (mut app, mut sub_rx, _app_rx, mut cancel_rx) = make_app();
         app.turn_running = false;
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         app.handle_tui_event(TuiEvent::Key(key));
         assert!(sub_rx.try_recv().is_err());
+        assert!(cancel_rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn turn_started_sets_thinking_status() {
-        let (mut app, _sub_rx, mut app_rx) = make_app();
+        let (mut app, _sub_rx, mut app_rx, _cancel_rx) = make_app();
         app.handle_agent_event(AgentEvent::TurnStarted);
         assert!(app.turn_running);
         match app_rx.try_recv() {
@@ -798,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn turn_complete_resets_to_idle() {
-        let (mut app, _sub_rx, mut app_rx) = make_app();
+        let (mut app, _sub_rx, mut app_rx, _cancel_rx) = make_app();
         app.turn_running = true;
         app.handle_agent_event(AgentEvent::TurnComplete {
             response: String::new(),
@@ -822,29 +855,64 @@ mod tests {
 
     #[tokio::test]
     async fn error_resets_turn_running() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.turn_running = true;
         app.handle_agent_event(AgentEvent::Error("boom".into()));
         assert!(!app.turn_running);
     }
 
     #[tokio::test]
+    async fn error_displays_message_in_chat() {
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
+        app.turn_running = true;
+        // Start a turn so there is an active cell to append to.
+        app.handle_agent_event(AgentEvent::TurnStarted);
+        app.handle_agent_event(AgentEvent::Error("network timeout".into()));
+        // The error message should be committed as an agent cell.
+        let cells = app.chat.committed_cells();
+        assert!(!cells.is_empty(), "error should produce committed cells");
+        // The last agent cell should contain the error text.
+        let has_error = cells.iter().any(|c| {
+            if let crate::history::cell::HistoryCell::Agent(agent) = c {
+                agent.text().contains("network timeout")
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_error,
+            "committed cells should contain the error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn warning_updates_status_bar() {
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
+        app.handle_agent_event(AgentEvent::Warning("context at 85%".into()));
+        // The transient warning should be set on the status bar.
+        assert!(
+            app.status_bar.has_transient_warning(),
+            "status bar should have a transient warning"
+        );
+    }
+
+    #[tokio::test]
     async fn slash_exit_sets_should_exit() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_app_event(AppEvent::SlashCommand("/exit".into()));
         assert!(app.should_exit);
     }
 
     #[tokio::test]
     async fn slash_quit_sets_should_exit() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_app_event(AppEvent::SlashCommand("/quit".into()));
         assert!(app.should_exit);
     }
 
     #[tokio::test]
     async fn tool_running_updates_status() {
-        let (mut app, _sub_rx, mut app_rx) = make_app();
+        let (mut app, _sub_rx, mut app_rx, _cancel_rx) = make_app();
         app.handle_agent_event(AgentEvent::ToolCallStart {
             call_id: "call_1".into(),
             tool_name: "shell".into(),
@@ -860,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn enter_submits_message_to_agent() {
-        let (mut app, mut sub_rx, _app_rx) = make_app();
+        let (mut app, mut sub_rx, _app_rx, _cancel_rx) = make_app();
         // Type "hello" then press Enter.
         for c in "hello".chars() {
             app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
@@ -886,14 +954,14 @@ mod tests {
 
     #[tokio::test]
     async fn paste_inserts_into_input() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_tui_event(TuiEvent::Paste("pasted text".into()));
         assert_eq!(app.chat.input.text(), "pasted text");
     }
 
     #[tokio::test]
     async fn text_delta_appends_to_active_cell() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_agent_event(AgentEvent::TurnStarted);
         app.handle_agent_event(AgentEvent::TextDelta("Hello".into()));
         app.handle_agent_event(AgentEvent::TextDelta(" world".into()));
@@ -903,7 +971,7 @@ mod tests {
 
     #[tokio::test]
     async fn turn_complete_freezes_active_cell() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_agent_event(AgentEvent::TurnStarted);
         app.handle_agent_event(AgentEvent::TextDelta("Response text".into()));
         app.handle_agent_event(AgentEvent::TurnComplete {
@@ -919,7 +987,7 @@ mod tests {
 
     #[tokio::test]
     async fn welcome_screen_transitions_to_chat_on_enter() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.screen = AppScreen::Welcome;
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         app.handle_tui_event(TuiEvent::Key(key));
@@ -930,7 +998,7 @@ mod tests {
 
     #[tokio::test]
     async fn welcome_screen_forwards_printable_char() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.screen = AppScreen::Welcome;
         let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         app.handle_tui_event(TuiEvent::Key(key));
@@ -941,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn welcome_screen_transitions_on_escape() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.screen = AppScreen::Welcome;
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         app.handle_tui_event(TuiEvent::Key(key));
@@ -951,7 +1019,7 @@ mod tests {
 
     #[tokio::test]
     async fn tab_toggles_agent_mode() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         assert_eq!(app.agent_mode, AgentMode::Act);
         app.handle_tui_event(TuiEvent::Key(KeyEvent::new(
             KeyCode::Tab,
@@ -967,7 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn slash_plan_toggles_agent_mode() {
-        let (mut app, _sub_rx, _app_rx) = make_app();
+        let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         assert_eq!(app.agent_mode, AgentMode::Act);
         app.handle_app_event(AppEvent::SlashCommand("/plan".into()));
         assert_eq!(app.agent_mode, AgentMode::Plan);
@@ -977,7 +1045,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_prepends_instruction_to_submission() {
-        let (mut app, mut sub_rx, _app_rx) = make_app();
+        let (mut app, mut sub_rx, _app_rx, _cancel_rx) = make_app();
         // Switch to plan mode.
         app.agent_mode = AgentMode::Plan;
         // Type "analyze this" and submit.
