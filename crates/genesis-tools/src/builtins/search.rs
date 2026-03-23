@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -16,7 +16,7 @@ fn rg_available() -> bool {
 pub struct SearchFilesTool;
 
 impl ToolHandler for SearchFilesTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let pattern = call
             .arguments
             .get("pattern")
@@ -25,11 +25,25 @@ impl ToolHandler for SearchFilesTool {
                 argument: "pattern",
             })?;
 
-        let path = call
+        let path_arg = call
             .arguments
             .get("path")
             .map(|p| p.as_str())
             .unwrap_or(".");
+
+        let validated_path = if let Some(ref validator) = context.path_validator {
+            validator
+                .validate(path_arg)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e.to_string(),
+                })?
+        } else {
+            PathBuf::from(path_arg)
+        };
+
+        let path = validated_path.to_string_lossy().into_owned();
+        let path = path.as_str();
 
         if !Path::new(path).exists() {
             return Err(ToolError::ExecutionFailed {

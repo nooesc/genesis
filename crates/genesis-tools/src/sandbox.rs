@@ -68,9 +68,7 @@ impl PathValidator {
         // --- Absolute sensitive paths (exact or starts_with with `/` boundary) ---
         let path_str = path.to_string_lossy();
         for &sensitive in SENSITIVE_ABSOLUTE {
-            if path_str == sensitive
-                || path_str.starts_with(&format!("{sensitive}/"))
-            {
+            if path_str == sensitive || path_str.starts_with(&format!("{sensitive}/")) {
                 return true;
             }
         }
@@ -174,18 +172,14 @@ impl PathValidator {
         // 2. Symlink check.
         if let Ok(meta) = fs::symlink_metadata(&normalized) {
             if meta.file_type().is_symlink() {
-                let target = fs::read_link(&normalized).map_err(|e| {
-                    SandboxError::ResolutionFailed {
+                let target =
+                    fs::read_link(&normalized).map_err(|e| SandboxError::ResolutionFailed {
                         path: raw.to_string(),
                         reason: format!("could not read symlink: {e}"),
-                    }
-                })?;
+                    })?;
                 // Resolve relative symlink targets against the link's parent.
                 let resolved = if target.is_relative() {
-                    normalized
-                        .parent()
-                        .unwrap_or(Path::new("/"))
-                        .join(&target)
+                    normalized.parent().unwrap_or(Path::new("/")).join(&target)
                 } else {
                     target
                 };
@@ -200,12 +194,12 @@ impl PathValidator {
 
         // 3. Canonicalize.
         let canonical = if normalized.exists() {
-            normalized.canonicalize().map_err(|e| {
-                SandboxError::ResolutionFailed {
+            normalized
+                .canonicalize()
+                .map_err(|e| SandboxError::ResolutionFailed {
                     path: raw.to_string(),
                     reason: format!("canonicalize failed: {e}"),
-                }
-            })?
+                })?
         } else {
             // Walk up to the first existing ancestor and canonicalize that,
             // then re-append the remaining components.
@@ -222,12 +216,13 @@ impl PathValidator {
                     break;
                 }
             }
-            let mut canonical_base = existing.canonicalize().map_err(|e| {
-                SandboxError::ResolutionFailed {
-                    path: raw.to_string(),
-                    reason: format!("canonicalize ancestor failed: {e}"),
-                }
-            })?;
+            let mut canonical_base =
+                existing
+                    .canonicalize()
+                    .map_err(|e| SandboxError::ResolutionFailed {
+                        path: raw.to_string(),
+                        reason: format!("canonicalize ancestor failed: {e}"),
+                    })?;
             for component in tail_components.into_iter().rev() {
                 canonical_base.push(component);
             }
@@ -380,32 +375,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "hello").unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v.validate(file.to_str().unwrap()).is_ok());
     }
 
     #[test]
     fn validate_blocks_path_outside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v.validate("/etc/hosts").is_err());
     }
 
     #[test]
     fn validate_blocks_traversal_outside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v.validate("../../etc/hosts").is_err());
     }
 
     #[test]
     fn validate_handles_nonexistent_path_inside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v
             .validate(dir.path().join("new_file.txt").to_str().unwrap())
             .is_ok());
@@ -423,8 +426,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("dangling");
         std::os::unix::fs::symlink("/nonexistent/target", &link).unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v.validate(link.to_str().unwrap()).is_err());
     }
 
@@ -435,8 +440,10 @@ mod tests {
         std::fs::write(&real_file, "data").unwrap();
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&real_file, &link).unwrap();
-        let v =
-            PathValidator::new(Some(dir.path().to_path_buf()), PathBuf::from("/tmp/fake-home"));
+        let v = PathValidator::new(
+            Some(dir.path().to_path_buf()),
+            PathBuf::from("/tmp/fake-home"),
+        );
         assert!(v.validate(link.to_str().unwrap()).is_ok());
     }
 }

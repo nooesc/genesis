@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
@@ -16,14 +16,27 @@ const FUZZY_THRESHOLD: f64 = 0.70;
 pub struct PatchTool;
 
 impl ToolHandler for PatchTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
                 tool: call.name.clone(),
                 argument: "path",
             })?;
+
+        let file_path = if let Some(ref validator) = context.path_validator {
+            validator
+                .validate(path_arg)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e.to_string(),
+                })?
+        } else {
+            PathBuf::from(path_arg)
+        };
+
+        let path = path_arg;
 
         let old_text =
             call.arguments
@@ -41,8 +54,7 @@ impl ToolHandler for PatchTool {
                     argument: "new_text",
                 })?;
 
-        let file_path = Path::new(path);
-        let content = fs::read_to_string(file_path).map_err(|e| ToolError::ExecutionFailed {
+        let content = fs::read_to_string(&file_path).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: format!("failed to read `{path}`: {e}"),
         })?;

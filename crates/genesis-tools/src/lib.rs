@@ -176,6 +176,10 @@ pub struct ToolContext {
     /// When set, memory tools generate embeddings and perform deduplication.
     #[serde(skip)]
     pub embedding_service: Option<Arc<dyn EmbeddingService>>,
+    /// Filesystem path validator for sandbox enforcement.
+    /// When set, file-system tools validate paths against this before I/O.
+    #[serde(skip)]
+    pub path_validator: Option<Arc<sandbox::PathValidator>>,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -197,6 +201,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "embedding_service",
                 &self.embedding_service.as_ref().map(|_| ".."),
+            )
+            .field(
+                "path_validator",
+                &self.path_validator.as_ref().map(|_| ".."),
             )
             .field("approval_mode", &self.approval_mode)
             .finish()
@@ -1990,6 +1998,7 @@ pub mod test_utils {
             default_working_dir: None,
             sandbox_manager: None,
             embedding_service: None,
+            path_validator: None,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

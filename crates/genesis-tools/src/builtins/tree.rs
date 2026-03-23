@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput, NOISE_DIRS};
 
@@ -10,14 +10,27 @@ const MAX_ENTRIES: usize = 2000;
 pub struct ListTreeTool;
 
 impl ToolHandler for ListTreeTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let path = call
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let path_arg = call
             .arguments
             .get("path")
             .ok_or_else(|| ToolError::MissingArgument {
                 tool: call.name.clone(),
                 argument: "path",
             })?;
+
+        let validated_path = if let Some(ref validator) = context.path_validator {
+            validator
+                .validate(path_arg)
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: e.to_string(),
+                })?
+        } else {
+            PathBuf::from(path_arg)
+        };
+
+        let path = &validated_path.to_string_lossy().into_owned();
 
         let max_depth: usize = call
             .arguments

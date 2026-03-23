@@ -261,6 +261,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             default_working_dir: None,
             sandbox_manager: None,
             embedding_service: None,
+            path_validator: None,
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
