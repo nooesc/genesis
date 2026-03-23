@@ -123,6 +123,135 @@ impl ToolHandler for MemoryRecallTool {
     }
 }
 
+pub struct MemoryConsolidateTool;
+
+impl ToolHandler for MemoryConsolidateTool {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let database_path = context.db_path();
+        let store = MemoryStore::new(&database_path);
+
+        let threshold = call
+            .arguments
+            .get("threshold")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.85);
+
+        let min_cluster_size = call
+            .arguments
+            .get("min_cluster_size")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2);
+
+        let clusters = store
+            .find_consolidation_clusters(threshold, min_cluster_size)
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to find clusters: {error}"),
+            })?;
+
+        if clusters.is_empty() {
+            return Ok(ToolOutput {
+                content: "no clusters found for consolidation".to_owned(),
+                metadata: BTreeMap::from([("tool".to_owned(), call.name.clone())]),
+            });
+        }
+
+        let mut summaries = Vec::new();
+        for cluster in &clusters {
+            let members: Vec<_> = cluster
+                .iter()
+                .filter_map(|id| store.get(id).ok().flatten())
+                .collect();
+            let combined_content: String = members
+                .iter()
+                .map(|m| format!("- [{}] {}", m.kind, m.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let keywords: Vec<String> = members
+                .iter()
+                .flat_map(|m| extract_keywords(&m.kind, &m.content))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
+            let summary_content = format!(
+                "Consolidated from {} memories:\n{}",
+                members.len(),
+                combined_content
+            );
+            let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
+            store
+                .consolidate_cluster(&member_refs, &summary_content, keywords)
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to consolidate: {error}"),
+                })?;
+            summaries.push(format!("- {} memories consolidated", members.len()));
+        }
+
+        Ok(ToolOutput {
+            content: format!(
+                "consolidated {} clusters:\n{}",
+                clusters.len(),
+                summaries.join("\n")
+            ),
+            metadata: BTreeMap::from([
+                ("tool".to_owned(), call.name.clone()),
+                ("clusters".to_owned(), clusters.len().to_string()),
+            ]),
+        })
+    }
+}
+
+pub struct MemoryPruneTool;
+
+impl ToolHandler for MemoryPruneTool {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let database_path = context.db_path();
+        let store = MemoryStore::new(&database_path);
+
+        let importance_threshold = call
+            .arguments
+            .get("importance_threshold")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.1);
+
+        let stale_days = call
+            .arguments
+            .get("stale_days")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(90);
+
+        let stale = store
+            .list_stale(importance_threshold, stale_days)
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to list stale memories: {error}"),
+            })?;
+
+        let count = stale.len();
+        for memory in &stale {
+            store
+                .delete(&memory.id)
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to delete {}: {error}", memory.id),
+                })?;
+        }
+
+        Ok(ToolOutput {
+            content: format!(
+                "pruned {count} stale memories (importance < {importance_threshold}, \
+                 not accessed in {stale_days}+ days)"
+            ),
+            metadata: BTreeMap::from([
+                ("tool".to_owned(), call.name.clone()),
+                ("pruned_count".to_owned(), count.to_string()),
+            ]),
+        })
+    }
+}
+
 fn memory_id(context: &ToolContext, key: &str) -> String {
     format!("{}:{}:{}", context.session_id, key, unique_suffix())
 }
@@ -496,5 +625,140 @@ mod tests {
 
         assert_eq!(output.metadata.get("session_id").unwrap(), "session-42");
         assert_eq!(output.metadata.get("key").unwrap(), "test_key");
+    }
+
+    #[test]
+    fn memory_consolidate_tool_no_clusters() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let tool = super::MemoryConsolidateTool;
+        let output = tool
+            .run(
+                &ToolCall {
+                    name: "memory_consolidate".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &context,
+            )
+            .unwrap();
+
+        assert_eq!(output.content, "no clusters found for consolidation");
+    }
+
+    #[test]
+    fn memory_consolidate_tool_consolidates_similar_memories() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Insert memories with embeddings for clustering
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for i in 1..=4 {
+            conn.execute(
+                &format!(
+                    "INSERT INTO memories (id, session_id, kind, content, created_at) \
+                     VALUES ('cmem{i}', 'session-42', 'fact', 'rust ownership fact {i}', \
+                     CURRENT_TIMESTAMP)"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        // Store similar embeddings (cluster of 4)
+        let embeddings = genesis_storage::EmbeddingStore::new(&db_path);
+        embeddings
+            .store("cmem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("cmem2", &[0.98, 0.02, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("cmem3", &[0.95, 0.05, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("cmem4", &[0.90, 0.10, 0.0, 0.0], "test")
+            .unwrap();
+
+        let tool = super::MemoryConsolidateTool;
+        let output = tool
+            .run(
+                &ToolCall {
+                    name: "memory_consolidate".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &context,
+            )
+            .unwrap();
+
+        assert!(
+            output.content.contains("consolidated"),
+            "should report consolidation: {}",
+            output.content
+        );
+    }
+
+    #[test]
+    fn memory_prune_removes_stale_memories() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at) \
+             VALUES ('stale1', 'session-42', 'fact', 'old info', '2024-01-01T00:00:00Z', 0.05, '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let tool = super::MemoryPruneTool;
+        let output = tool
+            .run(
+                &ToolCall {
+                    name: "memory_prune".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &context,
+            )
+            .unwrap();
+
+        assert!(output.content.contains("pruned"));
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id = 'stale1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn memory_prune_no_stale_memories() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        let tool = super::MemoryPruneTool;
+        let output = tool
+            .run(
+                &ToolCall {
+                    name: "memory_prune".to_owned(),
+                    arguments: BTreeMap::new(),
+                },
+                &context,
+            )
+            .unwrap();
+
+        assert!(output.content.contains("pruned 0"));
     }
 }

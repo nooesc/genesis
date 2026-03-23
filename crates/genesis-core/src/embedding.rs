@@ -380,6 +380,8 @@ pub enum SearchMode {
     Vector,
     /// Hybrid: combine FTS5 and vector results via reciprocal rank fusion.
     Hybrid,
+    /// Multi-hop graph traversal with edge-type weighting and consolidation awareness.
+    Advanced,
 }
 
 impl SearchMode {
@@ -388,6 +390,7 @@ impl SearchMode {
             Some("graph") => Self::Graph,
             Some("vector") => Self::Vector,
             Some("hybrid") => Self::Hybrid,
+            Some("advanced") => Self::Advanced,
             _ => Self::Keyword,
         }
     }
@@ -435,6 +438,9 @@ pub async fn hybrid_search(
                 .hybrid_search(query, &query_embedding, limit)
                 .map_err(EmbeddingError::from)
         }
+        SearchMode::Advanced => memory_store
+            .advanced_search(query, limit, 2)
+            .map_err(EmbeddingError::from),
     }
 }
 
@@ -800,5 +806,58 @@ mod tests {
             matches!(result.unwrap_err(), EmbeddingError::NotConfigured),
             "should fail with NotConfigured when no provider given"
         );
+    }
+
+    #[test]
+    fn search_mode_from_str_opt_advanced() {
+        assert_eq!(
+            SearchMode::from_str_opt(Some("advanced")),
+            SearchMode::Advanced
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_advanced_mode_delegates_to_advanced_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        genesis_storage::bootstrap(&db_path).expect("bootstrap");
+
+        let session_store = genesis_storage::SessionStore::new(&db_path);
+        session_store.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'advanced search test', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        let rowid = conn.last_insert_rowid();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, 'fact', 'advanced search test')",
+            rusqlite::params![rowid],
+        )
+        .unwrap();
+        drop(conn);
+
+        let memory_store = genesis_storage::MemoryStore::new(&db_path);
+        let results = hybrid_search(
+            "advanced search",
+            10,
+            SearchMode::Advanced,
+            &memory_store,
+            None,
+        )
+        .await
+        .expect("advanced search should succeed");
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].source, "advanced");
     }
 }

@@ -28,6 +28,18 @@ pub(crate) fn decayed_importance(
     Ok(importance * 0.99_f32.powf(days))
 }
 
+/// Return the retrieval weight multiplier for a given edge type.
+pub(crate) fn edge_type_weight(edge_type: &str) -> f64 {
+    match edge_type {
+        "consolidation" => 1.2,
+        "semantic" => 1.0,
+        "causal" => 0.9,
+        "temporal" => 0.7,
+        "entity" => 0.6,
+        _ => 0.5,
+    }
+}
+
 pub(crate) fn sql_placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
@@ -60,8 +72,16 @@ pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> boo
             .all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "column_exists: column name must be alphanumeric, got {column:?}"
     );
-    conn.prepare(&format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0"))
-        .is_ok()
+    // Use PRAGMA table_info instead of SELECT to avoid SQLite's DQS misfeature
+    // where double-quoted identifiers for missing columns are silently treated
+    // as string literals, causing column_exists to incorrectly return true.
+    conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map(|cols| cols.iter().any(|c| c == column))
+        .unwrap_or(false)
 }
 
 /// Run a batch of SQL statements as a migration step.
@@ -332,4 +352,23 @@ where
     I: Iterator<Item = PathBuf>,
 {
     candidates.find(|path| path.is_dir())
+}
+
+/// Cosine similarity between two vectors. Returns 0.0 on empty/mismatched inputs.
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut norm_a, mut norm_b) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
+    }
 }

@@ -6,10 +6,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::StorageError;
-use crate::stores::embedding::embedding_to_blob;
+use crate::stores::embedding::{embedding_to_blob, EmbeddingStore};
 use crate::util::{
-    collect_rows, decayed_importance, exec_migration, memory_vec_declared_dimensions,
-    memory_vec_table_exists, sql_placeholders, sqlite_table_exists,
+    collect_rows, cosine_similarity, decayed_importance, edge_type_weight, exec_migration,
+    memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders, sqlite_table_exists,
 };
 use crate::Database;
 
@@ -43,6 +43,8 @@ struct GraphAttributes {
 struct GraphCandidate {
     memory: StoredMemory,
     attributes: GraphAttributes,
+    edge_type: String,
+    edge_weight: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,8 +295,8 @@ impl MemoryStore {
             let base_score = 1.0 / (60.0 + rank as f64);
             if seen.insert(memory.id.clone()) {
                 if let Some(attributes) = attributes.get(&memory.id) {
-                    expanded.push(Self::score_graph_memory(
-                        memory, attributes, base_score, &now,
+                    expanded.push(Self::score_memory(
+                        memory, attributes, base_score, &now, "graph",
                     )?);
                 }
             }
@@ -306,12 +308,16 @@ impl MemoryStore {
                 .enumerate()
             {
                 if seen.insert(linked.memory.id.clone()) {
-                    let link_score = base_score * (0.5 / (link_rank as f64 + 1.0));
-                    expanded.push(Self::score_graph_memory(
+                    let link_score = base_score
+                        * (0.5 / (link_rank as f64 + 1.0))
+                        * edge_type_weight(&linked.edge_type)
+                        * linked.edge_weight;
+                    expanded.push(Self::score_memory(
                         &linked.memory,
                         &linked.attributes,
                         link_score,
                         &now,
+                        "graph",
                     )?);
                 }
             }
@@ -465,6 +471,30 @@ impl MemoryStore {
         collect_rows(rows, self.db.path())
     }
 
+    /// Insert or update a typed, weighted edge between two memories.
+    pub fn create_link(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        edge_type: &str,
+        weight: f64,
+    ) -> Result<(), StorageError> {
+        let connection = self.db.conn()?;
+        connection
+            .execute(
+                "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(source_id, target_id) DO UPDATE
+                 SET edge_type = excluded.edge_type, weight = excluded.weight",
+                params![source_id, target_id, edge_type, weight],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    }
+
     fn graph_attributes_for_ids(
         &self,
         connection: &Connection,
@@ -517,7 +547,7 @@ impl MemoryStore {
         let mut stmt = connection
             .prepare(&format!(
                 "SELECT ml.source_id, m.id, m.session_id, m.kind, m.content, m.created_at,
-                        m.importance, m.accessed_at
+                        m.importance, m.accessed_at, ml.edge_type, ml.weight
                  FROM memory_links ml
                  JOIN memories m ON m.id = ml.target_id
                  WHERE ml.source_id IN ({})
@@ -546,6 +576,8 @@ impl MemoryStore {
                                 importance: row.get::<_, f32>(6)?,
                                 accessed_at: row.get::<_, String>(7)?,
                             },
+                            edge_type: row.get::<_, String>(8)?,
+                            edge_weight: row.get::<_, f64>(9)?,
                         },
                     ))
                 },
@@ -565,18 +597,19 @@ impl MemoryStore {
         Ok(grouped)
     }
 
-    fn score_graph_memory(
+    fn score_memory(
         memory: &StoredMemory,
         attributes: &GraphAttributes,
         base_score: f64,
         now: &DateTime<Utc>,
+        source: &str,
     ) -> Result<ScoredMemory, StorageError> {
         let score = base_score
             * decayed_importance(attributes.importance, &attributes.accessed_at, now)? as f64;
         Ok(ScoredMemory {
             memory: memory.clone(),
             score,
-            source: "graph".to_owned(),
+            source: source.to_owned(),
         })
     }
 
@@ -612,6 +645,259 @@ impl MemoryStore {
             source,
         })?;
         Ok(())
+    }
+
+    /// Find memories with embedding cosine similarity above the given threshold.
+    /// Used for entropy-aware deduplication.
+    pub fn find_similar(
+        &self,
+        query_embedding: &[f32],
+        threshold: f64,
+        max_candidates: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        let candidates = self.vector_search(query_embedding, max_candidates)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|s| s.score >= threshold)
+            .collect())
+    }
+
+    /// Merge new content into an existing memory, updating importance to max(old, new).
+    pub fn merge_into(
+        &self,
+        memory_id: &str,
+        additional_content: &str,
+        new_importance: f32,
+    ) -> Result<(), StorageError> {
+        let mut connection = self.db.conn()?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+
+        tx.execute(
+            "UPDATE memories SET content = content || ?2, importance = MAX(importance, ?3), accessed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![memory_id, additional_content, new_importance],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })?;
+
+        if sqlite_table_exists(&tx, self.db.path(), "memory_search")? {
+            let (rowid, kind, content): (i64, String, String) = tx
+                .query_row(
+                    "SELECT rowid, kind, content FROM memories WHERE id = ?1",
+                    params![memory_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            tx.execute(
+                "DELETE FROM memory_search WHERE memory_row_id = ?1",
+                params![rowid],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+            tx.execute(
+                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
+                params![rowid, kind, content],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        }
+
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })
+    }
+
+    /// Find top-N similar memories (above threshold) and create bidirectional semantic edges.
+    pub fn auto_link_semantic(
+        &self,
+        memory_id: &str,
+        embedding: &[f32],
+        threshold: f64,
+        max_links: usize,
+    ) -> Result<usize, StorageError> {
+        let candidates = self.vector_search(embedding, max_links + 2)?; // +2 to account for self
+        let mut linked = 0;
+        for candidate in candidates {
+            if candidate.memory.id == memory_id {
+                continue;
+            }
+            if candidate.score < threshold {
+                break;
+            }
+            self.create_link(memory_id, &candidate.memory.id, "semantic", candidate.score)?;
+            self.create_link(&candidate.memory.id, memory_id, "semantic", candidate.score)?;
+            linked += 1;
+            if linked >= max_links {
+                break;
+            }
+        }
+        Ok(linked)
+    }
+
+    /// Advanced memory retrieval with multi-hop graph traversal and edge-weighted scoring.
+    ///
+    /// 1. Runs FTS5 search for primary results
+    /// 2. Expands to `max_depth` hops along typed edges
+    /// 3. Applies edge_type_weight multipliers at each hop
+    /// 4. Score decays by 0.5 per hop to prioritize closer memories
+    /// 5. Consolidated summaries score via their consolidation edge weight (1.2x)
+    pub fn advanced_search(
+        &self,
+        query: &str,
+        limit: usize,
+        max_depth: usize,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let primary = self.search(query, limit)?;
+        if primary.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let connection = self.db.conn()?;
+        let now = Utc::now();
+        let mut seen = HashSet::new();
+        let mut scored = Vec::new();
+
+        // Score primary results
+        let primary_ids: Vec<String> = primary.iter().map(|m| m.id.clone()).collect();
+        let attributes = self.graph_attributes_for_ids(&connection, &primary_ids)?;
+
+        for (rank, memory) in primary.iter().enumerate() {
+            if seen.insert(memory.id.clone()) {
+                let base_score = 1.0 / (60.0 + rank as f64);
+                if let Some(attrs) = attributes.get(&memory.id) {
+                    scored.push(Self::score_memory(
+                        memory, attrs, base_score, &now, "advanced",
+                    )?);
+                }
+            }
+        }
+
+        // Build frontier from primary results with their scores
+        let mut frontier: Vec<(String, f64)> = scored
+            .iter()
+            .map(|s| (s.memory.id.clone(), s.score))
+            .collect();
+
+        // Multi-hop BFS expansion
+        for _depth in 0..max_depth {
+            let source_ids: Vec<String> = frontier.iter().map(|(id, _)| id.clone()).collect();
+            if source_ids.is_empty() {
+                break;
+            }
+            let linked = self.linked_memories_for_sources(&connection, &source_ids)?;
+
+            let mut next_frontier = Vec::new();
+            for (source_id, source_score) in &frontier {
+                if let Some(neighbors) = linked.get(source_id) {
+                    for (link_rank, neighbor) in neighbors.iter().enumerate() {
+                        if seen.insert(neighbor.memory.id.clone()) {
+                            let hop_decay = 0.5;
+                            let link_position_decay = 1.0 / (link_rank as f64 + 1.0);
+                            let type_weight = edge_type_weight(&neighbor.edge_type);
+                            let neighbor_score = source_score
+                                * hop_decay
+                                * link_position_decay
+                                * type_weight
+                                * neighbor.edge_weight;
+                            let final_score = neighbor_score
+                                * decayed_importance(
+                                    neighbor.attributes.importance,
+                                    &neighbor.attributes.accessed_at,
+                                    &now,
+                                )
+                                .unwrap_or(neighbor.attributes.importance)
+                                    as f64;
+
+                            scored.push(ScoredMemory {
+                                memory: neighbor.memory.clone(),
+                                score: final_score,
+                                source: "advanced".to_owned(),
+                            });
+                            next_frontier.push((neighbor.memory.id.clone(), final_score));
+                        }
+                    }
+                }
+            }
+            frontier = next_frontier;
+
+            // Cap frontier to prevent unbounded expansion on dense graphs.
+            frontier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            frontier.truncate(limit * 4);
+        }
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+
+        drop(connection);
+        self.bump_access_metrics(
+            &scored
+                .iter()
+                .map(|s| s.memory.id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+
+        Ok(scored)
+    }
+
+    /// Create temporal edges to the N most recent memories from the same session.
+    pub fn auto_link_temporal(
+        &self,
+        memory_id: &str,
+        session_id: &str,
+        max_links: usize,
+    ) -> Result<usize, StorageError> {
+        let connection = self.db.conn()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id FROM memories WHERE session_id = ?1 AND id != ?2 ORDER BY created_at DESC LIMIT ?3",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        let recent_ids: Vec<String> = collect_rows(
+            stmt.query_map(params![session_id, memory_id, max_links as i64], |row| {
+                row.get(0)
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?,
+            self.db.path(),
+        )?;
+        drop(stmt);
+        drop(connection);
+
+        let mut linked = 0;
+        for (rank, target_id) in recent_ids.iter().enumerate() {
+            let weight = 1.0 / (rank as f64 + 1.0);
+            self.create_link(memory_id, target_id, "temporal", weight)?;
+            self.create_link(target_id, memory_id, "temporal", weight)?;
+            linked += 1;
+        }
+        Ok(linked)
     }
 
     /// Delete a memory by ID.
@@ -671,6 +957,189 @@ impl MemoryStore {
             source,
         })?;
         Ok(rows > 0)
+    }
+
+    /// Mark memories as consolidated, pointing to a summary note.
+    pub fn mark_consolidated(
+        &self,
+        memory_ids: &[&str],
+        summary_id: &str,
+    ) -> Result<(), StorageError> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.db.conn()?;
+        let tx = connection
+            .transaction()
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        for id in memory_ids {
+            tx.execute(
+                "UPDATE memories SET consolidated = 1, parent_summary_id = ?2 WHERE id = ?1",
+                params![id, summary_id],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        }
+        tx.commit().map_err(|source| StorageError::Sqlite {
+            path: self.db.path().to_path_buf(),
+            source,
+        })
+    }
+
+    /// List memories with importance below threshold, not accessed in `min_stale_days` days.
+    pub fn list_stale(
+        &self,
+        importance_threshold: f32,
+        min_stale_days: i64,
+    ) -> Result<Vec<StoredMemory>, StorageError> {
+        let connection = self.db.conn()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, session_id, kind, content, created_at FROM memories
+                 WHERE importance < ?1 AND consolidated = 0
+                   AND kind != 'consolidated_summary'
+                   AND julianday('now') - julianday(accessed_at) > ?2
+                 ORDER BY importance ASC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map(
+                params![importance_threshold, min_stale_days],
+                Self::row_to_memory,
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        collect_rows(rows, self.db.path())
+    }
+
+    /// Find clusters of unconsolidated memories that are semantically similar.
+    pub fn find_consolidation_clusters(
+        &self,
+        threshold: f64,
+        min_cluster_size: usize,
+    ) -> Result<Vec<Vec<String>>, StorageError> {
+        let embedding_store = EmbeddingStore::with_db(self.db.clone());
+        let all = embedding_store.all_embeddings()?;
+
+        let connection = self.db.conn()?;
+        let unconsolidated: HashSet<String> = {
+            let mut stmt = connection
+                .prepare("SELECT id FROM memories WHERE consolidated = 0")
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            collect_rows(rows, self.db.path())?.into_iter().collect()
+        };
+        drop(connection);
+
+        let embeddings: Vec<(String, Vec<f32>)> = all
+            .into_iter()
+            .filter(|(id, _)| unconsolidated.contains(id))
+            .collect();
+
+        const MAX_CLUSTER_CANDIDATES: usize = 5000;
+        if embeddings.len() > MAX_CLUSTER_CANDIDATES {
+            return Ok(Vec::new());
+        }
+
+        if embeddings.len() < min_cluster_size {
+            return Ok(Vec::new());
+        }
+
+        let mut assigned: HashSet<usize> = HashSet::new();
+        let mut clusters = Vec::new();
+        for i in 0..embeddings.len() {
+            if assigned.contains(&i) {
+                continue;
+            }
+            let mut cluster = vec![i];
+            for j in (i + 1)..embeddings.len() {
+                if assigned.contains(&j) {
+                    continue;
+                }
+                if cosine_similarity(&embeddings[i].1, &embeddings[j].1) >= threshold as f32 {
+                    cluster.push(j);
+                }
+            }
+            if cluster.len() >= min_cluster_size {
+                for &idx in &cluster {
+                    assigned.insert(idx);
+                }
+                clusters.push(
+                    cluster
+                        .into_iter()
+                        .map(|idx| embeddings[idx].0.clone())
+                        .collect(),
+                );
+            }
+        }
+        Ok(clusters)
+    }
+
+    /// Create a summary note for a cluster, mark members consolidated, create consolidation edges.
+    pub fn consolidate_cluster(
+        &self,
+        member_ids: &[&str],
+        summary_content: &str,
+        keywords: Vec<String>,
+    ) -> Result<StoredMemory, StorageError> {
+        // Get max importance from members
+        let connection = self.db.conn()?;
+        let max_importance: f32 = if member_ids.is_empty() {
+            0.5
+        } else {
+            let mut stmt = connection
+                .prepare(&format!(
+                    "SELECT COALESCE(MAX(importance), 0.5) FROM memories WHERE id IN ({})",
+                    sql_placeholders(member_ids.len()),
+                ))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            stmt.query_row(params_from_iter(member_ids.iter()), |row| row.get(0))
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?
+        };
+        drop(connection);
+
+        let summary_id = format!("summary-{}", memory_unique_suffix());
+        let summary = self.create_note(NewMemoryNote {
+            id: summary_id.clone(),
+            session_id: None,
+            kind: "consolidated_summary".to_owned(),
+            content: summary_content.to_owned(),
+            keywords,
+            tags: vec!["consolidated".to_owned()],
+            linked_ids: Vec::new(),
+            importance: max_importance,
+        })?;
+
+        self.mark_consolidated(member_ids, &summary_id)?;
+        for member_id in member_ids {
+            self.create_link(member_id, &summary_id, "consolidation", 1.0)?;
+            self.create_link(&summary_id, member_id, "consolidation", 0.5)?;
+        }
+        Ok(summary)
     }
 }
 
@@ -1237,5 +1706,745 @@ mod memory_store_tests {
 
         let (page3, _) = store.list_paginated(10, 5).expect("beyond end");
         assert!(page3.is_empty());
+    }
+
+    #[test]
+    fn create_link_with_edge_type_stores_type_and_weight() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "src".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "source note".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+        store
+            .create_note(NewMemoryNote {
+                id: "tgt".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "target note".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        store
+            .create_link("src", "tgt", "causal", 0.9)
+            .expect("create_link should succeed");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (edge_type, weight): (String, f64) = conn
+            .query_row(
+                "SELECT edge_type, weight FROM memory_links
+                 WHERE source_id = 'src' AND target_id = 'tgt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("link row should exist");
+        assert_eq!(edge_type, "causal");
+        assert!((weight - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn graph_search_weights_causal_edges_higher_than_entity() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create FTS index so search works.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                memory_row_id UNINDEXED, kind, content
+            );",
+        )
+        .unwrap();
+
+        // Primary memory — will be the FTS hit.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('primary', 's1', 'fact', 'genesis architecture overview', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        let primary_rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, 'fact', 'genesis architecture overview')",
+            rusqlite::params![primary_rowid],
+        )
+        .unwrap();
+
+        // Causal linked memory.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('causal-linked', 's1', 'fact', 'causal consequence', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // Entity linked memory.
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance, accessed_at)
+             VALUES ('entity-linked', 's1', 'fact', 'entity relation', CURRENT_TIMESTAMP, 1.0, CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+
+        // Insert links with typed edges.
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+             VALUES ('primary', 'causal-linked', 'causal', 1.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, edge_type, weight)
+             VALUES ('primary', 'entity-linked', 'entity', 1.0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let results = store.graph_search("genesis architecture", 10).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        assert!(
+            ids.contains(&"causal-linked"),
+            "causal-linked should appear in results"
+        );
+        assert!(
+            ids.contains(&"entity-linked"),
+            "entity-linked should appear in results"
+        );
+
+        // Causal (0.9 multiplier) should score higher than entity (0.6 multiplier).
+        let causal_score = results
+            .iter()
+            .find(|r| r.memory.id == "causal-linked")
+            .unwrap()
+            .score;
+        let entity_score = results
+            .iter()
+            .find(|r| r.memory.id == "entity-linked")
+            .unwrap()
+            .score;
+        assert!(
+            causal_score > entity_score,
+            "causal ({causal_score}) should score higher than entity ({entity_score})"
+        );
+    }
+
+    #[test]
+    fn find_similar_returns_near_duplicate_above_threshold() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let results = store
+            .find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92, 10)
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "near-duplicate embedding should be found above threshold"
+        );
+        assert_eq!(results[0].memory.id, "mem1");
+    }
+
+    #[test]
+    fn find_similar_returns_empty_below_threshold() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let results = store.find_similar(&[0.0, 1.0, 0.0, 0.0], 0.92, 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "orthogonal embedding should not match above threshold"
+        );
+    }
+
+    #[test]
+    fn merge_into_appends_content_and_updates_importance() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        // Set a known importance for mem1
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE memories SET importance = 0.5 WHERE id = 'mem1'", [])
+            .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        store
+            .merge_into("mem1", " — updated info", 0.7)
+            .expect("merge_into should succeed");
+
+        let memory = store.get("mem1").unwrap().expect("mem1 should exist");
+        assert!(
+            memory.content.contains("hello world"),
+            "original content should remain"
+        );
+        assert!(
+            memory.content.contains("— updated info"),
+            "appended content should be present"
+        );
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let importance: f32 = conn
+            .query_row(
+                "SELECT importance FROM memories WHERE id = 'mem1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (importance - 0.7).abs() < f32::EPSILON,
+            "importance should be max(0.5, 0.7) = 0.7, got {importance}"
+        );
+    }
+
+    #[test]
+    fn auto_link_semantic_creates_edges_for_similar_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("semantic.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, content) in [
+            ("mem1", "first note"),
+            ("mem2", "second note"),
+            ("mem3", "third note"),
+        ] {
+            conn.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, content],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem2", &[0.95, 0.05, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem3", &[0.0, 0.0, 1.0, 0.0], "test")
+            .unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let linked = store
+            .auto_link_semantic("mem1", &[1.0, 0.0, 0.0, 0.0], 0.8, 3)
+            .expect("auto_link_semantic should succeed");
+        assert!(linked >= 1, "should link to at least mem2");
+
+        let links = store.links_for("mem1").unwrap();
+        assert!(
+            links.contains(&"mem2".to_owned()),
+            "mem1 should link to mem2"
+        );
+        assert!(
+            !links.contains(&"mem3".to_owned()),
+            "mem1 should not link to dissimilar mem3"
+        );
+
+        // Verify bidirectional
+        let reverse_links = store.links_for("mem2").unwrap();
+        assert!(
+            reverse_links.contains(&"mem1".to_owned()),
+            "mem2 should link back to mem1"
+        );
+    }
+
+    #[test]
+    fn auto_link_temporal_links_same_session_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("temporal.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'first', '2026-03-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'fact', 'second', '2026-03-02 00:00:00')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let linked = store
+            .auto_link_temporal("mem2", "s1", 5)
+            .expect("auto_link_temporal should succeed");
+        assert_eq!(linked, 1, "should link to mem1");
+
+        let links = store.links_for("mem2").unwrap();
+        assert!(
+            links.contains(&"mem1".to_owned()),
+            "mem2 should link to mem1"
+        );
+
+        // Verify bidirectional
+        let reverse_links = store.links_for("mem1").unwrap();
+        assert!(
+            reverse_links.contains(&"mem2".to_owned()),
+            "mem1 should link back to mem2"
+        );
+
+        // Verify edge type is temporal
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let edge_type: String = conn
+            .query_row(
+                "SELECT edge_type FROM memory_links WHERE source_id = 'mem2' AND target_id = 'mem1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_type, "temporal");
+    }
+
+    #[test]
+    fn mark_consolidated_sets_flag_and_parent() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        // Create a summary memory that can be referenced by parent_summary_id FK.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('summary-1', 's1', 'consolidated_summary', 'summary', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .mark_consolidated(&["mem1", "mem2"], "summary-1")
+            .expect("mark_consolidated should succeed");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (consolidated, parent): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mem1 should have consolidated columns");
+        assert_eq!(consolidated, 1);
+        assert_eq!(parent, "summary-1");
+
+        let (consolidated2, parent2): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("mem2 should have consolidated columns");
+        assert_eq!(consolidated2, 1);
+        assert_eq!(parent2, "summary-1");
+    }
+
+    #[test]
+    fn mark_consolidated_empty_ids_is_noop() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .mark_consolidated(&[], "summary-1")
+            .expect("empty ids should be a no-op");
+    }
+
+    #[test]
+    fn list_stale_returns_low_importance_old_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.05, accessed_at = '2025-01-01T00:00:00Z' WHERE id = 'mem1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.9, accessed_at = '2025-01-01T00:00:00Z' WHERE id = 'mem2'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let stale = store
+            .list_stale(0.1, 90)
+            .expect("list_stale should succeed");
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, "mem1");
+    }
+
+    #[test]
+    fn list_stale_excludes_consolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.05, accessed_at = '2025-01-01T00:00:00Z', consolidated = 1 WHERE id = 'mem1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let stale = store
+            .list_stale(0.1, 90)
+            .expect("list_stale should succeed");
+        assert!(
+            stale.is_empty(),
+            "consolidated memory should not appear in stale list"
+        );
+    }
+
+    #[test]
+    fn find_consolidation_clusters_groups_similar_unconsolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cluster.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, content) in [
+            ("mem1", "note one"),
+            ("mem3", "note three"),
+            ("mem4", "note four"),
+            ("mem5", "note five"),
+            ("mem6", "note six"),
+            ("mem7", "note seven"),
+        ] {
+            conn.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, content],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        // Cluster A: very similar vectors
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem3", &[0.95, 0.05, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem4", &[0.9, 0.1, 0.0, 0.0], "test")
+            .unwrap();
+        // Cluster B: similar to each other, different from A
+        embeddings
+            .store("mem5", &[0.0, 1.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem6", &[0.0, 0.95, 0.05, 0.0], "test")
+            .unwrap();
+        // Outlier
+        embeddings
+            .store("mem7", &[0.0, 0.0, 0.0, 1.0], "test")
+            .unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let clusters = store
+            .find_consolidation_clusters(0.85, 2)
+            .expect("find_consolidation_clusters should succeed");
+
+        assert!(
+            clusters.len() >= 2,
+            "should find at least 2 clusters, found {}",
+            clusters.len()
+        );
+
+        // Check that cluster A and cluster B are found
+        let all_cluster_ids: Vec<&String> = clusters.iter().flatten().collect();
+        assert!(all_cluster_ids.contains(&&"mem1".to_owned()));
+        assert!(all_cluster_ids.contains(&&"mem5".to_owned()));
+        // Outlier should not be in any cluster
+        assert!(!all_cluster_ids.contains(&&"mem7".to_owned()));
+    }
+
+    #[test]
+    fn find_consolidation_clusters_ignores_consolidated_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("cluster2.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, consolidated)
+             VALUES ('mem1', 's1', 'fact', 'note one', CURRENT_TIMESTAMP, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'fact', 'note two', CURRENT_TIMESTAMP)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem2", &[0.99, 0.01, 0.0, 0.0], "test")
+            .unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let clusters = store
+            .find_consolidation_clusters(0.85, 2)
+            .expect("should succeed");
+        // mem1 is consolidated, so only mem2 is unconsolidated — not enough for a cluster of 2
+        assert!(
+            clusters.is_empty(),
+            "consolidated memory should be excluded from clustering"
+        );
+    }
+
+    #[test]
+    fn consolidate_cluster_creates_summary_and_marks_members() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("consolidate.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "rust is fast".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .unwrap();
+        store
+            .create_note(NewMemoryNote {
+                id: "mem2".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "rust is safe".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.9,
+            })
+            .unwrap();
+
+        let summary = store
+            .consolidate_cluster(
+                &["mem1", "mem2"],
+                "Combined knowledge about Rust",
+                vec!["rust".to_owned()],
+            )
+            .expect("consolidate_cluster should succeed");
+
+        // Verify summary note
+        assert!(summary.id.starts_with("summary-"));
+        assert_eq!(summary.kind, "consolidated_summary");
+        assert_eq!(summary.content, "Combined knowledge about Rust");
+
+        // Verify members are marked consolidated
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (c1, p1): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c1, 1);
+        assert_eq!(p1, summary.id);
+
+        let (c2, p2): (i64, String) = conn
+            .query_row(
+                "SELECT consolidated, parent_summary_id FROM memories WHERE id = 'mem2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c2, 1);
+        assert_eq!(p2, summary.id);
+
+        // Verify importance is max(0.7, 0.9) = 0.9
+        let importance: f32 = conn
+            .query_row(
+                "SELECT importance FROM memories WHERE id = ?1",
+                rusqlite::params![&summary.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((importance - 0.9).abs() < f32::EPSILON);
+
+        // Verify consolidation edges exist
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'consolidation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // 2 from members→summary + 2 from summary→members = 4
+        assert_eq!(edge_count, 4);
+    }
+
+    #[test]
+    fn advanced_search_follows_multi_hop_edges() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("advanced.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create primary memory via create_note so FTS is populated
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "hello world".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 1.0,
+            })
+            .unwrap();
+
+        // Chain: mem1 → mem-hop1 → mem-hop2
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop1', 's1', 'fact', 'middle node', CURRENT_TIMESTAMP, 0.8)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop2', 's1', 'fact', 'two hops away', CURRENT_TIMESTAMP, 0.5)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .create_link("mem1", "mem-hop1", "semantic", 0.9)
+            .unwrap();
+        store
+            .create_link("mem-hop1", "mem-hop2", "causal", 0.85)
+            .unwrap();
+
+        let results = store.advanced_search("hello", 10, 2).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+
+        assert!(ids.contains(&"mem1"), "primary match");
+        assert!(ids.contains(&"mem-hop1"), "1-hop");
+        assert!(ids.contains(&"mem-hop2"), "2-hop");
+    }
+
+    #[test]
+    fn advanced_search_respects_max_depth() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("advanced_depth.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Create primary memory via create_note so FTS is populated
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "hello world".to_owned(),
+                keywords: vec![],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 1.0,
+            })
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop1', 's1', 'fact', 'one hop', CURRENT_TIMESTAMP, 0.8)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at, importance)
+             VALUES ('mem-hop2', 's1', 'fact', 'two hops', CURRENT_TIMESTAMP, 0.5)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        store
+            .create_link("mem1", "mem-hop1", "semantic", 0.9)
+            .unwrap();
+        store
+            .create_link("mem-hop1", "mem-hop2", "semantic", 0.9)
+            .unwrap();
+
+        // depth=1 should NOT reach mem-hop2
+        let results = store.advanced_search("hello", 10, 1).unwrap();
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        assert!(ids.contains(&"mem-hop1"), "1-hop reachable");
+        assert!(!ids.contains(&"mem-hop2"), "2-hop NOT reachable at depth 1");
     }
 }

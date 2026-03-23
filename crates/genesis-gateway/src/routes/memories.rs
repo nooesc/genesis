@@ -184,6 +184,7 @@ pub(crate) async fn search_memories_handler(
         genesis_core::embedding::SearchMode::Graph => "graph",
         genesis_core::embedding::SearchMode::Vector => "vector",
         genesis_core::embedding::SearchMode::Hybrid => "hybrid",
+        genesis_core::embedding::SearchMode::Advanced => "advanced",
     };
 
     Ok(Json(serde_json::json!({
