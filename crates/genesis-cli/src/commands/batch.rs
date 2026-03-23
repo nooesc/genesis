@@ -227,6 +227,7 @@ pub(crate) async fn run_batch_item(
             enable_trajectory: true,
             trajectory_dir: Some(output_dir.to_owned()),
             session_id: Some(session_id.to_owned()),
+            stuck_loop_threshold: loaded.config.runtime.stuck_loop_threshold,
             ..genesis_core::agent_loop::AgentLoopConfig::default()
         },
         genesis_core::hooks::HookRunner::default(),

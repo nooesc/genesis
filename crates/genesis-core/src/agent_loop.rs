@@ -420,7 +420,8 @@ pub struct AgentLoop {
 }
 
 /// Default number of consecutive failures for the same tool before injecting
-/// a "try a different approach" nudge (overrides the centralized default of 3).
+/// a "try a different approach" nudge. Raised from the centralized default of 3
+/// to reduce false positives on flaky tools.
 const DEFAULT_STUCK_LOOP_THRESHOLD: usize = 5;
 
 impl AgentLoop {
@@ -883,6 +884,11 @@ impl AgentLoop {
         user_message: &str,
         images: Vec<genesis_provider::ImageUrl>,
     ) -> Result<AgentResult, AgentError> {
+        // Reset per-turn stuck-loop tracking so that prior-turn failures do not
+        // bleed into a fresh user turn.
+        self.tool_failure_counts.clear();
+        self.nudged_tools.clear();
+
         // Record turn-level span attributes via tracing events rather than
         // holding a non-Send span guard across await points.
         info!(
@@ -1345,8 +1351,7 @@ impl AgentLoop {
                                 .or_insert(0);
                             *count += 1;
                         } else {
-                            self.tool_failure_counts.remove(&tc.function.name);
-                            self.nudged_tools.remove(&tc.function.name);
+                            self.record_tool_success(&tc.function.name);
                         }
                         self.hooks.on_tool_call_end(
                             &hook_session,
@@ -1474,6 +1479,11 @@ impl AgentLoop {
     where
         F: FnMut(StreamEvent<'_>),
     {
+        // Reset per-turn stuck-loop tracking so that prior-turn failures do not
+        // bleed into a fresh user turn.
+        self.tool_failure_counts.clear();
+        self.nudged_tools.clear();
+
         let hook_session = self.session_id_str().to_owned();
         let lua_pre_turn = self.run_lua_pre_turn(user_message);
         let user_message = match lua_pre_turn {
@@ -1877,8 +1887,7 @@ impl AgentLoop {
                                     .or_insert(0);
                                 *count += 1;
                             } else {
-                                self.tool_failure_counts.remove(&tc.function.name);
-                                self.nudged_tools.remove(&tc.function.name);
+                                self.record_tool_success(&tc.function.name);
                                 // Auto-discover tools called outside core set.
                                 if self.config.core_tools.is_some() {
                                     self.discover_tool(&tc.function.name);
@@ -2118,8 +2127,7 @@ impl AgentLoop {
                                         .or_insert(0);
                                     *count += 1;
                                 } else {
-                                    self.tool_failure_counts.remove(&tc.function.name);
-                                    self.nudged_tools.remove(&tc.function.name);
+                                    self.record_tool_success(&tc.function.name);
                                 }
                                 self.fire_shell_hooks(
                                     HookEvent::PostToolCall,
@@ -2319,6 +2327,13 @@ impl AgentLoop {
             let _ =
                 self.push_message_with_lua_hooks(&hook_session, ChatMessage::system(&escalation));
         }
+    }
+
+    /// Record a successful tool call: clear the failure count and nudged
+    /// status for this tool so subsequent calls are not penalised.
+    fn record_tool_success(&mut self, tool_name: &str) {
+        self.tool_failure_counts.remove(tool_name);
+        self.nudged_tools.remove(tool_name);
     }
 
     /// Save the trajectory to disk if a trajectory directory is configured.
@@ -3787,12 +3802,21 @@ tools = [{tools_list}]
             "failure count reset after nudge"
         );
 
-        // Simulate a success — should clear nudged status
-        agent.tool_failure_counts.remove("shell_exec");
-        agent.nudged_tools.remove("shell_exec");
+        // Re-add a failure count so we can verify record_tool_success clears it
+        agent
+            .tool_failure_counts
+            .insert("shell_exec".to_owned(), 2);
+
+        // Call the production code path that handles tool success
+        agent.record_tool_success("shell_exec");
+
         assert!(
             !agent.nudged_tools.contains("shell_exec"),
-            "nudged status cleared on success"
+            "nudged status cleared on success via record_tool_success"
+        );
+        assert!(
+            !agent.tool_failure_counts.contains_key("shell_exec"),
+            "failure count cleared on success via record_tool_success"
         );
     }
 
@@ -3845,8 +3869,9 @@ tools = [{tools_list}]
     fn default_stuck_loop_threshold_is_five() {
         let config = AgentLoopConfig::default();
         assert_eq!(
-            config.stuck_loop_threshold, 5,
-            "default threshold should be 5"
+            config.stuck_loop_threshold,
+            genesis_config::DEFAULT_STUCK_LOOP_THRESHOLD,
+            "default threshold should match the exported constant"
         );
     }
 

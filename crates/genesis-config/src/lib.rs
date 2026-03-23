@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing::warn;
 
 const APP_DIR_NAME: &str = "genesis";
 const DEFAULT_PROFILE: &str = "default";
@@ -381,12 +382,16 @@ pub struct RuntimeConfig {
     pub stuck_loop_threshold: usize,
 }
 
+/// Default number of consecutive failures for the same tool before injecting
+/// a stuck-loop nudge.
+pub const DEFAULT_STUCK_LOOP_THRESHOLD: usize = 5;
+
 const fn default_stuck_loop_threshold() -> usize {
-    5
+    DEFAULT_STUCK_LOOP_THRESHOLD
 }
 
 fn is_default_stuck_loop_threshold(val: &usize) -> bool {
-    *val == default_stuck_loop_threshold()
+    *val == DEFAULT_STUCK_LOOP_THRESHOLD
 }
 
 /// Batch API routing configuration.
@@ -1244,12 +1249,24 @@ pub fn load_from_map(
         batch: rt.and_then(|r| r.batch.clone()),
         tool_policy_path: rt.and_then(|r| r.tool_policy_path.clone()),
         approval_mode: rt.and_then(|r| r.approval_mode).unwrap_or_default(),
-        stuck_loop_threshold: parse_env(
-            env,
-            "GENESIS_STUCK_LOOP_THRESHOLD",
-            rt.and_then(|r| r.stuck_loop_threshold)
-                .unwrap_or_else(default_stuck_loop_threshold),
-        )?,
+        stuck_loop_threshold: {
+            let raw: usize = parse_env(
+                env,
+                "GENESIS_STUCK_LOOP_THRESHOLD",
+                rt.and_then(|r| r.stuck_loop_threshold)
+                    .unwrap_or_else(default_stuck_loop_threshold),
+            )?;
+            if raw < 2 {
+                warn!(
+                    configured = raw,
+                    clamped_to = 2,
+                    "stuck_loop_threshold must be >= 2; clamping to 2"
+                );
+                2
+            } else {
+                raw
+            }
+        },
     };
 
     let mcp_servers = file_config.mcp_servers.unwrap_or_default();

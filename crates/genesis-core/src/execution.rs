@@ -2264,7 +2264,7 @@ tools = [{tools_list}]
                     batch: None,
                     tool_policy_path: None,
                     approval_mode: genesis_config::ApprovalMode::default(),
-                    stuck_loop_threshold: 5,
+                    stuck_loop_threshold: genesis_config::DEFAULT_STUCK_LOOP_THRESHOLD,
                 },
                 gateway: None,
                 toolsets: std::collections::HashMap::new(),
