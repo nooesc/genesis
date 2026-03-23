@@ -16,22 +16,22 @@ use crate::colors::{EVE_AMBER, EVE_DARK, EVE_LAVENDER, EVE_LILAC, EVE_PURPLE};
 const ALPHA_THRESHOLD: f32 = 0.05;
 
 /// Hex grid spacing for full-size frames.
-const HEX_SPACING_FULL: u32 = 8;
+const HEX_SPACING_FULL: u32 = 10;
 
 /// Hex grid spacing for compact frames.
-const HEX_SPACING_COMPACT: u32 = 12;
+const HEX_SPACING_COMPACT: u32 = 14;
 
 /// Compact frame width threshold.
 const COMPACT_THRESHOLD: u32 = 35;
 
 /// Dissolve base distance (normalized) -- how far from center the dissolve starts.
-const DISSOLVE_BASE: f32 = 0.35;
+const DISSOLVE_BASE: f32 = 0.45;
 
 /// Dissolve oscillation amplitude.
-const DISSOLVE_AMPLITUDE: f32 = 0.06;
+const DISSOLVE_AMPLITUDE: f32 = 0.04;
 
 /// Arc radii for the halo (normalized coordinates).
-const ARC_RADII: &[f32] = &[0.12, 0.20, 0.28];
+const ARC_RADII: &[f32] = &[0.08, 0.14, 0.20];
 
 /// Compose a procedural welcome frame.
 ///
@@ -54,37 +54,43 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
     let t_f32 = t as f32;
 
     // ── Layer 1: Hex grid ────────────────────────────────────────────
+    // Dimmer grid so it doesn't overpower the silhouette.
     let hex_spacing = if is_compact {
         HEX_SPACING_COMPACT
     } else {
         HEX_SPACING_FULL
     };
+    let dimmed_dark = geometry::dim_color(RgbColor::from_tuple(EVE_DARK), 0.7);
     let hex_grid = geometry::render_hex_grid(
         px_w,
         px_h,
         hex_spacing,
-        RgbColor::from_tuple(EVE_DARK),
+        dimmed_dark,
         0.5,
-        0.25,
+        0.35,
         t_f32,
     );
 
     // ── Layer 2: Cruciform ───────────────────────────────────────────
+    // Positioned at y=0.12 — above/behind the head like a halo, not
+    // cutting through the body. Thin and dimmed.
     let cruciform_t = t_f32 + 0.5;
+    let dimmed_amber = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.6);
     let cruciform = geometry::render_cruciform(
         px_w,
         px_h,
         0.5,
-        0.25,
-        0.015,
-        RgbColor::from_tuple(EVE_AMBER),
+        0.12,
+        0.010,
+        dimmed_amber,
         cruciform_t,
     );
 
     // ── Layer 3: Arcs (skip for compact) ─────────────────────────────
+    // Concentric arcs around the halo center.
     let arcs = if !is_compact {
-        let dimmed_amber = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.5);
-        geometry::render_arcs(px_w, px_h, 0.5, 0.25, ARC_RADII, dimmed_amber)
+        let arc_color = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.35);
+        geometry::render_arcs(px_w, px_h, 0.5, 0.12, ARC_RADII, arc_color)
     } else {
         geometry::new_pixel_grid(px_w, px_h)
     };
@@ -214,7 +220,7 @@ fn apply_dissolve(
             let nx = x as f32 / w;
             let ny = y as f32 / h;
             let dx = nx - 0.5;
-            let dy = ny - 0.4;
+            let dy = ny - 0.45;
             let dist = (dx * dx + dy * dy).sqrt();
 
             if dist > threshold {

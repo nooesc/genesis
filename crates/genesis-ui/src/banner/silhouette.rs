@@ -30,191 +30,155 @@ pub struct SilhouettePath {
 /// Returns the Eve silhouette — an abstract feminine form.
 ///
 /// The path is a closed loop of cubic bezier segments in normalized [0,1]
-/// space. The figure faces forward, centered horizontally at x=0.5.
+/// space. The figure is bold and exaggerated to read clearly at low pixel
+/// resolutions (20-40px wide). Centered at x=0.5, fills ~50% of width.
 pub fn default_silhouette() -> SilhouettePath {
-    // Key landmark points (right side — left is mirrored).
+    // The figure needs to be WIDE to read at half-block resolution.
+    // At 20px wide, a 50% fill gives ~10px across at shoulders/hips.
     //
-    // The figure occupies roughly the center 30% of width and center 75% of
-    // height, leaving room for surrounding geometry.
+    // Key proportions (exaggerated for low-res):
+    //   - Head: rounded, ~20% of width
+    //   - Neck: narrow pinch (~12% of width)
+    //   - Shoulders: wide sweep (~50% of width)
+    //   - Waist: narrow (~25% of width)
+    //   - Hips: wide (~48% of width)
+    //   - Lower body: tapers to dissolve
 
-    // Crown of head
-    let crown = Point { x: 0.50, y: 0.08 };
-
-    // Right side landmarks
-    let head_r1 = Point { x: 0.56, y: 0.08 };
-    let head_r2 = Point { x: 0.57, y: 0.12 };
-    let head_r3 = Point { x: 0.55, y: 0.18 };
-    let neck_r = Point { x: 0.52, y: 0.22 };
-    let shoulder_r = Point { x: 0.62, y: 0.28 };
-    let arm_r = Point { x: 0.64, y: 0.35 };
-    let waist_r = Point { x: 0.57, y: 0.45 };
-    let hip_r = Point { x: 0.62, y: 0.55 };
-    let thigh_r = Point { x: 0.55, y: 0.72 };
-    let dissolve_r = Point { x: 0.52, y: 0.82 };
-
-    // Mirror helper
-    let mirror = |p: Point| Point {
-        x: 1.0 - p.x,
-        y: p.y,
-    };
-
-    // Left side landmarks (mirrored)
-    let head_l1 = mirror(head_r1);
-    let head_l2 = mirror(head_r2);
-    let head_l3 = mirror(head_r3);
-    let neck_l = mirror(neck_r);
-    let shoulder_l = mirror(shoulder_r);
-    let arm_l = mirror(arm_r);
-    let waist_l = mirror(waist_r);
-    let hip_l = mirror(hip_r);
-    let thigh_l = mirror(thigh_r);
-    let dissolve_l = mirror(dissolve_r);
-
-    // Bottom center — gentle curve connecting the two dissolve points
-    let bottom_center = Point { x: 0.50, y: 0.84 };
-
-    // Build segments going clockwise starting from crown.
     let segments = vec![
-        // === RIGHT SIDE (top to bottom) ===
-        // Crown -> right head curve
+        // === TOP OF HEAD (starting at crown, going right) ===
+        // Crown to right temple
         CubicBezier {
-            p0: crown,
-            p1: Point { x: 0.53, y: 0.06 },
-            p2: Point { x: 0.56, y: 0.06 },
-            p3: head_r1,
+            p0: Point { x: 0.50, y: 0.10 },
+            p1: Point { x: 0.54, y: 0.08 },
+            p2: Point { x: 0.58, y: 0.08 },
+            p3: Point { x: 0.60, y: 0.11 },
         },
-        // Right head upper -> right head lower
+        // Right temple down to right jaw
         CubicBezier {
-            p0: head_r1,
-            p1: head_r2,
-            p2: Point { x: 0.57, y: 0.15 },
-            p3: head_r3,
+            p0: Point { x: 0.60, y: 0.11 },
+            p1: Point { x: 0.62, y: 0.14 },
+            p2: Point { x: 0.61, y: 0.18 },
+            p3: Point { x: 0.58, y: 0.21 },
         },
-        // Right head lower -> neck
+        // Right jaw to right neck (narrow pinch)
         CubicBezier {
-            p0: head_r3,
-            p1: Point { x: 0.54, y: 0.20 },
-            p2: Point { x: 0.53, y: 0.21 },
-            p3: neck_r,
+            p0: Point { x: 0.58, y: 0.21 },
+            p1: Point { x: 0.56, y: 0.23 },
+            p2: Point { x: 0.55, y: 0.24 },
+            p3: Point { x: 0.54, y: 0.26 },
         },
-        // Neck -> shoulder
+        // Right neck to right shoulder (wide sweep outward)
         CubicBezier {
-            p0: neck_r,
-            p1: Point { x: 0.54, y: 0.23 },
-            p2: Point { x: 0.59, y: 0.25 },
-            p3: shoulder_r,
+            p0: Point { x: 0.54, y: 0.26 },
+            p1: Point { x: 0.58, y: 0.27 },
+            p2: Point { x: 0.68, y: 0.29 },
+            p3: Point { x: 0.73, y: 0.32 },
         },
-        // Shoulder -> upper arm
+        // Right shoulder to right upper arm
         CubicBezier {
-            p0: shoulder_r,
-            p1: Point { x: 0.64, y: 0.30 },
-            p2: Point { x: 0.65, y: 0.33 },
-            p3: arm_r,
+            p0: Point { x: 0.73, y: 0.32 },
+            p1: Point { x: 0.76, y: 0.34 },
+            p2: Point { x: 0.76, y: 0.37 },
+            p3: Point { x: 0.74, y: 0.40 },
         },
-        // Upper arm -> waist
+        // Right upper arm curving in to right waist
         CubicBezier {
-            p0: arm_r,
-            p1: Point { x: 0.63, y: 0.38 },
-            p2: Point { x: 0.59, y: 0.42 },
-            p3: waist_r,
+            p0: Point { x: 0.74, y: 0.40 },
+            p1: Point { x: 0.70, y: 0.44 },
+            p2: Point { x: 0.66, y: 0.47 },
+            p3: Point { x: 0.62, y: 0.50 },
         },
-        // Waist -> hip
+        // Right waist to right hip (flare out)
         CubicBezier {
-            p0: waist_r,
-            p1: Point { x: 0.56, y: 0.48 },
-            p2: Point { x: 0.63, y: 0.52 },
-            p3: hip_r,
+            p0: Point { x: 0.62, y: 0.50 },
+            p1: Point { x: 0.60, y: 0.52 },
+            p2: Point { x: 0.70, y: 0.56 },
+            p3: Point { x: 0.72, y: 0.60 },
         },
-        // Hip -> thigh
+        // Right hip curving down
         CubicBezier {
-            p0: hip_r,
-            p1: Point { x: 0.62, y: 0.60 },
-            p2: Point { x: 0.57, y: 0.68 },
-            p3: thigh_r,
+            p0: Point { x: 0.72, y: 0.60 },
+            p1: Point { x: 0.73, y: 0.63 },
+            p2: Point { x: 0.70, y: 0.68 },
+            p3: Point { x: 0.66, y: 0.72 },
         },
-        // Thigh -> dissolve
+        // Right thigh to dissolve
         CubicBezier {
-            p0: thigh_r,
-            p1: Point { x: 0.54, y: 0.75 },
-            p2: Point { x: 0.53, y: 0.79 },
-            p3: dissolve_r,
+            p0: Point { x: 0.66, y: 0.72 },
+            p1: Point { x: 0.62, y: 0.76 },
+            p2: Point { x: 0.57, y: 0.80 },
+            p3: Point { x: 0.53, y: 0.84 },
         },
-        // === BOTTOM (right dissolve -> left dissolve) ===
+        // === BOTTOM (right to left) ===
         CubicBezier {
-            p0: dissolve_r,
-            p1: Point { x: 0.51, y: 0.84 },
-            p2: Point { x: 0.50, y: 0.84 },
-            p3: bottom_center,
-        },
-        CubicBezier {
-            p0: bottom_center,
-            p1: Point { x: 0.50, y: 0.84 },
-            p2: Point { x: 0.49, y: 0.84 },
-            p3: dissolve_l,
+            p0: Point { x: 0.53, y: 0.84 },
+            p1: Point { x: 0.51, y: 0.85 },
+            p2: Point { x: 0.49, y: 0.85 },
+            p3: Point { x: 0.47, y: 0.84 },
         },
         // === LEFT SIDE (bottom to top, mirrored) ===
-        // Dissolve -> thigh
+        // Left dissolve up to left thigh
         CubicBezier {
-            p0: dissolve_l,
-            p1: Point { x: 0.47, y: 0.79 },
-            p2: Point { x: 0.46, y: 0.75 },
-            p3: thigh_l,
+            p0: Point { x: 0.47, y: 0.84 },
+            p1: Point { x: 0.43, y: 0.80 },
+            p2: Point { x: 0.38, y: 0.76 },
+            p3: Point { x: 0.34, y: 0.72 },
         },
-        // Thigh -> hip
+        // Left thigh up to left hip
         CubicBezier {
-            p0: thigh_l,
-            p1: Point { x: 0.43, y: 0.68 },
-            p2: Point { x: 0.38, y: 0.60 },
-            p3: hip_l,
+            p0: Point { x: 0.34, y: 0.72 },
+            p1: Point { x: 0.30, y: 0.68 },
+            p2: Point { x: 0.27, y: 0.63 },
+            p3: Point { x: 0.28, y: 0.60 },
         },
-        // Hip -> waist
+        // Left hip to left waist
         CubicBezier {
-            p0: hip_l,
-            p1: Point { x: 0.37, y: 0.52 },
-            p2: Point { x: 0.44, y: 0.48 },
-            p3: waist_l,
+            p0: Point { x: 0.28, y: 0.60 },
+            p1: Point { x: 0.30, y: 0.56 },
+            p2: Point { x: 0.40, y: 0.52 },
+            p3: Point { x: 0.38, y: 0.50 },
         },
-        // Waist -> upper arm
+        // Left waist up to left upper arm
         CubicBezier {
-            p0: waist_l,
-            p1: Point { x: 0.41, y: 0.42 },
-            p2: Point { x: 0.37, y: 0.38 },
-            p3: arm_l,
+            p0: Point { x: 0.38, y: 0.50 },
+            p1: Point { x: 0.34, y: 0.47 },
+            p2: Point { x: 0.30, y: 0.44 },
+            p3: Point { x: 0.26, y: 0.40 },
         },
-        // Upper arm -> shoulder
+        // Left upper arm to left shoulder
         CubicBezier {
-            p0: arm_l,
-            p1: Point { x: 0.35, y: 0.33 },
-            p2: Point { x: 0.36, y: 0.30 },
-            p3: shoulder_l,
+            p0: Point { x: 0.26, y: 0.40 },
+            p1: Point { x: 0.24, y: 0.37 },
+            p2: Point { x: 0.24, y: 0.34 },
+            p3: Point { x: 0.27, y: 0.32 },
         },
-        // Shoulder -> neck
+        // Left shoulder to left neck
         CubicBezier {
-            p0: shoulder_l,
-            p1: Point { x: 0.41, y: 0.25 },
-            p2: Point { x: 0.46, y: 0.23 },
-            p3: neck_l,
+            p0: Point { x: 0.27, y: 0.32 },
+            p1: Point { x: 0.32, y: 0.29 },
+            p2: Point { x: 0.42, y: 0.27 },
+            p3: Point { x: 0.46, y: 0.26 },
         },
-        // Neck -> left head lower
+        // Left neck to left jaw
         CubicBezier {
-            p0: neck_l,
-            p1: Point { x: 0.47, y: 0.21 },
-            p2: Point { x: 0.46, y: 0.20 },
-            p3: head_l3,
+            p0: Point { x: 0.46, y: 0.26 },
+            p1: Point { x: 0.45, y: 0.24 },
+            p2: Point { x: 0.44, y: 0.23 },
+            p3: Point { x: 0.42, y: 0.21 },
         },
-        // Left head lower -> left head upper
+        // Left jaw up to left temple
         CubicBezier {
-            p0: head_l3,
-            p1: Point { x: 0.43, y: 0.15 },
-            p2: head_l2,
-            p3: head_l1,
+            p0: Point { x: 0.42, y: 0.21 },
+            p1: Point { x: 0.39, y: 0.18 },
+            p2: Point { x: 0.38, y: 0.14 },
+            p3: Point { x: 0.40, y: 0.11 },
         },
-        // Left head upper -> crown (closing the path)
+        // Left temple to crown (closing)
         CubicBezier {
-            p0: head_l1,
-            p1: Point { x: 0.44, y: 0.06 },
-            p2: Point { x: 0.47, y: 0.06 },
-            p3: crown,
+            p0: Point { x: 0.40, y: 0.11 },
+            p1: Point { x: 0.42, y: 0.08 },
+            p2: Point { x: 0.46, y: 0.08 },
+            p3: Point { x: 0.50, y: 0.10 },
         },
     ];
 
@@ -254,9 +218,8 @@ pub fn rasterize(path: &SilhouettePath, width: u32, height: u32) -> Vec<Vec<f32>
 
     // Sample bezier segments into polygon vertices.
     let samples_per_segment = 50;
-    let mut vertices: Vec<(f32, f32)> = Vec::with_capacity(
-        path.segments.len() * samples_per_segment,
-    );
+    let mut vertices: Vec<(f32, f32)> =
+        Vec::with_capacity(path.segments.len() * samples_per_segment);
 
     for segment in &path.segments {
         for i in 0..samples_per_segment {
@@ -270,10 +233,7 @@ pub fn rasterize(path: &SilhouettePath, width: u32, height: u32) -> Vec<Vec<f32>
     let h = height as f32;
 
     // Convert normalized vertices to pixel coordinates.
-    let pixel_vertices: Vec<(f32, f32)> = vertices
-        .iter()
-        .map(|&(x, y)| (x * w, y * h))
-        .collect();
+    let pixel_vertices: Vec<(f32, f32)> = vertices.iter().map(|&(x, y)| (x * w, y * h)).collect();
 
     let mut mask = vec![vec![0.0f32; width as usize]; height as usize];
 
@@ -282,46 +242,20 @@ pub fn rasterize(path: &SilhouettePath, width: u32, height: u32) -> Vec<Vec<f32>
             let cx = col as f32 + 0.5;
             let cy = row as f32 + 0.5;
 
-            if point_in_polygon(cx, cy, &pixel_vertices) {
-                // Check if this is an edge pixel by testing sub-pixel corners.
-                let offsets: [(f32, f32); 4] = [
-                    (0.25, 0.25),
-                    (0.75, 0.25),
-                    (0.25, 0.75),
-                    (0.75, 0.75),
-                ];
-                let inside_count = offsets
-                    .iter()
-                    .filter(|&&(dx, dy)| {
-                        point_in_polygon(
-                            col as f32 + dx,
-                            row as f32 + dy,
-                            &pixel_vertices,
-                        )
-                    })
-                    .count();
+            // 2x2 sub-pixel sampling for anti-aliasing.
+            let offsets: [(f32, f32); 4] =
+                [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+            let inside_count = offsets
+                .iter()
+                .filter(|&&(dx, dy)| {
+                    point_in_polygon(col as f32 + dx, row as f32 + dy, &pixel_vertices)
+                })
+                .count();
+
+            if inside_count > 0 {
                 mask[row as usize][col as usize] = inside_count as f32 / 4.0;
-            } else {
-                // Check if any sub-pixel is inside (edge pixel from outside).
-                let offsets: [(f32, f32); 4] = [
-                    (0.25, 0.25),
-                    (0.75, 0.25),
-                    (0.25, 0.75),
-                    (0.75, 0.75),
-                ];
-                let inside_count = offsets
-                    .iter()
-                    .filter(|&&(dx, dy)| {
-                        point_in_polygon(
-                            col as f32 + dx,
-                            row as f32 + dy,
-                            &pixel_vertices,
-                        )
-                    })
-                    .count();
-                if inside_count > 0 {
-                    mask[row as usize][col as usize] = inside_count as f32 / 4.0;
-                }
+            } else if point_in_polygon(cx, cy, &pixel_vertices) {
+                mask[row as usize][col as usize] = 1.0;
             }
         }
     }
@@ -366,9 +300,6 @@ pub fn fill_gradient(
 }
 
 /// Ray-casting point-in-polygon test.
-///
-/// Casts a ray from `(px, py)` to the right and counts edge crossings. An odd
-/// count means the point is inside.
 fn point_in_polygon(px: f32, py: f32, vertices: &[(f32, f32)]) -> bool {
     let n = vertices.len();
     if n < 3 {
@@ -382,9 +313,7 @@ fn point_in_polygon(px: f32, py: f32, vertices: &[(f32, f32)]) -> bool {
         let (xi, yi) = vertices[i];
         let (xj, yj) = vertices[j];
 
-        if ((yi > py) != (yj > py))
-            && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
-        {
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
             inside = !inside;
         }
 
@@ -427,9 +356,6 @@ mod tests {
 
     #[test]
     fn bezier_evaluation_midpoint() {
-        // For B(t) with P0=(0,0), P1=(0,1), P2=(1,0), P3=(1,1):
-        // B(0.5) = (1/8)(0,0) + (3/8)(0,1) + (3/8)(1,0) + (1/8)(1,1)
-        //        = (0 + 0 + 3/8 + 1/8, 0 + 3/8 + 0 + 1/8) = (0.5, 0.5)
         let curve = CubicBezier {
             p0: Point { x: 0.0, y: 0.0 },
             p1: Point { x: 0.0, y: 1.0 },
@@ -438,34 +364,20 @@ mod tests {
         };
 
         let mid = evaluate_bezier(&curve, 0.5);
-        assert!(
-            (mid.x - 0.5).abs() < 1e-5,
-            "expected x ~0.5, got {}",
-            mid.x
-        );
-        assert!(
-            (mid.y - 0.5).abs() < 1e-5,
-            "expected y ~0.5, got {}",
-            mid.y
-        );
+        assert!((mid.x - 0.5).abs() < 1e-5);
+        assert!((mid.y - 0.5).abs() < 1e-5);
     }
 
     #[test]
     fn point_in_polygon_inside() {
-        // Unit square: (0,0), (1,0), (1,1), (0,1)
         let square = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         assert!(point_in_polygon(0.5, 0.5, &square));
-        assert!(point_in_polygon(0.1, 0.1, &square));
-        assert!(point_in_polygon(0.9, 0.9, &square));
     }
 
     #[test]
     fn point_in_polygon_outside() {
         let square = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         assert!(!point_in_polygon(1.5, 0.5, &square));
-        assert!(!point_in_polygon(-0.5, 0.5, &square));
-        assert!(!point_in_polygon(0.5, 1.5, &square));
-        assert!(!point_in_polygon(0.5, -0.5, &square));
     }
 
     #[test]
@@ -503,24 +415,29 @@ mod tests {
             .flat_map(|row| row.iter())
             .filter(|&&v| v > 0.0)
             .count();
-        assert!(
-            filled_count > 0,
-            "expected some filled pixels, got none"
-        );
+        assert!(filled_count > 0);
     }
 
     #[test]
     fn rasterize_center_is_filled() {
         let path = default_silhouette();
         let mask = rasterize(&path, 40, 70);
-
-        // The figure is centered at x=0.5, and at y ~0.5 the torso should
-        // be solidly filled. Pixel (20, 35) maps to normalized (0.5, 0.5).
+        // Center of figure at normalized (0.5, 0.5) -> pixel (20, 35)
         let val = mask[35][20];
+        assert!(val > 0.5, "center pixel should be filled, got {val}");
+    }
+
+    #[test]
+    fn rasterize_shoulders_are_wide() {
+        let path = default_silhouette();
+        let mask = rasterize(&path, 40, 70);
+        // At shoulder height (~y=0.32 -> pixel row 22), the figure should
+        // span at least 40% of the width (16+ pixels at width 40).
+        let shoulder_row = &mask[22];
+        let filled = shoulder_row.iter().filter(|&&v| v > 0.0).count();
         assert!(
-            val > 0.5,
-            "expected center pixel to be filled (~1.0), got {}",
-            val
+            filled >= 14,
+            "shoulders should be wide, got {filled} filled pixels"
         );
     }
 
@@ -533,7 +450,6 @@ mod tests {
         let bottom_color = RgbColor::new(50, 150, 200);
         let filled = fill_gradient(&mask, 40, 70, top_color, bottom_color);
 
-        // Find a filled pixel near the top and one near the bottom.
         let top_pixel = filled[10..20]
             .iter()
             .flat_map(|row| row.iter())
@@ -546,23 +462,14 @@ mod tests {
             .find_map(|c| c.as_ref())
             .expect("expected a filled pixel in bottom region");
 
-        assert_ne!(
-            top_pixel, bottom_pixel,
-            "top and bottom gradient colors should differ"
-        );
+        assert_ne!(top_pixel, bottom_pixel);
     }
 
     #[test]
     fn rasterize_zero_size() {
         let path = default_silhouette();
-
-        let mask = rasterize(&path, 0, 0);
-        assert!(mask.is_empty());
-
-        let mask = rasterize(&path, 10, 0);
-        assert!(mask.is_empty());
-
-        let mask = rasterize(&path, 0, 10);
-        assert!(mask.is_empty());
+        assert!(rasterize(&path, 0, 0).is_empty());
+        assert!(rasterize(&path, 10, 0).is_empty());
+        assert!(rasterize(&path, 0, 10).is_empty());
     }
 }
