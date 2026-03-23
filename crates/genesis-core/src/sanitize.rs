@@ -281,7 +281,9 @@ fn sanitize_database_urls(text: &mut String) {
             let scheme_pos = search_from + rel_pos;
             let after_scheme = scheme_pos + scheme.len();
             // Limit search to the authority component (up to first `/` after scheme, or end of string).
-            let authority_end = text[after_scheme..].find('/').unwrap_or(text.len() - after_scheme);
+            let authority_end = text[after_scheme..]
+                .find('/')
+                .unwrap_or(text.len() - after_scheme);
             let authority = &text[after_scheme..after_scheme + authority_end];
 
             // Look for the user:password@host pattern.
@@ -340,7 +342,13 @@ fn sanitize_jwt_tokens(text: &mut String) {
                     end = i;
                     break;
                 }
-            } else if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '=' || c == '/' || c == '+' {
+            } else if c.is_ascii_alphanumeric()
+                || c == '-'
+                || c == '_'
+                || c == '='
+                || c == '/'
+                || c == '+'
+            {
                 // Valid base64url character
             } else {
                 end = i;
@@ -463,10 +471,8 @@ fn sanitize_aws_secret_keys(text: &mut String) {
             let rest = &text[after_marker..];
 
             // Look for the value: skip `=`, `"`, `:`, `>`, whitespace to find the key.
-            let value_start_rel = rest
-                .find(|c: char| {
-                    c.is_ascii_alphanumeric() || c == '+' || c == '/'
-                });
+            let value_start_rel =
+                rest.find(|c: char| c.is_ascii_alphanumeric() || c == '+' || c == '/');
 
             let Some(rel_start) = value_start_rel else {
                 search_from = after_marker;
@@ -476,7 +482,12 @@ fn sanitize_aws_secret_keys(text: &mut String) {
             // Only allow separators (=, :, >, ", whitespace) between marker and value.
             let separator = &rest[..rel_start];
             if separator.chars().any(|c| {
-                !c.is_ascii_whitespace() && c != '=' && c != ':' && c != '"' && c != '\'' && c != '>'
+                !c.is_ascii_whitespace()
+                    && c != '='
+                    && c != ':'
+                    && c != '"'
+                    && c != '\''
+                    && c != '>'
             }) {
                 search_from = after_marker;
                 continue;
@@ -485,18 +496,13 @@ fn sanitize_aws_secret_keys(text: &mut String) {
             let abs_value_start = after_marker + rel_start;
             // AWS secret keys are exactly 40 chars of base64 (letters, digits, +, /).
             let value_end = text[abs_value_start..]
-                .find(|c: char| {
-                    !c.is_ascii_alphanumeric() && c != '+' && c != '/'
-                })
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '+' && c != '/')
                 .map(|i| abs_value_start + i)
                 .unwrap_or(text.len());
 
             let value_len = value_end - abs_value_start;
             if value_len >= 40 {
-                text.replace_range(
-                    abs_value_start..value_end,
-                    "[REDACTED:aws-secret-key]",
-                );
+                text.replace_range(abs_value_start..value_end, "[REDACTED:aws-secret-key]");
                 search_from = abs_value_start + "[REDACTED:aws-secret-key]".len();
             } else {
                 search_from = after_marker;
@@ -560,9 +566,7 @@ pub fn contains_credentials(text: &str) -> bool {
         // Quick heuristic: eyJ followed by content with at least 2 dots.
         let rest = &text[pos..];
         let token_end = rest
-            .find(|c: char| {
-                c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')'
-            })
+            .find(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')')
             .unwrap_or(rest.len());
         let token = &rest[..token_end];
         if token.len() >= 20 && token.matches('.').count() >= 2 {
@@ -903,18 +907,12 @@ mod tests {
     #[test]
     fn contains_credentials_detects_new_patterns() {
         // Database URLs
-        assert!(contains_credentials(
-            "postgresql://user:pass@host/db"
-        ));
+        assert!(contains_credentials("postgresql://user:pass@host/db"));
         assert!(contains_credentials(
             "mongodb+srv://user:pass@cluster.mongodb.net/db"
         ));
-        assert!(contains_credentials(
-            "redis://default:secret@redis:6379"
-        ));
-        assert!(contains_credentials(
-            "mysql://root:pass@localhost/db"
-        ));
+        assert!(contains_credentials("redis://default:secret@redis:6379"));
+        assert!(contains_credentials("mysql://root:pass@localhost/db"));
 
         // JWT tokens
         assert!(contains_credentials(
@@ -922,9 +920,7 @@ mod tests {
         ));
 
         // Azure
-        assert!(contains_credentials(
-            "AccountKey=aGVsbG93b3JsZHRoaXNpc2E="
-        ));
+        assert!(contains_credentials("AccountKey=aGVsbG93b3JsZHRoaXNpc2E="));
 
         // GCP
         assert!(contains_credentials(
@@ -962,7 +958,8 @@ mod tests {
 
     #[test]
     fn multiple_database_urls_redacted() {
-        let input = "primary: postgresql://a:secret1@host1/db1 replica: postgresql://b:secret2@host2/db2";
+        let input =
+            "primary: postgresql://a:secret1@host1/db1 replica: postgresql://b:secret2@host2/db2";
         let result = sanitize_credentials(input);
         assert!(!result.contains("secret1"));
         assert!(!result.contains("secret2"));

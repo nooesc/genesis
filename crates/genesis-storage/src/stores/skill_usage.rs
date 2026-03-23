@@ -3,10 +3,9 @@ use std::path::Path;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
-
+use crate::Database;
 
 /// A recorded skill usage — tracks when and how a skill was applied.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,8 +172,8 @@ impl SkillUsageStore {
 
 #[cfg(test)]
 mod skill_usage_store_tests {
-    use crate::{bootstrap, SkillStore};
     use super::SkillUsageStore;
+    use crate::{bootstrap, SkillStore};
     use tempfile::tempdir;
 
     /// Helper: create a skill so the foreign-key constraint on skill_usages is satisfied.
@@ -336,4 +335,3 @@ mod skill_usage_store_tests {
         assert_eq!(beta_recent[0].skill_name, "skill-beta");
     }
 }
-

@@ -102,7 +102,14 @@ impl CronExpr {
     }
 
     /// Check whether the given time matches this cron expression.
-    pub fn matches(&self, minute: u32, hour: u32, day_of_month: u32, month: u32, day_of_week: u32) -> bool {
+    pub fn matches(
+        &self,
+        minute: u32,
+        hour: u32,
+        day_of_month: u32,
+        month: u32,
+        day_of_week: u32,
+    ) -> bool {
         self.minute.matches(minute)
             && self.hour.matches(hour)
             && self.day_of_month.matches(day_of_month)
@@ -126,7 +133,11 @@ impl CronField {
     }
 
     /// Parse a single (non-list) cron field token.
-    fn parse_single(token: &str, original: &str, bounds: &FieldBounds) -> Result<Self, CronParseError> {
+    fn parse_single(
+        token: &str,
+        original: &str,
+        bounds: &FieldBounds,
+    ) -> Result<Self, CronParseError> {
         if token == "*" {
             return Ok(Self::Any);
         }
@@ -319,9 +330,9 @@ mod tests {
     #[test]
     fn matches_weekdays_only() {
         let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
-        assert!(expr.matches(0, 9, 10, 3, 1));  // Monday
-        assert!(expr.matches(0, 9, 14, 3, 5));  // Friday
-        assert!(!expr.matches(0, 9, 9, 3, 0));  // Sunday
+        assert!(expr.matches(0, 9, 10, 3, 1)); // Monday
+        assert!(expr.matches(0, 9, 14, 3, 5)); // Friday
+        assert!(!expr.matches(0, 9, 9, 3, 0)); // Sunday
         assert!(!expr.matches(0, 9, 15, 3, 6)); // Saturday
     }
 
@@ -382,7 +393,7 @@ mod tests {
 
     #[test]
     fn rejects_day_of_month_out_of_range() {
-        assert!(validate_cron("0 0 0 * *").is_err());  // 0 is below min (1)
+        assert!(validate_cron("0 0 0 * *").is_err()); // 0 is below min (1)
         assert!(validate_cron("0 0 32 * *").is_err());
         assert!(validate_cron("0 0 31 * *").is_ok());
         assert!(validate_cron("0 0 1 * *").is_ok());
@@ -390,7 +401,7 @@ mod tests {
 
     #[test]
     fn rejects_month_out_of_range() {
-        assert!(validate_cron("0 0 * 0 *").is_err());  // 0 is below min (1)
+        assert!(validate_cron("0 0 * 0 *").is_err()); // 0 is below min (1)
         assert!(validate_cron("0 0 * 13 *").is_err());
         assert!(validate_cron("0 0 * 12 *").is_ok());
         assert!(validate_cron("0 0 * 1 *").is_ok());
@@ -407,7 +418,7 @@ mod tests {
     fn rejects_range_with_out_of_bounds_values() {
         assert!(validate_cron("0-60 * * * *").is_err());
         assert!(validate_cron("0 0-24 * * *").is_err());
-        assert!(validate_cron("0 0 0-31 * *").is_err());  // 0 is below min for day-of-month
+        assert!(validate_cron("0 0 0-31 * *").is_err()); // 0 is below min for day-of-month
         assert!(validate_cron("0 0 1-31 * *").is_ok());
     }
 }

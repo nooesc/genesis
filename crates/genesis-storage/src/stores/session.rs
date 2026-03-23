@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A persisted conversation message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,7 +79,6 @@ pub struct InsightsData {
     /// Average output tokens per session.
     pub avg_output_tokens: u64,
 }
-
 
 pub struct SessionStore {
     db: Database,
@@ -812,7 +811,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -860,7 +862,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![query, limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![query, limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -1092,8 +1097,8 @@ impl SessionStore {
 
 #[cfg(test)]
 mod session_store_tests {
-    use crate::bootstrap;
     use super::SessionStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -1572,10 +1577,24 @@ mod session_store_tests {
             .create_session("s-other", "cli", None)
             .expect("session should be created");
         store
-            .append_message("s-match-1", "user", Some("pagination test alpha"), None, None, None)
+            .append_message(
+                "s-match-1",
+                "user",
+                Some("pagination test alpha"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
-            .append_message("s-match-2", "user", Some("pagination test beta"), None, None, None)
+            .append_message(
+                "s-match-2",
+                "user",
+                Some("pagination test beta"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
             .append_message("s-other", "user", Some("unrelated topic"), None, None, None)
