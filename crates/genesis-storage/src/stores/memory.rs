@@ -646,6 +646,129 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Find memories with embedding cosine similarity above the given threshold.
+    /// Used for entropy-aware deduplication.
+    pub fn find_similar(
+        &self,
+        query_embedding: &[f32],
+        threshold: f64,
+    ) -> Result<Vec<ScoredMemory>, StorageError> {
+        let candidates = self.vector_search(query_embedding, 5)?;
+        Ok(candidates
+            .into_iter()
+            .filter(|s| s.score >= threshold)
+            .collect())
+    }
+
+    /// Merge new content into an existing memory, updating importance to max(old, new).
+    pub fn merge_into(
+        &self,
+        memory_id: &str,
+        additional_content: &str,
+        new_importance: f32,
+    ) -> Result<(), StorageError> {
+        let connection = self.db.conn()?;
+        connection
+            .execute(
+                "UPDATE memories SET content = content || ?2, importance = MAX(importance, ?3), accessed_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![memory_id, additional_content, new_importance],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+
+        // Update FTS index
+        if sqlite_table_exists(&connection, self.db.path(), "memory_search")? {
+            let (rowid, kind, content): (i64, String, String) = connection
+                .query_row(
+                    "SELECT rowid, kind, content FROM memories WHERE id = ?1",
+                    params![memory_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|source| StorageError::Sqlite {
+                    path: self.db.path().to_path_buf(),
+                    source,
+                })?;
+            let _ = connection.execute(
+                "DELETE FROM memory_search WHERE memory_row_id = ?1",
+                params![rowid],
+            );
+            let _ = connection.execute(
+                "INSERT INTO memory_search (memory_row_id, kind, content) VALUES (?1, ?2, ?3)",
+                params![rowid, kind, content],
+            );
+        }
+        Ok(())
+    }
+
+    /// Find top-N similar memories (above threshold) and create bidirectional semantic edges.
+    pub fn auto_link_semantic(
+        &self,
+        memory_id: &str,
+        embedding: &[f32],
+        threshold: f64,
+        max_links: usize,
+    ) -> Result<usize, StorageError> {
+        let candidates = self.vector_search(embedding, max_links + 2)?; // +2 to account for self
+        let mut linked = 0;
+        for candidate in candidates {
+            if candidate.memory.id == memory_id {
+                continue;
+            }
+            if candidate.score < threshold {
+                break;
+            }
+            self.create_link(memory_id, &candidate.memory.id, "semantic", candidate.score)?;
+            self.create_link(&candidate.memory.id, memory_id, "semantic", candidate.score)?;
+            linked += 1;
+            if linked >= max_links {
+                break;
+            }
+        }
+        Ok(linked)
+    }
+
+    /// Create temporal edges to the N most recent memories from the same session.
+    pub fn auto_link_temporal(
+        &self,
+        memory_id: &str,
+        session_id: &str,
+        max_links: usize,
+    ) -> Result<usize, StorageError> {
+        let connection = self.db.conn()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT id FROM memories WHERE session_id = ?1 AND id != ?2 ORDER BY created_at DESC LIMIT ?3",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        let recent_ids: Vec<String> = stmt
+            .query_map(
+                params![session_id, memory_id, max_links as i64],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        drop(connection);
+
+        let mut linked = 0;
+        for (rank, target_id) in recent_ids.iter().enumerate() {
+            let weight = 1.0 / (rank as f64 + 1.0);
+            self.create_link(memory_id, target_id, "temporal", weight)?;
+            self.create_link(target_id, memory_id, "temporal", weight)?;
+            linked += 1;
+        }
+        Ok(linked)
+    }
+
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
         let mut connection = self.db.conn()?;
@@ -1405,5 +1528,172 @@ mod memory_store_tests {
             causal_score > entity_score,
             "causal ({causal_score}) should score higher than entity ({entity_score})"
         );
+    }
+
+    #[test]
+    fn find_similar_returns_near_duplicate_above_threshold() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let results = store.find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92).unwrap();
+        assert!(
+            !results.is_empty(),
+            "near-duplicate embedding should be found above threshold"
+        );
+        assert_eq!(results[0].memory.id, "mem1");
+    }
+
+    #[test]
+    fn find_similar_returns_empty_below_threshold() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let results = store.find_similar(&[0.0, 1.0, 0.0, 0.0], 0.92).unwrap();
+        assert!(
+            results.is_empty(),
+            "orthogonal embedding should not match above threshold"
+        );
+    }
+
+    #[test]
+    fn merge_into_appends_content_and_updates_importance() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = setup(dir.path());
+
+        // Set a known importance for mem1
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET importance = 0.5 WHERE id = 'mem1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        store
+            .merge_into("mem1", " — updated info", 0.7)
+            .expect("merge_into should succeed");
+
+        let memory = store.get("mem1").unwrap().expect("mem1 should exist");
+        assert!(
+            memory.content.contains("hello world"),
+            "original content should remain"
+        );
+        assert!(
+            memory.content.contains("— updated info"),
+            "appended content should be present"
+        );
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let importance: f32 = conn
+            .query_row(
+                "SELECT importance FROM memories WHERE id = 'mem1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (importance - 0.7).abs() < f32::EPSILON,
+            "importance should be max(0.5, 0.7) = 0.7, got {importance}"
+        );
+    }
+
+    #[test]
+    fn auto_link_semantic_creates_edges_for_similar_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("semantic.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for (id, content) in [("mem1", "first note"), ("mem2", "second note"), ("mem3", "third note")] {
+            conn.execute(
+                "INSERT INTO memories (id, session_id, kind, content, created_at)
+                 VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
+                rusqlite::params![id, content],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let embeddings = EmbeddingStore::new(&db_path);
+        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem2", &[0.95, 0.05, 0.0, 0.0], "test").unwrap();
+        embeddings.store("mem3", &[0.0, 0.0, 1.0, 0.0], "test").unwrap();
+
+        let store = MemoryStore::new(&db_path);
+        let linked = store
+            .auto_link_semantic("mem1", &[1.0, 0.0, 0.0, 0.0], 0.8, 3)
+            .expect("auto_link_semantic should succeed");
+        assert!(linked >= 1, "should link to at least mem2");
+
+        let links = store.links_for("mem1").unwrap();
+        assert!(links.contains(&"mem2".to_owned()), "mem1 should link to mem2");
+        assert!(!links.contains(&"mem3".to_owned()), "mem1 should not link to dissimilar mem3");
+
+        // Verify bidirectional
+        let reverse_links = store.links_for("mem2").unwrap();
+        assert!(
+            reverse_links.contains(&"mem1".to_owned()),
+            "mem2 should link back to mem1"
+        );
+    }
+
+    #[test]
+    fn auto_link_temporal_links_same_session_memories() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("temporal.db");
+        bootstrap(&db_path).expect("bootstrap");
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem1', 's1', 'fact', 'first', '2026-03-01 00:00:00')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, session_id, kind, content, created_at)
+             VALUES ('mem2', 's1', 'fact', 'second', '2026-03-02 00:00:00')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MemoryStore::new(&db_path);
+        let linked = store
+            .auto_link_temporal("mem2", "s1", 5)
+            .expect("auto_link_temporal should succeed");
+        assert_eq!(linked, 1, "should link to mem1");
+
+        let links = store.links_for("mem2").unwrap();
+        assert!(links.contains(&"mem1".to_owned()), "mem2 should link to mem1");
+
+        // Verify bidirectional
+        let reverse_links = store.links_for("mem1").unwrap();
+        assert!(
+            reverse_links.contains(&"mem2".to_owned()),
+            "mem1 should link back to mem2"
+        );
+
+        // Verify edge type is temporal
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let edge_type: String = conn
+            .query_row(
+                "SELECT edge_type FROM memory_links WHERE source_id = 'mem2' AND target_id = 'mem1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_type, "temporal");
     }
 }
