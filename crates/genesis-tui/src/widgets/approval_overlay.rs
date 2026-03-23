@@ -15,9 +15,9 @@ use ratatui::{
     widgets::{Paragraph, Widget as _},
 };
 
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use unicode_width::UnicodeWidthStr as _;
 
-use crate::history::rgb;
+use crate::history::{rgb, user_cell::word_wrap};
 
 /// How long the approval overlay waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -249,19 +249,10 @@ impl ApprovalOverlay {
     }
 
     pub(crate) fn build_content_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let raw = self.build_content_lines_raw();
-        let lines = lines_or_empty(raw);
         // The content area has 4 columns of padding (2 each side), so the
-        // usable width for text is `width - 4`.  Wrap any lines that exceed it.
-        let inner = width.saturating_sub(4) as usize;
-        if inner == 0 {
-            return lines;
-        }
-        wrap_styled_lines(lines, inner)
-    }
+        // usable width for text is `width - 4`.
+        let inner = width.saturating_sub(4);
 
-    /// Build the raw (unwrapped) content lines for the current tool call.
-    fn build_content_lines_raw(&self) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
 
         // Shell tools: highlight command prominently.
@@ -276,28 +267,25 @@ impl ApprovalOverlay {
                 .iter()
                 .find(|(k, _)| k == "command" || k == "cmd")
             {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  $ ",
-                        Style::default()
-                            .fg(SHELL_COLOR)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(cmd.clone(), Style::default().fg(TEXT)),
-                ]));
+                let prefix = "  $ ";
+                let prefix_style = Style::default()
+                    .fg(SHELL_COLOR)
+                    .add_modifier(Modifier::BOLD);
+                push_wrapped(
+                    &mut lines,
+                    prefix,
+                    prefix_style,
+                    cmd,
+                    Style::default().fg(TEXT),
+                    inner,
+                );
                 // Show other args below if any.
                 for (key, value) in &self.arg_lines {
                     if key != "command" && key != "cmd" {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  {key}: "),
-                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(value.clone(), Style::default().fg(DIM)),
-                        ]));
+                        push_wrapped_kv(&mut lines, key, value, inner);
                     }
                 }
-                return lines;
+                return lines_or_empty(lines);
             }
         }
 
@@ -310,15 +298,16 @@ impl ApprovalOverlay {
         if is_file_edit {
             // Show path prominently.
             if let Some((_, path)) = self.arg_lines.iter().find(|(k, _)| k == "path") {
-                lines.push(Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        path.clone(),
-                        Style::default()
-                            .fg(WRITE_COLOR)
-                            .add_modifier(Modifier::UNDERLINED),
-                    ),
-                ]));
+                push_wrapped(
+                    &mut lines,
+                    "  ",
+                    Style::default(),
+                    path,
+                    Style::default()
+                        .fg(WRITE_COLOR)
+                        .add_modifier(Modifier::UNDERLINED),
+                    inner,
+                );
             }
             // Show old_text/new_text as a mini diff.
             let old_text = self
@@ -333,23 +322,15 @@ impl ApprovalOverlay {
                 .map(|(_, v)| v.as_str());
             if let (Some(old), Some(new)) = (old_text, new_text) {
                 lines.push(Line::default()); // spacer
+                let del_prefix_style = Style::default().fg(DEL_COLOR).add_modifier(Modifier::BOLD);
+                let del_style = Style::default().fg(DEL_COLOR);
                 for line in old.lines().take(10) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  - ",
-                            Style::default().fg(DEL_COLOR).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(line.to_owned(), Style::default().fg(DEL_COLOR)),
-                    ]));
+                    push_wrapped(&mut lines, "  - ", del_prefix_style, line, del_style, inner);
                 }
+                let add_prefix_style = Style::default().fg(ADD_COLOR).add_modifier(Modifier::BOLD);
+                let add_style = Style::default().fg(ADD_COLOR);
                 for line in new.lines().take(10) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  + ",
-                            Style::default().fg(ADD_COLOR).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(line.to_owned(), Style::default().fg(ADD_COLOR)),
-                    ]));
+                    push_wrapped(&mut lines, "  + ", add_prefix_style, line, add_style, inner);
                 }
                 if old.lines().count() > 10 || new.lines().count() > 10 {
                     lines.push(Line::from(Span::styled(
@@ -360,26 +341,25 @@ impl ApprovalOverlay {
                 // Show remaining non-path/old/new args.
                 for (key, value) in &self.arg_lines {
                     if key != "path" && key != "old_text" && key != "new_text" && key != "content" {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("  {key}: "),
-                                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(value.clone(), Style::default().fg(DIM)),
-                        ]));
+                        push_wrapped_kv(&mut lines, key, value, inner);
                     }
                 }
-                return lines;
+                return lines_or_empty(lines);
             }
             // write_file with content: show content preview.
             if let Some((_, content)) = self.arg_lines.iter().find(|(k, _)| k == "content") {
                 let preview_lines: Vec<&str> = content.lines().take(10).collect();
                 lines.push(Line::default());
+                let content_style = Style::default().fg(DIM);
                 for line in &preview_lines {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled((*line).to_owned(), Style::default().fg(DIM)),
-                    ]));
+                    push_wrapped(
+                        &mut lines,
+                        "  ",
+                        Style::default(),
+                        line,
+                        content_style,
+                        inner,
+                    );
                 }
                 if content.lines().count() > 10 {
                     lines.push(Line::from(Span::styled(
@@ -387,37 +367,25 @@ impl ApprovalOverlay {
                         Style::default().fg(DIM),
                     )));
                 }
-                return lines;
+                return lines_or_empty(lines);
             }
 
             // File edit tool without diff or content (e.g. delete_file with only path).
             // Show remaining non-path args and return without falling through to generic.
             for (key, value) in &self.arg_lines {
                 if key != "path" {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("  {key}: "),
-                            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(value.clone(), Style::default().fg(DIM)),
-                    ]));
+                    push_wrapped_kv(&mut lines, key, value, inner);
                 }
             }
-            return lines;
+            return lines_or_empty(lines);
         }
 
         // Default: generic key-value rendering.
         for (key, value) in &self.arg_lines {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {key}: "),
-                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(value.clone(), Style::default().fg(DIM)),
-            ]));
+            push_wrapped_kv(&mut lines, key, value, inner);
         }
 
-        lines
+        lines_or_empty(lines)
     }
 
     fn draw_border(&self, area: Rect, buf: &mut Buffer) {
@@ -438,110 +406,56 @@ fn lines_or_empty(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     }
 }
 
-/// Wrap styled lines so that no line exceeds `max_width` display columns.
-///
-/// Each input line is composed of styled spans.  When a line is too wide we
-/// break it at the last character that fits, preserving span styles.
-/// Continuation lines are indented to match the width of the first span
-/// (typically a prefix like `"  $ "` or `"  key: "`).
-fn wrap_styled_lines(lines: Vec<Line<'static>>, max_width: usize) -> Vec<Line<'static>> {
-    if max_width == 0 {
-        return lines;
+/// Push a prefix+value line, word-wrapping the value if it exceeds
+/// `max_width`.  Continuation lines are indented to the prefix width.
+fn push_wrapped(
+    out: &mut Vec<Line<'static>>,
+    prefix: &str,
+    prefix_style: Style,
+    value: &str,
+    value_style: Style,
+    max_width: u16,
+) {
+    let prefix_w = prefix.width() as u16;
+    let value_width = max_width.saturating_sub(prefix_w);
+
+    if value_width == 0 || value.width() as u16 <= value_width {
+        // Fits on one line — no wrapping needed.
+        out.push(Line::from(vec![
+            Span::styled(prefix.to_owned(), prefix_style),
+            Span::styled(value.to_owned(), value_style),
+        ]));
+        return;
     }
 
-    let mut out = Vec::with_capacity(lines.len());
-
-    for line in lines {
-        // Fast path: measure total width and skip wrapping if it fits.
-        let total_w: usize = line.spans.iter().map(|s| s.content.width()).sum();
-        if total_w <= max_width {
-            out.push(line);
-            continue;
-        }
-
-        // Determine indent for continuation lines from the first span width.
-        let first_span_w = line.spans.first().map(|s| s.content.width()).unwrap_or(0);
-        let indent = " ".repeat(first_span_w);
-
-        // Flatten spans into (char, Style) for character-level wrapping.
-        let mut chars: Vec<(char, Style)> = Vec::new();
-        for span in &line.spans {
-            let style = span.style;
-            for ch in span.content.chars() {
-                chars.push((ch, style));
-            }
-        }
-
-        let mut row_chars: Vec<(char, Style)> = Vec::new();
-        let mut row_width: usize = 0;
-        let mut is_first_row = true;
-
-        for (ch, style) in chars {
-            let cw = ch.width().unwrap_or(0);
-            let avail = if is_first_row {
-                max_width
-            } else {
-                max_width.saturating_sub(first_span_w)
-            };
-
-            if row_width + cw > avail && row_width > 0 {
-                // Flush the current row.
-                out.push(build_line_from_chars(&row_chars, is_first_row, &indent));
-                is_first_row = false;
-                row_chars.clear();
-                row_width = 0;
-            }
-
-            row_chars.push((ch, style));
-            row_width += cw;
-        }
-
-        // Flush the last row.
-        if !row_chars.is_empty() {
-            out.push(build_line_from_chars(&row_chars, is_first_row, &indent));
+    let wrapped = word_wrap(value, value_width);
+    let indent = " ".repeat(prefix_w as usize);
+    for (i, piece) in wrapped.iter().enumerate() {
+        if i == 0 {
+            out.push(Line::from(vec![
+                Span::styled(prefix.to_owned(), prefix_style),
+                Span::styled(piece.clone(), value_style),
+            ]));
+        } else {
+            out.push(Line::from(vec![
+                Span::styled(indent.clone(), Style::default()),
+                Span::styled(piece.clone(), value_style),
+            ]));
         }
     }
-
-    out
 }
 
-/// Build a [`Line`] from a sequence of `(char, Style)` pairs, optionally
-/// prepending an indent on continuation rows.
-fn build_line_from_chars(
-    chars: &[(char, Style)],
-    is_first_row: bool,
-    indent: &str,
-) -> Line<'static> {
-    // Group consecutive chars with the same style into spans.
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
-    if !is_first_row && !indent.is_empty() {
-        spans.push(Span::raw(indent.to_owned()));
-    }
-
-    let mut buf = String::new();
-    let mut cur_style: Option<Style> = None;
-
-    for &(ch, style) in chars {
-        if cur_style == Some(style) {
-            buf.push(ch);
-        } else {
-            if let Some(s) = cur_style {
-                if !buf.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut buf), s));
-                }
-            }
-            buf.push(ch);
-            cur_style = Some(style);
-        }
-    }
-    if let Some(s) = cur_style {
-        if !buf.is_empty() {
-            spans.push(Span::styled(buf, s));
-        }
-    }
-
-    Line::from(spans)
+/// Convenience wrapper for the common key-value argument pattern.
+fn push_wrapped_kv(out: &mut Vec<Line<'static>>, key: &str, value: &str, max_width: u16) {
+    let prefix = format!("  {key}: ");
+    push_wrapped(
+        out,
+        &prefix,
+        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        value,
+        Style::default().fg(DIM),
+        max_width,
+    );
 }
 
 #[cfg(test)]
