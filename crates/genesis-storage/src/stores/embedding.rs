@@ -2,12 +2,12 @@ use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::{
     collect_rows, detect_uniform_embedding_dimensions, ensure_memory_vec_table,
     memory_embeddings_count, memory_vec_declared_dimensions, memory_vec_table_exists,
 };
+use crate::Database;
 
 /// Embedding persistence layer for vector/semantic memory search.
 pub struct EmbeddingStore {
@@ -188,8 +188,7 @@ impl EmbeddingStore {
     /// Returns the current database-wide embedding dimensions when known.
     pub fn dimensions(&self) -> Result<Option<usize>, StorageError> {
         let connection = self.db.conn()?;
-        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, self.db.path())?
-        {
+        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, self.db.path())? {
             return Ok(Some(dimensions));
         }
         detect_uniform_embedding_dimensions(&connection, self.db.path())
@@ -242,8 +241,8 @@ fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
 
 #[cfg(test)]
 mod embedding_store_tests {
-    use crate::{bootstrap, SessionStore};
     use super::EmbeddingStore;
+    use crate::{bootstrap, SessionStore};
     use tempfile::tempdir;
 
     fn setup(dir: &std::path::Path) -> std::path::PathBuf {
@@ -474,4 +473,3 @@ mod embedding_store_tests {
         assert_eq!(count, 1);
     }
 }
-

@@ -928,7 +928,10 @@ pub enum ScheduleCommand {
         destination: String,
         #[arg(long, help = "Prompt to execute when the schedule triggers")]
         prompt: String,
-        #[arg(long, help = "IANA timezone name (e.g. America/New_York). Defaults to UTC")]
+        #[arg(
+            long,
+            help = "IANA timezone name (e.g. America/New_York). Defaults to UTC"
+        )]
         timezone: Option<String>,
     },
     #[command(about = "List schedules")]
@@ -1675,15 +1678,13 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                     timezone,
                 } => {
                     // Validate cron expression at creation time
-                    genesis_core::scheduler::validate_cron(&cron).map_err(|e| {
-                        CliError::Other(format!("invalid cron expression: {e}"))
-                    })?;
+                    genesis_core::scheduler::validate_cron(&cron)
+                        .map_err(|e| CliError::Other(format!("invalid cron expression: {e}")))?;
 
                     // Validate timezone if provided
                     if let Some(ref tz) = timezone {
-                        genesis_core::scheduler::resolve_timezone(Some(tz)).map_err(|e| {
-                            CliError::Other(e)
-                        })?;
+                        genesis_core::scheduler::resolve_timezone(Some(tz))
+                            .map_err(|e| CliError::Other(e))?;
                     }
 
                     let schedule = store.create_with_timezone(

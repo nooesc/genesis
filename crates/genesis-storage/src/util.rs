@@ -65,7 +65,11 @@ pub(crate) fn column_exists(conn: &Connection, table: &str, column: &str) -> boo
 }
 
 /// Run a batch of SQL statements as a migration step.
-pub(crate) fn exec_migration(conn: &Connection, path: &Path, sql: &str) -> Result<(), StorageError> {
+pub(crate) fn exec_migration(
+    conn: &Connection,
+    path: &Path,
+    sql: &str,
+) -> Result<(), StorageError> {
     conn.execute_batch(sql)
         .map_err(|source| StorageError::Sqlite {
             path: path.to_path_buf(),
@@ -185,7 +189,10 @@ pub(crate) fn create_memory_vec_table(
     }
 }
 
-pub(crate) fn memory_embeddings_count(conn: &Connection, database_path: &Path) -> Result<usize, StorageError> {
+pub(crate) fn memory_embeddings_count(
+    conn: &Connection,
+    database_path: &Path,
+) -> Result<usize, StorageError> {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM memory_embeddings", [], |row| {
             row.get(0)
@@ -232,7 +239,10 @@ pub(crate) fn ensure_memory_vec_table(
     }
 }
 
-pub(crate) fn rebuild_memory_vec_index(conn: &Connection, database_path: &Path) -> Result<(), StorageError> {
+pub(crate) fn rebuild_memory_vec_index(
+    conn: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
     let dimensions = match detect_uniform_embedding_dimensions(conn, database_path) {
         Ok(Some(dimensions)) => dimensions,
         Ok(None) => return Ok(()),
@@ -277,7 +287,10 @@ pub(crate) fn sqlite_table_exists(
     })
 }
 
-pub(crate) fn memory_vec_table_exists(conn: &Connection, database_path: &Path) -> Result<bool, StorageError> {
+pub(crate) fn memory_vec_table_exists(
+    conn: &Connection,
+    database_path: &Path,
+) -> Result<bool, StorageError> {
     memory_vec_declared_dimensions(conn, database_path).map(|value| value.is_some())
 }
 

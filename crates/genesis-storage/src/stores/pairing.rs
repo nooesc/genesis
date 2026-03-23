@@ -2,9 +2,9 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 // ===========================================================================
 // PairingStore — DM pairing system for messaging platform authorization
@@ -437,11 +437,9 @@ impl PairingStore {
             (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pairing_approved",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM pairing_approved", [], |row| {
+                    row.get(0)
+                })
                 .map_err(me)?;
             let mut stmt = connection
                 .prepare(
@@ -513,11 +511,7 @@ impl PairingStore {
             (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pairing_pending",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM pairing_pending", [], |row| row.get(0))
                 .map_err(me)?;
             let mut stmt = connection
                 .prepare(
@@ -539,8 +533,8 @@ impl PairingStore {
 
 #[cfg(test)]
 mod pairing_store_tests {
-    use crate::bootstrap;
     use super::PairingStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -799,4 +793,3 @@ mod pairing_store_tests {
         );
     }
 }
-

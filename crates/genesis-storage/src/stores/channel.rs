@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 // ChannelStore — cached platform channel directory for send_message discovery
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,8 +148,8 @@ impl ChannelStore {
 
 #[cfg(test)]
 mod channel_store_tests {
-    use crate::bootstrap;
     use super::{CachedChannel, ChannelStore};
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     fn make_channel(
