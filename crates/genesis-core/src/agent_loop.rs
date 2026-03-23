@@ -744,37 +744,54 @@ impl AgentLoop {
                     model = model.as_str(),
                     error = %err,
                     fallback_count = self.fallback_clients.len(),
-                    "primary provider failed, trying fallbacks"
+                    "primary provider failed, trying fallbacks concurrently"
                 );
             }
         }
 
-        // Track how many providers were actually attempted.
-        let mut attempted = 1; // primary was already attempted
-        for (i, fallback) in self.fallback_clients.iter().enumerate() {
-            let fb_model = fallback.model().to_owned();
-            attempted += 1;
-            match fallback.complete(request.clone()).await {
-                Ok(response) => {
-                    info!(
-                        fallback_index = i,
-                        model = fb_model.as_str(),
-                        "fallback provider succeeded"
-                    );
-                    return Ok((response, fb_model));
-                }
-                Err(err) => {
-                    warn!(
-                        fallback_index = i,
-                        model = fb_model.as_str(),
-                        error = %err,
-                        "fallback provider failed"
-                    );
-                }
+        // Race all fallback providers concurrently.
+        let fallback_count = self.fallback_clients.len();
+        let futures: Vec<_> = self
+            .fallback_clients
+            .iter()
+            .enumerate()
+            .map(|(i, fallback)| {
+                let fb = fallback.clone();
+                let req = request.clone();
+                Box::pin(async move {
+                    let fb_model = fb.model().to_owned();
+                    match fb.complete(req).await {
+                        Ok(response) => {
+                            info!(
+                                fallback_index = i,
+                                model = fb_model.as_str(),
+                                "fallback provider succeeded"
+                            );
+                            Ok((response, fb_model))
+                        }
+                        Err(err) => {
+                            warn!(
+                                fallback_index = i,
+                                model = fb_model.as_str(),
+                                error = %err,
+                                "fallback provider failed"
+                            );
+                            Err(err)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        match futures_util::future::select_ok(futures).await {
+            Ok((result, _remaining)) => Ok(result),
+            Err(_last_err) => {
+                // select_ok returns the last error when all futures fail.
+                Err(ProviderError::AllProvidersFailed {
+                    count: 1 + fallback_count,
+                })
             }
         }
-
-        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Try a streaming completion against the active client, falling back to
@@ -805,36 +822,53 @@ impl AgentLoop {
                     model = model.as_str(),
                     error = %err,
                     fallback_count = self.fallback_clients.len(),
-                    "primary provider stream failed, trying fallbacks"
+                    "primary provider stream failed, trying fallbacks concurrently"
                 );
             }
         }
 
-        let mut attempted = 1; // primary was already attempted
-        for (i, fallback) in self.fallback_clients.iter().enumerate() {
-            let fb_model = fallback.model().to_owned();
-            attempted += 1;
-            match fallback.complete_stream(request.clone()).await {
-                Ok(stream) => {
-                    info!(
-                        fallback_index = i,
-                        model = fb_model.as_str(),
-                        "fallback provider stream succeeded"
-                    );
-                    return Ok((stream, fb_model));
-                }
-                Err(err) => {
-                    warn!(
-                        fallback_index = i,
-                        model = fb_model.as_str(),
-                        error = %err,
-                        "fallback provider stream failed"
-                    );
-                }
+        // Race all fallback providers concurrently.
+        let fallback_count = self.fallback_clients.len();
+        let futures: Vec<_> = self
+            .fallback_clients
+            .iter()
+            .enumerate()
+            .map(|(i, fallback)| {
+                let fb = fallback.clone();
+                let req = request.clone();
+                Box::pin(async move {
+                    let fb_model = fb.model().to_owned();
+                    match fb.complete_stream(req).await {
+                        Ok(stream) => {
+                            info!(
+                                fallback_index = i,
+                                model = fb_model.as_str(),
+                                "fallback provider stream succeeded"
+                            );
+                            Ok((stream, fb_model))
+                        }
+                        Err(err) => {
+                            warn!(
+                                fallback_index = i,
+                                model = fb_model.as_str(),
+                                error = %err,
+                                "fallback provider stream failed"
+                            );
+                            Err(err)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        match futures_util::future::select_ok(futures).await {
+            Ok((result, _remaining)) => Ok(result),
+            Err(_last_err) => {
+                Err(ProviderError::AllProvidersFailed {
+                    count: 1 + fallback_count,
+                })
             }
         }
-
-        Err(ProviderError::AllProvidersFailed { count: attempted })
     }
 
     /// Run a single user turn through the agent loop.
