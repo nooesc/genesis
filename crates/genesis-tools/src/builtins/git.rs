@@ -1054,7 +1054,7 @@ mod tests {
     fn truncate_cuts_long_text() {
         let long = "a\n".repeat(100_000);
         let result = truncate_output(&long);
-        assert!(result.len() <= MAX_OUTPUT_BYTES + 50);
-        assert!(result.ends_with("... (output truncated)"));
+        assert!(result.len() <= MAX_OUTPUT_BYTES + 200);
+        assert!(result.contains("output truncated: showing"));
     }
 }

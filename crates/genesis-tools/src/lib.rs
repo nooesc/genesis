@@ -56,6 +56,37 @@ pub const NOISE_DIRS: &[&str] = &[
 /// Maximum output size for tool results (64 KiB).
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Format a byte count into a human-readable string (B, KB, MB).
+pub fn format_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+
+    let b = bytes as f64;
+    if b < KB {
+        format!("{}B", bytes)
+    } else if b < MB {
+        format!("{:.1}KB", b / KB)
+    } else {
+        format!("{:.1}MB", b / MB)
+    }
+}
+
+/// Build a truncation suffix that reports how much content was shown vs total.
+///
+/// If the (trimmed) content starts with `{` or `[`, appends a JSON warning.
+fn truncation_suffix(shown_bytes: usize, total_bytes: usize, content: &str) -> String {
+    let mut suffix = format!(
+        "\n... (output truncated: showing {} of {})",
+        format_bytes(shown_bytes),
+        format_bytes(total_bytes),
+    );
+    let trimmed = content.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        suffix.push_str("\n\u{26a0} JSON output was cut mid-structure");
+    }
+    suffix
+}
+
 /// Truncate a string to at most `limit` bytes on a valid UTF-8 boundary,
 /// appending `suffix` if truncation occurred.
 pub fn truncate_at(s: &str, limit: usize, suffix: &str) -> String {
@@ -84,15 +115,16 @@ pub fn truncate_output(output: &str) -> String {
         end -= 1;
     }
 
-    if let Some(last_nl) = output[..end].rfind('\n') {
-        let mut truncated = output[..=last_nl].to_string();
-        truncated.push_str("... (output truncated)");
-        truncated
+    let (truncated, shown) = if let Some(last_nl) = output[..end].rfind('\n') {
+        (output[..=last_nl].to_string(), last_nl + 1)
     } else {
-        let mut truncated = output[..end].to_string();
-        truncated.push_str("\n... (output truncated)");
-        truncated
-    }
+        (output[..end].to_string(), end)
+    };
+
+    let suffix = truncation_suffix(shown, output.len(), output);
+    let mut result = truncated;
+    result.push_str(&suffix);
+    result
 }
 
 /// Truncate raw byte output (e.g. from `std::process::Output`) to
@@ -100,7 +132,17 @@ pub fn truncate_output(output: &str) -> String {
 /// character boundaries.
 pub fn truncate_output_bytes(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    truncate_at(&s, MAX_OUTPUT_BYTES, "\n... (output truncated)")
+    if s.len() <= MAX_OUTPUT_BYTES {
+        return s.into_owned();
+    }
+    let mut end = MAX_OUTPUT_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let suffix = truncation_suffix(end, s.len(), &s);
+    let mut result = s[..end].to_string();
+    result.push_str(&suffix);
+    result
 }
 
 #[derive(Clone, Serialize, Deserialize)]
