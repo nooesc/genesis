@@ -2804,7 +2804,7 @@ impl ScheduleStore {
         let (count_sql, data_sql) = if enabled_only {
             (
                 "SELECT COUNT(*) FROM schedules WHERE enabled = 1",
-                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
                  FROM schedules WHERE enabled = 1
                  ORDER BY created_at ASC
                  LIMIT ?1 OFFSET ?2",
@@ -2812,7 +2812,7 @@ impl ScheduleStore {
         } else {
             (
                 "SELECT COUNT(*) FROM schedules",
-                "SELECT id, cron_expression, destination, prompt, enabled, created_at
+                "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
                  FROM schedules
                  ORDER BY created_at ASC
                  LIMIT ?1 OFFSET ?2",
@@ -2833,6 +2833,7 @@ impl ScheduleStore {
                     prompt: row.get(3)?,
                     enabled: row.get::<_, i64>(4)? != 0,
                     created_at: row.get(5)?,
+                    timezone: row.get(6).ok().flatten(),
                 })
             })
             .map_err(me)?;
