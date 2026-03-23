@@ -361,14 +361,17 @@ async fn process_envelope(
 
     // DM pairing check (skip for group messages — use group allowlist instead).
     if !is_group {
-        match super::check_pairing(
-            &state.loaded.config.storage.database_path,
-            "signal",
-            &source,
-            &user_name,
-        ) {
-            Ok(super::PairingCheck::Approved) => {} // proceed
-            Ok(super::PairingCheck::NeedsPairing(code)) => {
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let src = source.clone();
+        let uname = user_name.clone();
+        let pairing_result = tokio::task::spawn_blocking(move || {
+            super::check_pairing(&db_path, "signal", &src, &uname)
+        })
+        .await;
+
+        match pairing_result {
+            Ok(Ok(super::PairingCheck::Approved)) => {} // proceed
+            Ok(Ok(super::PairingCheck::NeedsPairing(code))) => {
                 let reply = super::pairing_reply(&code);
                 let base_url = signal_http_url();
                 let client = state.http_client.clone();
@@ -390,7 +393,7 @@ async fn process_envelope(
                 });
                 return ProcessResult::Ok;
             }
-            Ok(super::PairingCheck::AtCapacity) => {
+            Ok(Ok(super::PairingCheck::AtCapacity)) => {
                 let reply = super::pairing_capacity_reply().to_owned();
                 let base_url = signal_http_url();
                 let client = state.http_client.clone();
@@ -412,18 +415,27 @@ async fn process_envelope(
                 });
                 return ProcessResult::Ok;
             }
-            Err(_) => {
+            Ok(Err(_)) | Err(_) => {
                 return ProcessResult::Error;
             }
         }
     }
 
-    // Handle gateway slash commands.
+    // Handle gateway slash commands + auto-reset expired sessions.
     {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(&prompt, &session_id, &store, &state.loaded.config)
-        {
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let p = prompt.clone();
+        let sid = session_id.clone();
+        let config = state.loaded.config.clone();
+        let cmd_result = tokio::task::spawn_blocking(move || {
+            let store = SessionStore::new(&db_path);
+            let cmd = crate::commands::handle_command(&p, &sid, &store, &config);
+            crate::commands::check_session_expiry(&sid, &store, config.gateway.as_ref());
+            cmd
+        })
+        .await;
+
+        if let Ok(crate::commands::CommandResult::Reply(reply)) = cmd_result {
             let base_url = signal_http_url();
             let client = state.http_client.clone();
             let account_clone = account.to_owned();
@@ -433,7 +445,8 @@ async fn process_envelope(
                 let result = if is_group_clone {
                     send_group_message(&client, &base_url, &account_clone, &recipient, &reply).await
                 } else {
-                    send_message(&client, &base_url, &account_clone, &recipient, &reply, None).await
+                    send_message(&client, &base_url, &account_clone, &recipient, &reply, None)
+                        .await
                 };
                 if let Err(e) = result {
                     error!(error = %e, "failed to send signal command reply");
@@ -441,16 +454,6 @@ async fn process_envelope(
             });
             return ProcessResult::Ok;
         }
-    }
-
-    // Auto-reset expired sessions.
-    {
-        let store = SessionStore::new(&state.loaded.config.storage.database_path);
-        crate::commands::check_session_expiry(
-            &session_id,
-            &store,
-            state.loaded.config.gateway.as_ref(),
-        );
     }
 
     // Spawn agent execution in background.
@@ -521,14 +524,17 @@ async fn process_envelope(
                 error!(error = %e, "failed to send signal reply");
             }
 
-            // Cross-platform delivery mirror.
-            crate::mirror::append_delivery_mirror(
-                &state.loaded.config.storage.database_path,
-                "signal",
-                &chat_id,
-                &reply_text,
-                "signal",
-            );
+            // Cross-platform delivery mirror (fire-and-forget).
+            {
+                let db_path = state.loaded.config.storage.database_path.clone();
+                let cid = chat_id.clone();
+                let reply = reply_text.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::mirror::append_delivery_mirror(
+                        &db_path, "signal", &cid, &reply, "signal",
+                    );
+                });
+            }
         }
         .instrument(span),
     );

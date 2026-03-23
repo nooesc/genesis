@@ -193,15 +193,64 @@ pub async fn interactions_handler(
 
         // DM pairing check
         let discord_user_id = extract_user_id(&interaction).unwrap_or_default();
-        match super::check_pairing(
-            &state.loaded.config.storage.database_path,
-            "discord",
-            &discord_user_id,
-            &user_name,
-        ) {
-            Ok(super::PairingCheck::Approved) => {}
-            Ok(super::PairingCheck::NeedsPairing(code)) => {
-                let reply = super::pairing_reply(&code);
+        {
+            let db_path = state.loaded.config.storage.database_path.clone();
+            let uid = discord_user_id.clone();
+            let uname = user_name.clone();
+            let pairing_result = tokio::task::spawn_blocking(move || {
+                super::check_pairing(&db_path, "discord", &uid, &uname)
+            })
+            .await;
+
+            match pairing_result {
+                Ok(Ok(super::PairingCheck::Approved)) => {}
+                Ok(Ok(super::PairingCheck::NeedsPairing(code))) => {
+                    let reply = super::pairing_reply(&code);
+                    return Ok(Json(
+                        serde_json::to_value(InteractionResponse {
+                            response_type: RESPONSE_CHANNEL_MESSAGE,
+                            data: Some(InteractionResponseData { content: reply }),
+                        })
+                        .map_err(|e| {
+                            error!(error = %e, "failed to serialize interaction response");
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?,
+                    ));
+                }
+                Ok(Ok(super::PairingCheck::AtCapacity)) => {
+                    return Ok(Json(
+                        serde_json::to_value(InteractionResponse {
+                            response_type: RESPONSE_CHANNEL_MESSAGE,
+                            data: Some(InteractionResponseData {
+                                content: super::pairing_capacity_reply().to_owned(),
+                            }),
+                        })
+                        .map_err(|e| {
+                            error!(error = %e, "failed to serialize interaction response");
+                            StatusCode::INTERNAL_SERVER_ERROR
+                        })?,
+                    ));
+                }
+                Ok(Err(_)) | Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+            }
+        }
+
+        // Handle gateway slash commands + auto-reset expired sessions.
+        {
+            let db_path = state.loaded.config.storage.database_path.clone();
+            let msg = message.clone();
+            let sid = session_id.clone();
+            let config = state.loaded.config.clone();
+            let cmd_result = tokio::task::spawn_blocking(move || {
+                let store =
+                    genesis_storage::SessionStore::new(&db_path);
+                let cmd = crate::commands::handle_command(&msg, &sid, &store, &config);
+                crate::commands::check_session_expiry(&sid, &store, config.gateway.as_ref());
+                cmd
+            })
+            .await;
+
+            if let Ok(crate::commands::CommandResult::Reply(reply)) = cmd_result {
                 return Ok(Json(
                     serde_json::to_value(InteractionResponse {
                         response_type: RESPONSE_CHANNEL_MESSAGE,
@@ -213,46 +262,7 @@ pub async fn interactions_handler(
                     })?,
                 ));
             }
-            Ok(super::PairingCheck::AtCapacity) => {
-                return Ok(Json(
-                    serde_json::to_value(InteractionResponse {
-                        response_type: RESPONSE_CHANNEL_MESSAGE,
-                        data: Some(InteractionResponseData {
-                            content: super::pairing_capacity_reply().to_owned(),
-                        }),
-                    })
-                    .map_err(|e| {
-                        error!(error = %e, "failed to serialize interaction response");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                ));
-            }
-            Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
         }
-
-        // Handle gateway slash commands.
-        let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-        if let crate::commands::CommandResult::Reply(reply) =
-            crate::commands::handle_command(&message, &session_id, &store, &state.loaded.config)
-        {
-            return Ok(Json(
-                serde_json::to_value(InteractionResponse {
-                    response_type: RESPONSE_CHANNEL_MESSAGE,
-                    data: Some(InteractionResponseData { content: reply }),
-                })
-                .map_err(|e| {
-                    error!(error = %e, "failed to serialize interaction response");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
-            ));
-        }
-
-        // Auto-reset expired sessions before processing.
-        crate::commands::check_session_expiry(
-            &session_id,
-            &store,
-            state.loaded.config.gateway.as_ref(),
-        );
 
         // Spawn background task to process and follow up
         tokio::spawn(
@@ -284,14 +294,17 @@ pub async fn interactions_handler(
                     error!(error = %e, "failed to send discord followup");
                 }
 
-                // Append delivery mirror for cross-platform visibility.
-                crate::mirror::append_delivery_mirror(
-                    &state.loaded.config.storage.database_path,
-                    "discord",
-                    &channel_id,
-                    &reply_text,
-                    "discord",
-                );
+                // Append delivery mirror for cross-platform visibility (fire-and-forget).
+                {
+                    let db_path = state.loaded.config.storage.database_path.clone();
+                    let cid = channel_id.clone();
+                    let reply = reply_text.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::mirror::append_delivery_mirror(
+                            &db_path, "discord", &cid, &reply, "discord",
+                        );
+                    });
+                }
             }
             .instrument(span),
         );

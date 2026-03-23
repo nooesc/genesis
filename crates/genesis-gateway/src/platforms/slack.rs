@@ -154,52 +154,67 @@ pub async fn events_handler(
     info!(parent: &span, event_type = event.event_type.as_str(), "received slack event");
 
     // DM pairing check
-    match super::check_pairing(
-        &state.loaded.config.storage.database_path,
-        "slack",
-        &user,
-        &user, // Slack user IDs are opaque; username isn't available without API call
-    ) {
-        Ok(super::PairingCheck::Approved) => {}
-        Ok(super::PairingCheck::NeedsPairing(code)) => {
-            let reply = super::pairing_reply(&code);
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            let channel2 = channel.clone();
-            let ts = thread_ts.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
-                {
-                    error!(error = %e, "failed to send pairing reply");
-                }
-            });
-            return Ok(Json(serde_json::json!({ "ok": true })));
-        }
-        Ok(super::PairingCheck::AtCapacity) => {
-            let reply = super::pairing_capacity_reply().to_owned();
-            let client2 = state.http_client.clone();
-            let token2 = token.clone();
-            let channel2 = channel.clone();
-            let ts = thread_ts.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
-                {
-                    error!(error = %e, "failed to send capacity reply");
-                }
-            });
-            return Ok(Json(serde_json::json!({ "ok": true })));
-        }
-        Err(_) => {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
+    {
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let uid = user.clone();
+        let pairing_result = tokio::task::spawn_blocking(move || {
+            super::check_pairing(&db_path, "slack", &uid, &uid)
+        })
+        .await;
+
+        match pairing_result {
+            Ok(Ok(super::PairingCheck::Approved)) => {}
+            Ok(Ok(super::PairingCheck::NeedsPairing(code))) => {
+                let reply = super::pairing_reply(&code);
+                let client2 = state.http_client.clone();
+                let token2 = token.clone();
+                let channel2 = channel.clone();
+                let ts = thread_ts.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
+                    {
+                        error!(error = %e, "failed to send pairing reply");
+                    }
+                });
+                return Ok(Json(serde_json::json!({ "ok": true })));
+            }
+            Ok(Ok(super::PairingCheck::AtCapacity)) => {
+                let reply = super::pairing_capacity_reply().to_owned();
+                let client2 = state.http_client.clone();
+                let token2 = token.clone();
+                let channel2 = channel.clone();
+                let ts = thread_ts.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        post_message(&client2, &token2, &channel2, &reply, ts.as_deref()).await
+                    {
+                        error!(error = %e, "failed to send capacity reply");
+                    }
+                });
+                return Ok(Json(serde_json::json!({ "ok": true })));
+            }
+            Ok(Err(_)) | Err(_) => {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
         }
     }
 
-    // Handle gateway slash commands before reaching the agent.
-    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-    match crate::commands::handle_command(&text, &session_id, &store, &state.loaded.config) {
-        crate::commands::CommandResult::Reply(reply) => {
+    // Handle gateway slash commands + auto-reset expired sessions.
+    {
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let txt = text.clone();
+        let sid = session_id.clone();
+        let config = state.loaded.config.clone();
+        let cmd_result = tokio::task::spawn_blocking(move || {
+            let store = genesis_storage::SessionStore::new(&db_path);
+            let cmd = crate::commands::handle_command(&txt, &sid, &store, &config);
+            crate::commands::check_session_expiry(&sid, &store, config.gateway.as_ref());
+            cmd
+        })
+        .await;
+
+        if let Ok(crate::commands::CommandResult::Reply(reply)) = cmd_result {
             let client2 = state.http_client.clone();
             let token2 = token.clone();
             let channel2 = channel.clone();
@@ -213,15 +228,7 @@ pub async fn events_handler(
             });
             return Ok(Json(serde_json::json!({ "ok": true })));
         }
-        crate::commands::CommandResult::PassThrough => {}
     }
-
-    // Auto-reset expired sessions before processing.
-    crate::commands::check_session_expiry(
-        &session_id,
-        &store,
-        state.loaded.config.gateway.as_ref(),
-    );
 
     // Process in background
     tokio::spawn(
@@ -253,14 +260,17 @@ pub async fn events_handler(
                 error!(error = %e, "failed to post slack message");
             }
 
-            // Append delivery mirror for cross-platform visibility.
-            crate::mirror::append_delivery_mirror(
-                &state.loaded.config.storage.database_path,
-                "slack",
-                &channel,
-                &reply_text,
-                "slack",
-            );
+            // Append delivery mirror for cross-platform visibility (fire-and-forget).
+            {
+                let db_path = state.loaded.config.storage.database_path.clone();
+                let ch = channel.clone();
+                let reply = reply_text.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::mirror::append_delivery_mirror(
+                        &db_path, "slack", &ch, &reply, "slack",
+                    );
+                });
+            }
         }
         .instrument(span),
     );

@@ -215,8 +215,7 @@ pub async fn webhook_handler(
                 .map(|c| c.profile.name.clone())
                 .unwrap_or_else(|| "Unknown".to_owned());
 
-            let store =
-                genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
+
 
             for message in &change.value.messages {
                 if message.msg_type != "text" {
@@ -240,55 +239,72 @@ pub async fn webhook_handler(
                 info!(parent: &span, "received whatsapp message");
 
                 // DM pairing check
-                match super::check_pairing(
-                    &state.loaded.config.storage.database_path,
-                    "whatsapp",
-                    &from,
-                    &contact_name,
-                ) {
-                    Ok(super::PairingCheck::Approved) => {}
-                    Ok(super::PairingCheck::NeedsPairing(code)) => {
-                        let reply = super::pairing_reply(&code);
-                        let client2 = state.http_client.clone();
-                        let token2 = token.clone();
-                        let phone2 = phone_id.clone();
-                        let from2 = from.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
-                            {
-                                error!(error = %e, "failed to send pairing reply");
-                            }
-                        });
-                        continue;
-                    }
-                    Ok(super::PairingCheck::AtCapacity) => {
-                        let reply = super::pairing_capacity_reply().to_owned();
-                        let client2 = state.http_client.clone();
-                        let token2 = token.clone();
-                        let phone2 = phone_id.clone();
-                        let from2 = from.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                send_reply(&client2, &token2, &phone2, &from2, &reply).await
-                            {
-                                error!(error = %e, "failed to send capacity reply");
-                            }
-                        });
-                        continue;
-                    }
-                    Err(_) => {
-                        return StatusCode::SERVICE_UNAVAILABLE;
+                {
+                    let db_path = state.loaded.config.storage.database_path.clone();
+                    let f = from.clone();
+                    let cn = contact_name.clone();
+                    let pairing_result = tokio::task::spawn_blocking(move || {
+                        super::check_pairing(&db_path, "whatsapp", &f, &cn)
+                    })
+                    .await;
+
+                    match pairing_result {
+                        Ok(Ok(super::PairingCheck::Approved)) => {}
+                        Ok(Ok(super::PairingCheck::NeedsPairing(code))) => {
+                            let reply = super::pairing_reply(&code);
+                            let client2 = state.http_client.clone();
+                            let token2 = token.clone();
+                            let phone2 = phone_id.clone();
+                            let from2 = from.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    send_reply(&client2, &token2, &phone2, &from2, &reply).await
+                                {
+                                    error!(error = %e, "failed to send pairing reply");
+                                }
+                            });
+                            continue;
+                        }
+                        Ok(Ok(super::PairingCheck::AtCapacity)) => {
+                            let reply = super::pairing_capacity_reply().to_owned();
+                            let client2 = state.http_client.clone();
+                            let token2 = token.clone();
+                            let phone2 = phone_id.clone();
+                            let from2 = from.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    send_reply(&client2, &token2, &phone2, &from2, &reply).await
+                                {
+                                    error!(error = %e, "failed to send capacity reply");
+                                }
+                            });
+                            continue;
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
                     }
                 }
 
-                match crate::commands::handle_command(
-                    &text,
-                    &session_id,
-                    &store,
-                    &state.loaded.config,
-                ) {
-                    crate::commands::CommandResult::Reply(reply) => {
+                // Handle gateway slash commands + auto-reset expired sessions.
+                {
+                    let db_path = state.loaded.config.storage.database_path.clone();
+                    let txt = text.clone();
+                    let sid = session_id.clone();
+                    let config = state.loaded.config.clone();
+                    let cmd_result = tokio::task::spawn_blocking(move || {
+                        let store = genesis_storage::SessionStore::new(&db_path);
+                        let cmd = crate::commands::handle_command(&txt, &sid, &store, &config);
+                        crate::commands::check_session_expiry(
+                            &sid,
+                            &store,
+                            config.gateway.as_ref(),
+                        );
+                        cmd
+                    })
+                    .await;
+
+                    if let Ok(crate::commands::CommandResult::Reply(reply)) = cmd_result {
                         let client2 = state.http_client.clone();
                         let token2 = token.clone();
                         let phone2 = phone_id.clone();
@@ -302,15 +318,7 @@ pub async fn webhook_handler(
                         });
                         continue;
                     }
-                    crate::commands::CommandResult::PassThrough => {}
                 }
-
-                // Auto-reset expired sessions before processing.
-                crate::commands::check_session_expiry(
-                    &session_id,
-                    &store,
-                    state.loaded.config.gateway.as_ref(),
-                );
 
                 let state = Arc::clone(&state);
                 let token = token.clone();
@@ -341,14 +349,17 @@ pub async fn webhook_handler(
                             error!(error = %e, "failed to send whatsapp reply");
                         }
 
-                        // Append delivery mirror for cross-platform visibility.
-                        crate::mirror::append_delivery_mirror(
-                            &state.loaded.config.storage.database_path,
-                            "whatsapp",
-                            &from,
-                            &reply_text,
-                            "whatsapp",
-                        );
+                        // Append delivery mirror for cross-platform visibility (fire-and-forget).
+                        {
+                            let db_path = state.loaded.config.storage.database_path.clone();
+                            let f = from.clone();
+                            let reply = reply_text.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::mirror::append_delivery_mirror(
+                                    &db_path, "whatsapp", &f, &reply, "whatsapp",
+                                );
+                            });
+                        }
                     }
                     .instrument(span),
                 );

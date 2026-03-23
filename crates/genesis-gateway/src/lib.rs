@@ -362,6 +362,27 @@ fn storage_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     )
 }
 
+/// Run a synchronous storage closure on the blocking thread pool.
+///
+/// All SQLite operations are synchronous via `rusqlite`. Running them
+/// directly on async handler threads starves the tokio runtime under
+/// concurrent load. This helper offloads the work to
+/// [`tokio::task::spawn_blocking`] and maps the `JoinError` into an
+/// HTTP 500 response.
+async fn blocking_storage<F, T>(f: F) -> Result<T, (StatusCode, String)>
+where
+    F: FnOnce() -> Result<T, (StatusCode, String)> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| {
+        error!(error = %e, "blocking storage task panicked or was cancelled");
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("internal error: {e}"),
+        ))
+    })
+}
+
 /// Response body from the `/chat` endpoint.
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatResponse {
@@ -873,15 +894,22 @@ async fn rate_limit_middleware(
 }
 
 /// Shared DB stats used by health, metrics, and prometheus handlers.
-fn fetch_db_stats(db_path: &std::path::Path) -> (usize, usize) {
-    let total_sessions = genesis_storage::SessionStore::new(db_path)
-        .session_count()
-        .unwrap_or(0) as usize;
-    let active_schedules = genesis_storage::ScheduleStore::new(db_path)
-        .list_enabled()
-        .map(|s| s.len())
-        .unwrap_or(0);
-    (total_sessions, active_schedules)
+///
+/// Runs synchronous SQLite queries on the blocking thread pool.
+async fn fetch_db_stats(db_path: &std::path::Path) -> (usize, usize) {
+    let db_path = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let total_sessions = genesis_storage::SessionStore::new(&db_path)
+            .session_count()
+            .unwrap_or(0) as usize;
+        let active_schedules = genesis_storage::ScheduleStore::new(&db_path)
+            .list_enabled()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        (total_sessions, active_schedules)
+    })
+    .await
+    .unwrap_or((0, 0))
 }
 
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
@@ -890,7 +918,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
         None => 0,
     };
     let (total_sessions, active_schedules) =
-        fetch_db_stats(&state.loaded.config.storage.database_path);
+        fetch_db_stats(&state.loaded.config.storage.database_path).await;
     let mcp_tools = match &state.mcp {
         Some(mcp) => mcp.tool_count().await,
         None => 0,
@@ -1019,7 +1047,7 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
     let stream_reqs = state.stream_requests_total.load(Ordering::Relaxed);
 
     let db_path = &state.loaded.config.storage.database_path;
-    let (total_sessions, active_schedules_usize) = fetch_db_stats(db_path);
+    let (total_sessions, active_schedules_usize) = fetch_db_stats(db_path).await;
     let total_sessions = total_sessions as u64;
     let active_schedules = active_schedules_usize as u64;
 
@@ -1028,8 +1056,14 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
         None => 0,
     };
 
-    let cache_store = genesis_storage::ResponseCacheStore::new(db_path);
-    let (cache_entries, cache_hits) = cache_store.stats().unwrap_or((0, 0));
+    let db_path_owned = db_path.to_path_buf();
+    let (cache_entries, cache_hits) = tokio::task::spawn_blocking(move || {
+        genesis_storage::ResponseCacheStore::new(&db_path_owned)
+            .stats()
+            .unwrap_or((0, 0))
+    })
+    .await
+    .unwrap_or((0, 0));
 
     let model = format!(
         "{}/{}",
@@ -1040,12 +1074,17 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
     let (wh_delivered, wh_retried, wh_failed) = state.webhooks.metrics();
 
     // Audit log total
-    let audit_total: i64 = genesis_storage::AuditLogStore::new(db_path)
-        .stats()
-        .unwrap_or_default()
-        .iter()
-        .map(|(_, c)| c)
-        .sum();
+    let db_path_audit = db_path.to_path_buf();
+    let audit_total: i64 = tokio::task::spawn_blocking(move || {
+        genesis_storage::AuditLogStore::new(&db_path_audit)
+            .stats()
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, c)| c)
+            .sum::<i64>()
+    })
+    .await
+    .unwrap_or(0);
 
     // Request duration histogram
     let duration_histogram = if let Ok(hist) = state.request_duration_histogram.lock() {
@@ -1122,7 +1161,7 @@ async fn prometheus_metrics_handler(State(state): State<Arc<AppState>>) -> Respo
 /// JSON format that is easier for browser-based clients to consume.
 async fn metrics_json_handler(State(state): State<Arc<AppState>>) -> Json<MetricsJsonResponse> {
     let (total_sessions, active_schedules) =
-        fetch_db_stats(&state.loaded.config.storage.database_path);
+        fetch_db_stats(&state.loaded.config.storage.database_path).await;
 
     Json(MetricsJsonResponse {
         uptime_seconds: state.started_at.elapsed().as_secs(),
@@ -1152,13 +1191,18 @@ async fn list_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let sessions = if let Some(query) = &params.search {
-        store.search_sessions(query)
-    } else {
-        store.list_recent_sessions(params.limit)
-    }
-    .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let sessions = blocking_storage(move || {
+        let store = SessionStore::new(&db_path);
+        let sessions = if let Some(query) = &params.search {
+            store.search_sessions(query)
+        } else {
+            store.list_recent_sessions(params.limit)
+        }
+        .map_err(storage_err)?;
+        Ok(sessions)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "sessions": sessions,
@@ -1170,8 +1214,13 @@ async fn get_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let session = store.get_session(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let session = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .get_session(&id)
+            .map_err(storage_err)
+    })
+    .await?;
 
     match session {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
@@ -1180,7 +1229,7 @@ async fn get_session_handler(
                 format!("serialization error: {e}"),
             )
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("session '{id}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, "session not found".to_owned())),
     }
 }
 
@@ -1188,8 +1237,14 @@ async fn delete_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete_session(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let deleted = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .delete_session(&id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
@@ -1241,8 +1296,14 @@ async fn session_messages_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let messages = store.load_messages(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let messages = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .load_messages(&id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1256,16 +1317,23 @@ async fn fork_session_handler(
     Path(id): Path<String>,
     Json(request): Json<ForkRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
     let new_id = request.new_session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        format!("fork-{id}-{ts}")
+        format!("fork-{id_clone}-{ts}")
     });
 
-    store.fork_session(&id, &new_id).map_err(storage_err)?;
+    let new_id_clone = new_id.clone();
+    blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .fork_session(&id_clone, &new_id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "source_session_id": id,
@@ -1278,8 +1346,15 @@ async fn update_session_title_handler(
     Path(id): Path<String>,
     Json(request): Json<UpdateTitleRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let title = request.title.clone();
+    let updated = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .set_title(&id_clone, &title)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "session_id": id,
@@ -1298,11 +1373,19 @@ async fn export_session_handler(
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<ExportQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-
-    let session_title = store.get_session(&id).ok().flatten().and_then(|s| s.title);
-
-    let stored = store.load_messages(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let (session_title, stored) = blocking_storage(move || {
+        let store = SessionStore::new(&db_path);
+        let session_title = store
+            .get_session(&id_clone)
+            .ok()
+            .flatten()
+            .and_then(|s| s.title);
+        let stored = store.load_messages(&id_clone).map_err(storage_err)?;
+        Ok((session_title, stored))
+    })
+    .await?;
 
     if stored.is_empty() {
         return Err((
@@ -1359,10 +1442,14 @@ async fn purge_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PurgeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let purged = store
-        .purge_older_than(params.older_than_days)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let days = params.older_than_days;
+    let purged = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .purge_older_than(days)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "purged": purged,
@@ -1374,8 +1461,14 @@ async fn get_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let tags = store.get_tags(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let tags = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .get_tags(&id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
 }
 
@@ -1389,9 +1482,16 @@ async fn set_session_tags_handler(
     Path(id): Path<String>,
     Json(request): Json<SetTagsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
-    store.set_tags(&id, &tag_refs).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let tags = request.tags.clone();
+    blocking_storage(move || {
+        let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+        SessionStore::new(&db_path)
+            .set_tags(&id_clone, &tag_refs)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({ "session_id": id, "tags": request.tags }),
     ))
@@ -1401,9 +1501,16 @@ async fn add_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let added = store.add_tag(&id, &tag).map_err(storage_err)?;
-    let tags = store.get_tags(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let tag_clone = tag.clone();
+    let (added, tags) = blocking_storage(move || {
+        let store = SessionStore::new(&db_path);
+        let added = store.add_tag(&id_clone, &tag_clone).map_err(storage_err)?;
+        let tags = store.get_tags(&id_clone).map_err(storage_err)?;
+        Ok((added, tags))
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags }),
     ))
@@ -1413,9 +1520,18 @@ async fn remove_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
-    let tags = store.get_tags(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let tag_clone = tag.clone();
+    let (removed, tags) = blocking_storage(move || {
+        let store = SessionStore::new(&db_path);
+        let removed = store
+            .remove_tag(&id_clone, &tag_clone)
+            .map_err(storage_err)?;
+        let tags = store.get_tags(&id_clone).map_err(storage_err)?;
+        Ok((removed, tags))
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags }),
     ))
@@ -1425,8 +1541,14 @@ async fn sessions_by_tag_handler(
     State(state): State<Arc<AppState>>,
     Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let tag_clone = tag.clone();
+    let sessions = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .sessions_by_tag(&tag_clone)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() }),
     ))
@@ -1449,7 +1571,7 @@ async fn import_session_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ImportSessionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
 
     let session_id = request.session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
@@ -1466,14 +1588,19 @@ async fn import_session_handler(
         .map(|m| (m.role, m.content))
         .collect();
 
-    store
-        .import_session(&session_id, request.title.as_deref(), messages)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("import error: {e}"),
-            )
-        })?;
+    let sid = session_id.clone();
+    let title = request.title.clone();
+    blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .import_session(&sid, title.as_deref(), messages)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("import error: {e}"),
+                )
+            })
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "session_id": session_id,
@@ -1500,51 +1627,58 @@ async fn bulk_export_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<BulkExportQuery>,
 ) -> Result<Response, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let format = params.format.clone();
 
-    let limit = params.limit.unwrap_or(1000);
-    let sessions = store.list_recent_sessions(limit).map_err(storage_err)?;
+    let output = blocking_storage(move || {
+        let store = SessionStore::new(&db_path);
+        let limit = params.limit.unwrap_or(1000);
+        let sessions = store.list_recent_sessions(limit).map_err(storage_err)?;
 
-    use genesis_tools::builtins::export::{export_json, export_jsonl};
+        use genesis_tools::builtins::export::{export_json, export_jsonl};
 
-    let mut output = String::new();
+        let mut output = String::new();
 
-    for session in &sessions {
-        let stored = match store.load_messages(&session.id) {
-            Ok(msgs) if !msgs.is_empty() => msgs,
-            _ => continue,
-        };
+        for session in &sessions {
+            let stored = match store.load_messages(&session.id) {
+                Ok(msgs) if !msgs.is_empty() => msgs,
+                _ => continue,
+            };
 
-        let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
-            .into_iter()
-            .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
-            .collect();
+            let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
+                .into_iter()
+                .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+                .collect();
 
-        match params.format.as_str() {
-            "jsonl" | "finetune" => {
-                let line = export_jsonl(&messages);
-                if !line.is_empty() {
-                    output.push_str(&line);
+            match params.format.as_str() {
+                "jsonl" | "finetune" => {
+                    let line = export_jsonl(&messages);
+                    if !line.is_empty() {
+                        output.push_str(&line);
+                    }
+                }
+                "json" => {
+                    let json = export_json(&session.id, session.title.as_deref(), &messages);
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+                _ => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "unsupported bulk format '{}'; use 'jsonl' or 'json'",
+                            params.format
+                        ),
+                    ))
                 }
             }
-            "json" => {
-                let json = export_json(&session.id, session.title.as_deref(), &messages);
-                output.push_str(&json);
-                output.push('\n');
-            }
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "unsupported bulk format '{}'; use 'jsonl' or 'json'",
-                        params.format
-                    ),
-                ))
-            }
         }
-    }
 
-    let content_type = match params.format.as_str() {
+        Ok(output)
+    })
+    .await?;
+
+    let content_type = match format.as_str() {
         "json" => "application/json; charset=utf-8",
         _ => "application/jsonl; charset=utf-8",
     };
@@ -1576,15 +1710,20 @@ async fn search_messages_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMessagesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let results = store
-        .search_messages(&params.q, params.limit)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("search error: {e}"),
-            )
-        })?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let query = params.q.clone();
+    let limit = params.limit;
+    let results = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .search_messages(&query, limit)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("search error: {e}"),
+                )
+            })
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "query": params.q,
@@ -1597,8 +1736,13 @@ async fn insights_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let data = store.insights(params.days).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let data = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .insights(params.days)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::to_value(data).map_err(|e| {
         (
@@ -1611,8 +1755,13 @@ async fn insights_handler(
 async fn usage_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.usage_stats().map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let stats = blocking_storage(move || {
+        SessionStore::new(&db_path)
+            .usage_stats()
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
         (
@@ -1647,8 +1796,11 @@ struct SearchSkillsQuery {
 async fn list_skills_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store.list_all().map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let skills = blocking_storage(move || {
+        SkillStore::new(&db_path).list_all().map_err(storage_err)
+    })
+    .await?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1661,8 +1813,11 @@ async fn get_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skill = store.get(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let skill = blocking_storage(move || {
+        SkillStore::new(&db_path).get(&name).map_err(storage_err)
+    })
+    .await?;
 
     match skill {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
@@ -1671,7 +1826,7 @@ async fn get_skill_handler(
                 format!("serialization error: {e}"),
             )
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("skill '{name}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, "skill not found".to_owned())),
     }
 }
 
@@ -1679,17 +1834,21 @@ async fn upsert_skill_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<UpsertSkillRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
-    let skill = store
-        .upsert(
-            &request.name,
-            &request.description,
-            &request.instructions,
-            request.trigger_hint.as_deref(),
-            &tag_refs,
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let skill = blocking_storage(move || {
+        let store = SkillStore::new(&db_path);
+        let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
+        store
+            .upsert(
+                &request.name,
+                &request.description,
+                &request.instructions,
+                request.trigger_hint.as_deref(),
+                &tag_refs,
+            )
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::to_value(skill).map_err(|e| {
         (
@@ -1703,8 +1862,14 @@ async fn delete_skill_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let name_clone = name.clone();
+    let deleted = blocking_storage(move || {
+        SkillStore::new(&db_path)
+            .delete(&name_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "name": name})))
@@ -1717,8 +1882,13 @@ async fn search_skills_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchSkillsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let skills = store.find_by_tag(&params.tag).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let skills = blocking_storage(move || {
+        SkillStore::new(&db_path)
+            .find_by_tag(&params.tag)
+            .map_err(storage_err)
+    })
+    .await?;
 
     let count = skills.len();
     Ok(Json(serde_json::json!({
@@ -1830,8 +2000,13 @@ async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListMemoriesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = MemoryStore::new(&state.loaded.config.storage.database_path);
-    let memories = store.list(params.limit).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let memories = blocking_storage(move || {
+        MemoryStore::new(&db_path)
+            .list(params.limit)
+            .map_err(storage_err)
+    })
+    .await?;
 
     let count = memories.len();
     Ok(Json(serde_json::json!({
@@ -1896,15 +2071,22 @@ async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db_path = &state.loaded.config.storage.database_path;
-    let store = MemoryStore::new(db_path);
-    let deleted = store.delete(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let deleted = blocking_storage(move || {
+        let store = MemoryStore::new(&db_path);
+        let deleted = store.delete(&id_clone).map_err(storage_err)?;
+        if deleted {
+            // Also clean up any associated embedding
+            if let Err(e) = EmbeddingStore::new(&db_path).delete(&id_clone) {
+                warn!(memory_id = %id_clone, error = %e, "failed to delete embedding for memory");
+            }
+        }
+        Ok(deleted)
+    })
+    .await?;
 
     if deleted {
-        // Also clean up any associated embedding
-        if let Err(e) = EmbeddingStore::new(db_path).delete(&id) {
-            warn!(memory_id = %id, error = %e, "failed to delete embedding for memory");
-        }
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
     } else {
         Err((StatusCode::NOT_FOUND, format!("memory '{id}' not found")))
@@ -1927,10 +2109,15 @@ async fn embed_memories_handler(
         .expect("embedding config should yield a provider");
 
     let db_path = &state.loaded.config.storage.database_path;
-    let memory_store = MemoryStore::new(db_path);
     let embedding_store = EmbeddingStore::new(db_path);
 
-    let memories = memory_store.list(10000).map_err(storage_err)?;
+    let db_path_for_list = db_path.to_path_buf();
+    let memories = blocking_storage(move || {
+        MemoryStore::new(&db_path_for_list)
+            .list(10000)
+            .map_err(storage_err)
+    })
+    .await?;
 
     let mut embedded = 0usize;
     let mut skipped = 0usize;
@@ -2035,14 +2222,18 @@ async fn embed_single_memory_handler(
         .expect("embedding config should yield a provider");
 
     let db_path = &state.loaded.config.storage.database_path;
-    let memory_store = MemoryStore::new(db_path);
     let embedding_store = EmbeddingStore::new(db_path);
 
     // Find the memory by direct ID lookup
-    let memory = memory_store
-        .get(&id)
-        .map_err(storage_err)?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id}' not found")))?;
+    let db_path_for_get = db_path.to_path_buf();
+    let id_clone = id.clone();
+    let memory = blocking_storage(move || {
+        MemoryStore::new(&db_path_for_get)
+            .get(&id_clone)
+            .map_err(storage_err)?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("memory '{id_clone}' not found")))
+    })
+    .await?;
 
     genesis_core::embedding::embed_and_store(
         &memory.id,
@@ -2086,13 +2277,17 @@ async fn list_schedules_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListSchedulesQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedules = if params.enabled_only {
-        store.list_enabled()
-    } else {
-        store.list_all()
-    }
-    .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let schedules = blocking_storage(move || {
+        let store = ScheduleStore::new(&db_path);
+        if params.enabled_only {
+            store.list_enabled()
+        } else {
+            store.list_all()
+        }
+        .map_err(storage_err)
+    })
+    .await?;
 
     let count = schedules.len();
     Ok(Json(serde_json::json!({
@@ -2105,8 +2300,11 @@ async fn get_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedule = store.get(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let schedule = blocking_storage(move || {
+        ScheduleStore::new(&db_path).get(&id).map_err(storage_err)
+    })
+    .await?;
 
     match schedule {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
@@ -2115,7 +2313,7 @@ async fn get_schedule_handler(
                 format!("serialization error: {e}"),
             )
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("schedule '{id}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, "schedule not found".to_owned())),
     }
 }
 
@@ -2123,15 +2321,18 @@ async fn create_schedule_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateScheduleRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedule = store
-        .create(
-            &request.id,
-            &request.cron_expression,
-            &request.destination,
-            &request.prompt,
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let schedule = blocking_storage(move || {
+        ScheduleStore::new(&db_path)
+            .create(
+                &request.id,
+                &request.cron_expression,
+                &request.destination,
+                &request.prompt,
+            )
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -2148,8 +2349,14 @@ async fn delete_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let deleted = blocking_storage(move || {
+        ScheduleStore::new(&db_path)
+            .delete(&id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "id": id})))
@@ -2163,10 +2370,15 @@ async fn set_schedule_enabled_handler(
     Path(id): Path<String>,
     Json(request): Json<SetEnabledRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let updated = store
-        .set_enabled(&id, request.enabled)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let enabled = request.enabled;
+    let updated = blocking_storage(move || {
+        ScheduleStore::new(&db_path)
+            .set_enabled(&id_clone, enabled)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if updated {
         Ok(Json(serde_json::json!({
@@ -2199,15 +2411,19 @@ async fn list_user_traits_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ListTraitsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let traits = if let Some(category) = &params.category {
-        store.list_by_category(category)
-    } else if let Some(threshold) = params.min_confidence {
-        store.confident_traits(threshold)
-    } else {
-        store.list_all()
-    }
-    .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let traits = blocking_storage(move || {
+        let store = UserModelStore::new(&db_path);
+        if let Some(category) = &params.category {
+            store.list_by_category(category)
+        } else if let Some(threshold) = params.min_confidence {
+            store.confident_traits(threshold)
+        } else {
+            store.list_all()
+        }
+        .map_err(storage_err)
+    })
+    .await?;
 
     let count = traits.len();
     Ok(Json(serde_json::json!({
@@ -2220,8 +2436,13 @@ async fn get_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let user_trait = store.get(&key).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let user_trait = blocking_storage(move || {
+        UserModelStore::new(&db_path)
+            .get(&key)
+            .map_err(storage_err)
+    })
+    .await?;
 
     match user_trait {
         Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
@@ -2230,7 +2451,7 @@ async fn get_user_trait_handler(
                 format!("serialization error: {e}"),
             )
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("trait '{key}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, "trait not found".to_owned())),
     }
 }
 
@@ -2238,15 +2459,18 @@ async fn observe_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ObserveTraitRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let observed = store
-        .observe(
-            &request.trait_key,
-            &request.category,
-            &request.value,
-            request.source_session.as_deref(),
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let observed = blocking_storage(move || {
+        UserModelStore::new(&db_path)
+            .observe(
+                &request.trait_key,
+                &request.category,
+                &request.value,
+                request.source_session.as_deref(),
+            )
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok((
         StatusCode::OK,
@@ -2263,8 +2487,14 @@ async fn delete_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&key).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let key_clone = key.clone();
+    let deleted = blocking_storage(move || {
+        UserModelStore::new(&db_path)
+            .delete(&key_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if deleted {
         Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
@@ -2279,8 +2509,11 @@ async fn get_subagent_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SubagentStore::new(&state.loaded.config.storage.database_path);
-    let subagent = store.get(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let subagent = blocking_storage(move || {
+        SubagentStore::new(&db_path).get(&id).map_err(storage_err)
+    })
+    .await?;
 
     match subagent {
         Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
@@ -2289,7 +2522,7 @@ async fn get_subagent_handler(
                 format!("serialization error: {e}"),
             )
         })?)),
-        None => Err((StatusCode::NOT_FOUND, format!("subagent '{id}' not found"))),
+        None => Err((StatusCode::NOT_FOUND, "subagent not found".to_owned())),
     }
 }
 
@@ -2297,8 +2530,14 @@ async fn list_session_subagents_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SubagentStore::new(&state.loaded.config.storage.database_path);
-    let subagents = store.list_by_parent(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let subagents = blocking_storage(move || {
+        SubagentStore::new(&db_path)
+            .list_by_parent(&id_clone)
+            .map_err(storage_err)
+    })
+    .await?;
 
     let count = subagents.len();
     Ok(Json(serde_json::json!({
@@ -2324,8 +2563,13 @@ async fn skill_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.stats(&name).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let stats = blocking_storage(move || {
+        SkillUsageStore::new(&db_path)
+            .stats(&name)
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::to_value(stats).map_err(|e| {
         (
@@ -2340,10 +2584,15 @@ async fn skill_usage_recent_handler(
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<SkillUsageRecentQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = SkillUsageStore::new(&state.loaded.config.storage.database_path);
-    let usages = store
-        .recent_usages(&name, params.limit)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let limit = params.limit;
+    let name_clone = name.clone();
+    let usages = blocking_storage(move || {
+        SkillUsageStore::new(&db_path)
+            .recent_usages(&name_clone, limit)
+            .map_err(storage_err)
+    })
+    .await?;
 
     let count = usages.len();
     Ok(Json(serde_json::json!({
@@ -2442,9 +2691,15 @@ async fn config_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::
 }
 
 async fn cache_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let cache =
-        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
-    let (entries, hits) = cache.stats().unwrap_or((0, 0));
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let (entries, hits) = tokio::task::spawn_blocking(move || {
+        genesis_storage::ResponseCacheStore::new(&db_path)
+            .stats()
+            .unwrap_or((0, 0))
+    })
+    .await
+    .unwrap_or((0, 0));
+
     let enabled = state
         .loaded
         .config
@@ -2460,14 +2715,21 @@ async fn cache_stats_handler(State(state): State<Arc<AppState>>) -> Json<serde_j
 }
 
 async fn cache_clear_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let cache =
-        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
-    match cache.clear() {
-        Ok(deleted) => Json(serde_json::json!({
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        genesis_storage::ResponseCacheStore::new(&db_path).clear()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(deleted)) => Json(serde_json::json!({
             "cleared": deleted,
         })),
-        Err(e) => Json(serde_json::json!({
+        Ok(Err(e)) => Json(serde_json::json!({
             "error": e.to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": format!("internal error: {e}"),
         })),
     }
 }
@@ -2486,15 +2748,17 @@ async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
-    let limit = params.limit.unwrap_or(50);
-    let entries = if let Some(ref event_type) = params.event_type {
-        store
-            .by_event_type(event_type, limit)
-            .map_err(storage_err)?
-    } else {
-        store.recent(limit).map_err(storage_err)?
-    };
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let entries = blocking_storage(move || {
+        let store = genesis_storage::AuditLogStore::new(&db_path);
+        let limit = params.limit.unwrap_or(50);
+        if let Some(ref event_type) = params.event_type {
+            store.by_event_type(event_type, limit).map_err(storage_err)
+        } else {
+            store.recent(limit).map_err(storage_err)
+        }
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "entries": entries,
         "count": entries.len(),
@@ -2504,8 +2768,13 @@ async fn audit_recent_handler(
 async fn audit_stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.stats().map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let stats = blocking_storage(move || {
+        genesis_storage::AuditLogStore::new(&db_path)
+            .stats()
+            .map_err(storage_err)
+    })
+    .await?;
     let total: i64 = stats.iter().map(|(_, c)| c).sum();
     Ok(Json(serde_json::json!({
         "total_entries": total,
@@ -2520,9 +2789,15 @@ async fn audit_session_handler(
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
-    let limit = params.limit.unwrap_or(100);
-    let entries = store.by_session(&id, limit).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let id_clone = id.clone();
+    let entries = blocking_storage(move || {
+        let limit = params.limit.unwrap_or(100);
+        genesis_storage::AuditLogStore::new(&db_path)
+            .by_session(&id_clone, limit)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "session_id": id,
         "entries": entries,
@@ -2539,9 +2814,14 @@ async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = request.older_than_days.unwrap_or(90);
-    let deleted = store.purge_older_than(days).map_err(storage_err)?;
+    let deleted = blocking_storage(move || {
+        genesis_storage::AuditLogStore::new(&db_path)
+            .purge_older_than(days)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "purged": deleted,
         "older_than_days": days,
@@ -2561,9 +2841,14 @@ async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = params.days.unwrap_or(30);
-    let analytics = store.tool_analytics(days).map_err(storage_err)?;
+    let analytics = blocking_storage(move || {
+        genesis_storage::AuditLogStore::new(&db_path)
+            .tool_analytics(days)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "period_days": days,
         "tools": analytics,
@@ -2574,9 +2859,14 @@ async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = params.days.unwrap_or(30);
-    let analytics = store.llm_analytics(days).map_err(storage_err)?;
+    let analytics = blocking_storage(move || {
+        genesis_storage::AuditLogStore::new(&db_path)
+            .llm_analytics(days)
+            .map_err(storage_err)
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "period_days": days,
         "models": analytics,
@@ -3020,14 +3310,15 @@ async fn chat_handler(
             }),
         );
 
-        // Append delivery mirror for cross-platform visibility.
-        // Use the direct variant since we already have the session ID.
-        mirror::append_delivery_mirror_to_session(
-            &metrics_state.loaded.config.storage.database_path,
-            &session_id,
-            &outcome.result.response,
-            "api",
-        );
+        // Append delivery mirror for cross-platform visibility (fire-and-forget).
+        {
+            let db_path = metrics_state.loaded.config.storage.database_path.clone();
+            let sid = session_id.clone();
+            let response = outcome.result.response.clone();
+            tokio::task::spawn_blocking(move || {
+                mirror::append_delivery_mirror_to_session(&db_path, &sid, &response, "api");
+            });
+        }
 
         // Record token metrics + duration histogram
         metrics_state
@@ -3656,14 +3947,17 @@ async fn chat_stream_handler(
                         "streaming chat request completed"
                     );
 
-                    // Append delivery mirror for cross-platform visibility.
-                    // Use the direct variant since we already have the session ID.
-                    mirror::append_delivery_mirror_to_session(
-                        &state_for_task.loaded.config.storage.database_path,
-                        &outcome.session_id,
-                        &outcome.result.response,
-                        "api",
-                    );
+                    // Append delivery mirror for cross-platform visibility (fire-and-forget).
+                    {
+                        let db_path = state_for_task.loaded.config.storage.database_path.clone();
+                        let sid = outcome.session_id.clone();
+                        let response = outcome.result.response.clone();
+                        tokio::task::spawn_blocking(move || {
+                            mirror::append_delivery_mirror_to_session(
+                                &db_path, &sid, &response, "api",
+                            );
+                        });
+                    }
 
                     if let Ok(payload) = serde_json::to_string(&StreamDoneResponse {
                         session_id: outcome.session_id,
@@ -3928,10 +4222,13 @@ async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let users = store
-        .list_approved(params.platform.as_deref())
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let users = blocking_storage(move || {
+        PairingStore::new(&db_path)
+            .list_approved(params.platform.as_deref())
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "approved": users,
@@ -3943,10 +4240,13 @@ async fn list_pending_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PairingPlatformQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let pending = store
-        .list_pending(params.platform.as_deref())
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let pending = blocking_storage(move || {
+        PairingStore::new(&db_path)
+            .list_pending(params.platform.as_deref())
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "pending": pending,
@@ -3958,10 +4258,13 @@ async fn approve_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApprovePairingRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let approved = store
-        .approve_code(&request.platform, &request.code)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let approved = blocking_storage(move || {
+        PairingStore::new(&db_path)
+            .approve_code(&request.platform, &request.code)
+            .map_err(storage_err)
+    })
+    .await?;
 
     match approved {
         Some(user) => Ok(Json(serde_json::json!({
@@ -3979,10 +4282,15 @@ async fn revoke_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RevokePairingRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let revoked = store
-        .revoke(&request.platform, &request.user_id)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let platform = request.platform.clone();
+    let user_id = request.user_id.clone();
+    let revoked = blocking_storage(move || {
+        PairingStore::new(&db_path)
+            .revoke(&platform, &user_id)
+            .map_err(storage_err)
+    })
+    .await?;
 
     if revoked {
         Ok(Json(serde_json::json!({
@@ -4005,10 +4313,14 @@ async fn clear_pending_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ClearPendingRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let cleared = store
-        .clear_pending(request.platform.as_deref())
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let platform = request.platform.clone();
+    let cleared = blocking_storage(move || {
+        PairingStore::new(&db_path)
+            .clear_pending(platform.as_deref())
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "cleared": cleared,

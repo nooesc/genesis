@@ -120,25 +120,29 @@ pub async fn webhook_handler(
 
     info!(parent: &span, "received home assistant webhook");
 
-    // Handle gateway slash commands before reaching the agent.
-    let store = genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
-    if let crate::commands::CommandResult::Reply(reply) =
-        crate::commands::handle_command(&request.message, &session_id, &store, &state.loaded.config)
+    // Handle gateway slash commands + auto-reset expired sessions.
     {
-        return Ok(Json(HomeAssistantResponse {
-            response: reply,
-            session_id,
-            turns_used: 0,
-            tool_calls_made: 0,
-        }));
-    }
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let msg = request.message.clone();
+        let sid = session_id.clone();
+        let config = state.loaded.config.clone();
+        let cmd_result = tokio::task::spawn_blocking(move || {
+            let store = genesis_storage::SessionStore::new(&db_path);
+            let cmd = crate::commands::handle_command(&msg, &sid, &store, &config);
+            crate::commands::check_session_expiry(&sid, &store, config.gateway.as_ref());
+            cmd
+        })
+        .await;
 
-    // Auto-reset expired sessions before processing.
-    crate::commands::check_session_expiry(
-        &session_id,
-        &store,
-        state.loaded.config.gateway.as_ref(),
-    );
+        if let Ok(crate::commands::CommandResult::Reply(reply)) = cmd_result {
+            return Ok(Json(HomeAssistantResponse {
+                response: reply,
+                session_id,
+                turns_used: 0,
+                tool_calls_made: 0,
+            }));
+        }
+    }
 
     let service = state.session_service();
 
@@ -167,15 +171,25 @@ pub async fn webhook_handler(
         "home assistant turn completed"
     );
 
-    // Append delivery mirror for cross-platform visibility.
-    let ha_chat_id = request.entity_id.as_deref().unwrap_or("default");
-    crate::mirror::append_delivery_mirror(
-        &state.loaded.config.storage.database_path,
-        "homeassistant",
-        ha_chat_id,
-        &outcome.result.response,
-        "homeassistant",
-    );
+    // Append delivery mirror for cross-platform visibility (fire-and-forget).
+    {
+        let db_path = state.loaded.config.storage.database_path.clone();
+        let ha_chat_id = request
+            .entity_id
+            .as_deref()
+            .unwrap_or("default")
+            .to_owned();
+        let response = outcome.result.response.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::mirror::append_delivery_mirror(
+                &db_path,
+                "homeassistant",
+                &ha_chat_id,
+                &response,
+                "homeassistant",
+            );
+        });
+    }
 
     Ok(Json(HomeAssistantResponse {
         response: outcome.result.response,
