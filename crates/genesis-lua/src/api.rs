@@ -55,17 +55,17 @@ impl PluginContext {
     }
 
     pub(crate) fn close_tool_registration(&self) {
-        *self
-            .load_active
-            .lock()
-            .expect("plugin load state mutex should not be poisoned") = false;
+        *self.load_active.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("lua plugin 'load_active' mutex was poisoned, recovering");
+            poisoned.into_inner()
+        }) = false;
     }
 
     fn load_active(&self) -> bool {
-        *self
-            .load_active
-            .lock()
-            .expect("plugin load state mutex should not be poisoned")
+        *self.load_active.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("lua plugin 'load_active' mutex was poisoned, recovering");
+            poisoned.into_inner()
+        })
     }
 
     pub(crate) fn for_execution(name: String, permissions: PluginPermissions) -> Self {
@@ -202,7 +202,10 @@ impl UserData for GenesisApi {
                 }
                 hooks
                     .lock()
-                    .expect("hook registry mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("lua plugin 'hooks' mutex was poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .register(event, callback, Some(plugin_context));
                 Ok(())
             })
@@ -221,7 +224,10 @@ impl UserData for GenesisApi {
                 }
                 tools
                     .lock()
-                    .expect("tool registry mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("lua plugin 'tools' mutex was poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .register(lua, &plugin_context.name, &plugin_context.permissions, spec)
                     .map_err(mlua::Error::external)?;
                 Ok(())
@@ -241,7 +247,10 @@ impl UserData for GenesisApi {
                 }
                 personalities
                     .lock()
-                    .expect("personality registry mutex should not be poisoned")
+                    .unwrap_or_else(|poisoned| {
+                        tracing::warn!("lua plugin 'personalities' mutex was poisoned, recovering");
+                        poisoned.into_inner()
+                    })
                     .register(&plugin_context.name, &plugin_context.permissions, spec)
                     .map_err(mlua::Error::external)?;
                 Ok(())
@@ -320,7 +329,10 @@ fn make_memory_bridge(
             let kind = resolve_memory_kind(metadata)?;
             let session_id = session
                 .lock()
-                .expect("session state mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("lua plugin 'session' mutex was poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .id
                 .clone();
             let store = MemoryStore::new(&database_path);
@@ -360,7 +372,10 @@ fn make_logger(
     prefix: Option<&'static str>,
 ) -> mlua::Result<mlua::Function> {
     lua.create_function(move |_, message: String| {
-        let mut stored = logs.lock().expect("log sink mutex should not be poisoned");
+        let mut stored = logs.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("lua plugin 'logs' mutex was poisoned, recovering");
+            poisoned.into_inner()
+        });
         stored.push(match prefix {
             Some(prefix) => format!("{prefix}{message}"),
             None => message,
@@ -382,7 +397,10 @@ fn make_tool_bridge(
         lua.create_function(move |lua, args: Option<Table>| {
             let plugin_context = active_plugin
                 .lock()
-                .expect("active plugin mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("lua plugin 'active_plugin' mutex was poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .last()
                 .cloned()
                 .ok_or_else(|| {
@@ -405,7 +423,10 @@ fn make_tool_bridge(
 
             let executor = host_tools
                 .lock()
-                .expect("host tools mutex should not be poisoned")
+                .unwrap_or_else(|poisoned| {
+                    tracing::warn!("lua plugin 'host_tools' mutex was poisoned, recovering");
+                    poisoned.into_inner()
+                })
                 .clone()
                 .ok_or_else(|| mlua::Error::external(LuaRuntimeError::HostToolBridgeUnavailable))?;
             let arguments = table_to_string_arguments(lua, args)?;
