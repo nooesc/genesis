@@ -233,6 +233,7 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
             recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             keyword_enricher: None,
+            auto_consolidation_threshold: 0,
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
@@ -1095,6 +1096,11 @@ impl ToolRuntime {
     /// Set the keyword enricher for LLM-powered keyword extraction.
     pub fn set_keyword_enricher(&mut self, enricher: Arc<dyn genesis_tools::KeywordEnricher>) {
         self.context.keyword_enricher = Some(enricher);
+    }
+
+    /// Set the auto-consolidation threshold for background memory consolidation.
+    pub fn set_auto_consolidation_threshold(&mut self, threshold: u64) {
+        self.context.auto_consolidation_threshold = threshold;
     }
 
     /// Clear the recalled memory IDs at the start of each new user turn.

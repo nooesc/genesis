@@ -318,6 +318,7 @@ mod tests {
             path_validator: None,
             recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             keyword_enricher: None,
+            auto_consolidation_threshold: 0,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

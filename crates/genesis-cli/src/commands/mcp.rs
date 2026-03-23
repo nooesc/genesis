@@ -106,6 +106,7 @@ pub(crate) async fn run_mcp(
                 )),
                 recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 keyword_enricher: None,
+                auto_consolidation_threshold: loaded.config.memory.auto_consolidation_threshold,
                 approval_mode: genesis_config::ApprovalMode::Auto,
             };
 

@@ -1080,6 +1080,22 @@ impl MemoryStore {
         collect_rows(rows, self.db.path())
     }
 
+    /// Count the number of unconsolidated memories (not yet part of any summary).
+    pub fn count_unconsolidated(&self) -> Result<u64, StorageError> {
+        let connection = self.db.conn()?;
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE consolidated = 0 AND parent_summary_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(count as u64)
+    }
+
     /// Find clusters of unconsolidated memories that are semantically similar.
     pub fn find_consolidation_clusters(
         &self,
@@ -2630,5 +2646,46 @@ mod memory_store_tests {
 
         let linked = store.auto_link_entity("mem1", &[], 5).unwrap();
         assert_eq!(linked, 0);
+    }
+
+    #[test]
+    fn count_unconsolidated_returns_correct_count() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).unwrap();
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // Initially zero
+        assert_eq!(store.count_unconsolidated().unwrap(), 0);
+
+        // Add 3 memories
+        for i in 0..3 {
+            store
+                .create_note(NewMemoryNote {
+                    id: format!("mem{i}"),
+                    session_id: Some("s1".to_owned()),
+                    kind: "fact".to_owned(),
+                    content: format!("content {i}"),
+                    keywords: vec![],
+                    tags: vec![],
+                    linked_ids: vec![],
+                    importance: 0.5,
+                })
+                .unwrap();
+        }
+        assert_eq!(store.count_unconsolidated().unwrap(), 3);
+
+        // Mark one as consolidated
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE memories SET consolidated = 1 WHERE id = 'mem0'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(store.count_unconsolidated().unwrap(), 2);
     }
 }

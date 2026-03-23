@@ -189,6 +189,10 @@ pub struct ToolContext {
     /// When set, memory tools use this instead of simple tokenization.
     #[serde(skip)]
     pub keyword_enricher: Option<Arc<dyn KeywordEnricher>>,
+    /// Auto-consolidation threshold: trigger consolidation after this many
+    /// unconsolidated memories accumulate. 0 = disabled.
+    #[serde(default)]
+    pub auto_consolidation_threshold: u64,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -229,6 +233,10 @@ impl std::fmt::Debug for ToolContext {
                 "keyword_enricher",
                 &self.keyword_enricher.as_ref().map(|_| ".."),
             )
+            .field(
+                "auto_consolidation_threshold",
+                &self.auto_consolidation_threshold,
+            )
             .field("approval_mode", &self.approval_mode)
             .finish()
     }
@@ -242,6 +250,7 @@ impl PartialEq for ToolContext {
             && self.allow_destructive_tools == other.allow_destructive_tools
             && self.terminal_backend == other.terminal_backend
             && self.default_working_dir == other.default_working_dir
+            && self.auto_consolidation_threshold == other.auto_consolidation_threshold
             && self.approval_mode == other.approval_mode
         // sandbox_manager intentionally excluded from equality comparison
         // embedding_service intentionally excluded from equality comparison
@@ -1954,6 +1963,7 @@ pub mod test_utils {
             path_validator: None,
             recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             keyword_enricher: None,
+            auto_consolidation_threshold: 0,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

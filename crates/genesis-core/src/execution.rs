@@ -838,6 +838,10 @@ impl<'a> SessionExecutionService<'a> {
             }
         }
 
+        // Wire auto-consolidation threshold from memory config
+        tool_runtime
+            .set_auto_consolidation_threshold(self.loaded.config.memory.auto_consolidation_threshold);
+
         // Start filesystem watcher for tool result cache.
         // Uses the working directory (or worktree dir) as the watch root.
         {
