@@ -454,6 +454,7 @@ mod tests {
             rate_limit_rpm: None,
             webhooks: Vec::new(),
             cors_origins: Vec::new(),
+            stream_timeout_secs: None,
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
     }
@@ -467,6 +468,7 @@ mod tests {
             rate_limit_rpm: None,
             webhooks: Vec::new(),
             cors_origins: Vec::new(),
+            stream_timeout_secs: None,
         };
         assert!(!check_session_expiry("nonexistent", &store, Some(&config)));
     }
@@ -488,6 +490,7 @@ mod tests {
             rate_limit_rpm: None,
             webhooks: Vec::new(),
             cors_origins: Vec::new(),
+            stream_timeout_secs: None,
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         // Session should be deleted
@@ -506,6 +509,7 @@ mod tests {
             rate_limit_rpm: None,
             webhooks: Vec::new(),
             cors_origins: Vec::new(),
+            stream_timeout_secs: None,
         };
         assert!(!check_session_expiry("s1", &store, Some(&config)));
         // Session should still exist
@@ -530,6 +534,7 @@ mod tests {
             rate_limit_rpm: None,
             webhooks: Vec::new(),
             cors_origins: Vec::new(),
+            stream_timeout_secs: None,
         };
         assert!(check_session_expiry("s1", &store, Some(&config)));
         assert!(store.get_session("s1").unwrap().is_none());

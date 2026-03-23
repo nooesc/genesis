@@ -731,6 +731,11 @@ pub struct GatewayConfig {
     /// for production).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cors_origins: Vec<String>,
+    /// Maximum duration in seconds for a streaming SSE request before it is
+    /// forcefully terminated.  Prevents runaway agent tasks from holding
+    /// resources indefinitely.  Default: 300 (5 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_timeout_secs: Option<u64>,
 }
 
 /// Configuration for a single webhook endpoint.
@@ -1535,6 +1540,15 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                 .get_or_insert_with(GatewayConfig::default)
                 .rate_limit_rpm
         ),
+        "gateway.stream_timeout_secs" => parse_and_set!(
+            value,
+            "gateway.stream_timeout_secs",
+            u64,
+            file_config
+                .gateway
+                .get_or_insert_with(GatewayConfig::default)
+                .stream_timeout_secs
+        ),
         "tui.theme" => {
             file_config.tui.get_or_insert_with(TuiConfig::default).theme = value.to_owned();
         }
@@ -1549,7 +1563,7 @@ pub fn set_value_in_file(config_path: &Path, key: &str, value: &str) -> Result<(
                      runtime.thinking_budget, runtime.max_context_tokens, \
                      runtime.max_iterations, runtime.reasoning_effort, \
                      gateway.idle_timeout_minutes, gateway.daily_reset_hour, \
-                     gateway.rate_limit_rpm, tui.theme"
+                     gateway.rate_limit_rpm, gateway.stream_timeout_secs, tui.theme"
                 ),
             });
         }
