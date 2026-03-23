@@ -8,6 +8,7 @@ pub mod export;
 pub mod find_tools;
 pub mod fs;
 pub mod git;
+pub(crate) mod path_security;
 pub mod glob;
 pub mod homeassistant;
 pub mod image_gen;

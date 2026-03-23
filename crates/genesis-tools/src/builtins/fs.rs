@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 
+use crate::builtins::path_security::validate_path;
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
 const MAX_READ_BYTES: usize = 128 * 1024;
@@ -9,7 +9,7 @@ const MAX_READ_BYTES: usize = 128 * 1024;
 pub struct ReadFileTool;
 
 impl ToolHandler for ReadFileTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let path = call
             .arguments
             .get("path")
@@ -18,10 +18,13 @@ impl ToolHandler for ReadFileTool {
                 argument: "path",
             })?;
 
-        let content = fs::read_to_string(path).map_err(|e| ToolError::ExecutionFailed {
-            tool: call.name.clone(),
-            reason: format!("failed to read `{path}`: {e}"),
-        })?;
+        let canonical = validate_path(path, &call.name, context)?;
+
+        let content =
+            fs::read_to_string(&canonical).map_err(|e| ToolError::ExecutionFailed {
+                tool: call.name.clone(),
+                reason: format!("failed to read `{path}`: {e}"),
+            })?;
 
         let content = crate::truncate_at(&content, MAX_READ_BYTES, "\n... (file truncated)");
 
@@ -38,7 +41,7 @@ impl ToolHandler for ReadFileTool {
 pub struct WriteFileTool;
 
 impl ToolHandler for WriteFileTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let path = call
             .arguments
             .get("path")
@@ -55,8 +58,12 @@ impl ToolHandler for WriteFileTool {
                 argument: "content",
             })?;
 
+        // Validate path *before* creating directories — we must not create
+        // directories in locations we shouldn't be writing to.
+        let canonical = validate_path(path, &call.name, context)?;
+
         // Create parent directories if needed.
-        if let Some(parent) = Path::new(path).parent() {
+        if let Some(parent) = canonical.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),
@@ -65,7 +72,7 @@ impl ToolHandler for WriteFileTool {
             }
         }
 
-        fs::write(path, content).map_err(|e| ToolError::ExecutionFailed {
+        fs::write(&canonical, content).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: format!("failed to write `{path}`: {e}"),
         })?;
@@ -84,7 +91,7 @@ impl ToolHandler for WriteFileTool {
 pub struct ListDirTool;
 
 impl ToolHandler for ListDirTool {
-    fn run(&self, call: &ToolCall, _context: &ToolContext) -> Result<ToolOutput, ToolError> {
+    fn run(&self, call: &ToolCall, context: &ToolContext) -> Result<ToolOutput, ToolError> {
         let path = call
             .arguments
             .get("path")
@@ -93,7 +100,9 @@ impl ToolHandler for ListDirTool {
                 argument: "path",
             })?;
 
-        let entries = fs::read_dir(path).map_err(|e| ToolError::ExecutionFailed {
+        let canonical = validate_path(path, &call.name, context)?;
+
+        let entries = fs::read_dir(&canonical).map_err(|e| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: format!("failed to list `{path}`: {e}"),
         })?;
@@ -143,6 +152,13 @@ mod tests {
 
     fn ctx() -> ToolContext {
         crate::test_utils::test_ctx_destructive()
+    }
+
+    fn ctx_with_working_dir(dir: &str) -> ToolContext {
+        ToolContext {
+            default_working_dir: Some(dir.to_owned()),
+            ..ctx()
+        }
     }
 
     #[test]
@@ -245,5 +261,118 @@ mod tests {
 
         let err = tool.run(&call, &ctx()).unwrap_err();
         assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+    }
+
+    // --- Path validation integration tests ---
+
+    #[test]
+    fn read_file_blocks_sensitive_path() {
+        let tool = ReadFileTool;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), format!("{home}/.ssh/id_rsa"))]),
+        };
+
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sensitive path"), "error: {msg}");
+    }
+
+    #[test]
+    fn write_file_blocks_sensitive_path() {
+        let tool = WriteFileTool;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), format!("{home}/.ssh/authorized_keys")),
+                ("content".to_owned(), "evil key".to_owned()),
+            ]),
+        };
+
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sensitive path"), "error: {msg}");
+    }
+
+    #[test]
+    fn list_dir_blocks_sensitive_path() {
+        let tool = ListDirTool;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
+        let call = ToolCall {
+            name: "list_dir".to_owned(),
+            arguments: BTreeMap::from([("path".to_owned(), format!("{home}/.ssh"))]),
+        };
+
+        let err = tool.run(&call, &ctx()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sensitive path"), "error: {msg}");
+    }
+
+    #[test]
+    fn read_file_blocks_path_outside_working_dir() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("secret.txt");
+        fs::write(&file, "secret").unwrap();
+
+        let ctx = ctx_with_working_dir(&dir.path().to_string_lossy());
+        let tool = ReadFileTool;
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::from([(
+                "path".to_owned(),
+                file.to_string_lossy().into_owned(),
+            )]),
+        };
+
+        let err = tool.run(&call, &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("outside the allowed working directory"), "error: {msg}");
+    }
+
+    #[test]
+    fn write_file_allowed_in_working_dir() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("ok.txt");
+
+        let ctx = ctx_with_working_dir(&dir.path().to_string_lossy());
+        let tool = WriteFileTool;
+        let call = ToolCall {
+            name: "write_file".to_owned(),
+            arguments: BTreeMap::from([
+                ("path".to_owned(), file_path.to_string_lossy().into_owned()),
+                ("content".to_owned(), "allowed".to_owned()),
+            ]),
+        };
+
+        let output = tool.run(&call, &ctx).expect("should succeed");
+        assert!(output.content.contains("7 bytes"));
+    }
+
+    #[test]
+    fn read_file_blocks_traversal_escape() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("project");
+        fs::create_dir(&sub).unwrap();
+
+        let ctx = ctx_with_working_dir(&sub.to_string_lossy());
+        let tool = ReadFileTool;
+        // Attempt path traversal via ..
+        let call = ToolCall {
+            name: "read_file".to_owned(),
+            arguments: BTreeMap::from([(
+                "path".to_owned(),
+                format!("{}/../../../etc/hosts", sub.display()),
+            )]),
+        };
+
+        let err = tool.run(&call, &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside the allowed working directory"),
+            "error: {msg}"
+        );
     }
 }
