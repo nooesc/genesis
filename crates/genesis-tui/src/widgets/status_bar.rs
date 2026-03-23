@@ -29,7 +29,7 @@ use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 // ── Palette (theme-aware) ────────────────────────────────────────────────────
 
 /// Snapshot of theme colors used by the status bar. Updated when the theme
-/// changes via `set_theme_colors`.
+/// changes via `set_theme`.
 #[derive(Clone)]
 struct BarPalette {
     bar_bg: Color,
@@ -57,16 +57,7 @@ impl BarPalette {
     }
 
     fn eve() -> Self {
-        Self {
-            bar_bg: Color::Rgb(30, 28, 36),
-            bar_bg_active: Color::Rgb(38, 34, 48),
-            dim: Color::Rgb(98, 98, 98),
-            text: Color::Rgb(168, 168, 168),
-            accent: Color::Rgb(180, 167, 214),
-            success: Color::Rgb(135, 175, 95),
-            sep: Color::Rgb(58, 55, 66),
-            muted: Color::Rgb(138, 138, 138),
-        }
+        Self::from_theme(&crate::theme::EveTheme)
     }
 }
 

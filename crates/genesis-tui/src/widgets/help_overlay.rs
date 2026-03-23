@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn snapshot_help_overlay() {
         let overlay = HelpOverlay::new();
-        let area = Rect::new(0, 0, 60, 30);
+        let area = Rect::new(0, 0, 60, 55);
         let mut buf = Buffer::empty(area);
         overlay.render(area, &mut buf);
         insta::assert_snapshot!(buffer_to_string(&buf));
