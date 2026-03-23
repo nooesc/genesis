@@ -20,7 +20,7 @@ use crate::render::markdown::markdown_to_lines;
 const PREFIX: &str = "eve> ";
 
 /// A single agent (Eve) response cell.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AgentCell {
     /// The raw response text (private — use `text()` accessor).
     text: String,
@@ -31,6 +31,21 @@ pub struct AgentCell {
     /// the width hasn't changed.  Uses interior mutability so `height()` can
     /// stay `&self`.
     cached_height: Cell<Option<(u16, u16)>>,
+}
+
+impl Clone for AgentCell {
+    fn clone(&self) -> Self {
+        let cached_lines = OnceCell::new();
+        // Preserve the cached lines from the source to avoid re-parsing markdown.
+        if let Some(lines) = self.cached_lines.get() {
+            let _ = cached_lines.set(lines.clone());
+        }
+        Self {
+            text: self.text.clone(),
+            cached_lines,
+            cached_height: self.cached_height.clone(),
+        }
+    }
 }
 
 impl AgentCell {

@@ -400,7 +400,7 @@ impl ChatWidget {
         }
 
         let mut remaining_rows = area.height;
-        let mut bottom_y = area.y + area.height;
+        let bottom_y = area.y + area.height;
 
         // ── Active cell (if any) ───────────────────────────────────────
         // Only show the active streaming cell when not scrolled up.
@@ -456,7 +456,6 @@ impl ChatWidget {
                     .scroll((skip, 0));
                 paragraph.render(cell_area, buf);
 
-                bottom_y -= rows_to_use;
                 remaining_rows -= rows_to_use;
             }
         }
@@ -652,18 +651,37 @@ impl ChatWidget {
             0
         };
 
+        // ── Determine hint rows ────────────────────────────────────────
+        // Reserve rows for overflow hints so they don't overwrite content.
+        let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
+        let show_top_hint = skipped_message_count > 0;
+        let show_bottom_hint = self.scroll_locked && below_count > 0;
+
+        // Adjust content area to leave room for hints.
+        let content_y = area.y + if show_top_hint { 1 } else { 0 };
+        let content_height = area
+            .height
+            .saturating_sub(if show_top_hint { 1 } else { 0 })
+            .saturating_sub(if show_bottom_hint { 1 } else { 0 });
+
         // Render from oldest to newest (reverse the reversed list).
         entries.reverse();
-        let mut row_cursor = bottom_y.saturating_sub(used);
+        let clamped_used = used.min(content_height);
+        let mut row_cursor = content_y + content_height - clamped_used;
 
         let sep_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
 
         for entry in &entries {
+            if row_cursor >= content_y + content_height {
+                break;
+            }
+            let avail = (content_y + content_height).saturating_sub(row_cursor);
+            let h = entry.height.min(avail);
             let cell_area = Rect {
                 x: area.x,
                 y: row_cursor,
                 width: area.width,
-                height: entry.height,
+                height: h,
             };
             match &entry.visual {
                 VisualEntry::Cell(cell) => cell.render(cell_area, buf),
@@ -674,7 +692,7 @@ impl ChatWidget {
             }
             row_cursor += entry.height;
 
-            if entry.separator_after {
+            if entry.separator_after && row_cursor < content_y + content_height {
                 render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
                 row_cursor += 1;
             }
@@ -682,28 +700,12 @@ impl ChatWidget {
 
         // Render a separator between the last committed cell and the
         // active streaming cell, if needed.
-        if active_sep {
+        if active_sep && row_cursor < content_y + content_height {
             render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
         }
 
-        // ── Overflow indicator ────────────────────────────────────────
-        let dim_style = Style::default().fg(crate::history::rgb(genesis_ui::colors::UI_DIM));
-
-        // Show scrolled-up indicator at the bottom when content is below.
-        if self.scroll_locked && below_count > 0 {
-            let hint = " \u{2193} scrolled up \u{00b7} PgDn/End to return".to_string();
-            let hint_line = Line::from(Span::styled(hint, dim_style));
-            let hint_area = Rect {
-                x: area.x,
-                y: area.y + area.height - 1,
-                width: area.width,
-                height: 1,
-            };
-            Paragraph::new(hint_line).render(hint_area, buf);
-        }
-
-        // Show overflow indicator at the top when messages are clipped above.
-        if skipped_message_count > 0 {
+        // ── Overflow indicators ───────────────────────────────────────
+        if show_top_hint {
             let hint = if self.scroll_locked {
                 format!(
                     " \u{2191} {} more \u{00b7} PgUp to scroll",
@@ -719,6 +721,17 @@ impl ChatWidget {
             let hint_area = Rect {
                 x: area.x,
                 y: area.y,
+                width: area.width,
+                height: 1,
+            };
+            Paragraph::new(hint_line).render(hint_area, buf);
+        }
+        if show_bottom_hint {
+            let hint = " \u{2193} scrolled up \u{00b7} PgDn/End to return".to_string();
+            let hint_line = Line::from(Span::styled(hint, dim_style));
+            let hint_area = Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
                 width: area.width,
                 height: 1,
             };
