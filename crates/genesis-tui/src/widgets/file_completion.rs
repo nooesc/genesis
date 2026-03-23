@@ -3,6 +3,9 @@
 //! Shows a floating popup above the input with fuzzy-filtered file paths
 //! from the current working directory. Tab/Enter inserts the selected path.
 
+use std::path::PathBuf;
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -29,6 +32,9 @@ pub enum FileCompletionAction {
     Dismiss,
 }
 
+/// How long a cached file scan remains fresh before rescanning.
+const SCAN_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Floating file completion popup.
 pub struct FileCompletion {
     /// Characters typed after `@` (the search query).
@@ -41,6 +47,10 @@ pub struct FileCompletion {
     selected: usize,
     /// Whether the popup is visible.
     visible: bool,
+    /// The directory used for the last file scan (for cache invalidation).
+    last_scan_dir: Option<PathBuf>,
+    /// When the last file scan completed (for TTL-based cache expiry).
+    last_scan_time: Option<Instant>,
 }
 
 impl FileCompletion {
@@ -51,14 +61,35 @@ impl FileCompletion {
             filtered: Vec::new(),
             selected: 0,
             visible: false,
+            last_scan_dir: None,
+            last_scan_time: None,
         }
     }
 
-    /// Show the popup, scanning the cwd for files.
+    /// Show the popup, scanning the cwd for files if the cache is stale.
+    ///
+    /// The file scan is skipped when the working directory has not changed and
+    /// the previous scan is younger than [`SCAN_CACHE_TTL`]. This avoids
+    /// blocking the async runtime with repeated `read_dir` syscalls each time
+    /// the popup is opened.
     pub fn show(&mut self) {
         self.visible = true;
         self.query.clear();
-        self.scan_files();
+
+        let cwd = std::env::current_dir().ok();
+        let cache_fresh = match (&self.last_scan_dir, &self.last_scan_time, &cwd) {
+            (Some(prev_dir), Some(prev_time), Some(cur_dir)) => {
+                prev_dir == cur_dir && prev_time.elapsed() < SCAN_CACHE_TTL
+            }
+            _ => false,
+        };
+
+        if !cache_fresh {
+            self.scan_files();
+            self.last_scan_dir = cwd;
+            self.last_scan_time = Some(Instant::now());
+        }
+
         self.refilter();
     }
 

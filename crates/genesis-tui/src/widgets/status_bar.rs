@@ -119,9 +119,11 @@ pub struct StatusBarWidget {
 impl StatusBarWidget {
     /// Create a new status bar.
     ///
-    /// Git branch detection is deferred to the first `render()` call so the
-    /// constructor never blocks the async runtime with a synchronous subprocess.
+    /// Git branch detection runs eagerly here during initialization, before the
+    /// event loop starts. This avoids blocking the async Tokio runtime with a
+    /// synchronous subprocess during `render()`.
     pub fn new(model: String) -> Self {
+        let right_info = Some(Self::detect_right_info());
         Self {
             model,
             context_percent: 0,
@@ -130,7 +132,7 @@ impl StatusBarWidget {
             sprite_frame: 0,
             last_tick: Instant::now(),
             last_sprite_tick: Instant::now(),
-            right_info: None,
+            right_info,
             tokens_in: 0,
             tokens_out: 0,
             turn_elapsed: None,
@@ -143,10 +145,11 @@ impl StatusBarWidget {
         }
     }
 
-    /// Ensure `right_info` is populated, running the git subprocess if needed.
+    /// Ensure `right_info` is populated.
     ///
-    /// This is intentionally synchronous but called at most once per session,
-    /// from `render()`, which runs in the terminal draw callback.
+    /// Since `right_info` is now eagerly detected in `new()`, this is always a
+    /// no-op. Retained as a safety net so `render()` never panics if the field
+    /// is `None` due to future refactoring.
     fn ensure_right_info(&mut self) {
         if self.right_info.is_none() {
             self.right_info = Some(Self::detect_right_info());
