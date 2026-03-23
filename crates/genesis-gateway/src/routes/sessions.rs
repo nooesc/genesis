@@ -118,72 +118,93 @@ pub(crate) async fn list_sessions_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let search = params.search.clone();
 
-    let (sessions, total) = if let Some(query) = &params.search {
-        store
-            .search_sessions_paginated(query, limit, offset)
-            .map_err(storage_err)?
-    } else {
-        store
-            .list_recent_sessions_paginated(limit, offset)
-            .map_err(storage_err)?
-    };
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
 
-    let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(SessionListResponse {
-            sessions,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+        let (sessions, total) = if let Some(query) = &search {
+            store
+                .search_sessions_paginated(query, limit, offset)
+                .map_err(storage_err)?
+        } else {
+            store
+                .list_recent_sessions_paginated(limit, offset)
+                .map_err(storage_err)?
+        };
+
+        let has_more = (offset + sessions.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(SessionListResponse {
+                sessions,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn get_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let session = store.get_session(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    match session {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            ApiError::internal(format!("serialization error: {e}"))
-        })?)),
-        None => Err(ApiError::not_found(format!("session '{id}' not found"))),
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let session = store.get_session(&id).map_err(storage_err)?;
+
+        match session {
+            Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization error: {e}"))
+            })?)),
+            None => Err(ApiError::not_found(format!("session '{id}' not found"))),
+        }
+    })
+    .await
 }
 
 pub(crate) async fn delete_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete_session(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if deleted {
-        Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
-    } else {
-        Err(ApiError::not_found(format!("session '{id}' not found")))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let deleted = store.delete_session(&id).map_err(storage_err)?;
+
+        if deleted {
+            Ok(Json(serde_json::json!({"deleted": true, "session_id": id})))
+        } else {
+            Err(ApiError::not_found(format!("session '{id}' not found")))
+        }
+    })
+    .await
 }
 
 pub(crate) async fn session_messages_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let messages = store.load_messages(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::json!({
-        "session_id": id,
-        "messages": messages,
-        "count": messages.len(),
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let messages = store.load_messages(&id).map_err(storage_err)?;
+
+        Ok(Json(serde_json::json!({
+            "session_id": id,
+            "messages": messages,
+            "count": messages.len(),
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn fork_session_handler(
@@ -191,7 +212,7 @@ pub(crate) async fn fork_session_handler(
     Path(id): Path<String>,
     Json(request): Json<ForkRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let new_id = request.new_session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -200,12 +221,20 @@ pub(crate) async fn fork_session_handler(
         format!("fork-{id}-{ts}")
     });
 
-    store.fork_session(&id, &new_id).map_err(storage_err)?;
+    let new_id_clone = new_id.clone();
+    let id_clone = id.clone();
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        store
+            .fork_session(&id_clone, &new_id_clone)
+            .map_err(storage_err)?;
 
-    Ok(Json(serde_json::json!({
-        "source_session_id": id,
-        "new_session_id": new_id,
-    })))
+        Ok(Json(serde_json::json!({
+            "source_session_id": id_clone,
+            "new_session_id": new_id_clone,
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn update_session_title_handler(
@@ -213,14 +242,19 @@ pub(crate) async fn update_session_title_handler(
     Path(id): Path<String>,
     Json(request): Json<UpdateTitleRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::json!({
-        "session_id": id,
-        "title": request.title,
-        "updated": updated,
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let updated = store.set_title(&id, &request.title).map_err(storage_err)?;
+
+        Ok(Json(serde_json::json!({
+            "session_id": id,
+            "title": request.title,
+            "updated": updated,
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn export_session_handler(
@@ -228,52 +262,58 @@ pub(crate) async fn export_session_handler(
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-
-    let session_title = match store.get_session(&id) {
-        Ok(s) => s.and_then(|s| s.title),
-        Err(e) => {
-            warn!(error = %e, session_id = %id, "failed to load session title for export");
-            None
-        }
-    };
-
-    let stored = store.load_messages(&id).map_err(storage_err)?;
-
-    if stored.is_empty() {
-        return Err(ApiError::not_found(format!(
-            "no messages found for session '{id}'"
-        )));
-    }
-
-    let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
-        .into_iter()
-        .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
-        .collect();
-
+    let db_path = state.loaded.config.storage.database_path.clone();
     let format = params.format.unwrap_or_else(|| "markdown".to_owned());
 
-    use genesis_tools::builtins::export::{
-        export_chatml, export_json, export_jsonl, export_markdown,
-    };
+    let (content, content_type) = spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
 
-    let (content, content_type) = match format.as_str() {
-        "json" => (
-            export_json(&id, session_title.as_deref(), &messages),
-            "application/json",
-        ),
-        "markdown" | "md" => (
-            export_markdown(&id, session_title.as_deref(), &messages),
-            "text/markdown; charset=utf-8",
-        ),
-        "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
-        "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
-        _ => {
-            return Err(ApiError::bad_request(format!(
-                "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
-            )))
+        let session_title = match store.get_session(&id) {
+            Ok(s) => s.and_then(|s| s.title),
+            Err(e) => {
+                warn!(error = %e, session_id = %id, "failed to load session title for export");
+                None
+            }
+        };
+
+        let stored = store.load_messages(&id).map_err(storage_err)?;
+
+        if stored.is_empty() {
+            return Err(ApiError::not_found(format!(
+                "no messages found for session '{id}'"
+            )));
         }
-    };
+
+        let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
+            .into_iter()
+            .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+            .collect();
+
+        use genesis_tools::builtins::export::{
+            export_chatml, export_json, export_jsonl, export_markdown,
+        };
+
+        let result = match format.as_str() {
+            "json" => (
+                export_json(&id, session_title.as_deref(), &messages),
+                "application/json",
+            ),
+            "markdown" | "md" => (
+                export_markdown(&id, session_title.as_deref(), &messages),
+                "text/markdown; charset=utf-8",
+            ),
+            "chatml" => (export_chatml(&messages), "text/plain; charset=utf-8"),
+            "jsonl" | "finetune" => (export_jsonl(&messages), "application/jsonl; charset=utf-8"),
+            _ => {
+                return Err(ApiError::bad_request(format!(
+                    "unsupported format '{format}'; use 'markdown', 'json', 'chatml', or 'jsonl'"
+                )))
+            }
+        };
+
+        Ok(result)
+    })
+    .await?;
 
     Response::builder()
         .status(StatusCode::OK)
@@ -286,24 +326,35 @@ pub(crate) async fn purge_sessions_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<PurgeQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let purged = store
-        .purge_older_than(params.older_than_days)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let older_than_days = params.older_than_days;
 
-    Ok(Json(serde_json::json!({
-        "purged": purged,
-        "older_than_days": params.older_than_days,
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let purged = store
+            .purge_older_than(older_than_days)
+            .map_err(storage_err)?;
+
+        Ok(Json(serde_json::json!({
+            "purged": purged,
+            "older_than_days": older_than_days,
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn get_session_tags_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let tags = store.get_tags(&id).map_err(storage_err)?;
-    Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let tags = store.get_tags(&id).map_err(storage_err)?;
+        Ok(Json(serde_json::json!({ "session_id": id, "tags": tags })))
+    })
+    .await
 }
 
 pub(crate) async fn set_session_tags_handler(
@@ -311,54 +362,74 @@ pub(crate) async fn set_session_tags_handler(
     Path(id): Path<String>,
     Json(request): Json<SetTagsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
-    store.set_tags(&id, &tag_refs).map_err(storage_err)?;
-    Ok(Json(
-        serde_json::json!({ "session_id": id, "tags": request.tags }),
-    ))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let tag_refs: Vec<&str> = request.tags.iter().map(|s| s.as_str()).collect();
+        store.set_tags(&id, &tag_refs).map_err(storage_err)?;
+        Ok(Json(
+            serde_json::json!({ "session_id": id, "tags": request.tags }),
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn add_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let added = store.add_tag(&id, &tag).map_err(storage_err)?;
-    let tags = store.get_tags(&id).map_err(storage_err)?;
-    Ok(Json(
-        serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags }),
-    ))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let added = store.add_tag(&id, &tag).map_err(storage_err)?;
+        let tags = store.get_tags(&id).map_err(storage_err)?;
+        Ok(Json(
+            serde_json::json!({ "session_id": id, "tag": tag, "added": added, "tags": tags }),
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn remove_session_tag_handler(
     State(state): State<Arc<AppState>>,
     Path((id, tag)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
-    let tags = store.get_tags(&id).map_err(storage_err)?;
-    Ok(Json(
-        serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags }),
-    ))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let removed = store.remove_tag(&id, &tag).map_err(storage_err)?;
+        let tags = store.get_tags(&id).map_err(storage_err)?;
+        Ok(Json(
+            serde_json::json!({ "session_id": id, "tag": tag, "removed": removed, "tags": tags }),
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn sessions_by_tag_handler(
     State(state): State<Arc<AppState>>,
     Path(tag): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
-    Ok(Json(
-        serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() }),
-    ))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let sessions = store.sessions_by_tag(&tag).map_err(storage_err)?;
+        Ok(Json(
+            serde_json::json!({ "tag": tag, "sessions": sessions, "count": sessions.len() }),
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn import_session_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ImportSessionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
 
     let session_id = request.session_id.unwrap_or_else(|| {
         let ts = std::time::SystemTime::now()
@@ -374,15 +445,21 @@ pub(crate) async fn import_session_handler(
         .into_iter()
         .map(|m| (m.role, m.content))
         .collect();
+    let title = request.title;
 
-    store
-        .import_session(&session_id, request.title.as_deref(), messages)
-        .map_err(|e| ApiError::internal(format!("import error: {e}")))?;
+    let sid = session_id.clone();
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        store
+            .import_session(&sid, title.as_deref(), messages)
+            .map_err(|e| ApiError::internal(format!("import error: {e}")))?;
 
-    Ok(Json(serde_json::json!({
-        "session_id": session_id,
-        "messages_imported": message_count,
-    })))
+        Ok(Json(serde_json::json!({
+            "session_id": sid,
+            "messages_imported": message_count,
+        })))
+    })
+    .await
 }
 
 /// Export multiple sessions as JSONL for fine-tuning or archival.
@@ -392,51 +469,58 @@ pub(crate) async fn bulk_export_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<BulkExportQuery>,
 ) -> Result<Response, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let format = params.format;
     let limit = params.limit.unwrap_or(1000);
-    let sessions = store.list_recent_sessions(limit).map_err(storage_err)?;
 
-    use genesis_tools::builtins::export::{export_json, export_jsonl};
+    let (output, content_type) = spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let sessions = store.list_recent_sessions(limit).map_err(storage_err)?;
 
-    let mut output = String::new();
+        use genesis_tools::builtins::export::{export_json, export_jsonl};
 
-    for session in &sessions {
-        let stored = match store.load_messages(&session.id) {
-            Ok(msgs) if !msgs.is_empty() => msgs,
-            _ => continue,
-        };
+        let mut output = String::new();
 
-        let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
-            .into_iter()
-            .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
-            .collect();
+        for session in &sessions {
+            let stored = match store.load_messages(&session.id) {
+                Ok(msgs) if !msgs.is_empty() => msgs,
+                _ => continue,
+            };
 
-        match params.format.as_str() {
-            "jsonl" | "finetune" => {
-                let line = export_jsonl(&messages);
-                if !line.is_empty() {
-                    output.push_str(&line);
+            let messages: Vec<(String, Option<String>, Option<String>, String)> = stored
+                .into_iter()
+                .map(|m| (m.role, m.content, m.tool_calls_json, m.created_at))
+                .collect();
+
+            match format.as_str() {
+                "jsonl" | "finetune" => {
+                    let line = export_jsonl(&messages);
+                    if !line.is_empty() {
+                        output.push_str(&line);
+                    }
+                }
+                "json" => {
+                    let json = export_json(&session.id, session.title.as_deref(), &messages);
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+                _ => {
+                    return Err(ApiError::bad_request(format!(
+                        "unsupported bulk format '{}'; use 'jsonl' or 'json'",
+                        format
+                    )))
                 }
             }
-            "json" => {
-                let json = export_json(&session.id, session.title.as_deref(), &messages);
-                output.push_str(&json);
-                output.push('\n');
-            }
-            _ => {
-                return Err(ApiError::bad_request(format!(
-                    "unsupported bulk format '{}'; use 'jsonl' or 'json'",
-                    params.format
-                )))
-            }
         }
-    }
 
-    let content_type = match params.format.as_str() {
-        "json" => "application/json; charset=utf-8",
-        _ => "application/jsonl; charset=utf-8",
-    };
+        let content_type = match format.as_str() {
+            "json" => "application/json; charset=utf-8",
+            _ => "application/jsonl; charset=utf-8",
+        };
+
+        Ok((output, content_type))
+    })
+    .await?;
 
     Response::builder()
         .status(StatusCode::OK)
@@ -449,37 +533,52 @@ pub(crate) async fn search_messages_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<SearchMessagesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let results = store
-        .search_messages(&params.q, params.limit)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::json!({
-        "query": params.q,
-        "results": results,
-        "count": results.len(),
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let results = store
+            .search_messages(&params.q, params.limit)
+            .map_err(storage_err)?;
+
+        Ok(Json(serde_json::json!({
+            "query": params.q,
+            "results": results,
+            "count": results.len(),
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn insights_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<InsightsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let data = store.insights(params.days).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::to_value(data).map_err(|e| {
-        ApiError::internal(format!("serialization error: {e}"))
-    })?))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let data = store.insights(params.days).map_err(storage_err)?;
+
+        Ok(Json(serde_json::to_value(data).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?))
+    })
+    .await
 }
 
 pub(crate) async fn usage_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.usage_stats().map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::to_value(stats).map_err(|e| {
-        ApiError::internal(format!("serialization error: {e}"))
-    })?))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = SessionStore::new(&path);
+        let stats = store.usage_stats().map_err(storage_err)?;
+
+        Ok(Json(serde_json::to_value(stats).map_err(|e| {
+            ApiError::internal(format!("serialization error: {e}"))
+        })?))
+    })
+    .await
 }

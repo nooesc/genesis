@@ -72,39 +72,66 @@ pub async fn process_platform_message(
     state: &Arc<AppState>,
     msg: &PlatformMessage<'_>,
 ) -> ProcessOutcome {
-    // 1. DM pairing check
-    match check_pairing(
-        &state.loaded.config.storage.database_path,
-        msg.platform_name,
-        msg.user_id,
-        msg.user_name,
-    ) {
-        Ok(PairingCheck::Approved) => {}
-        Ok(PairingCheck::NeedsPairing(code)) => {
+    // 1. DM pairing check (on blocking thread)
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let platform_name = msg.platform_name.to_owned();
+    let user_id = msg.user_id.to_owned();
+    let user_name = msg.user_name.to_owned();
+
+    let pairing_result = {
+        let db_path = db_path.clone();
+        let platform_name = platform_name.clone();
+        let user_id = user_id.clone();
+        let user_name = user_name.clone();
+        tokio::task::spawn_blocking(move || {
+            check_pairing(&db_path, &platform_name, &user_id, &user_name)
+        })
+        .await
+    };
+
+    match pairing_result {
+        Ok(Ok(PairingCheck::Approved)) => {}
+        Ok(Ok(PairingCheck::NeedsPairing(code))) => {
             return ProcessOutcome::NeedsPairing(pairing_reply(&code));
         }
-        Ok(PairingCheck::AtCapacity) => {
+        Ok(Ok(PairingCheck::AtCapacity)) => {
             return ProcessOutcome::AtCapacity;
         }
-        Err(_) => {
+        Ok(Err(_)) | Err(_) => {
             return ProcessOutcome::PairingError;
         }
     }
 
-    // 2. Handle gateway slash commands
-    let store = SessionStore::new(&state.loaded.config.storage.database_path);
-    if let crate::commands::CommandResult::Reply(reply) =
-        crate::commands::handle_command(msg.text, msg.session_id, &store, &state.loaded.config)
-    {
-        return ProcessOutcome::CommandReply(reply);
-    }
+    // 2. Handle gateway slash commands + 3. Auto-reset expired sessions (on blocking thread)
+    let text = msg.text.to_owned();
+    let session_id = msg.session_id.to_owned();
+    let config = state.loaded.config.clone();
 
-    // 3. Auto-reset expired sessions
-    crate::commands::check_session_expiry(
-        msg.session_id,
-        &store,
-        state.loaded.config.gateway.as_ref(),
-    );
+    let command_result = {
+        let db_path = db_path.clone();
+        let text = text.clone();
+        let session_id = session_id.clone();
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = SessionStore::new(&db_path);
+            let cmd = crate::commands::handle_command(&text, &session_id, &store, &config);
+            // Auto-reset expired sessions while we have the store
+            crate::commands::check_session_expiry(&session_id, &store, config.gateway.as_ref());
+            cmd
+        })
+        .await
+    };
+
+    match command_result {
+        Ok(crate::commands::CommandResult::Reply(reply)) => {
+            return ProcessOutcome::CommandReply(reply);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "blocking command handler panicked");
+            return ProcessOutcome::ExecutionError("internal error".to_owned());
+        }
+        _ => {}
+    }
 
     // 4. Run the agent turn
     let service = state.session_service();
@@ -127,14 +154,22 @@ pub async fn process_platform_message(
     // 5. Extract the reply
     let reply_text = extract_reply(result, msg.platform_name);
 
-    // 6. Delivery mirror
-    crate::mirror::append_delivery_mirror(
-        &state.loaded.config.storage.database_path,
-        msg.platform_name,
-        msg.chat_id,
-        &reply_text,
-        msg.platform_name,
-    );
+    // 6. Delivery mirror (on blocking thread)
+    {
+        let platform_name_mirror = platform_name.clone();
+        let chat_id = msg.chat_id.to_owned();
+        let reply = reply_text.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::mirror::append_delivery_mirror(
+                &db_path,
+                &platform_name_mirror,
+                &chat_id,
+                &reply,
+                &platform_name_mirror,
+            );
+        })
+        .await;
+    }
 
     ProcessOutcome::AgentReply(reply_text)
 }

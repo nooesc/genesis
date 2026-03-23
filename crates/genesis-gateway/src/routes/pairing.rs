@@ -50,22 +50,28 @@ pub(crate) async fn list_approved_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let (approved, total) = store
-        .list_approved_paginated(params.platform.as_deref(), limit, offset)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let platform = params.platform;
 
-    let has_more = (offset + approved.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(ApprovedListResponse {
-            approved,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = PairingStore::new(&path);
+        let (approved, total) = store
+            .list_approved_paginated(platform.as_deref(), limit, offset)
+            .map_err(storage_err)?;
+
+        let has_more = (offset + approved.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(ApprovedListResponse {
+                approved,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn list_pending_handler(
@@ -74,76 +80,97 @@ pub(crate) async fn list_pending_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let (pending, total) = store
-        .list_pending_paginated(params.platform.as_deref(), limit, offset)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let platform = params.platform;
 
-    let has_more = (offset + pending.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(PendingListResponse {
-            pending,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = PairingStore::new(&path);
+        let (pending, total) = store
+            .list_pending_paginated(platform.as_deref(), limit, offset)
+            .map_err(storage_err)?;
+
+        let has_more = (offset + pending.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(PendingListResponse {
+                pending,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn approve_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApprovePairingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let approved = store
-        .approve_code(&request.platform, &request.code)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    match approved {
-        Some(user) => Ok(Json(serde_json::json!({
-            "approved": true,
-            "user": user,
-        }))),
-        None => Err(ApiError::not_found("invalid or expired pairing code")),
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = PairingStore::new(&path);
+        let approved = store
+            .approve_code(&request.platform, &request.code)
+            .map_err(storage_err)?;
+
+        match approved {
+            Some(user) => Ok(Json(serde_json::json!({
+                "approved": true,
+                "user": user,
+            }))),
+            None => Err(ApiError::not_found("invalid or expired pairing code")),
+        }
+    })
+    .await
 }
 
 pub(crate) async fn revoke_pairing_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RevokePairingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let revoked = store
-        .revoke(&request.platform, &request.user_id)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if revoked {
-        Ok(Json(serde_json::json!({
-            "revoked": true,
-            "platform": request.platform,
-            "user_id": request.user_id,
-        })))
-    } else {
-        Err(ApiError::not_found(format!(
-            "no approved user '{}' on platform '{}'",
-            request.user_id, request.platform
-        )))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = PairingStore::new(&path);
+        let revoked = store
+            .revoke(&request.platform, &request.user_id)
+            .map_err(storage_err)?;
+
+        if revoked {
+            Ok(Json(serde_json::json!({
+                "revoked": true,
+                "platform": request.platform,
+                "user_id": request.user_id,
+            })))
+        } else {
+            Err(ApiError::not_found(format!(
+                "no approved user '{}' on platform '{}'",
+                request.user_id, request.platform
+            )))
+        }
+    })
+    .await
 }
 
 pub(crate) async fn clear_pending_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ClearPendingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = PairingStore::new(&state.loaded.config.storage.database_path);
-    let cleared = store
-        .clear_pending(request.platform.as_deref())
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok(Json(serde_json::json!({
-        "cleared": cleared,
-        "platform": request.platform,
-    })))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = PairingStore::new(&path);
+        let cleared = store
+            .clear_pending(request.platform.as_deref())
+            .map_err(storage_err)?;
+
+        Ok(Json(serde_json::json!({
+            "cleared": cleared,
+            "platform": request.platform,
+        })))
+    })
+    .await
 }

@@ -43,77 +43,91 @@ pub(crate) async fn list_user_traits_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let (traits_list, total) = store
-        .list_paginated(
-            params.category.as_deref(),
-            params.min_confidence,
-            limit,
-            offset,
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let category = params.category;
+    let min_confidence = params.min_confidence;
 
-    let has_more = (offset + traits_list.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(TraitListResponse {
-            traits: traits_list,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = UserModelStore::new(&path);
+        let (traits_list, total) = store
+            .list_paginated(category.as_deref(), min_confidence, limit, offset)
+            .map_err(storage_err)?;
+
+        let has_more = (offset + traits_list.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(TraitListResponse {
+                traits: traits_list,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn get_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let user_trait = store.get(&key).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    match user_trait {
-        Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
-            ApiError::internal(format!("serialization error: {e}"))
-        })?)),
-        None => Err(ApiError::not_found(format!("trait '{key}' not found"))),
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = UserModelStore::new(&path);
+        let user_trait = store.get(&key).map_err(storage_err)?;
+
+        match user_trait {
+            Some(t) => Ok(Json(serde_json::to_value(t).map_err(|e| {
+                ApiError::internal(format!("serialization error: {e}"))
+            })?)),
+            None => Err(ApiError::not_found(format!("trait '{key}' not found"))),
+        }
+    })
+    .await
 }
 
 pub(crate) async fn observe_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ObserveTraitRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let observed = store
-        .observe(
-            &request.trait_key,
-            &request.category,
-            &request.value,
-            request.source_session.as_deref(),
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    Ok((
-        StatusCode::OK,
-        Json(
-            serde_json::to_value(observed)
-                .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-        ),
-    ))
+    let result = spawn_blocking_storage(db_path, move |path| {
+        let store = UserModelStore::new(&path);
+        let observed = store
+            .observe(
+                &request.trait_key,
+                &request.category,
+                &request.value,
+                request.source_session.as_deref(),
+            )
+            .map_err(storage_err)?;
+
+        serde_json::to_value(observed)
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))
+    })
+    .await?;
+
+    Ok((StatusCode::OK, Json(result)))
 }
 
 pub(crate) async fn delete_user_trait_handler(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = UserModelStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&key).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if deleted {
-        Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
-    } else {
-        Err(ApiError::not_found(format!("trait '{key}' not found")))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = UserModelStore::new(&path);
+        let deleted = store.delete(&key).map_err(storage_err)?;
+
+        if deleted {
+            Ok(Json(serde_json::json!({"deleted": true, "trait_key": key})))
+        } else {
+            Err(ApiError::not_found(format!("trait '{key}' not found")))
+        }
+    })
+    .await
 }

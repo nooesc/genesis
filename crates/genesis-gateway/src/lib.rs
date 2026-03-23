@@ -262,6 +262,32 @@ pub(crate) mod helpers {
         pending,
         genesis_storage::PendingPairing
     );
+
+    // -----------------------------------------------------------------------
+    // Blocking storage helper
+    // -----------------------------------------------------------------------
+
+    /// Run a synchronous storage closure on a dedicated blocking thread.
+    ///
+    /// `rusqlite::Connection` is **not `Send`**, so all database work must
+    /// happen entirely inside the closure.  The closure receives a cloned
+    /// `PathBuf` so it can construct whatever store it needs on the blocking
+    /// thread.
+    ///
+    /// This keeps the tokio async executor free from blocking I/O and
+    /// prevents thread-starvation under concurrent gateway load.
+    pub(crate) async fn spawn_blocking_storage<F, T>(
+        db_path: std::path::PathBuf,
+        f: F,
+    ) -> Result<T, ApiError>
+    where
+        F: FnOnce(std::path::PathBuf) -> Result<T, ApiError> + Send + 'static,
+        T: Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || f(db_path))
+            .await
+            .map_err(|e| ApiError::internal(format!("blocking task panicked: {e}")))?
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -26,33 +26,44 @@ pub(crate) async fn audit_recent_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let limit = params.limit.unwrap_or(50);
-    let entries = if let Some(ref event_type) = params.event_type {
-        store
-            .by_event_type(event_type, limit)
-            .map_err(storage_err)?
-    } else {
-        store.recent(limit).map_err(storage_err)?
-    };
-    Ok(Json(serde_json::json!({
-        "entries": entries,
-        "count": entries.len(),
-    })))
+    let event_type = params.event_type;
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let entries = if let Some(ref event_type) = event_type {
+            store
+                .by_event_type(event_type, limit)
+                .map_err(storage_err)?
+        } else {
+            store.recent(limit).map_err(storage_err)?
+        };
+        Ok(Json(serde_json::json!({
+            "entries": entries,
+            "count": entries.len(),
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn audit_stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
-    let stats = store.stats().map_err(storage_err)?;
-    let total: i64 = stats.iter().map(|(_, c)| c).sum();
-    Ok(Json(serde_json::json!({
-        "total_entries": total,
-        "by_event_type": stats.into_iter().map(|(t, c)| {
-            serde_json::json!({"event_type": t, "count": c})
-        }).collect::<Vec<_>>(),
-    })))
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let stats = store.stats().map_err(storage_err)?;
+        let total: i64 = stats.iter().map(|(_, c)| c).sum();
+        Ok(Json(serde_json::json!({
+            "total_entries": total,
+            "by_event_type": stats.into_iter().map(|(t, c)| {
+                serde_json::json!({"event_type": t, "count": c})
+            }).collect::<Vec<_>>(),
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn audit_session_handler(
@@ -60,14 +71,19 @@ pub(crate) async fn audit_session_handler(
     Path(id): Path<String>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let limit = params.limit.unwrap_or(100);
-    let entries = store.by_session(&id, limit).map_err(storage_err)?;
-    Ok(Json(serde_json::json!({
-        "session_id": id,
-        "entries": entries,
-        "count": entries.len(),
-    })))
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let entries = store.by_session(&id, limit).map_err(storage_err)?;
+        Ok(Json(serde_json::json!({
+            "session_id": id,
+            "entries": entries,
+            "count": entries.len(),
+        })))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -79,13 +95,18 @@ pub(crate) async fn audit_purge_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuditPurgeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = request.older_than_days.unwrap_or(90);
-    let deleted = store.purge_older_than(days).map_err(storage_err)?;
-    Ok(Json(serde_json::json!({
-        "purged": deleted,
-        "older_than_days": days,
-    })))
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let deleted = store.purge_older_than(days).map_err(storage_err)?;
+        Ok(Json(serde_json::json!({
+            "purged": deleted,
+            "older_than_days": days,
+        })))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -101,26 +122,36 @@ pub(crate) async fn tool_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = params.days.unwrap_or(30);
-    let analytics = store.tool_analytics(days).map_err(storage_err)?;
-    Ok(Json(serde_json::json!({
-        "period_days": days,
-        "tools": analytics,
-    })))
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let analytics = store.tool_analytics(days).map_err(storage_err)?;
+        Ok(Json(serde_json::json!({
+            "period_days": days,
+            "tools": analytics,
+        })))
+    })
+    .await
 }
 
 pub(crate) async fn llm_analytics_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = genesis_storage::AuditLogStore::new(&state.loaded.config.storage.database_path);
+    let db_path = state.loaded.config.storage.database_path.clone();
     let days = params.days.unwrap_or(30);
-    let analytics = store.llm_analytics(days).map_err(storage_err)?;
-    Ok(Json(serde_json::json!({
-        "period_days": days,
-        "models": analytics,
-    })))
+
+    spawn_blocking_storage(db_path, move |path| {
+        let store = genesis_storage::AuditLogStore::new(&path);
+        let analytics = store.llm_analytics(days).map_err(storage_err)?;
+        Ok(Json(serde_json::json!({
+            "period_days": days,
+            "models": analytics,
+        })))
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -130,9 +161,7 @@ pub(crate) async fn llm_analytics_handler(
 pub(crate) async fn cache_stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let cache =
-        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
-    let (entries, hits) = cache.stats().unwrap_or((0, 0));
+    let db_path = state.loaded.config.storage.database_path.clone();
     let enabled = state
         .loaded
         .config
@@ -140,6 +169,14 @@ pub(crate) async fn cache_stats_handler(
         .cache
         .as_ref()
         .is_some_and(|c| c.enabled);
+
+    let (entries, hits) = tokio::task::spawn_blocking(move || {
+        let cache = genesis_storage::ResponseCacheStore::new(&db_path);
+        cache.stats().unwrap_or((0, 0))
+    })
+    .await
+    .unwrap_or((0, 0));
+
     Json(serde_json::json!({
         "enabled": enabled,
         "entries": entries,
@@ -150,14 +187,23 @@ pub(crate) async fn cache_stats_handler(
 pub(crate) async fn cache_clear_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let cache =
-        genesis_storage::ResponseCacheStore::new(&state.loaded.config.storage.database_path);
-    match cache.clear() {
-        Ok(deleted) => Json(serde_json::json!({
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let cache = genesis_storage::ResponseCacheStore::new(&db_path);
+        cache.clear()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(deleted)) => Json(serde_json::json!({
             "cleared": deleted,
         })),
-        Err(e) => Json(serde_json::json!({
+        Ok(Err(e)) => Json(serde_json::json!({
             "error": e.to_string(),
+        })),
+        Err(e) => Json(serde_json::json!({
+            "error": format!("blocking task failed: {e}"),
         })),
     }
 }

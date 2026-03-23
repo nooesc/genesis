@@ -51,37 +51,48 @@ pub(crate) async fn list_schedules_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let (schedules, total) = store
-        .list_paginated(params.enabled_only, limit, offset)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let enabled_only = params.enabled_only;
 
-    let has_more = (offset + schedules.len()) < total as usize;
-    Ok(Json(
-        serde_json::to_value(ScheduleListResponse {
-            schedules,
-            total,
-            limit,
-            offset,
-            has_more,
-        })
-        .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
-    ))
+    spawn_blocking_storage(db_path, move |path| {
+        let store = ScheduleStore::new(&path);
+        let (schedules, total) = store
+            .list_paginated(enabled_only, limit, offset)
+            .map_err(storage_err)?;
+
+        let has_more = (offset + schedules.len()) < total as usize;
+        Ok(Json(
+            serde_json::to_value(ScheduleListResponse {
+                schedules,
+                total,
+                limit,
+                offset,
+                has_more,
+            })
+            .map_err(|e| ApiError::internal(format!("serialization error: {e}")))?,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn get_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedule = store.get(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    match schedule {
-        Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
-            ApiError::internal(format!("serialization error: {e}"))
-        })?)),
-        None => Err(ApiError::not_found(format!("schedule '{id}' not found"))),
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = ScheduleStore::new(&path);
+        let schedule = store.get(&id).map_err(storage_err)?;
+
+        match schedule {
+            Some(s) => Ok(Json(serde_json::to_value(s).map_err(|e| {
+                ApiError::internal(format!("serialization error: {e}"))
+            })?)),
+            None => Err(ApiError::not_found(format!("schedule '{id}' not found"))),
+        }
+    })
+    .await
 }
 
 pub(crate) async fn create_schedule_handler(
@@ -102,16 +113,21 @@ pub(crate) async fn create_schedule_handler(
         }
     }
 
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let schedule = store
-        .create_with_timezone(
-            &request.id,
-            &request.cron_expression,
-            &request.destination,
-            &request.prompt,
-            request.timezone.as_deref(),
-        )
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+
+    let schedule = spawn_blocking_storage(db_path, move |path| {
+        let store = ScheduleStore::new(&path);
+        store
+            .create_with_timezone(
+                &request.id,
+                &request.cron_expression,
+                &request.destination,
+                &request.prompt,
+                request.timezone.as_deref(),
+            )
+            .map_err(storage_err)
+    })
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -126,14 +142,19 @@ pub(crate) async fn delete_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let deleted = store.delete(&id).map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
 
-    if deleted {
-        Ok(Json(serde_json::json!({"deleted": true, "id": id})))
-    } else {
-        Err(ApiError::not_found(format!("schedule '{id}' not found")))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = ScheduleStore::new(&path);
+        let deleted = store.delete(&id).map_err(storage_err)?;
+
+        if deleted {
+            Ok(Json(serde_json::json!({"deleted": true, "id": id})))
+        } else {
+            Err(ApiError::not_found(format!("schedule '{id}' not found")))
+        }
+    })
+    .await
 }
 
 pub(crate) async fn set_schedule_enabled_handler(
@@ -141,18 +162,22 @@ pub(crate) async fn set_schedule_enabled_handler(
     Path(id): Path<String>,
     Json(request): Json<SetEnabledRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = ScheduleStore::new(&state.loaded.config.storage.database_path);
-    let updated = store
-        .set_enabled(&id, request.enabled)
-        .map_err(storage_err)?;
+    let db_path = state.loaded.config.storage.database_path.clone();
+    let enabled = request.enabled;
 
-    if updated {
-        Ok(Json(serde_json::json!({
-            "id": id,
-            "enabled": request.enabled,
-            "updated": true,
-        })))
-    } else {
-        Err(ApiError::not_found(format!("schedule '{id}' not found")))
-    }
+    spawn_blocking_storage(db_path, move |path| {
+        let store = ScheduleStore::new(&path);
+        let updated = store.set_enabled(&id, enabled).map_err(storage_err)?;
+
+        if updated {
+            Ok(Json(serde_json::json!({
+                "id": id,
+                "enabled": enabled,
+                "updated": true,
+            })))
+        } else {
+            Err(ApiError::not_found(format!("schedule '{id}' not found")))
+        }
+    })
+    .await
 }
