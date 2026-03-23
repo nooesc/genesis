@@ -3,7 +3,7 @@ pub mod cron;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -18,6 +18,106 @@ static SQLITE_VEC_REGISTERED: OnceLock<()> = OnceLock::new();
 pub struct StorageBootstrap {
     pub database_path: PathBuf,
     pub schema_version: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Database — shared, pooled connection wrapper
+// ---------------------------------------------------------------------------
+
+/// A thread-safe, cheaply cloneable handle to a lazily-opened SQLite
+/// connection.
+///
+/// The connection is opened on first use (with WAL mode, busy timeout, and
+/// foreign-key pragmas) and then reused for every subsequent query.  Wrapping
+/// it in `Arc<Mutex<…>>` means multiple stores created from the same
+/// `Database` share one connection without paying the open/pragma cost on
+/// every operation.
+#[derive(Clone)]
+pub struct Database {
+    inner: Arc<DatabaseInner>,
+}
+
+struct DatabaseInner {
+    conn: Mutex<Option<Connection>>,
+    path: PathBuf,
+}
+
+impl Database {
+    /// Create a handle for the database at `path`.  The actual SQLite
+    /// connection is opened lazily on the first call to [`conn`].
+    pub fn new(path: &Path) -> Self {
+        Self {
+            inner: Arc::new(DatabaseInner {
+                conn: Mutex::new(None),
+                path: path.to_path_buf(),
+            }),
+        }
+    }
+
+    /// Eagerly open (or create) the SQLite database.  Useful when you want
+    /// to surface open-errors immediately rather than on first query.
+    pub fn open(path: &Path) -> Result<Self, StorageError> {
+        let db = Self::new(path);
+        // Force the lazy open now.
+        let _ = db.conn()?;
+        Ok(db)
+    }
+
+    /// Returns the filesystem path for this database.
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    /// Acquire the shared connection via a mutex guard.
+    ///
+    /// On the first call the connection is opened and configured.  The
+    /// returned guard dereferences to `Connection` and releases the lock
+    /// when dropped.  For mutable access (e.g. transactions), bind the
+    /// result as `let mut conn = db.conn()?;`.
+    pub fn conn(&self) -> Result<DatabaseGuard<'_>, StorageError> {
+        let mut guard = self.inner.conn.lock().map_err(|_| {
+            StorageError::ConnectionPoolPoisoned {
+                path: self.inner.path.clone(),
+            }
+        })?;
+
+        if guard.is_none() {
+            *guard = Some(open(&self.inner.path)?);
+        }
+
+        Ok(DatabaseGuard { guard })
+    }
+}
+
+impl std::fmt::Debug for Database {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Database")
+            .field("path", &self.inner.path)
+            .finish()
+    }
+}
+
+/// RAII guard returned by [`Database::conn`].  Dereferences to
+/// [`Connection`] and releases the mutex when dropped.
+pub struct DatabaseGuard<'a> {
+    guard: MutexGuard<'a, Option<Connection>>,
+}
+
+impl<'a> std::ops::Deref for DatabaseGuard<'a> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.guard
+            .as_ref()
+            .expect("DatabaseGuard: connection must be initialised before deref")
+    }
+}
+
+impl<'a> std::ops::DerefMut for DatabaseGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.guard
+            .as_mut()
+            .expect("DatabaseGuard: connection must be initialised before deref_mut")
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +686,8 @@ pub enum StorageError {
     },
     #[error("database at {path} has an unrecognized memory_vec schema: {sql}")]
     InvalidVectorIndexSchema { path: PathBuf, sql: String },
+    #[error("connection pool mutex poisoned for database at {path}")]
+    ConnectionPoolPoisoned { path: PathBuf },
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(String),
     #[error("unknown import status in database: {0}")]
@@ -1616,19 +1718,23 @@ pub struct InsightsData {
 
 /// Session persistence layer.
 pub struct SessionStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SessionStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Returns the database path this store is using.
     pub fn database_path(&self) -> &Path {
-        &self.database_path
+        self.db.path()
     }
 
     /// Map a database row to a `SessionSummary`.
@@ -1655,7 +1761,7 @@ impl SessionStore {
         platform: &str,
         title: Option<&str>,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO sessions (id, title, platform, created_at, updated_at)
@@ -1663,7 +1769,7 @@ impl SessionStore {
                 params![id, title, platform],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -1679,7 +1785,7 @@ impl SessionStore {
         tool_calls_json: Option<&str>,
         provider_metadata: Option<&str>,
     ) -> Result<i64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         connection
             .execute(
@@ -1688,7 +1794,7 @@ impl SessionStore {
                 params![session_id, role, content, tool_call_id, tool_calls_json, provider_metadata],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -1703,7 +1809,7 @@ impl SessionStore {
                         params![session_id, text],
                     )
                     .map_err(|source| StorageError::Sqlite {
-                        path: self.database_path.clone(),
+                        path: self.db.path().to_path_buf(),
                         source,
                     })?;
             }
@@ -1716,7 +1822,7 @@ impl SessionStore {
                 params![session_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -1734,7 +1840,7 @@ impl SessionStore {
         content: &str,
         mirror_source: &str,
     ) -> Result<i64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         connection
             .execute(
@@ -1743,7 +1849,7 @@ impl SessionStore {
                 params![session_id, content, mirror_source],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -1756,7 +1862,7 @@ impl SessionStore {
                 params![session_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -1795,7 +1901,7 @@ impl SessionStore {
         if input_tokens == 0 && output_tokens == 0 {
             return Ok(());
         }
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "UPDATE sessions SET
@@ -1806,7 +1912,7 @@ impl SessionStore {
                 params![session_id, input_tokens as i64, output_tokens as i64],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -1814,7 +1920,7 @@ impl SessionStore {
 
     /// Set the title on an existing session (only if currently null).
     pub fn update_title(&self, session_id: &str, title: &str) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "UPDATE sessions SET title = ?2, updated_at = CURRENT_TIMESTAMP
@@ -1822,7 +1928,7 @@ impl SessionStore {
                 params![session_id, title],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -1830,14 +1936,14 @@ impl SessionStore {
 
     /// Set the session title unconditionally (overwrites any existing title).
     pub fn set_title(&self, session_id: &str, title: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "UPDATE sessions SET title = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
                 params![session_id, title],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -1845,7 +1951,7 @@ impl SessionStore {
 
     /// Get tags for a session (comma-separated string parsed into Vec).
     pub fn get_tags(&self, session_id: &str) -> Result<Vec<String>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let tags: String = connection
             .query_row(
                 "SELECT tags FROM sessions WHERE id = ?1",
@@ -1853,7 +1959,7 @@ impl SessionStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(if tags.is_empty() {
@@ -1865,7 +1971,7 @@ impl SessionStore {
 
     /// Set tags for a session (replaces existing tags).
     pub fn set_tags(&self, session_id: &str, tags: &[&str]) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let tags_str = tags.join(",");
         let rows = connection
             .execute(
@@ -1873,7 +1979,7 @@ impl SessionStore {
                 params![session_id, tags_str],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -1906,7 +2012,7 @@ impl SessionStore {
 
     /// List sessions that have a specific tag.
     pub fn sessions_by_tag(&self, tag: &str) -> Result<Vec<SessionSummary>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let pattern = format!("%{tag}%");
         let mut stmt = connection
             .prepare(
@@ -1915,21 +2021,21 @@ impl SessionStore {
                  ORDER BY updated_at DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![pattern], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List all sessions that were forked from a given parent session.
     pub fn list_children(&self, parent_id: &str) -> Result<Vec<SessionSummary>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, title, platform, total_input_tokens, total_output_tokens,
@@ -1938,21 +2044,21 @@ impl SessionStore {
                  ORDER BY created_at ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![parent_id], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Delete a session and all its messages and search index entries.
     pub fn delete_session(&self, session_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         // Delete FTS entries (virtual table — no ON DELETE CASCADE support).
         connection
             .execute(
@@ -1960,14 +2066,14 @@ impl SessionStore {
                 params![session_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         // Delete session; ON DELETE CASCADE removes associated messages.
         let deleted = connection
             .execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted > 0)
@@ -1981,7 +2087,7 @@ impl SessionStore {
         source_session_id: &str,
         new_session_id: &str,
     ) -> Result<String, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Get source session info
         let (platform, title): (String, Option<String>) = connection
@@ -1991,7 +2097,7 @@ impl SessionStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2008,7 +2114,7 @@ impl SessionStore {
                 params![new_session_id, fork_title, platform, source_session_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2022,7 +2128,7 @@ impl SessionStore {
                 params![new_session_id, source_session_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2032,13 +2138,13 @@ impl SessionStore {
     /// Delete sessions (and their messages/FTS entries) older than `days` days.
     /// Returns the number of sessions deleted.
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let cutoff = format!("-{days} days");
 
         let tx = connection
             .unchecked_transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2050,7 +2156,7 @@ impl SessionStore {
             params![cutoff],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
@@ -2060,14 +2166,14 @@ impl SessionStore {
             params![cutoff],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
-        let deleted = tx.changes() as u64;
+        let deleted = tx.changes();
 
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
@@ -2076,7 +2182,7 @@ impl SessionStore {
 
     /// Load all messages for a session in chronological order.
     pub fn load_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let mut stmt = connection
             .prepare(
@@ -2086,7 +2192,7 @@ impl SessionStore {
                  ORDER BY id ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2106,11 +2212,11 @@ impl SessionStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Delete messages older than the N most recent for a session.
@@ -2120,7 +2226,7 @@ impl SessionStore {
         session_id: &str,
         keep_recent: usize,
     ) -> Result<usize, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Find the ID threshold: keep messages with the highest IDs.
         let count: i64 = connection
@@ -2130,7 +2236,7 @@ impl SessionStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2148,7 +2254,7 @@ impl SessionStore {
                 params![session_id, to_delete],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2165,7 +2271,7 @@ impl SessionStore {
         if n == 0 {
             return Ok(0);
         }
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute(
                 "DELETE FROM messages WHERE session_id = ?1 AND id IN (
@@ -2175,7 +2281,7 @@ impl SessionStore {
                 params![session_id, n],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted)
@@ -2184,7 +2290,7 @@ impl SessionStore {
     /// Full-text search across session content. Returns matching session IDs
     /// with their summaries, ordered by relevance.
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let mut stmt = connection
             .prepare(
@@ -2195,18 +2301,18 @@ impl SessionStore {
                  ORDER BY rank",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![query], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Search message content across all sessions using FTS5.
@@ -2218,7 +2324,7 @@ impl SessionStore {
         query: &str,
         max_results: usize,
     ) -> Result<Vec<MessageSearchResult>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let mut stmt = connection
             .prepare(
@@ -2230,7 +2336,7 @@ impl SessionStore {
                  LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2245,30 +2351,37 @@ impl SessionStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Count total sessions.
     pub fn session_count(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
                 Ok(row.get::<_, i64>(0)? as u64)
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// Get a session summary by ID.
     pub fn get_session(&self, id: &str) -> Result<Option<SessionSummary>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
+        self.get_session_with_conn(&connection, id)
+    }
 
+    fn get_session_with_conn(
+        &self,
+        connection: &Connection,
+        id: &str,
+    ) -> Result<Option<SessionSummary>, StorageError> {
         connection
             .query_row(
                 "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
@@ -2278,13 +2391,13 @@ impl SessionStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     pub fn list_recent_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, title, platform, total_input_tokens, total_output_tokens, parent_session_id, created_at, updated_at
@@ -2293,18 +2406,18 @@ impl SessionStore {
                  LIMIT ?1",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![limit as i64], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List recent sessions with offset/limit pagination.
@@ -2313,12 +2426,12 @@ impl SessionStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SessionSummary>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let total: i64 = connection
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2330,18 +2443,18 @@ impl SessionStore {
                  LIMIT ?1 OFFSET ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        let items = collect_rows(rows, &self.database_path)?;
+        let items = collect_rows(rows, self.db.path())?;
         Ok((items, total as u64))
     }
 
@@ -2352,7 +2465,7 @@ impl SessionStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<SessionSummary>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let total: i64 = connection
             .query_row(
@@ -2364,7 +2477,7 @@ impl SessionStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2378,28 +2491,28 @@ impl SessionStore {
                  LIMIT ?2 OFFSET ?3",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![query, limit as i64, offset as i64], Self::row_to_session_summary)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        let items = collect_rows(rows, &self.database_path)?;
+        let items = collect_rows(rows, self.db.path())?;
         Ok((items, total as u64))
     }
 
     /// Count total number of sessions.
     pub fn count_sessions(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(count as u64)
@@ -2407,7 +2520,7 @@ impl SessionStore {
 
     /// Aggregate token usage across all sessions.
     pub fn usage_stats(&self) -> Result<UsageStats, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let (count, input, output): (i64, i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(total_input_tokens), 0), COALESCE(SUM(total_output_tokens), 0) FROM sessions",
@@ -2415,7 +2528,7 @@ impl SessionStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(UsageStats {
@@ -2427,7 +2540,7 @@ impl SessionStore {
 
     /// Gather usage insights for the last N days.
     pub fn insights(&self, days: u32) -> Result<InsightsData, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let period = format!("-{days} days");
 
         // Aggregate totals for the period
@@ -2439,7 +2552,7 @@ impl SessionStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2451,7 +2564,7 @@ impl SessionStore {
                  GROUP BY day ORDER BY day",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let sessions_per_day: Vec<(String, u64)> = stmt
@@ -2459,12 +2572,12 @@ impl SessionStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2476,7 +2589,7 @@ impl SessionStore {
                  GROUP BY platform ORDER BY COUNT(*) DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let platform_breakdown: Vec<(String, u64)> = stmt
@@ -2484,12 +2597,12 @@ impl SessionStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2503,7 +2616,7 @@ impl SessionStore {
                  GROUP BY day ORDER BY day",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let tokens_per_day: Vec<(String, u64, u64)> = stmt
@@ -2515,12 +2628,12 @@ impl SessionStore {
                 ))
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2533,18 +2646,18 @@ impl SessionStore {
                  AND s.created_at >= datetime('now', ?)",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let tool_jsons: Vec<String> = stmt
             .query_map([&period], |row| row.get::<_, String>(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2641,14 +2754,18 @@ pub struct ScheduleExecution {
 
 /// Schedule persistence layer.
 pub struct ScheduleStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl ScheduleStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Create a new scheduled job.
@@ -2671,7 +2788,7 @@ impl ScheduleStore {
         prompt: &str,
         timezone: Option<&str>,
     ) -> Result<StoredSchedule, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO schedules (id, cron_expression, destination, prompt, enabled, created_at, timezone)
@@ -2679,19 +2796,23 @@ impl ScheduleStore {
                 params![id, cron_expression, destination, prompt, timezone],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
+        // Drop the connection guard before calling self.get() to avoid mutex
+        // re-entrance deadlock.
+        drop(connection);
+
         self.get(id)?.ok_or_else(|| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source: rusqlite::Error::QueryReturnedNoRows,
         })
     }
 
     /// Get a schedule by ID.
     pub fn get(&self, id: &str) -> Result<Option<StoredSchedule>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
@@ -2711,14 +2832,14 @@ impl ScheduleStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// List all enabled schedules.
     pub fn list_enabled(&self) -> Result<Vec<StoredSchedule>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
@@ -2726,7 +2847,7 @@ impl ScheduleStore {
                  ORDER BY created_at ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2743,16 +2864,16 @@ impl ScheduleStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List all schedules (enabled and disabled).
     pub fn list_all(&self) -> Result<Vec<StoredSchedule>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, cron_expression, destination, prompt, enabled, created_at, timezone
@@ -2760,7 +2881,7 @@ impl ScheduleStore {
                  ORDER BY created_at ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2777,11 +2898,11 @@ impl ScheduleStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List schedules with offset/limit pagination.
@@ -2794,10 +2915,10 @@ impl ScheduleStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<StoredSchedule>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
@@ -2838,20 +2959,20 @@ impl ScheduleStore {
             })
             .map_err(me)?;
 
-        let items = collect_rows(rows, &self.database_path)?;
+        let items = collect_rows(rows, self.db.path())?;
         Ok((items, total as u64))
     }
 
     /// Enable or disable a schedule.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows_changed = connection
             .execute(
                 "UPDATE schedules SET enabled = ?2 WHERE id = ?1",
                 params![id, enabled as i64],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows_changed > 0)
@@ -2859,11 +2980,11 @@ impl ScheduleStore {
 
     /// Delete a schedule by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows_changed = connection
             .execute("DELETE FROM schedules WHERE id = ?1", params![id])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows_changed > 0)
@@ -2877,7 +2998,7 @@ impl ScheduleStore {
         error_message: Option<&str>,
         duration_ms: Option<i64>,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO schedule_executions (schedule_id, executed_at, status, error_message, duration_ms)
@@ -2885,7 +3006,7 @@ impl ScheduleStore {
                 params![schedule_id, status, error_message, duration_ms],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -2897,7 +3018,7 @@ impl ScheduleStore {
         schedule_id: &str,
         limit: usize,
     ) -> Result<Vec<ScheduleExecution>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, schedule_id, executed_at, status, error_message, duration_ms
@@ -2905,7 +3026,7 @@ impl ScheduleStore {
                  ORDER BY executed_at DESC LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -2921,11 +3042,11 @@ impl ScheduleStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 }
 
@@ -2977,14 +3098,18 @@ pub fn format_user_traits(traits: &[StoredUserTrait]) -> Option<String> {
 /// Stores observations about the user that the agent learns over time.
 /// Categories include: preference, personality, communication_style, goal, expertise, context.
 pub struct UserModelStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl UserModelStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Record or update a user trait. If the trait already exists, its confidence
@@ -2996,7 +3121,7 @@ impl UserModelStore {
         value: &str,
         source_session: Option<&str>,
     ) -> Result<StoredUserTrait, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Clamp confidence at 1.0, increase by 0.1 per observation
         connection
@@ -3012,19 +3137,23 @@ impl UserModelStore {
                 params![trait_key, category, value, source_session],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
+        // Drop the connection guard before calling self.get() to avoid mutex
+        // re-entrance deadlock.
+        drop(connection);
+
         self.get(trait_key)?.ok_or_else(|| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source: rusqlite::Error::QueryReturnedNoRows,
         })
     }
 
     /// Get a specific user trait by key.
     pub fn get(&self, trait_key: &str) -> Result<Option<StoredUserTrait>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
@@ -3034,78 +3163,78 @@ impl UserModelStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// List all user traits, ordered by confidence (highest first).
     pub fn list_all(&self) -> Result<Vec<StoredUserTrait>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
                  FROM user_model ORDER BY confidence DESC, evidence_count DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows =
             stmt.query_map([], Self::row_to_trait)
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List traits in a specific category.
     pub fn list_by_category(&self, category: &str) -> Result<Vec<StoredUserTrait>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
                  FROM user_model WHERE category = ?1 ORDER BY confidence DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![category], Self::row_to_trait)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Get high-confidence traits (>= threshold) for prompt injection.
     pub fn confident_traits(&self, threshold: f64) -> Result<Vec<StoredUserTrait>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT trait_key, category, value, confidence, evidence_count, source_session, created_at, updated_at
                  FROM user_model WHERE confidence >= ?1 ORDER BY confidence DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![threshold], Self::row_to_trait)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List user traits with offset/limit pagination.
@@ -3119,10 +3248,10 @@ impl UserModelStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<StoredUserTrait>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
@@ -3178,7 +3307,7 @@ impl UserModelStore {
             let rows = stmt
                 .query_map(params![cat, limit as i64, offset as i64], Self::row_to_trait)
                 .map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         } else if let Some(threshold) = min_confidence {
             let rows = stmt
                 .query_map(
@@ -3186,12 +3315,12 @@ impl UserModelStore {
                     Self::row_to_trait,
                 )
                 .map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         } else {
             let rows = stmt
                 .query_map(params![limit as i64, offset as i64], Self::row_to_trait)
                 .map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         };
 
         Ok((items, total as u64))
@@ -3199,14 +3328,14 @@ impl UserModelStore {
 
     /// Delete a user trait.
     pub fn delete(&self, trait_key: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "DELETE FROM user_model WHERE trait_key = ?1",
                 params![trait_key],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -3241,14 +3370,18 @@ pub struct StoredSkill {
 
 /// Skill persistence layer.
 pub struct SkillStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SkillStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     fn row_to_skill(row: &rusqlite::Row) -> Result<StoredSkill, rusqlite::Error> {
@@ -3280,7 +3413,7 @@ impl SkillStore {
         trigger_hint: Option<&str>,
         tags: &[&str],
     ) -> Result<StoredSkill, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let tags_str = tags.join(",");
 
         connection
@@ -3297,19 +3430,23 @@ impl SkillStore {
                 params![name, description, instructions, trigger_hint, tags_str],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
+        // Drop the connection guard before calling self.get() to avoid mutex
+        // re-entrance deadlock.
+        drop(connection);
+
         self.get(name)?.ok_or_else(|| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source: rusqlite::Error::QueryReturnedNoRows,
         })
     }
 
     /// Get a skill by name.
     pub fn get(&self, name: &str) -> Result<Option<StoredSkill>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
@@ -3319,32 +3456,32 @@ impl SkillStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// List all skills, ordered by name.
     pub fn list_all(&self) -> Result<Vec<StoredSkill>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT name, description, instructions, trigger_hint, tags, version, created_at, updated_at
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows =
             stmt.query_map([], Self::row_to_skill)
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List all skills with offset/limit pagination.
@@ -3353,12 +3490,12 @@ impl SkillStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<StoredSkill>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let total: i64 = connection
             .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -3369,24 +3506,24 @@ impl SkillStore {
                  LIMIT ?1 OFFSET ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        let items = collect_rows(rows, &self.database_path)?;
+        let items = collect_rows(rows, self.db.path())?;
         Ok((items, total as u64))
     }
 
     /// Find skills matching any of the given tags.
     pub fn find_by_tag(&self, tag: &str) -> Result<Vec<StoredSkill>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         // SQLite LIKE with comma-separated tags
         let pattern = format!("%{tag}%");
         let mut stmt = connection
@@ -3395,18 +3532,18 @@ impl SkillStore {
                  FROM skills WHERE tags LIKE ?1 ORDER BY name ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![pattern], Self::row_to_skill)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Find skills whose trigger hints, names, descriptions, or tags match the
@@ -3458,11 +3595,11 @@ impl SkillStore {
 
     /// Delete a skill by name. Returns true if a skill was deleted.
     pub fn delete(&self, name: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows_changed = connection
             .execute("DELETE FROM skills WHERE name = ?1", params![name])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows_changed > 0)
@@ -3471,14 +3608,18 @@ impl SkillStore {
 
 /// Supporting files associated with a skill, stored in SQLite.
 pub struct SkillFileStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SkillFileStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     pub fn store_file(
@@ -3487,7 +3628,7 @@ impl SkillFileStore {
         file_path: &str,
         content: &str,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO skill_files (skill_name, file_path, content, created_at)
@@ -3497,7 +3638,7 @@ impl SkillFileStore {
                 params![skill_name, file_path, content],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -3508,7 +3649,7 @@ impl SkillFileStore {
         skill_name: &str,
         file_path: &str,
     ) -> Result<Option<String>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT content FROM skill_files WHERE skill_name = ?1 AND file_path = ?2",
@@ -3517,53 +3658,53 @@ impl SkillFileStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     pub fn list_files(&self, skill_name: &str) -> Result<Vec<String>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT file_path FROM skill_files WHERE skill_name = ?1 ORDER BY file_path ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![skill_name], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     pub fn delete_file(&self, skill_name: &str, file_path: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "DELETE FROM skill_files WHERE skill_name = ?1 AND file_path = ?2",
                 params![skill_name, file_path],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
     }
 
     pub fn delete_all_files(&self, skill_name: &str) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "DELETE FROM skill_files WHERE skill_name = ?1",
                 params![skill_name],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows as u64)
@@ -3637,14 +3778,18 @@ pub struct StoredSubagent {
 
 /// Subagent persistence layer.
 pub struct SubagentStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SubagentStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Create a new subagent record with status "pending".
@@ -3656,7 +3801,7 @@ impl SubagentStore {
         name: &str,
         task: &str,
     ) -> Result<StoredSubagent, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO subagents (id, parent_session_id, child_session_id, name, task, status)
@@ -3664,19 +3809,23 @@ impl SubagentStore {
                 params![id, parent_session_id, child_session_id, name, task],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
+        // Drop the connection guard before calling self.get() to avoid mutex
+        // re-entrance deadlock.
+        drop(connection);
+
         self.get(id)?.ok_or_else(|| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source: rusqlite::Error::QueryReturnedNoRows,
         })
     }
 
     /// Get a subagent by ID.
     pub fn get(&self, id: &str) -> Result<Option<StoredSubagent>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT id, parent_session_id, child_session_id, name, task, status, result, error, created_at, completed_at
@@ -3686,7 +3835,7 @@ impl SubagentStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
@@ -3696,7 +3845,7 @@ impl SubagentStore {
         &self,
         parent_session_id: &str,
     ) -> Result<Vec<StoredSubagent>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, parent_session_id, child_session_id, name, task, status, result, error, created_at, completed_at
@@ -3704,30 +3853,30 @@ impl SubagentStore {
                  ORDER BY created_at ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![parent_session_id], Self::row_to_subagent)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Mark a subagent as running.
     pub fn set_running(&self, id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "UPDATE subagents SET status = 'running' WHERE id = ?1",
                 params![id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -3735,14 +3884,14 @@ impl SubagentStore {
 
     /// Mark a subagent as completed with its result.
     pub fn set_completed(&self, id: &str, result: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "UPDATE subagents SET status = 'completed', result = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?1",
                 params![id, result],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -3750,14 +3899,14 @@ impl SubagentStore {
 
     /// Mark a subagent as failed with an error message.
     pub fn set_failed(&self, id: &str, error: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "UPDATE subagents SET status = 'failed', error = ?2, completed_at = CURRENT_TIMESTAMP WHERE id = ?1",
                 params![id, error],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -3807,14 +3956,18 @@ pub struct SkillUsageStats {
 
 /// Skill usage tracking layer.
 pub struct SkillUsageStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SkillUsageStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Record that a skill was used in a session.
@@ -3825,7 +3978,7 @@ impl SkillUsageStore {
         outcome: &str,
         feedback: Option<&str>,
     ) -> Result<StoredSkillUsage, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO skill_usages (skill_name, session_id, outcome, feedback)
@@ -3833,7 +3986,7 @@ impl SkillUsageStore {
                 params![skill_name, session_id, outcome, feedback],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -3846,21 +3999,21 @@ impl SkillUsageStore {
                 Self::row_to_usage,
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// Mark a usage record as having led to a skill refinement.
     pub fn mark_refined(&self, usage_id: i64) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "UPDATE skill_usages SET refined = 1 WHERE id = ?1",
                 params![usage_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -3868,7 +4021,7 @@ impl SkillUsageStore {
 
     /// Get aggregate usage stats for a skill.
     pub fn stats(&self, skill_name: &str) -> Result<SkillUsageStats, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT
@@ -3892,7 +4045,7 @@ impl SkillUsageStore {
                 },
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
@@ -3903,7 +4056,7 @@ impl SkillUsageStore {
         skill_name: &str,
         limit: usize,
     ) -> Result<Vec<StoredSkillUsage>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, skill_name, session_id, outcome, feedback, refined, created_at
@@ -3911,18 +4064,18 @@ impl SkillUsageStore {
                  ORDER BY created_at DESC LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![skill_name, limit as i64], Self::row_to_usage)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     fn row_to_usage(row: &rusqlite::Row) -> Result<StoredSkillUsage, rusqlite::Error> {
@@ -3984,14 +4137,18 @@ pub struct NewMemoryNote {
 
 /// Memory persistence layer.
 pub struct MemoryStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl MemoryStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Map a database row to a `StoredMemory`.
@@ -4009,23 +4166,23 @@ impl MemoryStore {
 
     /// List all stored memories, most recent first.
     pub fn list(&self, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, session_id, kind, content, created_at
                  FROM memories ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// List stored memories with offset/limit pagination.
@@ -4034,12 +4191,12 @@ impl MemoryStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<StoredMemory>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let total: i64 = connection
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -4049,24 +4206,24 @@ impl MemoryStore {
                  FROM memories ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![limit as i64, offset as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        let items = collect_rows(rows, &self.database_path)?;
+        let items = collect_rows(rows, self.db.path())?;
         Ok((items, total as u64))
     }
 
     /// Get a single memory by ID. Returns `None` if not found.
     pub fn get(&self, id: &str) -> Result<Option<StoredMemory>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT id, session_id, kind, content, created_at
@@ -4076,19 +4233,19 @@ impl MemoryStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// Full-text search across stored memories.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Ensure FTS index exists (memory tools also create it, but this is defensive)
         exec_migration(
             &connection,
-            &self.database_path,
+            self.db.path(),
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
                 memory_row_id UNINDEXED, kind, content
             );",
@@ -4104,16 +4261,16 @@ impl MemoryStore {
                  LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![query, limit as i64], Self::row_to_memory)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Vector similarity search across stored memory embeddings.
@@ -4126,9 +4283,9 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let Some(expected_dimensions) =
-            memory_vec_declared_dimensions(&connection, &self.database_path)?
+            memory_vec_declared_dimensions(&connection, self.db.path())?
         else {
             return Ok(Vec::new());
         };
@@ -4147,7 +4304,7 @@ impl MemoryStore {
                  ORDER BY distance",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
@@ -4166,10 +4323,10 @@ impl MemoryStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Hybrid search combining FTS results with vector similarity via reciprocal rank fusion.
@@ -4202,7 +4359,7 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let primary_ids: Vec<String> = primary.iter().map(|memory| memory.id.clone()).collect();
         let attributes = self.graph_attributes_for_ids(&connection, &primary_ids)?;
         let linked_memories = self.linked_memories_for_sources(&connection, &primary_ids)?;
@@ -4244,6 +4401,11 @@ impl MemoryStore {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         expanded.truncate(limit);
+
+        // Drop the connection guard before calling self.bump_access_metrics()
+        // to avoid mutex re-entrance deadlock.
+        drop(connection);
+
         self.bump_access_metrics(
             &expanded
                 .iter()
@@ -4254,10 +4416,10 @@ impl MemoryStore {
     }
 
     pub fn create_note(&self, note: NewMemoryNote) -> Result<StoredMemory, StorageError> {
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         exec_migration(
             &connection,
-            &self.database_path,
+            self.db.path(),
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
                 memory_row_id UNINDEXED, kind, content
             );",
@@ -4266,7 +4428,7 @@ impl MemoryStore {
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -4302,7 +4464,7 @@ impl MemoryStore {
             ],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
@@ -4312,7 +4474,7 @@ impl MemoryStore {
             params![memory_row_id, &kind, &content],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
@@ -4320,18 +4482,22 @@ impl MemoryStore {
             .iter()
             .filter(|linked_id| linked_id.as_str() != note_id.as_str())
         {
-            insert_pending_memory_link(&tx, &self.database_path, &note_id, linked_id)?;
-            insert_pending_memory_link(&tx, &self.database_path, linked_id, &note_id)?;
+            insert_pending_memory_link(&tx, self.db.path(), &note_id, linked_id)?;
+            insert_pending_memory_link(&tx, self.db.path(), linked_id, &note_id)?;
         }
-        resolve_pending_memory_links(&tx, &self.database_path, &note_id)?;
+        resolve_pending_memory_links(&tx, self.db.path(), &note_id)?;
 
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
+        // Drop the connection guard before calling self.get() to avoid mutex
+        // re-entrance deadlock.
+        drop(connection);
+
         self.get(&note_id)?.ok_or_else(|| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source: rusqlite::Error::QueryReturnedNoRows,
         })
     }
@@ -4356,7 +4522,7 @@ impl MemoryStore {
     }
 
     pub fn links_for(&self, id: &str) -> Result<Vec<String>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT target_id
@@ -4365,16 +4531,16 @@ impl MemoryStore {
                  ORDER BY target_id ASC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
             .query_map(params![id], |row| row.get::<_, String>(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     fn graph_attributes_for_ids(
@@ -4394,7 +4560,7 @@ impl MemoryStore {
                 sql_placeholders(memory_ids.len()),
             ))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
@@ -4411,10 +4577,10 @@ impl MemoryStore {
                 },
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path).map(|pairs| pairs.into_iter().collect())
+        collect_rows(rows, self.db.path()).map(|pairs| pairs.into_iter().collect())
     }
 
     fn linked_memories_for_sources(
@@ -4437,7 +4603,7 @@ impl MemoryStore {
                 sql_placeholders(source_ids.len()),
             ))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
@@ -4463,12 +4629,12 @@ impl MemoryStore {
                 },
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let mut grouped = HashMap::new();
-        for (source_id, candidate) in collect_rows(rows, &self.database_path)? {
+        for (source_id, candidate) in collect_rows(rows, self.db.path())? {
             grouped
                 .entry(source_id)
                 .or_insert_with(Vec::new)
@@ -4497,11 +4663,11 @@ impl MemoryStore {
             return Ok(());
         }
 
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -4514,13 +4680,13 @@ impl MemoryStore {
                 params![memory_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         }
 
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         Ok(())
@@ -4528,11 +4694,11 @@ impl MemoryStore {
 
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let memory_rowid: Option<i64> = tx
@@ -4543,31 +4709,31 @@ impl MemoryStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let Some(memory_rowid) = memory_rowid else {
             return Ok(false);
         };
 
-        if memory_vec_table_exists(&tx, &self.database_path)? {
+        if memory_vec_table_exists(&tx, self.db.path())? {
             tx.execute(
                 "DELETE FROM memory_vec WHERE memory_rowid = ?1",
                 params![memory_rowid],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         }
 
-        if sqlite_table_exists(&tx, &self.database_path, "memory_search")? {
+        if sqlite_table_exists(&tx, self.db.path(), "memory_search")? {
             tx.execute(
                 "DELETE FROM memory_search WHERE memory_row_id = ?1",
                 params![memory_rowid],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         }
@@ -4575,11 +4741,11 @@ impl MemoryStore {
         let rows = tx
             .execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         Ok(rows > 0)
@@ -4699,19 +4865,23 @@ fn reciprocal_rank_fusion(
 
 /// Embedding persistence layer for vector/semantic memory search.
 pub struct EmbeddingStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl EmbeddingStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Returns the database path for this store.
     pub fn database_path(&self) -> &Path {
-        &self.database_path
+        self.db.path()
     }
 
     /// Store an embedding for a memory. Replaces any existing embedding for this memory_id.
@@ -4721,11 +4891,11 @@ impl EmbeddingStore {
         embedding: &[f32],
         model: &str,
     ) -> Result<(), StorageError> {
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let memory_rowid: i64 = tx
@@ -4735,10 +4905,10 @@ impl EmbeddingStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        ensure_memory_vec_table(&tx, &self.database_path, embedding.len())?;
+        ensure_memory_vec_table(&tx, self.db.path(), embedding.len())?;
         let blob = embedding_to_blob(embedding);
         tx.execute(
             "INSERT INTO memory_embeddings (memory_id, embedding, model, dimensions, created_at)
@@ -4749,7 +4919,7 @@ impl EmbeddingStore {
             params![memory_id, &blob, model, embedding.len() as i64],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         tx.execute(
@@ -4757,7 +4927,7 @@ impl EmbeddingStore {
             params![memory_rowid],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         tx.execute(
@@ -4765,11 +4935,11 @@ impl EmbeddingStore {
             params![memory_rowid, &blob],
         )
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         Ok(())
@@ -4778,11 +4948,11 @@ impl EmbeddingStore {
     /// Retrieve all embeddings for cosine similarity search.
     /// Returns (memory_id, embedding) pairs.
     pub fn all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare("SELECT memory_id, embedding FROM memory_embeddings")
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let rows = stmt
@@ -4792,19 +4962,19 @@ impl EmbeddingStore {
                 Ok((memory_id, blob_to_embedding(&blob)))
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Delete an embedding by memory ID.
     pub fn delete(&self, memory_id: &str) -> Result<bool, StorageError> {
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         let memory_rowid: Option<i64> = tx
@@ -4815,17 +4985,17 @@ impl EmbeddingStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         if let Some(memory_rowid) = memory_rowid {
-            if memory_vec_table_exists(&tx, &self.database_path)? {
+            if memory_vec_table_exists(&tx, self.db.path())? {
                 tx.execute(
                     "DELETE FROM memory_vec WHERE memory_rowid = ?1",
                     params![memory_rowid],
                 )
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?;
             }
@@ -4837,11 +5007,11 @@ impl EmbeddingStore {
                 params![memory_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         Ok(rows > 0)
@@ -4849,7 +5019,7 @@ impl EmbeddingStore {
 
     /// Check if an embedding exists for a given memory ID.
     pub fn has_embedding(&self, memory_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id = ?1",
@@ -4857,7 +5027,7 @@ impl EmbeddingStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(count > 0)
@@ -4865,43 +5035,43 @@ impl EmbeddingStore {
 
     /// Count total stored embeddings.
     pub fn count(&self) -> Result<usize, StorageError> {
-        let connection = open(&self.database_path)?;
-        memory_embeddings_count(&connection, &self.database_path)
+        let connection = self.db.conn()?;
+        memory_embeddings_count(&connection, self.db.path())
     }
 
     /// Returns the current database-wide embedding dimensions when known.
     pub fn dimensions(&self) -> Result<Option<usize>, StorageError> {
-        let connection = open(&self.database_path)?;
-        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, &self.database_path)?
+        let connection = self.db.conn()?;
+        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, self.db.path())?
         {
             return Ok(Some(dimensions));
         }
-        detect_uniform_embedding_dimensions(&connection, &self.database_path)
+        detect_uniform_embedding_dimensions(&connection, self.db.path())
     }
 
     /// Remove all stored embeddings and clear the vector index.
     pub fn clear(&self) -> Result<(), StorageError> {
-        let mut connection = open(&self.database_path)?;
+        let mut connection = self.db.conn()?;
         let tx = connection
             .transaction()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         tx.execute("DELETE FROM memory_embeddings", [])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
-        if memory_vec_table_exists(&tx, &self.database_path)? {
+        if memory_vec_table_exists(&tx, self.db.path())? {
             tx.execute("DELETE FROM memory_vec", [])
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?;
         }
         tx.commit().map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
         Ok(())
@@ -5011,7 +5181,7 @@ pub struct PendingPairing {
 /// Instead of static allowlists, unknown users receive a one-time pairing
 /// code that the bot owner approves via the CLI or API.
 pub struct PairingStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 /// Unambiguous alphabet for pairing codes (no 0/O, 1/I).
@@ -5047,9 +5217,13 @@ fn generate_pairing_code() -> String {
 
 impl PairingStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Delete pending pairing codes that have exceeded their TTL.
@@ -5073,7 +5247,7 @@ impl PairingStore {
 
     /// Check if a user is approved (paired) on a platform.
     pub fn is_approved(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM pairing_approved
@@ -5082,7 +5256,7 @@ impl PairingStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(count > 0)
@@ -5090,10 +5264,10 @@ impl PairingStore {
 
     /// List all approved users, optionally filtered by platform.
     pub fn list_approved(&self, platform: Option<&str>) -> Result<Vec<ApprovedUser>, StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
@@ -5115,7 +5289,7 @@ impl PairingStore {
                 )
                 .map_err(me)?;
             let rows = stmt.query_map(params![p], map_row).map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -5125,7 +5299,7 @@ impl PairingStore {
                 )
                 .map_err(me)?;
             let rows = stmt.query_map([], map_row).map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         };
 
         Ok(users)
@@ -5146,12 +5320,12 @@ impl PairingStore {
             return Ok(None);
         }
 
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Clean up expired codes
         Self::cleanup_expired_codes(
             &connection,
-            &self.database_path,
+            self.db.path(),
             &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
         )?;
 
@@ -5163,7 +5337,7 @@ impl PairingStore {
                 |row| row.get(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5181,7 +5355,7 @@ impl PairingStore {
                 params![platform, &code, user_id, user_name],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5197,12 +5371,12 @@ impl PairingStore {
         code: &str,
     ) -> Result<Option<ApprovedUser>, StorageError> {
         let code = code.to_uppercase();
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Clean up expired codes first
         Self::cleanup_expired_codes(
             &connection,
-            &self.database_path,
+            self.db.path(),
             &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
         )?;
 
@@ -5216,7 +5390,7 @@ impl PairingStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5231,7 +5405,7 @@ impl PairingStore {
                 params![platform, &code],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5244,7 +5418,7 @@ impl PairingStore {
                 params![platform, &user_id, &user_name],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5265,7 +5439,7 @@ impl PairingStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5277,17 +5451,17 @@ impl PairingStore {
         &self,
         platform: Option<&str>,
     ) -> Result<Vec<PendingPairing>, StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
         // Clean up expired first
         Self::cleanup_expired_codes(
             &connection,
-            &self.database_path,
+            self.db.path(),
             &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
         )?;
 
@@ -5310,7 +5484,7 @@ impl PairingStore {
                 )
                 .map_err(me)?;
             let rows = stmt.query_map(params![p], map_row).map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         } else {
             let mut stmt = connection
                 .prepare(
@@ -5320,7 +5494,7 @@ impl PairingStore {
                 )
                 .map_err(me)?;
             let rows = stmt.query_map([], map_row).map_err(me)?;
-            collect_rows(rows, &self.database_path)?
+            collect_rows(rows, self.db.path())?
         };
 
         Ok(pending)
@@ -5328,14 +5502,14 @@ impl PairingStore {
 
     /// Revoke an approved user's access.
     pub fn revoke(&self, platform: &str, user_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = connection
             .execute(
                 "DELETE FROM pairing_approved WHERE platform = ?1 AND user_id = ?2",
                 params![platform, user_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(rows > 0)
@@ -5343,7 +5517,7 @@ impl PairingStore {
 
     /// Clear all pending codes, optionally filtered by platform.
     pub fn clear_pending(&self, platform: Option<&str>) -> Result<usize, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let rows = if let Some(p) = platform {
             connection
                 .execute(
@@ -5351,14 +5525,14 @@ impl PairingStore {
                     params![p],
                 )
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?
         } else {
             connection
                 .execute("DELETE FROM pairing_pending", [])
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?
         };
@@ -5372,10 +5546,10 @@ impl PairingStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<ApprovedUser>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
@@ -5407,7 +5581,7 @@ impl PairingStore {
             let rows = stmt
                 .query_map(params![p, limit as i64, offset as i64], map_row)
                 .map_err(me)?;
-            (t, collect_rows(rows, &self.database_path)?)
+            (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
                 .query_row(
@@ -5427,7 +5601,7 @@ impl PairingStore {
             let rows = stmt
                 .query_map(params![limit as i64, offset as i64], map_row)
                 .map_err(me)?;
-            (t, collect_rows(rows, &self.database_path)?)
+            (t, collect_rows(rows, self.db.path())?)
         };
 
         Ok((items, total as u64))
@@ -5440,17 +5614,17 @@ impl PairingStore {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<PendingPairing>, u64), StorageError> {
-        let connection = open(&self.database_path)?;
-        let db = &self.database_path;
+        let connection = self.db.conn()?;
+        let db = self.db.path();
         let me = |source: rusqlite::Error| StorageError::Sqlite {
-            path: db.clone(),
+            path: db.to_path_buf(),
             source,
         };
 
         // Clean up expired first
         Self::cleanup_expired_codes(
             &connection,
-            &self.database_path,
+            self.db.path(),
             &format!("-{PAIRING_CODE_TTL_SECS} seconds"),
         )?;
 
@@ -5483,7 +5657,7 @@ impl PairingStore {
             let rows = stmt
                 .query_map(params![p, limit as i64, offset as i64], map_row)
                 .map_err(me)?;
-            (t, collect_rows(rows, &self.database_path)?)
+            (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
                 .query_row(
@@ -5503,7 +5677,7 @@ impl PairingStore {
             let rows = stmt
                 .query_map(params![limit as i64, offset as i64], map_row)
                 .map_err(me)?;
-            (t, collect_rows(rows, &self.database_path)?)
+            (t, collect_rows(rows, self.db.path())?)
         };
 
         Ok((items, total as u64))
@@ -5524,19 +5698,23 @@ pub struct CachedChannel {
 }
 
 pub struct ChannelStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl ChannelStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// List cached channels, optionally filtered by platform.
     pub fn list(&self, platform: Option<&str>) -> Result<Vec<CachedChannel>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let (sql, param): (&str, Option<&str>) = if platform.is_some() {
             (
@@ -5556,7 +5734,7 @@ impl ChannelStore {
         let mut stmt = connection
             .prepare(sql)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5577,11 +5755,11 @@ impl ChannelStore {
             stmt.query_map([], row_mapper)
         }
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
-        collect_rows(mapped_rows, &self.database_path)
+        collect_rows(mapped_rows, self.db.path())
     }
 
     /// Upsert a batch of channels for a platform, replacing stale entries.
@@ -5590,7 +5768,7 @@ impl ChannelStore {
         platform: &str,
         channels: &[CachedChannel],
     ) -> Result<usize, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         // Clear old entries for this platform before inserting fresh data.
         connection
@@ -5599,7 +5777,7 @@ impl ChannelStore {
                 params![platform],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5617,7 +5795,7 @@ impl ChannelStore {
                     ],
                 )
                 .map_err(|source| StorageError::Sqlite {
-                    path: self.database_path.clone(),
+                    path: self.db.path().to_path_buf(),
                     source,
                 })?;
         }
@@ -5627,7 +5805,7 @@ impl ChannelStore {
 
     /// Check if channels for a platform are cached and fresh (within max_age_secs).
     pub fn is_fresh(&self, platform: &str, max_age_secs: i64) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let fresh: bool = connection
             .query_row(
                 "SELECT COUNT(*) FROM channels
@@ -5637,7 +5815,7 @@ impl ChannelStore {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?
             > 0;
@@ -5683,14 +5861,18 @@ pub struct LlmAnalytics {
 /// events with structured JSON details. Supports querying by session, event type,
 /// and time range.
 pub struct AuditLogStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl AuditLogStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Map a database row to an `AuditEntry`.
@@ -5713,7 +5895,7 @@ impl AuditLogStore {
         event_type: &str,
         details: &serde_json::Value,
     ) -> Result<i64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let details_str = details.to_string();
         connection
             .execute(
@@ -5722,7 +5904,7 @@ impl AuditLogStore {
                 params![session_id, event_type, details_str],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(connection.last_insert_rowid())
@@ -5734,7 +5916,7 @@ impl AuditLogStore {
         session_id: &str,
         limit: usize,
     ) -> Result<Vec<AuditEntry>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, session_id, event_type, details, created_at
@@ -5744,18 +5926,18 @@ impl AuditLogStore {
                  LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![session_id, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Query audit entries by event type.
@@ -5764,7 +5946,7 @@ impl AuditLogStore {
         event_type: &str,
         limit: usize,
     ) -> Result<Vec<AuditEntry>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, session_id, event_type, details, created_at
@@ -5774,23 +5956,23 @@ impl AuditLogStore {
                  LIMIT ?2",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![event_type, limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Query recent audit entries across all sessions.
     pub fn recent(&self, limit: usize) -> Result<Vec<AuditEntry>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT id, session_id, event_type, details, created_at
@@ -5799,23 +5981,23 @@ impl AuditLogStore {
                  LIMIT ?1",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
         let rows = stmt
             .query_map(params![limit as i64], Self::row_to_audit_entry)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Count total audit entries and entries per event type.
     pub fn stats(&self) -> Result<Vec<(String, i64)>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT event_type, COUNT(*) as cnt
@@ -5824,7 +6006,7 @@ impl AuditLogStore {
                  ORDER BY cnt DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5833,11 +6015,11 @@ impl AuditLogStore {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Aggregate tool usage analytics from tool_call_end audit events.
@@ -5845,7 +6027,7 @@ impl AuditLogStore {
     /// Returns a list of (tool_name, call_count, success_count, avg_duration_ms)
     /// sorted by call count descending.
     pub fn tool_analytics(&self, days: u32) -> Result<Vec<ToolAnalytics>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT
@@ -5861,7 +6043,7 @@ impl AuditLogStore {
                  ORDER BY calls DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5875,18 +6057,18 @@ impl AuditLogStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Aggregate LLM usage analytics from llm_response audit events.
     ///
     /// Returns per-model token usage totals.
     pub fn llm_analytics(&self, days: u32) -> Result<Vec<LlmAnalytics>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let mut stmt = connection
             .prepare(
                 "SELECT
@@ -5902,7 +6084,7 @@ impl AuditLogStore {
                  ORDER BY calls DESC",
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -5916,23 +6098,23 @@ impl AuditLogStore {
                 })
             })
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
-        collect_rows(rows, &self.database_path)
+        collect_rows(rows, self.db.path())
     }
 
     /// Delete audit entries older than the given number of days.
     pub fn purge_older_than(&self, days: u32) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute(
                 "DELETE FROM audit_log WHERE created_at < datetime('now', '-' || ?1 || ' days')",
                 params![days],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted as u64)
@@ -5958,21 +6140,25 @@ pub struct CachedResponse {
 /// Caches responses keyed by a deterministic hash of the request parameters
 /// (model + messages + tools + temperature). Entries expire after a configurable TTL.
 pub struct ResponseCacheStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl ResponseCacheStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Look up a cached response by its cache key.
     /// Returns `None` if the entry doesn't exist or has expired.
     /// Increments the hit counter on successful lookup.
     pub fn get(&self, cache_key: &str) -> Result<Option<CachedResponse>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let entry: Option<CachedResponse> = connection
             .query_row(
@@ -5997,7 +6183,7 @@ impl ResponseCacheStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -6025,7 +6211,7 @@ impl ResponseCacheStore {
         output_tokens: u32,
         ttl_seconds: u32,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT OR REPLACE INTO response_cache
@@ -6044,7 +6230,7 @@ impl ResponseCacheStore {
                 ],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -6052,14 +6238,14 @@ impl ResponseCacheStore {
 
     /// Remove expired entries from the cache.
     pub fn prune_expired(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute(
                 "DELETE FROM response_cache WHERE expires_at <= datetime('now')",
                 [],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted as u64)
@@ -6067,11 +6253,11 @@ impl ResponseCacheStore {
 
     /// Clear all cache entries.
     pub fn clear(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute("DELETE FROM response_cache", [])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted as u64)
@@ -6079,7 +6265,7 @@ impl ResponseCacheStore {
 
     /// Return total number of cached entries and total hit count.
     pub fn stats(&self) -> Result<(u64, u64), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let (entries, hits) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(hit_count), 0) FROM response_cache
@@ -6088,7 +6274,7 @@ impl ResponseCacheStore {
                 |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok((entries, hits))
@@ -6110,19 +6296,23 @@ pub struct CachedSticker {
 /// Keyed by `file_unique_id` (stable across messages, unlike `file_id`).
 /// Stores vision-analyzed descriptions to avoid re-analyzing the same sticker.
 pub struct StickerCacheStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl StickerCacheStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Look up a cached sticker description by its unique file ID.
     pub fn get(&self, file_unique_id: &str) -> Result<Option<CachedSticker>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT file_unique_id, description, emoji, sticker_set, created_at
@@ -6140,7 +6330,7 @@ impl StickerCacheStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
@@ -6153,7 +6343,7 @@ impl StickerCacheStore {
         emoji: &str,
         sticker_set: &str,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT OR REPLACE INTO sticker_cache
@@ -6162,7 +6352,7 @@ impl StickerCacheStore {
                 params![file_unique_id, description, emoji, sticker_set],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -6170,14 +6360,14 @@ impl StickerCacheStore {
 
     /// Delete a cached sticker entry.
     pub fn delete(&self, file_unique_id: &str) -> Result<bool, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute(
                 "DELETE FROM sticker_cache WHERE file_unique_id = ?1",
                 params![file_unique_id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted > 0)
@@ -6185,11 +6375,11 @@ impl StickerCacheStore {
 
     /// Return the total number of cached sticker entries.
     pub fn count(&self) -> Result<u64, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM sticker_cache", [], |row| row.get(0))
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(count as u64)
@@ -6209,14 +6399,18 @@ pub struct SandboxRow {
 
 /// SQLite-backed store for sandbox terminal backend records.
 pub struct SandboxStore {
-    database_path: PathBuf,
+    db: Database,
 }
 
 impl SandboxStore {
     pub fn new(database_path: &Path) -> Self {
-        Self {
-            database_path: database_path.to_path_buf(),
-        }
+        Self::with_db(Database::new(database_path))
+    }
+
+    /// Create from a shared [`Database`] handle — multiple stores can share
+    /// the same pooled connection.
+    pub fn with_db(db: Database) -> Self {
+        Self { db }
     }
 
     /// Insert or replace a sandbox record, keyed on (backend, task_id).
@@ -6227,7 +6421,7 @@ impl SandboxStore {
         task_id: &str,
         snapshot_data: Option<&str>,
     ) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "INSERT INTO sandboxes (id, backend, task_id, snapshot_data, created_at, last_active)
@@ -6239,7 +6433,7 @@ impl SandboxStore {
                 params![id, backend, task_id, snapshot_data],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -6251,7 +6445,7 @@ impl SandboxStore {
         backend: &str,
         task_id: &str,
     ) -> Result<Option<SandboxRow>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .query_row(
                 "SELECT id, backend, task_id, snapshot_data, created_at, last_active
@@ -6270,21 +6464,21 @@ impl SandboxStore {
             )
             .optional()
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })
     }
 
     /// Update the last_active timestamp for a sandbox by id.
     pub fn update_activity(&self, id: &str) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute(
                 "UPDATE sandboxes SET last_active = datetime('now') WHERE id = ?1",
                 params![id],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -6292,11 +6486,11 @@ impl SandboxStore {
 
     /// Delete a sandbox record by id.
     pub fn delete(&self, id: &str) -> Result<(), StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         connection
             .execute("DELETE FROM sandboxes WHERE id = ?1", params![id])
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(())
@@ -6304,7 +6498,7 @@ impl SandboxStore {
 
     /// List all sandbox records, optionally filtered by backend.
     pub fn list(&self, backend: Option<&str>) -> Result<Vec<SandboxRow>, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
 
         let (sql, param): (&str, Option<&str>) = if backend.is_some() {
             (
@@ -6324,7 +6518,7 @@ impl SandboxStore {
         let mut stmt = connection
             .prepare(sql)
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
 
@@ -6345,24 +6539,24 @@ impl SandboxStore {
             stmt.query_map([], row_mapper)
         }
         .map_err(|source| StorageError::Sqlite {
-            path: self.database_path.clone(),
+            path: self.db.path().to_path_buf(),
             source,
         })?;
 
-        collect_rows(mapped_rows, &self.database_path)
+        collect_rows(mapped_rows, self.db.path())
     }
 
     /// Delete sandbox records that have not been active for more than `days` days.
     /// Returns the number of records deleted.
     pub fn cleanup_older_than(&self, days: u32) -> Result<usize, StorageError> {
-        let connection = open(&self.database_path)?;
+        let connection = self.db.conn()?;
         let deleted = connection
             .execute(
                 "DELETE FROM sandboxes WHERE last_active < datetime('now', '-' || ?1 || ' days')",
                 params![days],
             )
             .map_err(|source| StorageError::Sqlite {
-                path: self.database_path.clone(),
+                path: self.db.path().to_path_buf(),
                 source,
             })?;
         Ok(deleted)
