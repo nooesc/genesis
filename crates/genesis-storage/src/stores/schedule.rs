@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A persisted scheduled job.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

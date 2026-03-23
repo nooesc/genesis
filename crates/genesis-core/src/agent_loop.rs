@@ -1098,15 +1098,15 @@ impl AgentLoop {
             };
 
             let cached = cache_key.as_ref().and_then(|key| {
-                self.response_cache.as_ref().and_then(|cache| {
-                    match cache.get(key) {
+                self.response_cache
+                    .as_ref()
+                    .and_then(|cache| match cache.get(key) {
                         Ok(hit) => hit,
                         Err(e) => {
                             debug!(error = %e, "response cache lookup failed");
                             None
                         }
-                    }
-                })
+                    })
             });
 
             self.hooks
@@ -1188,17 +1188,16 @@ impl AgentLoop {
                 {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
-                    let tc_json = choice
-                        .message
-                        .tool_calls
-                        .as_ref()
-                        .and_then(|tc| match serde_json::to_string(tc) {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                debug!(error = %e, "failed to serialize tool calls for cache");
-                                None
-                            }
-                        });
+                    let tc_json =
+                        choice.message.tool_calls.as_ref().and_then(
+                            |tc| match serde_json::to_string(tc) {
+                                Ok(s) => Some(s),
+                                Err(e) => {
+                                    debug!(error = %e, "failed to serialize tool calls for cache");
+                                    None
+                                }
+                            },
+                        );
                     let (in_tok, out_tok) = response
                         .usage
                         .as_ref()
@@ -1782,10 +1781,8 @@ impl AgentLoop {
                         );
                         // Only response.completed emits provider_metadata today; last write wins is intentional.
                         msg.provider_metadata = streamed_provider_metadata;
-                        if let Some(message) = self.push_message_with_lua_hooks(
-                            &hook_session,
-                            msg,
-                        ) {
+                        if let Some(message) = self.push_message_with_lua_hooks(&hook_session, msg)
+                        {
                             if let Some(text) = message.content_text() {
                                 if !text.is_empty() {
                                     self.trajectory.record_assistant_message(text);
@@ -1944,10 +1941,7 @@ impl AgentLoop {
                     let mut text_msg = ChatMessage::assistant(&response_text);
                     text_msg.provider_metadata = streamed_provider_metadata;
                     let response_text = self
-                        .push_message_with_lua_hooks(
-                            &hook_session,
-                            text_msg,
-                        )
+                        .push_message_with_lua_hooks(&hook_session, text_msg)
                         .and_then(|message| message.content_text().map(str::to_owned))
                         .unwrap_or_default();
                     if !response_text.is_empty() {

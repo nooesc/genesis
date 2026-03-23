@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A stored user trait — an observation about the user's preferences, personality, or goals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,7 +262,10 @@ impl UserModelStore {
         let mut stmt = connection.prepare(data_sql).map_err(me)?;
         let items = if let Some(cat) = category {
             let rows = stmt
-                .query_map(params![cat, limit as i64, offset as i64], Self::row_to_trait)
+                .query_map(
+                    params![cat, limit as i64, offset as i64],
+                    Self::row_to_trait,
+                )
                 .map_err(me)?;
             collect_rows(rows, self.db.path())?
         } else if let Some(threshold) = min_confidence {
@@ -314,8 +317,8 @@ impl UserModelStore {
 
 #[cfg(test)]
 mod user_model_store_tests {
-    use crate::bootstrap;
     use super::UserModelStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -526,7 +529,12 @@ mod user_model_store_tests {
         let store = UserModelStore::new(&database_path);
         for i in 0..4 {
             store
-                .observe(&format!("trait_{i}"), "category_a", &format!("value_{i}"), None)
+                .observe(
+                    &format!("trait_{i}"),
+                    "category_a",
+                    &format!("value_{i}"),
+                    None,
+                )
                 .expect("observe should succeed");
         }
 
@@ -550,9 +558,10 @@ mod user_model_store_tests {
         store.observe("t2", "pref", "v2", None).unwrap();
         store.observe("t3", "skill", "v3", None).unwrap();
 
-        let (page, total) = store.list_paginated(Some("pref"), None, 50, 0).expect("filter by category");
+        let (page, total) = store
+            .list_paginated(Some("pref"), None, 50, 0)
+            .expect("filter by category");
         assert_eq!(total, 2);
         assert_eq!(page.len(), 2);
     }
 }
-
