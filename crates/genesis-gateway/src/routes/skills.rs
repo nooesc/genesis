@@ -62,16 +62,25 @@ pub(crate) async fn list_skills_handler(
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let (skills, total) = store.list_all_paginated(limit, offset).map_err(storage_err)?;
+    let (skills, total) = store
+        .list_all_paginated(limit, offset)
+        .map_err(storage_err)?;
 
     let has_more = (offset + skills.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SkillListResponse {
-        skills,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SkillListResponse {
+            skills,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

@@ -127,13 +127,20 @@ pub(crate) async fn list_memories_handler(
     let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(serde_json::to_value(MemoryListResponse {
-        memories,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(MemoryListResponse {
+            memories,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

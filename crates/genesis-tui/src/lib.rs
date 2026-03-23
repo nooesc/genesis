@@ -193,8 +193,9 @@ pub async fn run_tui(
         &compact_art,
     );
 
-    let animations_enabled =
-        config.tui.animations && genesis_config::env::get_opt(genesis_config::env::REDUCE_MOTION).is_none_or(|v| v != "1");
+    let animations_enabled = config.tui.animations
+        && genesis_config::env::get_opt(genesis_config::env::REDUCE_MOTION)
+            .is_none_or(|v| v != "1");
     let no_color = genesis_config::env::is_present(genesis_config::env::NO_COLOR);
 
     let mut status_bar =

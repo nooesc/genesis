@@ -3,7 +3,7 @@ use genesis_tools::ToolError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) const DEFAULT_MAX_TURNS: usize = 20;
+pub(crate) const DEFAULT_MAX_TURNS: usize = genesis_config::defaults::agent::DEFAULT_MAX_TURNS;
 
 /// Default number of tool calls between memory consolidation nudges.
 pub(crate) const DEFAULT_MEMORY_NUDGE_INTERVAL: usize = 15;
@@ -20,7 +20,8 @@ pub(crate) const SKILL_CREATION_THRESHOLD: usize = 8;
 
 /// Number of consecutive failures for the same tool before injecting a
 /// "try a different approach" nudge.
-pub(crate) const STUCK_LOOP_THRESHOLD: usize = genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
+pub(crate) const STUCK_LOOP_THRESHOLD: usize =
+    genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
 
 /// Events emitted during streaming execution.
 #[derive(Debug, Clone)]
@@ -208,11 +209,11 @@ pub enum AgentError {
     Tool(#[from] ToolError),
     #[error("failed to parse tool call arguments: {0}")]
     ArgumentParse(String),
-    #[error("agent loop exceeded maximum of {0} turns")]
+    #[error("agent loop exceeded maximum of {0} turns — increase `runtime.max_turns` or set GENESIS_MAX_TURNS env var to allow more")]
     MaxTurnsExceeded(usize),
-    #[error("budget exceeded: ${used:.4} / ${limit:.4}")]
+    #[error("session budget exceeded: ${used:.4} spent of ${limit:.4} limit — increase `runtime.budget_limit` in config, set GENESIS_BUDGET_LIMIT env var, or use 0 for unlimited")]
     BudgetExceeded { used: f64, limit: f64 },
-    #[error("iteration budget exhausted: {used} / {limit} iterations")]
+    #[error("iteration budget exhausted: {used}/{limit} iterations used — increase `runtime.max_iterations` to allow more")]
     IterationsExhausted { used: usize, limit: usize },
     #[error("agent loop was cancelled")]
     Cancelled,

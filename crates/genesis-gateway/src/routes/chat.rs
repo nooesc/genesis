@@ -736,59 +736,58 @@ pub(crate) async fn chat_stream_handler(
             let tx_cb = tx.clone();
             let cancelled_cb = Arc::clone(&cancelled);
 
-            let agent_future = service
-                .run_turn_streaming(
-                    SessionTurnInput {
-                        session_id: &session_id,
-                        session_platform: &platform,
-                        delivery_platform: delivery_platform_from_str(&platform),
-                        prompt: &message,
-                        title: None,
-                        images,
-                    },
-                    |event| match event {
-                        StreamEvent::Chunk(chunk) => {
-                            if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
-                                session_id: session_id.clone(),
-                                content: chunk.to_owned(),
-                            }) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("chunk").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+            let agent_future = service.run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: &platform,
+                    delivery_platform: delivery_platform_from_str(&platform),
+                    prompt: &message,
+                    title: None,
+                    images,
+                },
+                |event| match event {
+                    StreamEvent::Chunk(chunk) => {
+                        if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
+                            session_id: session_id.clone(),
+                            content: chunk.to_owned(),
+                        }) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("chunk").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallStart { name, .. } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "tool": name,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("tool_call").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallStart { name, .. } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "tool": name,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("tool_call").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallEnd { .. }
-                        | StreamEvent::TurnStarted
-                        | StreamEvent::TokenUsage { .. }
-                        | StreamEvent::Warning(_) => {}
-                        StreamEvent::ClarificationNeeded { question } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "question": question,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("clarification").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallEnd { .. }
+                    | StreamEvent::TurnStarted
+                    | StreamEvent::TokenUsage { .. }
+                    | StreamEvent::Warning(_) => {}
+                    StreamEvent::ClarificationNeeded { question } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "question": question,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("clarification").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                    },
-                );
+                    }
+                },
+            );
 
             let run_result =
                 match tokio::time::timeout(Duration::from_secs(timeout_secs), agent_future).await {
@@ -796,15 +795,12 @@ pub(crate) async fn chat_stream_handler(
                     Err(_elapsed) => {
                         warn!(
                             request_id = request_id_for_task.as_str(),
-                            timeout_secs,
-                            "streaming chat request timed out"
+                            timeout_secs, "streaming chat request timed out"
                         );
                         cancelled.store(true, Ordering::Relaxed);
                         if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
                             session_id,
-                            error: format!(
-                                "streaming request timed out after {timeout_secs}s"
-                            ),
+                            error: format!("streaming request timed out after {timeout_secs}s"),
                         }) {
                             send_sse(
                                 &tx,

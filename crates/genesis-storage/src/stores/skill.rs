@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 /// A stored agent skill — a reusable procedure the agent can invoke.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,8 +310,8 @@ fn skill_match_score(skill: &StoredSkill, prompt_words: &[String]) -> f64 {
 
 #[cfg(test)]
 mod skill_store_tests {
-    use crate::bootstrap;
     use super::SkillStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -534,4 +534,3 @@ mod skill_store_tests {
         assert_ne!(page[0].name, page2[0].name);
     }
 }
-

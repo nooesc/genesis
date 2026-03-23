@@ -57,13 +57,20 @@ pub(crate) async fn list_approved_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + approved.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ApprovedListResponse {
-        approved,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ApprovedListResponse {
+            approved,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -79,13 +86,20 @@ pub(crate) async fn list_pending_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + pending.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PendingListResponse {
-        pending,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(PendingListResponse {
+            pending,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

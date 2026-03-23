@@ -57,13 +57,20 @@ pub(crate) async fn list_schedules_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + schedules.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ScheduleListResponse {
-        schedules,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ScheduleListResponse {
+            schedules,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

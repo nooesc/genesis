@@ -6,8 +6,8 @@ mod types;
 
 // Re-export the full public API (unchanged).
 pub use types::{
-    AgentError, AgentHooks, AgentLoopConfig, AgentResult, NoopHooks, StreamEvent,
-    SubagentSpawner, DEFAULT_CORE_TOOLS,
+    AgentError, AgentHooks, AgentLoopConfig, AgentResult, NoopHooks, StreamEvent, SubagentSpawner,
+    DEFAULT_CORE_TOOLS,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -690,7 +690,8 @@ impl AgentLoop {
                 let result = AgentResult {
                     response: format!(
                         "I've reached the maximum of {} turns for this request. \
-                         The work so far has been saved. You can continue by sending another message.",
+                         The work so far has been saved. You can continue by sending another message, \
+                         or increase the limit via `runtime.max_turns` in config or the GENESIS_MAX_TURNS env var.",
                         self.config.max_turns
                     ),
                     turns_used: turns_used - 1,
@@ -771,15 +772,15 @@ impl AgentLoop {
             };
 
             let cached = cache_key.as_ref().and_then(|key| {
-                self.response_cache.as_ref().and_then(|cache| {
-                    match cache.get(key) {
+                self.response_cache
+                    .as_ref()
+                    .and_then(|cache| match cache.get(key) {
                         Ok(hit) => hit,
                         Err(e) => {
                             debug!(error = %e, "response cache lookup failed");
                             None
                         }
-                    }
-                })
+                    })
             });
 
             self.hooks
@@ -861,17 +862,16 @@ impl AgentLoop {
                 {
                     let choice = &response.choices[0];
                     let text = choice.message.content_text().unwrap_or("");
-                    let tc_json = choice
-                        .message
-                        .tool_calls
-                        .as_ref()
-                        .and_then(|tc| match serde_json::to_string(tc) {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                debug!(error = %e, "failed to serialize tool calls for cache");
-                                None
-                            }
-                        });
+                    let tc_json =
+                        choice.message.tool_calls.as_ref().and_then(
+                            |tc| match serde_json::to_string(tc) {
+                                Ok(s) => Some(s),
+                                Err(e) => {
+                                    debug!(error = %e, "failed to serialize tool calls for cache");
+                                    None
+                                }
+                            },
+                        );
                     let (in_tok, out_tok) = response
                         .usage
                         .as_ref()
@@ -1571,7 +1571,10 @@ tools = [{tools_list}]
     #[test]
     fn agent_loop_config_has_sensible_defaults() {
         let config = AgentLoopConfig::default();
-        assert_eq!(config.max_turns, 20);
+        assert_eq!(
+            config.max_turns,
+            genesis_config::defaults::agent::DEFAULT_MAX_TURNS
+        );
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
         assert_eq!(config.memory_nudge_interval, Some(15));
@@ -1659,7 +1662,10 @@ tools = [{tools_list}]
             initial_len,
             "no nudge below threshold"
         );
-        assert!(!agent.nudge_sent, "nudge_sent should be false below threshold");
+        assert!(
+            !agent.nudge_sent,
+            "nudge_sent should be false below threshold"
+        );
 
         // Simulate 5 failures — should trigger at default threshold
         agent.tool_failure_counts.insert("web_search".to_owned(), 5);

@@ -3,9 +3,9 @@ use std::path::Path;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::util::collect_rows;
+use crate::Database;
 
 // ---------------------------------------------------------------------------
 // Audit log
@@ -307,8 +307,8 @@ impl AuditLogStore {
 
 #[cfg(test)]
 mod audit_log_store_tests {
-    use crate::bootstrap;
     use super::AuditLogStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -508,4 +508,3 @@ mod audit_log_store_tests {
         assert_eq!(remaining[0].event_type, "recent_event");
     }
 }
-

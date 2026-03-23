@@ -108,7 +108,11 @@ pub async fn process_platform_message(
 
     // 4. Run the agent turn
     let service = state.session_service();
-    let title = format!("{}: {}", capitalize_platform(msg.platform_name), msg.user_name);
+    let title = format!(
+        "{}: {}",
+        capitalize_platform(msg.platform_name),
+        msg.user_name
+    );
     let result = service
         .run_turn(SessionTurnInput {
             session_id: msg.session_id,
@@ -315,9 +319,12 @@ pub fn check_pairing(
         return Ok(PairingCheck::Approved);
     }
 
-    let platform_allowlist =
-        genesis_config::env::get_or(genesis_config::env::platform_allowlist_var(platform.as_str()), "");
-    let global_allowlist = genesis_config::env::get_or(genesis_config::env::GATEWAY_ALLOWED_USERS, "");
+    let platform_allowlist = genesis_config::env::get_or(
+        genesis_config::env::platform_allowlist_var(platform.as_str()),
+        "",
+    );
+    let global_allowlist =
+        genesis_config::env::get_or(genesis_config::env::GATEWAY_ALLOWED_USERS, "");
 
     if platform_allowlist.is_empty() && global_allowlist.is_empty() {
         if is_truthy_env(genesis_config::env::GATEWAY_ALLOW_ALL_USERS) {
@@ -561,9 +568,15 @@ mod tests {
             body: "bot was blocked".to_owned(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("telegram"), "should contain platform name: {msg}");
+        assert!(
+            msg.contains("telegram"),
+            "should contain platform name: {msg}"
+        );
         assert!(msg.contains("403"), "should contain status code: {msg}");
-        assert!(msg.contains("bot was blocked"), "should contain body: {msg}");
+        assert!(
+            msg.contains("bot was blocked"),
+            "should contain body: {msg}"
+        );
     }
 
     #[test]

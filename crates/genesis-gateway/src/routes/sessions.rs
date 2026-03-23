@@ -131,13 +131,20 @@ pub(crate) async fn list_sessions_handler(
     };
 
     let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SessionListResponse {
-        sessions,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SessionListResponse {
+            sessions,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

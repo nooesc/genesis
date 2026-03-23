@@ -226,13 +226,20 @@ pub(crate) async fn list_templates_handler(
         .collect();
     let has_more = (offset + page.len()) < total as usize;
 
-    Ok(Json(serde_json::to_value(TemplateListResponse {
-        templates: page,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TemplateListResponse {
+            templates: page,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 

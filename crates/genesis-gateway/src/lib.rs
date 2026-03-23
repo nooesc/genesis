@@ -143,14 +143,30 @@ pub(crate) mod helpers {
         };
     }
 
-    paginated_response!(SessionListResponse, sessions, genesis_storage::SessionSummary);
+    paginated_response!(
+        SessionListResponse,
+        sessions,
+        genesis_storage::SessionSummary
+    );
     paginated_response!(SkillListResponse, skills, genesis_storage::StoredSkill);
     paginated_response!(MemoryListResponse, memories, genesis_storage::StoredMemory);
-    paginated_response!(ScheduleListResponse, schedules, genesis_storage::StoredSchedule);
+    paginated_response!(
+        ScheduleListResponse,
+        schedules,
+        genesis_storage::StoredSchedule
+    );
     paginated_response!(TraitListResponse, traits, genesis_storage::StoredUserTrait);
     paginated_response!(TemplateListResponse, templates, serde_json::Value);
-    paginated_response!(ApprovedListResponse, approved, genesis_storage::ApprovedUser);
-    paginated_response!(PendingListResponse, pending, genesis_storage::PendingPairing);
+    paginated_response!(
+        ApprovedListResponse,
+        approved,
+        genesis_storage::ApprovedUser
+    );
+    paginated_response!(
+        PendingListResponse,
+        pending,
+        genesis_storage::PendingPairing
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +412,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 mod tests {
     use super::*;
     use crate::helpers::*;
-    use crate::state::{HistogramBuckets, get_or_try_init_arc};
     use crate::middleware::RateLimiter;
+    use crate::state::{get_or_try_init_arc, HistogramBuckets};
     use std::net::IpAddr;
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
@@ -1169,7 +1185,11 @@ mod tests {
             .oneshot(req)
             .await
             .expect("request should succeed");
-        assert_eq!(resp.status(), StatusCode::OK, "/health at root must return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health at root must return 200"
+        );
 
         let req = Request::builder()
             .uri("/api/health")
@@ -1278,7 +1298,11 @@ mod tests {
             .uri("/api/memories/embed")
             .body(Body::empty())
             .expect("request should build");
-        let embed_resp = app.clone().oneshot(embed_req).await.expect("request should succeed");
+        let embed_resp = app
+            .clone()
+            .oneshot(embed_req)
+            .await
+            .expect("request should succeed");
         assert_eq!(embed_resp.status(), StatusCode::OK);
 
         let req = Request::builder()
@@ -1288,7 +1312,9 @@ mod tests {
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "vector");
         assert_eq!(json["count"], 1);
@@ -1306,18 +1332,30 @@ mod tests {
         let (state, dir) = create_test_state();
         let db_path = dir.path().join("genesis.db");
         let store = MemoryStore::new(&db_path);
-        store.create_note(NewMemoryNote {
-            id: "linked-note".to_owned(), session_id: Some("s1".to_owned()),
-            kind: "fact".to_owned(), content: "Rust ownership model".to_owned(),
-            keywords: vec!["rust".to_owned()], tags: vec!["language".to_owned()],
-            linked_ids: vec![], importance: 0.7,
-        }).expect("linked note should store");
-        store.create_note(NewMemoryNote {
-            id: "primary-note".to_owned(), session_id: Some("s1".to_owned()),
-            kind: "fact".to_owned(), content: "Genesis architecture memory".to_owned(),
-            keywords: vec!["genesis".to_owned()], tags: vec!["architecture".to_owned()],
-            linked_ids: vec!["linked-note".to_owned()], importance: 1.0,
-        }).expect("primary note should store");
+        store
+            .create_note(NewMemoryNote {
+                id: "linked-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust ownership model".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec!["language".to_owned()],
+                linked_ids: vec![],
+                importance: 0.7,
+            })
+            .expect("linked note should store");
+        store
+            .create_note(NewMemoryNote {
+                id: "primary-note".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Genesis architecture memory".to_owned(),
+                keywords: vec!["genesis".to_owned()],
+                tags: vec!["architecture".to_owned()],
+                linked_ids: vec!["linked-note".to_owned()],
+                importance: 1.0,
+            })
+            .expect("primary note should store");
 
         let app = build_router(state);
         let req = Request::builder()
@@ -1326,12 +1364,18 @@ mod tests {
             .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["mode"], "graph");
         assert_eq!(json["count"], 2);
-        let ids = json["memories"].as_array().unwrap().iter()
-            .map(|item| item["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let ids = json["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
         assert!(ids.contains(&"primary-note".to_owned()));
         assert!(ids.contains(&"linked-note".to_owned()));
     }
@@ -1347,17 +1391,31 @@ mod tests {
         let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], 1);
         assert_eq!(json["skipped"], 0);
         assert_eq!(json["errors"], 0);
         assert_eq!(json["total"], 1);
-        assert_eq!(genesis_storage::EmbeddingStore::new(&db_path).count().unwrap(), 1);
+        assert_eq!(
+            genesis_storage::EmbeddingStore::new(&db_path)
+                .count()
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(feature = "local-embeddings")]
@@ -1370,14 +1428,21 @@ mod tests {
         let (state, _dir) = create_test_state_with_local_embedding();
         let db_path = state.loaded.config.storage.database_path.clone();
         let embedding_store = genesis_storage::EmbeddingStore::new(&db_path);
-        embedding_store.store("mem-local", &[1.0, 0.0], "legacy-model").expect("legacy embedding should store");
+        embedding_store
+            .store("mem-local", &[1.0, 0.0], "legacy-model")
+            .expect("legacy embedding should store");
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], 1);
         assert_eq!(json["reset"], true);
@@ -1395,24 +1460,44 @@ mod tests {
         let db_path = state.loaded.config.storage.database_path.clone();
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/mem-local/embed")
-            .body(Body::empty()).expect("request should build");
-        let resp = app.clone().oneshot(req).await.expect("request should succeed");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/mem-local/embed")
+            .body(Body::empty())
+            .expect("request should build");
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["embedded"], true);
         assert_eq!(json["memory_id"], "mem-local");
         assert_eq!(json["model"], "sentence-transformers/all-MiniLM-L6-v2");
-        assert_eq!(genesis_storage::EmbeddingStore::new(&db_path).count().unwrap(), 1);
+        assert_eq!(
+            genesis_storage::EmbeddingStore::new(&db_path)
+                .count()
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(feature = "local-embeddings")]
     #[test]
     fn app_state_reuses_shared_local_embedding_provider() {
         let (state, _dir) = create_test_state_with_local_embedding();
-        let first = state.embedding_provider().expect("provider should initialize").expect("provider should be configured");
-        let second = state.embedding_provider().expect("provider should initialize").expect("provider should be configured");
+        let first = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
+        let second = state
+            .embedding_provider()
+            .expect("provider should initialize")
+            .expect("provider should be configured");
         assert!(Arc::ptr_eq(&first, &second));
     }
 
@@ -1426,16 +1511,23 @@ mod tests {
         let embedding = genesis_config::EmbeddingConfig {
             backend: "local".to_owned(),
             model: "unsupported-local-model".to_owned(),
-            base_url: None, api_key_env: None, dimensions: Some(384),
+            base_url: None,
+            api_key_env: None,
+            dimensions: Some(384),
         };
         let (state, _dir) = create_test_state_with_key(None, false, Some(embedding));
         let app = build_router(state);
 
-        let req = Request::builder().method("POST").uri("/api/memories/embed")
-            .body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/memories/embed")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let message = String::from_utf8(body.to_vec()).unwrap();
         assert!(message.contains("unsupported local embedding model"));
     }
@@ -1459,14 +1551,16 @@ mod tests {
         let second = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(42)
-        }).expect("second init should succeed");
+        })
+        .expect("second init should succeed");
         assert_eq!(*second, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
 
         let third = get_or_try_init_arc(&cache, &init_lock, || -> Result<usize, &'static str> {
             attempts.fetch_add(1, Ordering::Relaxed);
             Ok(7)
-        }).expect("cached init should succeed");
+        })
+        .expect("cached init should succeed");
         assert_eq!(*third, 42);
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
     }
@@ -1494,7 +1588,8 @@ mod tests {
                     attempts.fetch_add(1, Ordering::Relaxed);
                     std::thread::sleep(std::time::Duration::from_millis(25));
                     Ok(42)
-                }).expect("init should succeed")
+                })
+                .expect("init should succeed")
             }));
         }
         for handle in threads {
@@ -1529,10 +1624,15 @@ mod tests {
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let req = Request::builder().uri("/api/metrics/json").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/api/metrics/json")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("uptime_seconds").is_some());
         assert!(json.get("requests_total").is_some());
@@ -1543,7 +1643,13 @@ mod tests {
 
     #[test]
     fn paginated_response_serializes_correctly() {
-        let resp = PaginatedResponse { items: vec!["a", "b"], total: 5, limit: 2, offset: 0, has_more: true };
+        let resp = PaginatedResponse {
+            items: vec!["a", "b"],
+            total: 5,
+            limit: 2,
+            offset: 0,
+            has_more: true,
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
         assert_eq!(json["items"], serde_json::json!(["a", "b"]));
         assert_eq!(json["total"], 5);
@@ -1552,7 +1658,13 @@ mod tests {
 
     #[test]
     fn paginated_response_has_more_false_at_end() {
-        let resp = PaginatedResponse { items: vec![1, 2], total: 4, limit: 2, offset: 2, has_more: false };
+        let resp = PaginatedResponse {
+            items: vec![1, 2],
+            total: 4,
+            limit: 2,
+            offset: 2,
+            has_more: false,
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
         assert_eq!(json["has_more"], false);
     }
@@ -1586,7 +1698,8 @@ mod tests {
     #[test]
     fn list_sessions_query_defaults_match_pagination() {
         let json = r#"{}"#;
-        let q: crate::routes::sessions::ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        let q: crate::routes::sessions::ListSessionsQuery =
+            serde_json::from_str(json).expect("should deserialize");
         assert_eq!(q.limit, DEFAULT_PAGE_LIMIT);
         assert_eq!(q.offset, 0);
         assert!(q.search.is_none());
@@ -1595,7 +1708,8 @@ mod tests {
     #[test]
     fn list_sessions_query_accepts_offset() {
         let json = r#"{"limit": 10, "offset": 20}"#;
-        let q: crate::routes::sessions::ListSessionsQuery = serde_json::from_str(json).expect("should deserialize");
+        let q: crate::routes::sessions::ListSessionsQuery =
+            serde_json::from_str(json).expect("should deserialize");
         assert_eq!(q.limit, 10);
         assert_eq!(q.offset, 20);
     }
@@ -1635,10 +1749,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/sessions?limit=10&offset=0").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/sessions?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("sessions").is_some());
         assert!(json.get("total").is_some());
@@ -1655,10 +1774,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/skills?limit=5").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/skills?limit=5")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("skills").is_some());
         assert!(json.get("total").is_some());
@@ -1673,10 +1797,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/memories?limit=10&offset=0").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/memories?limit=10&offset=0")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("memories").is_some());
         assert!(json.get("total").is_some());
@@ -1691,10 +1820,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/tools").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/tools")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("builtin_tools").is_some());
         assert!(json.get("mcp_tools").is_some());
@@ -1715,10 +1849,15 @@ mod tests {
 
         let (state, _dir) = create_test_state();
         let app = build_router(state);
-        let req = Request::builder().uri("/api/templates?limit=50").body(Body::empty()).expect("request should build");
+        let req = Request::builder()
+            .uri("/api/templates?limit=50")
+            .body(Body::empty())
+            .expect("request should build");
         let resp = app.oneshot(req).await.expect("request should succeed");
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json.get("templates").is_some());
         assert!(json.get("total").is_some());
@@ -1735,13 +1874,30 @@ mod tests {
         let app = build_router(state);
 
         for uri in &[
-            "/api/sessions", "/api/skills", "/api/memories", "/api/schedules",
-            "/api/user/traits", "/api/tools", "/api/templates",
-            "/api/pairing/approved", "/api/pairing/pending",
+            "/api/sessions",
+            "/api/skills",
+            "/api/memories",
+            "/api/schedules",
+            "/api/user/traits",
+            "/api/tools",
+            "/api/templates",
+            "/api/pairing/approved",
+            "/api/pairing/pending",
         ] {
-            let req = Request::builder().uri(*uri).body(Body::empty()).expect("request should build");
-            let resp = app.clone().oneshot(req).await.expect("request should succeed");
-            assert_eq!(resp.status(), StatusCode::OK, "{uri} should return 200 with default params");
+            let req = Request::builder()
+                .uri(*uri)
+                .body(Body::empty())
+                .expect("request should build");
+            let resp = app
+                .clone()
+                .oneshot(req)
+                .await
+                .expect("request should succeed");
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} should return 200 with default params"
+            );
         }
     }
 
@@ -1759,11 +1915,18 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a POST request with JSON body.
-    async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1774,7 +1937,10 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a DELETE request.
@@ -1788,11 +1954,18 @@ mod tests {
             .uri(uri)
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a PATCH request with JSON body.
-    async fn patch_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn patch_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1803,11 +1976,18 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a PUT request with JSON body.
-    async fn put_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+    async fn put_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1818,7 +1998,10 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: parse response body as JSON.
@@ -1840,7 +2023,10 @@ mod tests {
             .header("authorization", format!("Bearer {key}"))
             .body(Body::empty())
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: make a POST request with auth header and JSON body.
@@ -1861,7 +2047,10 @@ mod tests {
             .header("authorization", format!("Bearer {key}"))
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .expect("request should build");
-        app.clone().oneshot(req).await.expect("request should succeed")
+        app.clone()
+            .oneshot(req)
+            .await
+            .expect("request should succeed")
     }
 
     /// Helper: open the test database directly for seeding data.
@@ -1998,8 +2187,12 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
-        store.append_message("s1", "assistant", Some("Hi there!"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
+        store
+            .append_message("s1", "assistant", Some("Hi there!"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2015,7 +2208,9 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2160,20 +2355,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/s1/export").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("text/markdown")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/markdown"));
     }
 
     #[tokio::test]
@@ -2181,20 +2377,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("test"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/s1/export?format=json").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("application/json")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json"));
     }
 
     #[tokio::test]
@@ -2202,7 +2399,9 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("test"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2228,20 +2427,21 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("Hello"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
         let resp = get(&app, "/api/sessions/export?format=jsonl").await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .contains("jsonl")
-        );
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("jsonl"));
     }
 
     #[tokio::test]
@@ -2250,7 +2450,9 @@ mod tests {
         let db = open_test_db(&dir);
         // Need at least one session with messages to trigger format validation
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("seed message"), None, None, None).unwrap();
+        store
+            .append_message("s1", "user", Some("seed message"), None, None, None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2263,7 +2465,16 @@ mod tests {
         let (state, dir) = create_test_state();
         let db = open_test_db(&dir);
         let store = SessionStore::new(&db);
-        store.append_message("s1", "user", Some("Rust programming language"), None, None, None).unwrap();
+        store
+            .append_message(
+                "s1",
+                "user",
+                Some("Rust programming language"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2611,9 +2822,13 @@ mod tests {
         let db = open_test_db(&dir);
         // Create the skill first (foreign key constraint)
         let skill_store = SkillStore::new(&db);
-        skill_store.upsert("test-skill", "A skill", "Do it", None, &[]).unwrap();
+        skill_store
+            .upsert("test-skill", "A skill", "Do it", None, &[])
+            .unwrap();
         let usage_store = SkillUsageStore::new(&db);
-        usage_store.record_usage("test-skill", Some("s1"), "success", None).unwrap();
+        usage_store
+            .record_usage("test-skill", Some("s1"), "success", None)
+            .unwrap();
 
         let app = build_router(state);
 
@@ -2698,12 +2913,7 @@ mod tests {
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/pairing/clear-pending",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/pairing/clear-pending", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
         let json = body_json(resp).await;
@@ -2951,12 +3161,7 @@ cases:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/eval/validate",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/eval/validate", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -2986,12 +3191,7 @@ cases:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/guardrails/check",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/guardrails/check", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -3027,12 +3227,7 @@ steps:
         let (state, _dir) = create_test_state();
         let app = build_router(state);
 
-        let resp = post_json(
-            &app,
-            "/api/workflows/validate",
-            serde_json::json!({}),
-        )
-        .await;
+        let resp = post_json(&app, "/api/workflows/validate", serde_json::json!({})).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -3187,7 +3382,12 @@ steps:
         let resp = get(&app, "/metrics").await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/plain"), "expected text/plain, got {ct}");
     }
 
@@ -3211,11 +3411,7 @@ steps:
 
     #[tokio::test]
     async fn auth_required_returns_401_without_key() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         // Protected routes should return 401
@@ -3231,11 +3427,7 @@ steps:
 
     #[tokio::test]
     async fn auth_with_valid_key_returns_200() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = get_with_auth(&app, "/api/sessions", "secret-key").await;
@@ -3244,11 +3436,7 @@ steps:
 
     #[tokio::test]
     async fn auth_with_wrong_key_returns_401() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = get_with_auth(&app, "/api/sessions", "wrong-key").await;
@@ -3257,11 +3445,7 @@ steps:
 
     #[tokio::test]
     async fn health_accessible_without_auth_when_key_configured() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         // Health endpoints are public
@@ -3277,11 +3461,7 @@ steps:
 
     #[tokio::test]
     async fn auth_post_endpoint_with_valid_key() {
-        let (state, _dir) = create_test_state_with_key(
-            Some("secret-key".to_string()),
-            true,
-            None,
-        );
+        let (state, _dir) = create_test_state_with_key(Some("secret-key".to_string()), true, None);
         let app = build_router(state);
 
         let resp = post_json_with_auth(
