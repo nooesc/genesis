@@ -29,6 +29,7 @@ pub struct GenesisApi {
     plugin_context: Option<PluginContext>,
     pub(crate) path_validator: Option<Arc<PathValidator>>,
     pub(crate) working_dir: Option<String>,
+    pub(crate) http_client: Option<Arc<reqwest::blocking::Client>>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +181,9 @@ impl UserData for GenesisApi {
         fields.add_field_method_get("process", |lua, this| {
             crate::primitives::process::make_process_bridge(lua, this.working_dir.clone())
         });
+        fields.add_field_method_get("http", |lua, this| {
+            crate::primitives::http::make_http_bridge(lua, this.http_client.clone())
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -285,6 +289,7 @@ pub(crate) fn install_genesis_api(
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
     working_dir: Option<String>,
+    http_client: Option<Arc<reqwest::blocking::Client>>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -305,6 +310,7 @@ pub(crate) fn install_genesis_api(
         plugin_context,
         path_validator,
         working_dir,
+        http_client,
     })?)
 }
 

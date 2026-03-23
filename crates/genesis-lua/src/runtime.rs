@@ -322,6 +322,7 @@ impl LuaRuntime {
             None,
             None,
             None,
+            None,
         )?;
         lua.globals().set("genesis", genesis)?;
         strip_unsafe_globals(&lua)?;
@@ -752,6 +753,7 @@ impl LuaRuntime {
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
+            None,
             None,
             None,
         )?;
