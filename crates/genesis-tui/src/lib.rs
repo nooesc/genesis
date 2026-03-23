@@ -261,8 +261,9 @@ pub async fn run_tui(
         active_theme: crate::theme::resolve_theme(&config.tui.theme),
     };
 
-    // Apply the initial theme to the status bar.
+    // Apply the initial theme to themed widgets.
     app.status_bar.set_theme(&*app.active_theme);
+    app.chat.set_theme(&*app.active_theme);
 
     // If an initial prompt was provided, skip the welcome screen and submit
     // the prompt as the first user message once the event loop starts.

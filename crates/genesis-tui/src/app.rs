@@ -373,6 +373,7 @@ impl App {
                     let next = names[(idx + 1) % names.len()];
                     self.active_theme = crate::theme::resolve_theme(next);
                     self.status_bar.set_theme(&*self.active_theme);
+                    self.chat.set_theme(&*self.active_theme);
                     // Persist to config (best-effort, ignore errors).
                     let _ = genesis_config::set_theme(next);
                     self.frame_requester.schedule_frame();
