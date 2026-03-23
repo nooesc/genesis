@@ -104,6 +104,8 @@ struct EmbeddingServiceBridge {
 
 impl genesis_tools::EmbeddingService for EmbeddingServiceBridge {
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, String> {
+        // block_in_place is safe in both cases: it's a no-op on blocking
+        // threads and moves the task off the worker when on a Tokio worker.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 self.provider
@@ -730,14 +732,19 @@ impl<'a> SessionExecutionService<'a> {
 
         // Wire embedding provider for auto-embed in memory tools
         if let Some(ref config) = self.loaded.config.embedding {
-            if let Ok(provider) = crate::embedding::EmbeddingProvider::from_config(config) {
-                let model = provider.model().to_owned();
-                let bridge: Arc<dyn genesis_tools::EmbeddingService> =
-                    Arc::new(EmbeddingServiceBridge {
-                        provider: Arc::new(provider),
-                        model,
-                    });
-                tool_runtime.set_embedding_service(bridge);
+            match crate::embedding::EmbeddingProvider::from_config(config) {
+                Ok(provider) => {
+                    let model = provider.model().to_owned();
+                    let bridge: Arc<dyn genesis_tools::EmbeddingService> =
+                        Arc::new(EmbeddingServiceBridge {
+                            provider: Arc::new(provider),
+                            model,
+                        });
+                    tool_runtime.set_embedding_service(bridge);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to initialise embedding provider; memory dedup disabled");
+                }
             }
         }
 

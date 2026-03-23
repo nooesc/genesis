@@ -78,6 +78,11 @@ impl ToolHandler for MemoryStoreTool {
                             {
                                 tracing::warn!(error = %e, "failed to auto-link merged memory");
                             }
+                            if let Err(e) =
+                                store.auto_link_temporal(&best_id, &context.session_id, 5)
+                            {
+                                tracing::warn!(error = %e, "failed to temporally link merged memory");
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to re-embed merged memory");
