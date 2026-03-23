@@ -364,11 +364,9 @@ mod tests {
 
         // Verify the columns exist by querying them.
         let edge_type: String = conn
-            .query_row(
-                "SELECT edge_type FROM memory_links LIMIT 0",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT edge_type FROM memory_links LIMIT 0", [], |row| {
+                row.get(0)
+            })
             .unwrap_or_else(|_| "semantic".to_owned());
         // If LIMIT 0 returns no rows that's fine — the point is the column is recognized.
         assert!(edge_type == "semantic" || edge_type.is_empty());

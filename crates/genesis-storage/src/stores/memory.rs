@@ -9,8 +9,7 @@ use crate::error::StorageError;
 use crate::stores::embedding::{embedding_to_blob, EmbeddingStore};
 use crate::util::{
     collect_rows, cosine_similarity, decayed_importance, edge_type_weight, exec_migration,
-    memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders,
-    sqlite_table_exists,
+    memory_vec_declared_dimensions, memory_vec_table_exists, sql_placeholders, sqlite_table_exists,
 };
 use crate::Database;
 
@@ -824,7 +823,8 @@ impl MemoryStore {
                                     &neighbor.attributes.accessed_at,
                                     &now,
                                 )
-                                .unwrap_or(neighbor.attributes.importance) as f64;
+                                .unwrap_or(neighbor.attributes.importance)
+                                    as f64;
 
                             scored.push(ScoredMemory {
                                 memory: neighbor.memory.clone(),
@@ -839,10 +839,7 @@ impl MemoryStore {
             frontier = next_frontier;
 
             // Cap frontier to prevent unbounded expansion on dense graphs.
-            frontier.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            frontier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             frontier.truncate(limit * 4);
         }
 
@@ -881,10 +878,9 @@ impl MemoryStore {
                 source,
             })?;
         let recent_ids: Vec<String> = collect_rows(
-            stmt.query_map(
-                params![session_id, memory_id, max_links as i64],
-                |row| row.get(0),
-            )
+            stmt.query_map(params![session_id, memory_id, max_links as i64], |row| {
+                row.get(0)
+            })
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -1049,9 +1045,7 @@ impl MemoryStore {
                     path: self.db.path().to_path_buf(),
                     source,
                 })?;
-            collect_rows(rows, self.db.path())?
-                .into_iter()
-                .collect()
+            collect_rows(rows, self.db.path())?.into_iter().collect()
         };
         drop(connection);
 
@@ -1830,8 +1824,14 @@ mod memory_store_tests {
 
         let results = store.graph_search("genesis architecture", 10).unwrap();
         let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
-        assert!(ids.contains(&"causal-linked"), "causal-linked should appear in results");
-        assert!(ids.contains(&"entity-linked"), "entity-linked should appear in results");
+        assert!(
+            ids.contains(&"causal-linked"),
+            "causal-linked should appear in results"
+        );
+        assert!(
+            ids.contains(&"entity-linked"),
+            "entity-linked should appear in results"
+        );
 
         // Causal (0.9 multiplier) should score higher than entity (0.6 multiplier).
         let causal_score = results
@@ -1855,10 +1855,14 @@ mod memory_store_tests {
         let dir = tempdir().expect("tempdir");
         let db_path = setup(dir.path());
         let embeddings = EmbeddingStore::new(&db_path);
-        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
 
         let store = MemoryStore::new(&db_path);
-        let results = store.find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92, 10).unwrap();
+        let results = store
+            .find_similar(&[0.99, 0.01, 0.0, 0.0], 0.92, 10)
+            .unwrap();
         assert!(
             !results.is_empty(),
             "near-duplicate embedding should be found above threshold"
@@ -1871,7 +1875,9 @@ mod memory_store_tests {
         let dir = tempdir().expect("tempdir");
         let db_path = setup(dir.path());
         let embeddings = EmbeddingStore::new(&db_path);
-        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
 
         let store = MemoryStore::new(&db_path);
         let results = store.find_similar(&[0.0, 1.0, 0.0, 0.0], 0.92, 10).unwrap();
@@ -1888,11 +1894,8 @@ mod memory_store_tests {
 
         // Set a known importance for mem1
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE memories SET importance = 0.5 WHERE id = 'mem1'",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE memories SET importance = 0.5 WHERE id = 'mem1'", [])
+            .unwrap();
         drop(conn);
 
         let store = MemoryStore::new(&db_path);
@@ -1933,7 +1936,11 @@ mod memory_store_tests {
         sessions.create_session("s1", "test", None).unwrap();
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        for (id, content) in [("mem1", "first note"), ("mem2", "second note"), ("mem3", "third note")] {
+        for (id, content) in [
+            ("mem1", "first note"),
+            ("mem2", "second note"),
+            ("mem3", "third note"),
+        ] {
             conn.execute(
                 "INSERT INTO memories (id, session_id, kind, content, created_at)
                  VALUES (?1, 's1', 'fact', ?2, CURRENT_TIMESTAMP)",
@@ -1944,9 +1951,15 @@ mod memory_store_tests {
         drop(conn);
 
         let embeddings = EmbeddingStore::new(&db_path);
-        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem2", &[0.95, 0.05, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem3", &[0.0, 0.0, 1.0, 0.0], "test").unwrap();
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem2", &[0.95, 0.05, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem3", &[0.0, 0.0, 1.0, 0.0], "test")
+            .unwrap();
 
         let store = MemoryStore::new(&db_path);
         let linked = store
@@ -1955,8 +1968,14 @@ mod memory_store_tests {
         assert!(linked >= 1, "should link to at least mem2");
 
         let links = store.links_for("mem1").unwrap();
-        assert!(links.contains(&"mem2".to_owned()), "mem1 should link to mem2");
-        assert!(!links.contains(&"mem3".to_owned()), "mem1 should not link to dissimilar mem3");
+        assert!(
+            links.contains(&"mem2".to_owned()),
+            "mem1 should link to mem2"
+        );
+        assert!(
+            !links.contains(&"mem3".to_owned()),
+            "mem1 should not link to dissimilar mem3"
+        );
 
         // Verify bidirectional
         let reverse_links = store.links_for("mem2").unwrap();
@@ -1996,7 +2015,10 @@ mod memory_store_tests {
         assert_eq!(linked, 1, "should link to mem1");
 
         let links = store.links_for("mem2").unwrap();
-        assert!(links.contains(&"mem1".to_owned()), "mem2 should link to mem1");
+        assert!(
+            links.contains(&"mem1".to_owned()),
+            "mem2 should link to mem1"
+        );
 
         // Verify bidirectional
         let reverse_links = store.links_for("mem1").unwrap();
@@ -2089,7 +2111,9 @@ mod memory_store_tests {
         drop(conn);
 
         let store = MemoryStore::new(&db_path);
-        let stale = store.list_stale(0.1, 90).expect("list_stale should succeed");
+        let stale = store
+            .list_stale(0.1, 90)
+            .expect("list_stale should succeed");
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].id, "mem1");
     }
@@ -2108,8 +2132,13 @@ mod memory_store_tests {
         drop(conn);
 
         let store = MemoryStore::new(&db_path);
-        let stale = store.list_stale(0.1, 90).expect("list_stale should succeed");
-        assert!(stale.is_empty(), "consolidated memory should not appear in stale list");
+        let stale = store
+            .list_stale(0.1, 90)
+            .expect("list_stale should succeed");
+        assert!(
+            stale.is_empty(),
+            "consolidated memory should not appear in stale list"
+        );
     }
 
     #[test]
@@ -2140,14 +2169,26 @@ mod memory_store_tests {
 
         let embeddings = EmbeddingStore::new(&db_path);
         // Cluster A: very similar vectors
-        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem3", &[0.95, 0.05, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem4", &[0.9, 0.1, 0.0, 0.0], "test").unwrap();
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem3", &[0.95, 0.05, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem4", &[0.9, 0.1, 0.0, 0.0], "test")
+            .unwrap();
         // Cluster B: similar to each other, different from A
-        embeddings.store("mem5", &[0.0, 1.0, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem6", &[0.0, 0.95, 0.05, 0.0], "test").unwrap();
+        embeddings
+            .store("mem5", &[0.0, 1.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem6", &[0.0, 0.95, 0.05, 0.0], "test")
+            .unwrap();
         // Outlier
-        embeddings.store("mem7", &[0.0, 0.0, 0.0, 1.0], "test").unwrap();
+        embeddings
+            .store("mem7", &[0.0, 0.0, 0.0, 1.0], "test")
+            .unwrap();
 
         let store = MemoryStore::new(&db_path);
         let clusters = store
@@ -2192,8 +2233,12 @@ mod memory_store_tests {
         drop(conn);
 
         let embeddings = EmbeddingStore::new(&db_path);
-        embeddings.store("mem1", &[1.0, 0.0, 0.0, 0.0], "test").unwrap();
-        embeddings.store("mem2", &[0.99, 0.01, 0.0, 0.0], "test").unwrap();
+        embeddings
+            .store("mem1", &[1.0, 0.0, 0.0, 0.0], "test")
+            .unwrap();
+        embeddings
+            .store("mem2", &[0.99, 0.01, 0.0, 0.0], "test")
+            .unwrap();
 
         let store = MemoryStore::new(&db_path);
         let clusters = store
@@ -2400,9 +2445,6 @@ mod memory_store_tests {
         let results = store.advanced_search("hello", 10, 1).unwrap();
         let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
         assert!(ids.contains(&"mem-hop1"), "1-hop reachable");
-        assert!(
-            !ids.contains(&"mem-hop2"),
-            "2-hop NOT reachable at depth 1"
-        );
+        assert!(!ids.contains(&"mem-hop2"), "2-hop NOT reachable at depth 1");
     }
 }

@@ -231,10 +231,12 @@ impl ToolHandler for MemoryPruneTool {
 
         let count = stale.len();
         for memory in &stale {
-            store.delete(&memory.id).map_err(|error| ToolError::ExecutionFailed {
-                tool: call.name.clone(),
-                reason: format!("failed to delete {}: {error}", memory.id),
-            })?;
+            store
+                .delete(&memory.id)
+                .map_err(|error| ToolError::ExecutionFailed {
+                    tool: call.name.clone(),
+                    reason: format!("failed to delete {}: {error}", memory.id),
+                })?;
         }
 
         Ok(ToolOutput {

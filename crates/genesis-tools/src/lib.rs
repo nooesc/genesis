@@ -2014,7 +2014,9 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "list_dir"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_store"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_recall"));
-        assert!(definitions.iter().any(|tool| tool.name == "memory_consolidate"));
+        assert!(definitions
+            .iter()
+            .any(|tool| tool.name == "memory_consolidate"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_prune"));
         assert!(definitions.iter().any(|tool| tool.name == "search_files"));
         assert!(definitions.iter().any(|tool| tool.name == "web_request"));

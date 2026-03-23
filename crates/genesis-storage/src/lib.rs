@@ -12,9 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::migrations::{
-    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v14,
-    migrate_to_v15, migrate_to_v2, migrate_to_v3, migrate_to_v4, migrate_to_v5, migrate_to_v6,
-    migrate_to_v7, migrate_to_v8, migrate_to_v9,
+    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v14, migrate_to_v15,
+    migrate_to_v2, migrate_to_v3, migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7,
+    migrate_to_v8, migrate_to_v9,
 };
 use crate::util::{exec_migration, first_existing_dir, first_existing_file, open};
 

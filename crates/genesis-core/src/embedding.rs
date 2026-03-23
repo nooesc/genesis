@@ -847,10 +847,15 @@ mod tests {
         drop(conn);
 
         let memory_store = genesis_storage::MemoryStore::new(&db_path);
-        let results =
-            hybrid_search("advanced search", 10, SearchMode::Advanced, &memory_store, None)
-                .await
-                .expect("advanced search should succeed");
+        let results = hybrid_search(
+            "advanced search",
+            10,
+            SearchMode::Advanced,
+            &memory_store,
+            None,
+        )
+        .await
+        .expect("advanced search should succeed");
 
         assert!(!results.is_empty());
         assert_eq!(results[0].source, "advanced");
