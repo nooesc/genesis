@@ -87,9 +87,7 @@ fn truncation_suffix(shown_bytes: usize, total_bytes: usize, content: &str) -> S
     );
     let trimmed = content.trim_start();
     if trimmed.starts_with("{\"") || trimmed.starts_with("[\"") {
-        suffix.push_str(
-            "\n\u{26a0} output may be cut mid-structure (looks like JSON or similar)",
-        );
+        suffix.push_str("\n\u{26a0} output may be cut mid-structure (looks like JSON or similar)");
     }
     suffix
 }
