@@ -401,6 +401,7 @@ impl ChatWidget {
 
         let mut remaining_rows = area.height;
         let bottom_y = area.y + area.height;
+        let mut active_cell_rows: u16 = 0;
 
         // ── Active cell (if any) ───────────────────────────────────────
         // Only show the active streaming cell when not scrolled up.
@@ -456,6 +457,7 @@ impl ChatWidget {
                     .scroll((skip, 0));
                 paragraph.render(cell_area, buf);
 
+                active_cell_rows = rows_to_use;
                 remaining_rows -= rows_to_use;
             }
         }
@@ -657,12 +659,13 @@ impl ChatWidget {
         let show_top_hint = skipped_message_count > 0;
         let show_bottom_hint = self.scroll_locked && below_count > 0;
 
-        // Adjust content area to leave room for hints.
+        // Adjust content area to leave room for hints and the active cell.
         let content_y = area.y + if show_top_hint { 1 } else { 0 };
         let content_height = area
             .height
             .saturating_sub(if show_top_hint { 1 } else { 0 })
-            .saturating_sub(if show_bottom_hint { 1 } else { 0 });
+            .saturating_sub(if show_bottom_hint { 1 } else { 0 })
+            .saturating_sub(active_cell_rows);
 
         // Render from oldest to newest (reverse the reversed list).
         entries.reverse();
@@ -690,7 +693,7 @@ impl ChatWidget {
                     paragraph.render(cell_area, buf);
                 }
             }
-            row_cursor += entry.height;
+            row_cursor += h;
 
             if entry.separator_after && row_cursor < content_y + content_height {
                 render_turn_separator(area.x, row_cursor, area.width, sep_style, buf);
