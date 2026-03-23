@@ -65,13 +65,29 @@ impl UserCell {
 }
 
 /// Simple word-wrap: split `text` into lines that fit within `max_width` columns.
-/// Splits on any Unicode whitespace boundary; individual words wider than
+/// Hard newlines (`\n`) are preserved as line breaks. Each resulting paragraph
+/// is then wrapped on Unicode whitespace boundaries; individual words wider than
 /// `max_width` are kept as-is. Returns at least one (possibly empty) element.
 pub(crate) fn word_wrap(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
 
+    let mut result = Vec::new();
+    for paragraph in text.split('\n') {
+        let wrapped = wrap_single_line(paragraph, max_width);
+        result.extend(wrapped);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+/// Word-wrap a single paragraph (no embedded newlines) to fit within
+/// `max_width` columns. Splits on any Unicode whitespace boundary; individual
+/// words wider than `max_width` are kept as-is.
+fn wrap_single_line(text: &str, max_width: u16) -> Vec<String> {
     let max = max_width as usize;
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -180,5 +196,37 @@ mod tests {
         // Non-breaking space (U+00A0) should also split.
         let result = word_wrap("hello\u{00A0}world", 6);
         assert_eq!(result.len(), 2, "expected 2 lines, got: {result:?}");
+    }
+
+    #[test]
+    fn word_wrap_preserves_hard_newlines() {
+        // Hard newlines should produce separate lines, not be collapsed.
+        let result = word_wrap("line one\nline two\nline three", 40);
+        assert_eq!(result.len(), 3, "expected 3 lines, got: {result:?}");
+        assert_eq!(result[0], "line one");
+        assert_eq!(result[1], "line two");
+        assert_eq!(result[2], "line three");
+    }
+
+    #[test]
+    fn word_wrap_hard_newline_with_wrapping() {
+        // Hard newlines + word-wrapping within each paragraph.
+        let result = word_wrap("hello world\nfoo bar baz", 6);
+        // "hello world" wraps to ["hello", "world"], "foo bar baz" wraps to ["foo", "bar", "baz"]
+        assert_eq!(result.len(), 5, "expected 5 lines, got: {result:?}");
+        assert_eq!(result[0], "hello");
+        assert_eq!(result[1], "world");
+        assert_eq!(result[2], "foo");
+        assert_eq!(result[3], "bar");
+        assert_eq!(result[4], "baz");
+    }
+
+    #[test]
+    fn word_wrap_trailing_newline() {
+        // A trailing newline should produce an extra empty line.
+        let result = word_wrap("hello\n", 40);
+        assert_eq!(result.len(), 2, "expected 2 lines, got: {result:?}");
+        assert_eq!(result[0], "hello");
+        assert_eq!(result[1], "");
     }
 }
