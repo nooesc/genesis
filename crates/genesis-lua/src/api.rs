@@ -130,11 +130,41 @@ impl UserData for SessionView {
     }
 }
 
+const ENV_ALLOWED_PREFIXES: &[&str] = &[
+    "GENESIS_",
+    "TELEGRAM_",
+    "SLACK_",
+    "DISCORD_",
+    "WHATSAPP_",
+    "SIGNAL_",
+    "OPENAI_",
+    "ANTHROPIC_",
+    "OPENROUTER_",
+    "HOME_ASSISTANT_",
+    "GOOGLE_",
+    "ELEVENLABS_",
+    "DEEPGRAM_",
+];
+
 impl UserData for ConfigView {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_function_get("get", |lua, ud| {
             let values = ud.borrow::<ConfigView>()?.values.clone();
             lua.create_function(move |_, key: String| Ok(values.get(&key).cloned()))
+        });
+        fields.add_field_function_get("env", |lua, _ud| {
+            lua.create_function(|lua, key: String| {
+                let allowed = ENV_ALLOWED_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix));
+                if !allowed {
+                    return Ok(Value::Nil);
+                }
+                match std::env::var(&key) {
+                    Ok(val) => Ok(Value::String(lua.create_string(&val)?)),
+                    Err(_) => Ok(Value::Nil),
+                }
+            })
         });
     }
 }
@@ -183,6 +213,9 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("http", |lua, this| {
             crate::primitives::http::make_http_bridge(lua, this.http_client.clone())
+        });
+        fields.add_field_method_get("storage", |lua, this| {
+            crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
         });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
