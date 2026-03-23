@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::{
     api::{install_genesis_api, PluginContext},
     bundled::BUNDLED_PERSONALITIES,
+    context_registry::PluginContextRegistry,
     discovery::{discover_plugins_best_effort, PluginKind},
     hooks::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
@@ -62,6 +63,7 @@ pub struct LuaRuntime {
     personality_registry: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
     execution_control: Arc<Mutex<PluginExecutionControl>>,
     disabled_plugins: Arc<Mutex<HashSet<String>>>,
     plugin_failures: Arc<Mutex<HashMap<String, u32>>>,
@@ -294,6 +296,7 @@ impl LuaRuntime {
         let personality_registry = Arc::new(Mutex::new(LuaPersonalityRegistry::default()));
         let host_tool_executor = Arc::new(Mutex::new(None));
         let active_plugin = Arc::new(Mutex::new(Vec::new()));
+        let context_registry = PluginContextRegistry::new();
         let execution_control = Arc::new(Mutex::new(PluginExecutionControl::default()));
         let disabled_plugins = Arc::new(Mutex::new(HashSet::new()));
         let plugin_failures = Arc::new(Mutex::new(HashMap::new()));
@@ -325,6 +328,7 @@ impl LuaRuntime {
             Arc::clone(&personality_registry),
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
+            context_registry.clone(),
             None,
             config.path_validator.clone(),
             config.working_dir.clone(),
@@ -345,6 +349,7 @@ impl LuaRuntime {
             personality_registry,
             host_tool_executor,
             active_plugin,
+            context_registry,
             execution_control,
             disabled_plugins,
             plugin_failures,
@@ -429,6 +434,10 @@ impl LuaRuntime {
 
     pub fn plugin_errors(&self) -> &[String] {
         &self.plugin_errors
+    }
+
+    pub fn context_registry(&self) -> &PluginContextRegistry {
+        &self.context_registry
     }
 
     pub fn registered_tools(&self) -> Vec<LuaRegisteredTool> {
@@ -826,6 +835,7 @@ impl LuaRuntime {
             Arc::clone(&self.personality_registry),
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
+            self.context_registry.clone(),
             Some(plugin_context.clone()),
             config.path_validator.clone(),
             config.working_dir.clone(),

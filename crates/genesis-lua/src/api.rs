@@ -6,6 +6,7 @@ use genesis_tools::sandbox::PathValidator;
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
+    context_registry::PluginContextRegistry,
     hooks::{HookEvent, HookRegistry},
     manifest::PluginPermissions,
     personality::LuaPersonalityRegistry,
@@ -26,6 +27,7 @@ pub struct GenesisApi {
     personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
     plugin_context: Option<PluginContext>,
     pub(crate) path_validator: Option<Arc<PathValidator>>,
     pub(crate) working_dir: Option<PathBuf>,
@@ -268,6 +270,35 @@ impl UserData for GenesisApi {
             crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
                 .map(mlua::Value::Table)
         });
+        fields.add_field_method_get("context", |lua, this| {
+            let registry = this.context_registry.clone();
+            let plugin_name = this.plugin_context.as_ref().map(|c| c.name.clone());
+            let table = lua.create_table()?;
+
+            let add_registry = registry.clone();
+            let add_plugin = plugin_name.clone();
+            table.set(
+                "add",
+                lua.create_function(move |_, content: String| {
+                    let name = add_plugin.as_deref().unwrap_or("unknown");
+                    add_registry.add(name, content);
+                    Ok(())
+                })?,
+            )?;
+
+            let clear_registry = registry;
+            let clear_plugin = plugin_name;
+            table.set(
+                "clear",
+                lua.create_function(move |_, ()| {
+                    let name = clear_plugin.as_deref().unwrap_or("unknown");
+                    clear_registry.clear_for_plugin(name);
+                    Ok(())
+                })?,
+            )?;
+
+            Ok(table)
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -370,6 +401,7 @@ pub(crate) fn install_genesis_api(
     personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
     working_dir: Option<PathBuf>,
@@ -391,6 +423,7 @@ pub(crate) fn install_genesis_api(
         personalities,
         host_tools,
         active_plugin,
+        context_registry,
         plugin_context,
         path_validator,
         working_dir,
