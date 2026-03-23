@@ -129,7 +129,6 @@ pub fn make_fs_bridge(lua: &Lua, validator: Option<Arc<PathValidator>>) -> mlua:
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use genesis_tools::sandbox::PathValidator;
@@ -137,10 +136,7 @@ mod tests {
     /// Create a bare Lua VM with `genesis.fs` installed, backed by a
     /// [`PathValidator`] rooted at `working_dir`.
     fn test_lua_with_fs(working_dir: &std::path::Path) -> mlua::Lua {
-        let validator = Arc::new(PathValidator::new(
-            Some(working_dir.to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        ));
+        let validator = Arc::new(PathValidator::new(Some(working_dir.to_path_buf())));
         let lua = mlua::Lua::new();
         let fs_table =
             super::make_fs_bridge(&lua, Some(validator)).expect("make_fs_bridge should succeed");

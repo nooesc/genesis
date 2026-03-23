@@ -429,7 +429,6 @@ fn build_tree(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use genesis_tools::sandbox::PathValidator;
@@ -437,10 +436,7 @@ mod tests {
     /// Create a bare Lua VM with `genesis.search` installed, backed by a
     /// [`PathValidator`] rooted at `working_dir`.
     fn test_lua_with_search(working_dir: &std::path::Path) -> mlua::Lua {
-        let validator = Arc::new(PathValidator::new(
-            Some(working_dir.to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        ));
+        let validator = Arc::new(PathValidator::new(Some(working_dir.to_path_buf())));
         let lua = mlua::Lua::new();
         let search_table = super::make_search_bridge(
             &lua,

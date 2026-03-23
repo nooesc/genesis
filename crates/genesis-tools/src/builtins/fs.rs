@@ -444,10 +444,7 @@ mod tests {
     fn read_file_blocks_sensitive_path() {
         use std::sync::Arc;
         let ctx = ToolContext {
-            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(
-                None,
-                PathBuf::from("/home/user"),
-            ))),
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
             ..crate::test_utils::test_ctx()
         };
         let tool = ReadFileTool;
@@ -463,10 +460,7 @@ mod tests {
     fn write_file_blocks_sensitive_path() {
         use std::sync::Arc;
         let ctx = ToolContext {
-            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(
-                None,
-                PathBuf::from("/home/user"),
-            ))),
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
             ..crate::test_utils::test_ctx_destructive()
         };
         let tool = WriteFileTool;
@@ -488,10 +482,7 @@ mod tests {
     fn list_dir_blocks_sensitive_path() {
         use std::sync::Arc;
         let ctx = ToolContext {
-            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(
-                None,
-                PathBuf::from("/home/user"),
-            ))),
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(None))),
             ..crate::test_utils::test_ctx()
         };
         let tool = ListDirTool;
@@ -508,10 +499,9 @@ mod tests {
         use std::sync::Arc;
         let dir = tempdir().unwrap();
         let ctx = ToolContext {
-            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(
-                Some(dir.path().to_path_buf()),
-                PathBuf::from("/tmp/fake-home"),
-            ))),
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(Some(
+                dir.path().to_path_buf(),
+            )))),
             ..crate::test_utils::test_ctx_destructive()
         };
         let file_path = dir.path().join("valid.txt");
@@ -533,10 +523,9 @@ mod tests {
         use std::sync::Arc;
         let dir = tempdir().unwrap();
         let ctx = ToolContext {
-            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(
-                Some(dir.path().to_path_buf()),
-                PathBuf::from("/tmp/fake-home"),
-            ))),
+            path_validator: Some(Arc::new(crate::sandbox::PathValidator::new(Some(
+                dir.path().to_path_buf(),
+            )))),
             ..crate::test_utils::test_ctx_destructive()
         };
         let tool = WriteFileTool;

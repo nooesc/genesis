@@ -37,17 +37,17 @@ pub enum SandboxError {
 pub struct PathValidator {
     /// If set, paths outside this directory are rejected.
     pub working_dir: Option<PathBuf>,
-    /// The user's home directory.
-    pub home_dir: PathBuf,
 }
 
 impl PathValidator {
     /// Creates a new `PathValidator`.
-    pub fn new(working_dir: Option<PathBuf>, home_dir: PathBuf) -> Self {
-        Self {
-            working_dir,
-            home_dir,
-        }
+    ///
+    /// `working_dir` is eagerly canonicalized so that comparisons against
+    /// canonicalized file paths are consistent (e.g. on macOS where `/tmp`
+    /// is a symlink to `/private/tmp`).
+    pub fn new(working_dir: Option<PathBuf>) -> Self {
+        let working_dir = working_dir.map(|wd| wd.canonicalize().unwrap_or(wd));
+        Self { working_dir }
     }
 
     /// Returns `true` if `path` refers to a known sensitive location.
@@ -231,17 +231,15 @@ impl PathValidator {
         };
 
         // 4. Working-dir containment.
+        //    `self.working_dir` was eagerly canonicalized in `new()`, so the
+        //    comparison is always between two canonical paths.
         if let Some(ref wd) = self.working_dir {
-            let wd_canonical = wd.canonicalize().unwrap_or_else(|_| wd.clone());
-            if canonical.starts_with(&wd_canonical) {
+            if canonical.starts_with(wd) {
                 return Ok(canonical);
             }
             return Err(SandboxError::Blocked {
                 path: raw.to_string(),
-                reason: format!(
-                    "path is outside working directory `{}`",
-                    wd_canonical.display()
-                ),
+                reason: format!("path is outside working directory `{}`", wd.display()),
             });
         }
 
@@ -282,10 +280,7 @@ mod tests {
     use super::*;
 
     fn validator() -> PathValidator {
-        PathValidator::new(
-            Some(PathBuf::from("/projects/myapp")),
-            PathBuf::from("/tmp/fake-home"),
-        )
+        PathValidator::new(Some(PathBuf::from("/projects/myapp")))
     }
 
     #[test]
@@ -396,40 +391,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "hello").unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v.validate(file.to_str().unwrap()).is_ok());
     }
 
     #[test]
     fn validate_blocks_path_outside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v.validate("/etc/hosts").is_err());
     }
 
     #[test]
     fn validate_blocks_traversal_outside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v.validate("../../etc/hosts").is_err());
     }
 
     #[test]
     fn validate_handles_nonexistent_path_inside_working_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v
             .validate(dir.path().join("new_file.txt").to_str().unwrap())
             .is_ok());
@@ -437,7 +420,7 @@ mod tests {
 
     #[test]
     fn validate_blocks_sensitive_path_without_working_dir() {
-        let v = PathValidator::new(None, PathBuf::from("/home/user"));
+        let v = PathValidator::new(None);
         let result = v.validate("/home/user/.ssh/id_rsa");
         assert!(result.is_err());
     }
@@ -447,10 +430,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("dangling");
         std::os::unix::fs::symlink("/nonexistent/target", &link).unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v.validate(link.to_str().unwrap()).is_err());
     }
 
@@ -461,10 +441,7 @@ mod tests {
         std::fs::write(&real_file, "data").unwrap();
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&real_file, &link).unwrap();
-        let v = PathValidator::new(
-            Some(dir.path().to_path_buf()),
-            PathBuf::from("/tmp/fake-home"),
-        );
+        let v = PathValidator::new(Some(dir.path().to_path_buf()));
         assert!(v.validate(link.to_str().unwrap()).is_ok());
     }
 }
