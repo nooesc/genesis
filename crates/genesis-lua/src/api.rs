@@ -28,7 +28,7 @@ pub struct GenesisApi {
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
     pub(crate) path_validator: Option<Arc<PathValidator>>,
-    pub(crate) working_dir: Option<String>,
+    pub(crate) working_dir: Option<PathBuf>,
     pub(crate) http_client: Option<Arc<reqwest::blocking::Client>>,
 }
 
@@ -328,7 +328,7 @@ pub(crate) fn install_genesis_api(
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
-    working_dir: Option<String>,
+    working_dir: Option<PathBuf>,
     http_client: Option<Arc<reqwest::blocking::Client>>,
 ) -> Result<mlua::AnyUserData, LuaRuntimeError> {
     Ok(lua.create_userdata(GenesisApi {

@@ -40,8 +40,6 @@ pub fn make_json_bridge(lua: &Lua) -> mlua::Result<Table> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use serde_json::json;
 
     use crate::{LuaRuntimeConfig, LuaSessionContext};
@@ -61,9 +59,6 @@ mod tests {
                     platform: "cli".to_owned(),
                     personality: None,
                 },
-                disabled_plugins: Vec::new(),
-                plugin_verbose: None,
-                config_values: BTreeMap::new(),
                 ..Default::default()
             })
             .build()

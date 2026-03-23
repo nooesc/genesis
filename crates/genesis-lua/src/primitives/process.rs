@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Command;
 
 use mlua::{Lua, Table, Value};
@@ -12,7 +13,7 @@ use mlua::{Lua, Table, Value};
 /// - `cwd` (string) — working directory override
 /// - `timeout` (number) — timeout in seconds (default 120, currently a TODO)
 /// - `env` (table) — extra environment variables merged into the current env
-pub fn make_process_bridge(lua: &Lua, working_dir: Option<String>) -> mlua::Result<Table> {
+pub fn make_process_bridge(lua: &Lua, working_dir: Option<PathBuf>) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     table.set(
@@ -22,9 +23,10 @@ pub fn make_process_bridge(lua: &Lua, working_dir: Option<String>) -> mlua::Resu
             cmd.args(["-c", &command]);
 
             // Resolve working directory: opts.cwd > working_dir > unset.
-            let cwd = opts
+            let cwd: Option<PathBuf> = opts
                 .as_ref()
                 .and_then(|o| o.get::<Option<String>>("cwd").ok().flatten())
+                .map(PathBuf::from)
                 .or_else(|| working_dir.clone());
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
@@ -74,7 +76,7 @@ pub fn make_process_bridge(lua: &Lua, working_dir: Option<String>) -> mlua::Resu
 #[cfg(test)]
 mod tests {
     /// Create a bare Lua VM with `genesis.process` installed.
-    fn test_lua_with_process(working_dir: Option<String>) -> mlua::Lua {
+    fn test_lua_with_process(working_dir: Option<std::path::PathBuf>) -> mlua::Lua {
         let lua = mlua::Lua::new();
         let process_table = super::make_process_bridge(&lua, working_dir)
             .expect("make_process_bridge should succeed");

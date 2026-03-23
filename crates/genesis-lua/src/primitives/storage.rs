@@ -117,8 +117,6 @@ mod tests {
                     platform: "cli".to_owned(),
                     personality: None,
                 },
-                disabled_plugins: Vec::new(),
-                plugin_verbose: None,
                 config_values,
                 ..Default::default()
             })

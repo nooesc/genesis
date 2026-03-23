@@ -46,7 +46,7 @@ pub struct LuaRuntimeConfig {
     /// Sandbox path validator for the `genesis.fs` / `genesis.search` primitives.
     pub path_validator: Option<Arc<genesis_tools::sandbox::PathValidator>>,
     /// Working directory for `genesis.process` / `genesis.search` primitives.
-    pub working_dir: Option<String>,
+    pub working_dir: Option<PathBuf>,
     /// Shared HTTP client for the `genesis.http` primitive.
     pub http_client: Option<Arc<reqwest::blocking::Client>>,
 }
@@ -759,9 +759,9 @@ impl LuaRuntime {
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             Some(plugin_context.clone()),
-            None,
-            None,
-            None,
+            config.path_validator.clone(),
+            config.working_dir.clone(),
+            config.http_client.clone(),
         )?;
         env.set("genesis", plugin_genesis)?;
         env.set("_G", env.clone())?;

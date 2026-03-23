@@ -20,14 +20,14 @@ fn resolve_path(raw: &str, validator: &Option<Arc<PathValidator>>) -> mlua::Resu
 /// Priority: explicitly provided path > working_dir > "."
 fn effective_base(
     explicit: Option<&str>,
-    working_dir: &Option<String>,
+    working_dir: &Option<PathBuf>,
     validator: &Option<Arc<PathValidator>>,
 ) -> mlua::Result<PathBuf> {
     if let Some(path) = explicit {
         return resolve_path(path, validator);
     }
     if let Some(ref wd) = *working_dir {
-        return Ok(PathBuf::from(wd));
+        return Ok(wd.clone());
     }
     Ok(PathBuf::from("."))
 }
@@ -41,7 +41,7 @@ fn effective_base(
 pub fn make_search_bridge(
     lua: &Lua,
     path_validator: Option<Arc<PathValidator>>,
-    working_dir: Option<String>,
+    working_dir: Option<PathBuf>,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
@@ -438,12 +438,9 @@ mod tests {
     fn test_lua_with_search(working_dir: &std::path::Path) -> mlua::Lua {
         let validator = Arc::new(PathValidator::new(Some(working_dir.to_path_buf())));
         let lua = mlua::Lua::new();
-        let search_table = super::make_search_bridge(
-            &lua,
-            Some(validator),
-            Some(working_dir.to_string_lossy().into_owned()),
-        )
-        .expect("make_search_bridge should succeed");
+        let search_table =
+            super::make_search_bridge(&lua, Some(validator), Some(working_dir.to_path_buf()))
+                .expect("make_search_bridge should succeed");
         let genesis = lua.create_table().expect("table should create");
         genesis
             .set("search", search_table)
