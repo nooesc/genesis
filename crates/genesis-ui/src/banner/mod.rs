@@ -12,13 +12,10 @@
 
 mod animate;
 mod frames;
-mod geometry;
-mod procedural;
-mod silhouette;
 
 pub use frames::{
-    compact_art, full_art, generate_frame, render_welcome_frame, render_welcome_frames,
-    HalfBlockCell, HalfBlockFrame, RgbColor, WELCOME_FRAME_COUNT,
+    compact_art, full_art, render_welcome_frame, render_welcome_frames, HalfBlockCell,
+    HalfBlockFrame, RgbColor, WELCOME_FRAME_COUNT,
 };
 
 use crate::colors::{UI_ACCENT, UI_DIM, UI_TEXT};

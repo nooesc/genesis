@@ -770,22 +770,10 @@ mod tests {
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        // Compact portrait uses half-block characters (▀ or ▄).
-        let portrait = rows
-            .iter()
-            .enumerate()
-            .find_map(|(idx, row)| {
-                if row.contains('▀') || row.contains('▄') {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .expect("compact portrait should render half-block art");
-        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
+        // With no portrait art, the compact layout should still render the title.
         assert!(
-            portrait < title.0,
-            "compact portrait should render above the title"
+            rows.iter().any(|row| row.contains(">_ Eve v0.1.0")),
+            "compact layout should render title"
         );
     }
 
@@ -973,8 +961,7 @@ mod tests {
         let areas = widget.last_areas();
         assert_eq!(areas.full, area, "full area should match viewport");
         assert!(areas.title.width > 0, "title area should have width");
-        assert!(areas.portrait.width > 0, "portrait area should have width");
-        assert!(areas.status.width > 0, "status area should have width");
+        // Portrait area may be empty when no art is provided.
     }
 
     #[test]
