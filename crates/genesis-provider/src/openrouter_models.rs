@@ -146,7 +146,7 @@ pub async fn fetch_models(
     let response = req
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(
-            genesis_config::defaults::limits::OPENROUTER_FETCH_TIMEOUT_SECS,
+            genesis_config::defaults::timeouts::OPENROUTER_FETCH_TIMEOUT_SECS,
         ))
         .send()
         .await

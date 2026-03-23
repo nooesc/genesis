@@ -58,6 +58,9 @@ pub mod timeouts {
     /// Token refresh HTTP request timeout (seconds).
     pub const TOKEN_REFRESH_TIMEOUT_SECS: u64 = 15;
 
+    /// Device-code login flow HTTP client timeout (seconds).
+    pub const DEVICE_CODE_HTTP_CLIENT_TIMEOUT_SECS: u64 = 15;
+
     /// Credential cache TTL (seconds).
     pub const CREDENTIAL_CACHE_TTL_SECS: u64 = 60;
 
@@ -87,6 +90,9 @@ pub mod timeouts {
 
     /// Batch API maximum poll delay (seconds).
     pub const BATCH_POLL_MAX_SECS: u64 = 60;
+
+    /// OpenRouter model list fetch timeout (seconds).
+    pub const OPENROUTER_FETCH_TIMEOUT_SECS: u64 = 15;
 }
 
 /// Size and count limits.
@@ -107,9 +113,6 @@ pub mod limits {
 
     /// Home Assistant maximum entities returned per list request.
     pub const HA_MAX_RESPONSE_ENTITIES: usize = 500;
-
-    /// OpenRouter model list fetch timeout (seconds).
-    pub const OPENROUTER_FETCH_TIMEOUT_SECS: u64 = 15;
 }
 
 /// Retry and resilience defaults.
