@@ -1,5 +1,10 @@
 use std::sync::{Arc, Mutex};
 
+/// Maximum number of context entries across all plugins.
+const MAX_CONTEXT_ENTRIES: usize = 100;
+/// Maximum total content size across all entries (64 KB).
+const MAX_CONTEXT_BYTES: usize = 64 * 1024;
+
 /// A single context snippet contributed by a plugin.
 #[derive(Debug, Clone)]
 pub struct PluginContextEntry {
@@ -18,14 +23,29 @@ impl PluginContextRegistry {
         Self::default()
     }
 
+    /// Add a context snippet. Silently drops entries that would exceed the
+    /// entry-count or total-size cap.
     pub fn add(&self, plugin_name: &str, content: String) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(PluginContextEntry {
-                plugin_name: plugin_name.to_owned(),
-                content,
-            });
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if entries.len() >= MAX_CONTEXT_ENTRIES {
+            tracing::warn!(
+                plugin = plugin_name,
+                "plugin context entry dropped — limit of {MAX_CONTEXT_ENTRIES} reached"
+            );
+            return;
+        }
+        let total_bytes: usize = entries.iter().map(|e| e.content.len()).sum();
+        if total_bytes + content.len() > MAX_CONTEXT_BYTES {
+            tracing::warn!(
+                plugin = plugin_name,
+                "plugin context entry dropped — total size would exceed {MAX_CONTEXT_BYTES} bytes"
+            );
+            return;
+        }
+        entries.push(PluginContextEntry {
+            plugin_name: plugin_name.to_owned(),
+            content,
+        });
     }
 
     pub fn clear_for_plugin(&self, plugin_name: &str) {

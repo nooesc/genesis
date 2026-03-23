@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const SOURCE_METADATA_FILE: &str = ".genesis-source.json";
-
-// ---------------------------------------------------------------------------
-// PluginSource
-// ---------------------------------------------------------------------------
+/// Maximum download size for GitHub tarballs (50 MB).
+const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginSource {
@@ -145,10 +143,6 @@ impl PluginSource {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PluginSourceInfo  (persisted metadata)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginSourceInfo {
     pub source: String,
@@ -156,10 +150,6 @@ pub struct PluginSourceInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// InstallError
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -191,10 +181,6 @@ pub enum InstallError {
     Io(#[from] io::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Core functions
-// ---------------------------------------------------------------------------
-
 /// Install a plugin from a source into `plugin_dir`.
 ///
 /// Returns the installed plugin name on success.
@@ -203,13 +189,14 @@ pub fn install_plugin(
     plugin_dir: &Path,
     force: bool,
 ) -> Result<String, InstallError> {
+    let source_label = source.display_string();
     match source {
         PluginSource::GitHub {
             owner,
             repo,
             git_ref,
             path,
-        } => install_from_github(owner, repo, git_ref.as_deref(), path.as_deref(), plugin_dir, force),
+        } => install_from_github(owner, repo, git_ref.as_deref(), path.as_deref(), plugin_dir, force, &source_label),
         PluginSource::Local(local_path) => install_from_local(local_path, plugin_dir, force),
     }
 }
@@ -241,10 +228,6 @@ pub fn read_source_info(plugin_dir: &Path) -> Option<PluginSourceInfo> {
     serde_json::from_str(&data).ok()
 }
 
-// ---------------------------------------------------------------------------
-// GitHub installation
-// ---------------------------------------------------------------------------
-
 fn install_from_github(
     owner: &str,
     repo: &str,
@@ -252,6 +235,7 @@ fn install_from_github(
     sub_path: Option<&str>,
     plugin_dir: &Path,
     force: bool,
+    source_label: &str,
 ) -> Result<String, InstallError> {
     let ref_str = git_ref.unwrap_or("HEAD");
     let tarball_url = format!("https://api.github.com/repos/{owner}/{repo}/tarball/{ref_str}");
@@ -272,9 +256,29 @@ fn install_from_github(
         });
     }
 
+    // Reject downloads that exceed the size limit.
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES {
+            return Err(InstallError::DownloadFailed {
+                reason: format!(
+                    "tarball too large ({len} bytes, max {MAX_DOWNLOAD_BYTES})"
+                ),
+            });
+        }
+    }
+
     let bytes = response.bytes().map_err(|err| InstallError::DownloadFailed {
         reason: err.to_string(),
     })?;
+
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(InstallError::DownloadFailed {
+            reason: format!(
+                "tarball too large ({} bytes, max {MAX_DOWNLOAD_BYTES})",
+                bytes.len()
+            ),
+        });
+    }
 
     // Extract to a temp directory.
     let tmp_dir = tempfile::tempdir().map_err(|err| InstallError::Io(err.into()))?;
@@ -331,26 +335,10 @@ fn install_from_github(
     }
 
     // Write source metadata.
-    let source_str = {
-        let mut s = format!("github:{owner}/{repo}");
-        if let Some(p) = sub_path {
-            s.push('/');
-            s.push_str(p);
-        }
-        if let Some(r) = git_ref {
-            s.push('@');
-            s.push_str(r);
-        }
-        s
-    };
-    write_source_info(&dest, &source_str, None)?;
+    write_source_info(&dest, source_label, None)?;
 
     Ok(plugin_name)
 }
-
-// ---------------------------------------------------------------------------
-// Local installation
-// ---------------------------------------------------------------------------
 
 fn install_from_local(
     local_path: &Path,
@@ -402,10 +390,6 @@ fn install_from_local(
 
     Ok(plugin_name)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Detect the plugin name from a path.
 ///
@@ -570,10 +554,6 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -80,6 +80,11 @@ impl PluginContext {
         context.close_tool_registration();
         context
     }
+
+    /// Check whether this plugin has access to a given primitive.
+    pub(crate) fn has_primitive(&self, name: &str) -> bool {
+        self.permissions.trusted || self.permissions.primitives.iter().any(|p| p == name)
+    }
 }
 
 impl UserData for SessionView {
@@ -210,9 +215,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("fs", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"fs".to_owned())
-                {
+                if !ctx.has_primitive("fs") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -221,9 +224,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("process", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"process".to_owned())
-                {
+                if !ctx.has_primitive("process") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -236,9 +237,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("http", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"http".to_owned())
-                {
+                if !ctx.has_primitive("http") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -247,9 +246,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("search", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"search".to_owned())
-                {
+                if !ctx.has_primitive("search") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -262,9 +259,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("storage", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"storage".to_owned())
-                {
+                if !ctx.has_primitive("storage") {
                     return Ok(mlua::Value::Nil);
                 }
             }
