@@ -1719,7 +1719,8 @@ impl AgentLoop {
                             },
                             streamed_tool_calls.clone(),
                         );
-                        msg.provider_metadata = streamed_provider_metadata.clone();
+                        // Only response.completed emits provider_metadata today; last write wins is intentional.
+                        msg.provider_metadata = streamed_provider_metadata;
                         if let Some(message) = self.push_message_with_lua_hooks(
                             &hook_session,
                             msg,
