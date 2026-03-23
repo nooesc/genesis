@@ -382,6 +382,8 @@ pub enum ToolError {
     },
     #[error("tool `{tool}` requires approval: {reason}")]
     ApprovalDenied { tool: String, reason: String },
+    #[error("tool `{tool}` invalid input: {reason}")]
+    InvalidInput { tool: String, reason: String },
     #[error("tool `{tool}` execution failed: {reason}")]
     ExecutionFailed { tool: String, reason: String },
 }
