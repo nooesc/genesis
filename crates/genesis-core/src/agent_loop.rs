@@ -300,9 +300,11 @@ pub enum AgentError {
     ArgumentParse(String),
     #[error("agent loop exceeded maximum of {0} turns")]
     MaxTurnsExceeded(usize),
-    #[error("Budget exceeded: ${used:.2} spent of ${limit:.2} limit. \
+    #[error(
+        "Budget exceeded: ${used:.2} spent of ${limit:.2} limit. \
              Adjust with: genesis config set runtime.budget_limit <amount> \
-             (or GENESIS_BUDGET_LIMIT=0 for unlimited)")]
+             (or GENESIS_BUDGET_LIMIT=0 for unlimited)"
+    )]
     BudgetExceeded { used: f64, limit: f64 },
     #[error("iteration budget exhausted: {used} / {limit} iterations")]
     IterationsExhausted { used: usize, limit: usize },

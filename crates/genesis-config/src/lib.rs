@@ -2749,8 +2749,7 @@ runtime:
     fn default_budget_limit_is_five_dollars() {
         let dir = tempdir().expect("tempdir should exist");
         let absent = dir.path().join("nonexistent.yaml");
-        let loaded =
-            load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
+        let loaded = load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
         assert_eq!(loaded.config.runtime.budget_limit, Some(5.0));
     }
 
@@ -2758,8 +2757,7 @@ runtime:
     fn default_max_turns_is_ten() {
         let dir = tempdir().expect("tempdir should exist");
         let absent = dir.path().join("nonexistent.yaml");
-        let loaded =
-            load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
+        let loaded = load_from_map(Some(&absent), &BTreeMap::new()).expect("config should load");
         assert_eq!(loaded.config.runtime.max_turns, 10);
     }
 
@@ -2767,11 +2765,7 @@ runtime:
     fn config_file_can_override_budget_limit() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
-        fs::write(
-            &config_path,
-            "runtime:\n  budget_limit: 25.0\n",
-        )
-        .unwrap();
+        fs::write(&config_path, "runtime:\n  budget_limit: 25.0\n").unwrap();
         let loaded =
             load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
         assert_eq!(loaded.config.runtime.budget_limit, Some(25.0));
@@ -2805,8 +2799,7 @@ runtime:
         fs::write(&config_path, "runtime:\n  budget_limit: 25.0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert("GENESIS_BUDGET_LIMIT".to_owned(), "10.0".to_owned());
-        let loaded =
-            load_from_map(Some(&config_path), &env).expect("config should load");
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
         assert_eq!(loaded.config.runtime.budget_limit, Some(10.0));
     }
 
@@ -2817,8 +2810,7 @@ runtime:
         fs::write(&config_path, "runtime:\n  budget_limit: 25.0\n").unwrap();
         let mut env = BTreeMap::new();
         env.insert("GENESIS_BUDGET_LIMIT".to_owned(), "0".to_owned());
-        let loaded =
-            load_from_map(Some(&config_path), &env).expect("config should load");
+        let loaded = load_from_map(Some(&config_path), &env).expect("config should load");
         assert_eq!(loaded.config.runtime.budget_limit, None);
     }
 
@@ -2857,11 +2849,7 @@ runtime:
     fn config_file_can_override_max_turns() {
         let dir = tempdir().expect("tempdir should exist");
         let config_path = dir.path().join("config.yaml");
-        fs::write(
-            &config_path,
-            "runtime:\n  max_turns: 30\n",
-        )
-        .unwrap();
+        fs::write(&config_path, "runtime:\n  max_turns: 30\n").unwrap();
         let loaded =
             load_from_map(Some(&config_path), &BTreeMap::new()).expect("config should load");
         assert_eq!(loaded.config.runtime.max_turns, 30);
