@@ -80,7 +80,7 @@ pub(crate) async fn run_chat_tui(
     config_path: Option<PathBuf>,
     session_id: Option<String>,
     resume: Option<String>,
-    _initial_prompt: Option<String>,
+    initial_prompt: Option<String>,
     system_override: Option<String>,
     last: bool,
     worktree: bool,
@@ -124,7 +124,7 @@ pub(crate) async fn run_chat_tui(
 
     service.ensure_session(&session_id, "cli", None)?;
 
-    genesis_tui::run_tui(&loaded.config, &mut service, &session_id)
+    genesis_tui::run_tui(&loaded.config, &mut service, &session_id, initial_prompt)
         .await
         .map_err(|e| CliError::Tui(e.to_string()))?;
 

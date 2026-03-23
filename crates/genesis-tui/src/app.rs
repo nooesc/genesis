@@ -124,7 +124,7 @@ impl App {
                 // that lines are re-wrapped at the new width and scroll bounds
                 // reflect the new height.
                 if let Some(ActiveOverlay::Transcript(_)) = &self.overlay {
-                    let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+                    let visible_rows = self.viewport_height.saturating_sub(1).max(1);
                     self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                         self.chat.committed_cells(),
                         self.viewport_width,
@@ -305,7 +305,7 @@ impl App {
             }
             AppEvent::ShowOverlay(OverlayKind::Transcript) => {
                 self.command_popup.hide();
-                let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+                let visible_rows = self.viewport_height.saturating_sub(1).max(1);
                 let width = if self.viewport_width > 0 {
                     self.viewport_width
                 } else {
@@ -376,7 +376,7 @@ impl App {
                 }
                 "/transcript" => {
                     self.command_popup.hide();
-                    let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+                    let visible_rows = self.viewport_height.saturating_sub(1).max(1);
                     self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
                         self.chat.committed_cells(),
                         self.viewport_width,
@@ -453,7 +453,7 @@ impl App {
 
         // When an overlay is active, route all keys to it.
         if let Some(overlay) = &mut self.overlay {
-            let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
             let (should_close, model_selected) = match overlay {
                 ActiveOverlay::Transcript(t) => (
                     matches!(t.handle_key(key, visible_rows), TranscriptAction::Close),
@@ -501,7 +501,7 @@ impl App {
         // Ctrl+T — toggle transcript overlay.
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.command_popup.hide();
-            let visible_rows = self.viewport_height.saturating_sub(2).max(1);
+            let visible_rows = self.viewport_height.saturating_sub(1).max(1);
             let width = if self.viewport_width > 0 {
                 self.viewport_width
             } else {
@@ -578,7 +578,15 @@ impl App {
                     // Replace @query with the selected path, preserving
                     // any text before and after the @-query token.
                     let text = self.chat.input.text().to_owned();
-                    if let Some(at_pos) = text.rfind('@') {
+                    // Use the stored trigger position to find the exact `@`
+                    // that started this completion, avoiding false matches
+                    // with `@` characters in previously inserted text.
+                    let at_pos = self
+                        .file_completion
+                        .trigger_pos()
+                        .filter(|&p| p < text.len() && text.as_bytes().get(p) == Some(&b'@'))
+                        .or_else(|| text.rfind('@'));
+                    if let Some(at_pos) = at_pos {
                         // Find end of the @-query: next space or end of text.
                         let query_end = text[at_pos + 1..]
                             .find(' ')
@@ -603,11 +611,22 @@ impl App {
                 FileCompletionAction::None => {}
             }
 
-            // Update file completion query from input.
+            // Update file completion query from input using the recorded
+            // trigger position for accuracy.
             let input_text = self.chat.input.text().to_owned();
-            if let Some(at_pos) = input_text.rfind('@') {
+            let at_pos = self
+                .file_completion
+                .trigger_pos()
+                .filter(|&p| p < input_text.len() && input_text.as_bytes().get(p) == Some(&b'@'));
+            if let Some(at_pos) = at_pos {
                 let query = &input_text[at_pos + 1..];
-                self.file_completion.update_query(query);
+                // If the query contains a space, the user moved past the
+                // @-token — close the popup.
+                if query.contains(' ') {
+                    self.file_completion.hide();
+                } else {
+                    self.file_completion.update_query(query);
+                }
             } else {
                 self.file_completion.hide();
             }
@@ -661,7 +680,11 @@ impl App {
                 // Only triggers when @ was just typed (last char), not when the
                 // buffer just happens to contain @ from earlier.
                 if input_text.ends_with('@') && !self.file_completion.is_visible() {
-                    self.file_completion.show();
+                    // Record the byte position of this `@` so we can replace
+                    // exactly this span later, even if the buffer contains
+                    // other `@` characters from earlier text.
+                    let at_byte_pos = input_text.len() - 1;
+                    self.file_completion.show(at_byte_pos);
                 }
 
                 match action {

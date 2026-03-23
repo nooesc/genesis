@@ -129,6 +129,7 @@ pub async fn run_tui(
     config: &GenesisConfig,
     service: &mut SessionExecutionService<'_>,
     session_id: &str,
+    initial_prompt: Option<String>,
 ) -> Result<(), TuiError> {
     terminal::init()?;
 
@@ -248,6 +249,16 @@ pub async fn run_tui(
         active_theme: crate::theme::resolve_theme(&config.tui.theme),
     };
 
+    // If an initial prompt was provided, skip the welcome screen and submit
+    // the prompt as the first user message once the event loop starts.
+    let pending_initial_prompt = if initial_prompt.is_some() {
+        app.screen = AppScreen::Chat;
+        app.clear_after_welcome = true;
+        initial_prompt
+    } else {
+        None
+    };
+
     // Schedule an initial frame so the UI renders immediately.
     app.frame_requester.schedule_frame();
 
@@ -258,6 +269,17 @@ pub async fn run_tui(
     let mut turn_future: Option<Pin<Box<dyn Future<Output = TurnResult> + '_>>> = None;
 
     let mut pending_model_switch: Option<String> = None;
+
+    // Submit the initial prompt (from `genesis chat --tui "prompt"`) as the
+    // first user message. This fires before the first select! iteration so it
+    // will be picked up immediately by the submission_rx arm.
+    if let Some(prompt) = pending_initial_prompt {
+        app.chat.add_user_message(prompt.clone());
+        let _ = app.submission_tx.send(Submission::UserMessage {
+            text: prompt,
+            images: vec![],
+        });
+    }
 
     loop {
         // Process deferred model switch — must drop turn_future first

@@ -56,6 +56,10 @@ pub struct FileCompletion {
     visible: bool,
     /// Cached directory scan metadata (directory + timestamp).
     last_scan: Option<ScanCache>,
+    /// Byte position of the `@` character that triggered this completion.
+    /// Used for accurate replacement instead of `rfind('@')`, which can match
+    /// stale `@` characters from previously inserted text (emails, git refs).
+    trigger_pos: Option<usize>,
 }
 
 impl FileCompletion {
@@ -67,18 +71,25 @@ impl FileCompletion {
             selected: 0,
             visible: false,
             last_scan: None,
+            trigger_pos: None,
         }
     }
 
     /// Show the popup, scanning the cwd for files if the cache is stale.
     ///
+    /// `at_byte_pos` is the byte offset of the `@` character in the input
+    /// buffer that triggered this completion. It is used later when inserting
+    /// the selected path so we replace exactly the right `@...query` span,
+    /// rather than relying on `rfind('@')` which can match the wrong `@`.
+    ///
     /// The file scan is skipped when the working directory has not changed and
     /// the previous scan is younger than [`SCAN_CACHE_TTL`]. This avoids
     /// blocking the async runtime with repeated `read_dir` syscalls each time
     /// the popup is opened.
-    pub fn show(&mut self) {
+    pub fn show(&mut self, at_byte_pos: usize) {
         self.visible = true;
         self.query.clear();
+        self.trigger_pos = Some(at_byte_pos);
 
         let cwd = std::env::current_dir().ok();
         let cache_fresh = match (&self.last_scan, &cwd) {
@@ -107,6 +118,12 @@ impl FileCompletion {
 
     pub fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// The byte position of the `@` that triggered this completion session,
+    /// or `None` if the popup is not active.
+    pub fn trigger_pos(&self) -> Option<usize> {
+        self.trigger_pos
     }
 
     /// Update the query and refilter.
@@ -384,7 +401,7 @@ mod tests {
     #[test]
     fn show_makes_visible() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         assert!(fc.is_visible());
         // Should have discovered some files in the cwd.
         assert!(!fc.all_files.is_empty(), "should find files in cwd");
@@ -393,7 +410,7 @@ mod tests {
     #[test]
     fn esc_dismisses() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         let action = fc.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(action, FileCompletionAction::Dismiss);
         assert!(!fc.is_visible());
@@ -402,7 +419,7 @@ mod tests {
     #[test]
     fn enter_selects() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         if !fc.filtered.is_empty() {
             let action = fc.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             assert!(matches!(action, FileCompletionAction::Select(_)));
@@ -412,7 +429,7 @@ mod tests {
     #[test]
     fn tab_selects() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         if !fc.filtered.is_empty() {
             let action = fc.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
             assert!(matches!(action, FileCompletionAction::Select(_)));
@@ -422,7 +439,7 @@ mod tests {
     #[test]
     fn space_dismisses() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         let action = fc.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert_eq!(action, FileCompletionAction::Dismiss);
     }
@@ -430,7 +447,7 @@ mod tests {
     #[test]
     fn typing_filters() {
         let mut fc = FileCompletion::new();
-        fc.show();
+        fc.show(0);
         let before = fc.filtered.len();
         // Type something specific to narrow results.
         fc.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
