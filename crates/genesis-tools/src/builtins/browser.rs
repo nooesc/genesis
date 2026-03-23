@@ -7,11 +7,13 @@ use std::time::{Duration, Instant, SystemTime};
 use base64::Engine as _;
 use serde_json::json;
 
+use genesis_config::defaults::{limits, timeouts};
+
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 300;
-const SNAPSHOT_MAX_CHARS: usize = 8000;
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = timeouts::BROWSER_COMMAND_SECS;
+const DEFAULT_SESSION_TIMEOUT_SECS: u64 = timeouts::BROWSER_SESSION_SECS;
+const SNAPSHOT_MAX_CHARS: usize = limits::BROWSER_SNAPSHOT_MAX_CHARS;
 
 const BOT_DETECTION_PATTERNS: &[&str] = &[
     "access denied",

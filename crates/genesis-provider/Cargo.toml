@@ -8,6 +8,7 @@ version.workspace = true
 async-stream.workspace = true
 futures-util.workspace = true
 genesis-auth = { path = "../genesis-auth" }
+genesis-config = { path = "../genesis-config" }
 genesis-types = { path = "../genesis-types" }
 reqwest.workspace = true
 serde.workspace = true

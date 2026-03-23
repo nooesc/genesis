@@ -413,7 +413,7 @@ pub struct AgentLoop {
 
 /// Number of consecutive failures for the same tool before injecting a
 /// "try a different approach" nudge.
-const STUCK_LOOP_THRESHOLD: usize = 3;
+const STUCK_LOOP_THRESHOLD: usize = genesis_config::defaults::retry::STUCK_LOOP_THRESHOLD;
 
 impl AgentLoop {
     pub fn new(
@@ -2696,7 +2696,9 @@ impl AgentLoop {
     /// Check if token-based compression should trigger (>85% of max_context_tokens).
     fn token_compression_needed(&self) -> bool {
         if let Some(max_tokens) = self.config.max_context_tokens {
-            let threshold = (max_tokens as f64 * 0.85) as u32;
+            let threshold = (max_tokens as f64
+                * genesis_config::defaults::limits::CONTEXT_COMPRESSION_THRESHOLD)
+                as u32;
             self.last_prompt_tokens > threshold
         } else {
             false

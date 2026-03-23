@@ -56,10 +56,10 @@ pub(crate) struct RateLimiter {
 }
 
 /// How often (in seconds) to purge stale rate-limit entries.
-const PURGE_INTERVAL_SECS: u64 = 120;
+const PURGE_INTERVAL_SECS: u64 = genesis_config::defaults::timeouts::RATE_PURGE_INTERVAL_SECS;
 
 /// Duration of each rate-limit sliding window, in seconds.
-const RATE_WINDOW_SECS: u64 = 60;
+const RATE_WINDOW_SECS: u64 = genesis_config::defaults::timeouts::RATE_WINDOW_SECS;
 
 impl RateLimiter {
     pub fn new(max_rpm: u32) -> Self {
@@ -247,7 +247,9 @@ impl AppState {
             api_key_required,
             mcp,
             http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(
+                    genesis_config::defaults::timeouts::GATEWAY_HTTP_CLIENT_SECS,
+                ))
                 .user_agent("genesis-gateway/0.1")
                 .build()
                 .unwrap_or_default(),

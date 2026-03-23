@@ -104,8 +104,12 @@ impl RemoteEmbeddingProvider {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(
+                genesis_config::defaults::timeouts::EMBEDDING_CONNECT_SECS,
+            ))
+            .timeout(std::time::Duration::from_secs(
+                genesis_config::defaults::timeouts::EMBEDDING_RESPONSE_SECS,
+            ))
             .build()?;
 
         let base = resolved.base_url.trim_end_matches('/');

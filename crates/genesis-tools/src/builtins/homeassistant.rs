@@ -13,10 +13,12 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use genesis_config::defaults::{limits, timeouts};
+
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
 
-const TIMEOUT_SECS: u64 = 15;
-const MAX_RESPONSE_ENTITIES: usize = 500;
+const TIMEOUT_SECS: u64 = timeouts::HOME_ASSISTANT_SECS;
+const MAX_RESPONSE_ENTITIES: usize = limits::HA_MAX_RESPONSE_ENTITIES;
 
 /// Blocked service domains that allow arbitrary code/command execution
 /// or enable SSRF attacks on the HA host.

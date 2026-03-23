@@ -83,7 +83,9 @@ pub struct WebhookDispatcher {
 impl WebhookDispatcher {
     pub fn new(configs: Vec<WebhookConfig>) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(
+                genesis_config::defaults::timeouts::WEBHOOK_DISPATCH_SECS,
+            ))
             .user_agent("genesis-webhook")
             .build()
             .unwrap_or_else(|e| {

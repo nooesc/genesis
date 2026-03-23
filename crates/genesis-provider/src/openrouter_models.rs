@@ -4,11 +4,12 @@
 //! pricing, context length, capabilities, and creation timestamps. Results
 //! are cached locally with a configurable TTL.
 
+use genesis_config::defaults::timeouts;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime};
 
 /// Default cache TTL: 1 hour.
-const CACHE_TTL: Duration = Duration::from_secs(3600);
+const CACHE_TTL: Duration = Duration::from_secs(timeouts::OPENROUTER_MODEL_CACHE_TTL_SECS);
 
 /// OpenRouter API base URL.
 const API_BASE: &str = "https://openrouter.ai/api/v1";
@@ -144,7 +145,9 @@ pub async fn fetch_models(
 
     let response = req
         .header("Accept", "application/json")
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(
+            genesis_config::defaults::limits::OPENROUTER_FETCH_TIMEOUT_SECS,
+        ))
         .send()
         .await
         .map_err(|e| FetchError::Network(e.to_string()))?;

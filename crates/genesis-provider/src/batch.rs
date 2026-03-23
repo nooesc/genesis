@@ -103,8 +103,12 @@ impl BatchClient {
 
         let http = reqwest::Client::builder()
             .default_headers(headers)
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(
+                genesis_config::defaults::timeouts::BATCH_CONNECT_SECS,
+            ))
+            .timeout(Duration::from_secs(
+                genesis_config::defaults::timeouts::BATCH_RESPONSE_SECS,
+            ))
             .build()?;
 
         Ok(Self {
@@ -243,8 +247,12 @@ impl BatchClient {
         timeout: Duration,
     ) -> Result<BatchStatus, ProviderError> {
         let started = std::time::Instant::now();
-        let mut delay = Duration::from_secs(5);
-        let max_delay = Duration::from_secs(60);
+        let mut delay = Duration::from_secs(
+            genesis_config::defaults::timeouts::BATCH_POLL_INITIAL_SECS,
+        );
+        let max_delay = Duration::from_secs(
+            genesis_config::defaults::timeouts::BATCH_POLL_MAX_SECS,
+        );
 
         loop {
             if started.elapsed() > timeout {

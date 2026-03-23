@@ -54,7 +54,7 @@ pub const NOISE_DIRS: &[&str] = &[
 ];
 
 /// Maximum output size for tool results (64 KiB).
-pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = genesis_config::defaults::limits::MAX_TOOL_OUTPUT_BYTES;
 
 /// Truncate a string to at most `limit` bytes on a valid UTF-8 boundary,
 /// appending `suffix` if truncation occurred.

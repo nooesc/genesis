@@ -7,12 +7,13 @@
 //! - **Home Assistant**: shared secret token header
 //! - **WhatsApp**: `sha256` HMAC over raw body
 
+use genesis_config::defaults::timeouts;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const WEBHOOK_TIMESTAMP_TOLERANCE_SECS: i64 = 300;
+const WEBHOOK_TIMESTAMP_TOLERANCE_SECS: i64 = timeouts::WEBHOOK_TIMESTAMP_TOLERANCE_SECS;
 
 /// Verify a simple token-style shared-secret header/value.
 pub(crate) fn verify_secret_token(secret: &str, provided: Option<&str>) -> bool {
