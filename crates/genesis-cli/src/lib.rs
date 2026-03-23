@@ -1917,6 +1917,11 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                             .into_iter()
                             .map(|item| item.memory)
                             .collect(),
+                        genesis_core::embedding::SearchMode::Advanced => store
+                            .advanced_search(&query, limit, 2)?
+                            .into_iter()
+                            .map(|item| item.memory)
+                            .collect(),
                         genesis_core::embedding::SearchMode::Vector
                         | genesis_core::embedding::SearchMode::Hybrid => {
                             let config = loaded.config.embedding.as_ref().ok_or_else(|| {
