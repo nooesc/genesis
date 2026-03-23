@@ -1498,6 +1498,22 @@ pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {
     })
 }
 
+/// Run `PRAGMA integrity_check` and return the result string.
+///
+/// Returns `Ok("ok")` when the database is healthy. Any other value
+/// indicates corruption.
+pub fn integrity_check(database_path: &Path) -> Result<String, StorageError> {
+    let connection = open(database_path)?;
+    connection
+        .query_row("PRAGMA integrity_check", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })
+}
+
 pub fn discover_legacy_source(root: &Path) -> LegacyImportSource {
     let config_path = first_existing_file(
         [
@@ -3048,6 +3064,19 @@ impl ScheduleStore {
 
         collect_rows(rows, self.db.path())
     }
+
+    /// Count total number of schedules.
+    pub fn count(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row("SELECT COUNT(*) FROM schedules", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
+    }
 }
 
 /// A stored user trait — an observation about the user's preferences, personality, or goals.
@@ -3603,6 +3632,19 @@ impl SkillStore {
                 source,
             })?;
         Ok(rows_changed > 0)
+    }
+
+    /// Count total number of skills.
+    pub fn count(&self) -> Result<u64, StorageError> {
+        let connection = open(&self.database_path)?;
+        connection
+            .query_row("SELECT COUNT(*) FROM skills", [], |row| {
+                Ok(row.get::<_, i64>(0)? as u64)
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })
     }
 }
 
@@ -6557,6 +6599,218 @@ impl SandboxStore {
             )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(deleted)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Bus Store
+// ---------------------------------------------------------------------------
+
+/// A message on the agent bus (storage representation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredBusMessage {
+    /// Unique message ID.
+    pub id: String,
+    /// Channel this message was published to.
+    pub channel: String,
+    /// Sender agent/session ID.
+    pub sender: String,
+    /// Message type for routing and filtering.
+    pub kind: String,
+    /// The message payload.
+    pub payload: String,
+    /// Optional structured metadata (JSON).
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// ISO 8601 timestamp.
+    pub timestamp: String,
+}
+
+/// Persistent storage for agent bus messages.
+pub struct AgentBusStore {
+    database_path: PathBuf,
+}
+
+impl AgentBusStore {
+    pub fn new(database_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+        }
+    }
+
+    /// Ensure the agent_bus_messages table exists.
+    pub fn ensure_table(&self) -> Result<(), StorageError> {
+        let conn = open(&self.database_path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_bus_messages (
+                id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_bus_messages_channel
+                ON agent_bus_messages(channel);
+            CREATE INDEX IF NOT EXISTS idx_bus_messages_sender
+                ON agent_bus_messages(sender);
+            CREATE INDEX IF NOT EXISTS idx_bus_messages_created_at
+                ON agent_bus_messages(created_at);",
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Store a message.
+    pub fn store_message(&self, message: &StoredBusMessage) -> Result<(), StorageError> {
+        let conn = open(&self.database_path)?;
+        let metadata_json =
+            serde_json::to_string(&message.metadata).unwrap_or_else(|_| "{}".to_owned());
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_bus_messages (id, channel, sender, kind, payload, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                message.id,
+                message.channel,
+                message.sender,
+                message.kind,
+                message.payload,
+                metadata_json,
+                message.timestamp,
+            ],
+        )
+        .map_err(|source| StorageError::Sqlite {
+            path: self.database_path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Retrieve recent messages from a channel.
+    pub fn channel_messages(
+        &self,
+        channel: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredBusMessage>, StorageError> {
+        let conn = open(&self.database_path)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, channel, sender, kind, payload, metadata, created_at
+                 FROM agent_bus_messages
+                 WHERE channel = ?1
+                 ORDER BY created_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![channel, limit as i64], |row| {
+                let metadata_str: String = row.get(5)?;
+                Ok(StoredBusMessage {
+                    id: row.get(0)?,
+                    channel: row.get(1)?,
+                    sender: row.get(2)?,
+                    kind: row.get(3)?,
+                    payload: row.get(4)?,
+                    metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
+                    timestamp: row.get(6)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        collect_rows(rows, &self.database_path)
+    }
+
+    /// Count messages per channel.
+    pub fn channel_stats(&self) -> Result<Vec<(String, i64)>, StorageError> {
+        let conn = open(&self.database_path)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel, COUNT(*) as cnt
+                 FROM agent_bus_messages
+                 GROUP BY channel
+                 ORDER BY cnt DESC",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        collect_rows(rows, &self.database_path)
+    }
+
+    /// Get all messages from a sender.
+    pub fn sender_messages(
+        &self,
+        sender: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredBusMessage>, StorageError> {
+        let conn = open(&self.database_path)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, channel, sender, kind, payload, metadata, created_at
+                 FROM agent_bus_messages
+                 WHERE sender = ?1
+                 ORDER BY created_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        let rows = stmt
+            .query_map(params![sender, limit as i64], |row| {
+                let metadata_str: String = row.get(5)?;
+                Ok(StoredBusMessage {
+                    id: row.get(0)?,
+                    channel: row.get(1)?,
+                    sender: row.get(2)?,
+                    kind: row.get(3)?,
+                    payload: row.get(4)?,
+                    metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
+                    timestamp: row.get(6)?,
+                })
+            })
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
+                source,
+            })?;
+
+        collect_rows(rows, &self.database_path)
+    }
+
+    /// Purge messages older than N days.
+    pub fn purge_older_than(&self, days: u32) -> Result<usize, StorageError> {
+        let conn = open(&self.database_path)?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM agent_bus_messages
+                 WHERE created_at < datetime('now', ?1)",
+                params![format!("-{days} days")],
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.database_path.clone(),
                 source,
             })?;
         Ok(deleted)

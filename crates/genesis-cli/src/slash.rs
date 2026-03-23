@@ -490,6 +490,7 @@ pub(crate) fn handle_chat_command(
         }
         "bus" => {
             let bus_store = genesis_core::agent_bus::AgentBusStore::new(store.database_path());
+            let _ = bus_store.ensure_table();
             let sub = _args.trim();
             if sub == "stats" {
                 match bus_store.channel_stats() {
@@ -521,7 +522,7 @@ pub(crate) fn handle_chat_command(
                                 let mut lines = vec![format!("Channel '{channel}' ({} messages):", messages.len())];
                                 for msg in &messages {
                                     lines.push(format!(
-                                        "  [{}] {} ({:?}): {}",
+                                        "  [{}] {} ({}): {}",
                                         msg.timestamp, msg.sender, msg.kind,
                                         if msg.payload.len() > 100 {
                                             format!("{}...", &msg.payload[..100])

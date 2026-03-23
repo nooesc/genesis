@@ -11,6 +11,7 @@
 //! - **Subscriptions**: Agents register interest in specific channels
 //! - **Persistence**: All messages stored in SQLite for durability and replay
 
+pub use genesis_storage::{AgentBusStore, StoredBusMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
@@ -53,6 +54,39 @@ pub enum MessageKind {
     Lifecycle,
 }
 
+impl AgentMessage {
+    /// Convert to storage representation.
+    fn to_stored(&self) -> StoredBusMessage {
+        let kind_str = serde_json::to_string(&self.kind)
+            .unwrap_or_else(|_| "\"text\"".to_owned())
+            .trim_matches('"')
+            .to_owned();
+        StoredBusMessage {
+            id: self.id.clone(),
+            channel: self.channel.clone(),
+            sender: self.sender.clone(),
+            kind: kind_str,
+            payload: self.payload.clone(),
+            metadata: self.metadata.clone(),
+            timestamp: self.timestamp.clone(),
+        }
+    }
+
+    /// Convert from storage representation.
+    fn from_stored(stored: StoredBusMessage) -> Self {
+        Self {
+            id: stored.id,
+            channel: stored.channel,
+            sender: stored.sender,
+            kind: serde_json::from_value(serde_json::Value::String(stored.kind))
+                .unwrap_or(MessageKind::Text),
+            payload: stored.payload,
+            metadata: stored.metadata,
+            timestamp: stored.timestamp,
+        }
+    }
+}
+
 /// In-memory agent message bus with broadcast channels.
 pub struct AgentBus {
     channels: tokio::sync::RwLock<HashMap<String, broadcast::Sender<AgentMessage>>>,
@@ -71,9 +105,14 @@ impl AgentBus {
 
     /// Create a bus with SQLite persistence.
     pub fn with_persistence(database_path: impl Into<std::path::PathBuf>) -> Self {
+        let db_path = database_path.into();
+        let store = AgentBusStore::new(&db_path);
+        if let Err(e) = store.ensure_table() {
+            tracing::warn!(error = %e, "failed to initialize agent_bus_messages table");
+        }
         Self {
             channels: tokio::sync::RwLock::new(HashMap::new()),
-            database_path: Some(database_path.into()),
+            database_path: Some(db_path),
         }
     }
 
@@ -85,7 +124,7 @@ impl AgentBus {
         // Persist to SQLite if configured
         if let Some(ref db_path) = self.database_path {
             let store = AgentBusStore::new(db_path);
-            if let Err(e) = store.store_message(&message) {
+            if let Err(e) = store.store_message(&message.to_stored()) {
                 tracing::warn!(error = %e, channel = %message.channel, "failed to persist bus message");
             }
         }
@@ -131,7 +170,12 @@ impl AgentBus {
     pub fn history(&self, channel: &str, limit: usize) -> Vec<AgentMessage> {
         if let Some(ref db_path) = self.database_path {
             let store = AgentBusStore::new(db_path);
-            store.channel_messages(channel, limit).unwrap_or_default()
+            store
+                .channel_messages(channel, limit)
+                .unwrap_or_default()
+                .into_iter()
+                .map(AgentMessage::from_stored)
+                .collect()
         } else {
             Vec::new()
         }
@@ -215,194 +259,6 @@ fn rand_bits() -> u64 {
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-// ---------------------------------------------------------------------------
-// SQLite persistence for bus messages
-// ---------------------------------------------------------------------------
-
-/// Persistent storage for agent bus messages.
-pub struct AgentBusStore {
-    database_path: std::path::PathBuf,
-}
-
-impl AgentBusStore {
-    pub fn new(database_path: &std::path::Path) -> Self {
-        let store = Self {
-            database_path: database_path.to_path_buf(),
-        };
-        if let Err(e) = store.ensure_table() {
-            tracing::warn!(error = %e, "failed to initialize agent_bus_messages table");
-        }
-        store
-    }
-
-    /// Ensure the agent_bus_messages table exists.
-    fn ensure_table(&self) -> Result<(), String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS agent_bus_messages (
-                id TEXT PRIMARY KEY,
-                channel TEXT NOT NULL,
-                sender TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_bus_messages_channel
-                ON agent_bus_messages(channel);
-            CREATE INDEX IF NOT EXISTS idx_bus_messages_sender
-                ON agent_bus_messages(sender);
-            CREATE INDEX IF NOT EXISTS idx_bus_messages_created_at
-                ON agent_bus_messages(created_at);",
-        )
-        .map_err(|e| format!("Failed to create table: {e}"))?;
-        Ok(())
-    }
-
-    /// Store a message.
-    pub fn store_message(&self, message: &AgentMessage) -> Result<(), String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let metadata_json =
-            serde_json::to_string(&message.metadata).unwrap_or_else(|_| "{}".to_owned());
-        let kind_str = serde_json::to_string(&message.kind)
-            .unwrap_or_else(|_| "\"text\"".to_owned())
-            .trim_matches('"')
-            .to_owned();
-        conn.execute(
-            "INSERT OR REPLACE INTO agent_bus_messages (id, channel, sender, kind, payload, metadata, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                message.id,
-                message.channel,
-                message.sender,
-                kind_str,
-                message.payload,
-                metadata_json,
-                message.timestamp,
-            ],
-        )
-        .map_err(|e| format!("Failed to insert message: {e}"))?;
-        Ok(())
-    }
-
-    /// Retrieve recent messages from a channel.
-    pub fn channel_messages(
-        &self,
-        channel: &str,
-        limit: usize,
-    ) -> Result<Vec<AgentMessage>, String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, channel, sender, kind, payload, metadata, created_at
-                 FROM agent_bus_messages
-                 WHERE channel = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| format!("Failed to prepare query: {e}"))?;
-
-        let messages = stmt
-            .query_map(rusqlite::params![channel, limit], |row| {
-                let kind_str: String = row.get(3)?;
-                let metadata_str: String = row.get(5)?;
-                Ok(AgentMessage {
-                    id: row.get(0)?,
-                    channel: row.get(1)?,
-                    sender: row.get(2)?,
-                    kind: serde_json::from_value(serde_json::Value::String(kind_str))
-                        .unwrap_or(MessageKind::Text),
-                    payload: row.get(4)?,
-                    metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
-                    timestamp: row.get(6)?,
-                })
-            })
-            .map_err(|e| format!("Failed to query messages: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to read messages: {e}"))?;
-
-        Ok(messages)
-    }
-
-    /// Count messages per channel.
-    pub fn channel_stats(&self) -> Result<Vec<(String, i64)>, String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT channel, COUNT(*) as cnt
-                 FROM agent_bus_messages
-                 GROUP BY channel
-                 ORDER BY cnt DESC",
-            )
-            .map_err(|e| format!("Failed to prepare query: {e}"))?;
-
-        let stats = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| format!("Failed to query stats: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to read stats: {e}"))?;
-
-        Ok(stats)
-    }
-}
-
-#[cfg(test)]
-impl AgentBusStore {
-    /// Get all messages from a sender.
-    pub fn sender_messages(&self, sender: &str, limit: usize) -> Result<Vec<AgentMessage>, String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, channel, sender, kind, payload, metadata, created_at
-                 FROM agent_bus_messages
-                 WHERE sender = ?1
-                 ORDER BY created_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| format!("Failed to prepare query: {e}"))?;
-
-        let messages = stmt
-            .query_map(rusqlite::params![sender, limit], |row| {
-                let kind_str: String = row.get(3)?;
-                let metadata_str: String = row.get(5)?;
-                Ok(AgentMessage {
-                    id: row.get(0)?,
-                    channel: row.get(1)?,
-                    sender: row.get(2)?,
-                    kind: serde_json::from_value(serde_json::Value::String(kind_str))
-                        .unwrap_or(MessageKind::Text),
-                    payload: row.get(4)?,
-                    metadata: serde_json::from_str(&metadata_str).unwrap_or_default(),
-                    timestamp: row.get(6)?,
-                })
-            })
-            .map_err(|e| format!("Failed to query messages: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to read messages: {e}"))?;
-
-        Ok(messages)
-    }
-
-    /// Purge messages older than N days.
-    pub fn purge_older_than(&self, days: u32) -> Result<usize, String> {
-        let conn = rusqlite::Connection::open(&self.database_path)
-            .map_err(|e| format!("Failed to open database: {e}"))?;
-        let rows = conn
-            .execute(
-                "DELETE FROM agent_bus_messages
-                 WHERE created_at < datetime('now', ?1)",
-                rusqlite::params![format!("-{days} days")],
-            )
-            .map_err(|e| format!("Failed to purge messages: {e}"))?;
-        Ok(rows)
-    }
 }
 
 #[cfg(test)]
@@ -531,12 +387,24 @@ mod tests {
         assert_eq!(channels, vec!["alpha", "beta"]);
     }
 
+    /// Helper to create a test store with table initialized.
+    fn test_store(db_path: &std::path::Path) -> AgentBusStore {
+        let store = AgentBusStore::new(db_path);
+        store.ensure_table().expect("ensure_table");
+        store
+    }
+
+    /// Helper to create a `StoredBusMessage` from an `AgentMessage`.
+    fn to_stored(msg: &AgentMessage) -> StoredBusMessage {
+        msg.to_stored()
+    }
+
     #[test]
     fn bus_store_persistence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("bus.db");
 
-        let store = AgentBusStore::new(&db_path);
+        let store = test_store(&db_path);
 
         let msg = AgentMessage {
             id: "persist-1".into(),
@@ -547,7 +415,7 @@ mod tests {
             metadata: HashMap::new(),
             timestamp: "2025-06-01T12:00:00Z".into(),
         };
-        store.store_message(&msg).unwrap();
+        store.store_message(&to_stored(&msg)).unwrap();
 
         let messages = store.channel_messages("logs", 10).unwrap();
         assert_eq!(messages.len(), 1);
@@ -560,33 +428,31 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("bus.db");
 
-        let store = AgentBusStore::new(&db_path);
+        let store = test_store(&db_path);
 
         for i in 0..5 {
-            store
-                .store_message(&AgentMessage {
-                    id: format!("a-{i}"),
-                    channel: "alpha".into(),
-                    sender: "s".into(),
-                    kind: MessageKind::Text,
-                    payload: "msg".into(),
-                    metadata: HashMap::new(),
-                    timestamp: now_iso8601(),
-                })
-                .unwrap();
+            let msg = AgentMessage {
+                id: format!("a-{i}"),
+                channel: "alpha".into(),
+                sender: "s".into(),
+                kind: MessageKind::Text,
+                payload: "msg".into(),
+                metadata: HashMap::new(),
+                timestamp: now_iso8601(),
+            };
+            store.store_message(&to_stored(&msg)).unwrap();
         }
         for i in 0..3 {
-            store
-                .store_message(&AgentMessage {
-                    id: format!("b-{i}"),
-                    channel: "beta".into(),
-                    sender: "s".into(),
-                    kind: MessageKind::Text,
-                    payload: "msg".into(),
-                    metadata: HashMap::new(),
-                    timestamp: now_iso8601(),
-                })
-                .unwrap();
+            let msg = AgentMessage {
+                id: format!("b-{i}"),
+                channel: "beta".into(),
+                sender: "s".into(),
+                kind: MessageKind::Text,
+                payload: "msg".into(),
+                metadata: HashMap::new(),
+                timestamp: now_iso8601(),
+            };
+            store.store_message(&to_stored(&msg)).unwrap();
         }
 
         let stats = store.channel_stats().unwrap();
@@ -600,30 +466,29 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("bus.db");
 
-        let store = AgentBusStore::new(&db_path);
+        let store = test_store(&db_path);
 
-        store
-            .store_message(&AgentMessage {
-                id: "s1".into(),
-                channel: "ch".into(),
-                sender: "agent-a".into(),
-                kind: MessageKind::Text,
-                payload: "from a".into(),
-                metadata: HashMap::new(),
-                timestamp: now_iso8601(),
-            })
-            .unwrap();
-        store
-            .store_message(&AgentMessage {
-                id: "s2".into(),
-                channel: "ch".into(),
-                sender: "agent-b".into(),
-                kind: MessageKind::TaskResult,
-                payload: "from b".into(),
-                metadata: HashMap::new(),
-                timestamp: now_iso8601(),
-            })
-            .unwrap();
+        let msg1 = AgentMessage {
+            id: "s1".into(),
+            channel: "ch".into(),
+            sender: "agent-a".into(),
+            kind: MessageKind::Text,
+            payload: "from a".into(),
+            metadata: HashMap::new(),
+            timestamp: now_iso8601(),
+        };
+        store.store_message(&to_stored(&msg1)).unwrap();
+
+        let msg2 = AgentMessage {
+            id: "s2".into(),
+            channel: "ch".into(),
+            sender: "agent-b".into(),
+            kind: MessageKind::TaskResult,
+            payload: "from b".into(),
+            metadata: HashMap::new(),
+            timestamp: now_iso8601(),
+        };
+        store.store_message(&to_stored(&msg2)).unwrap();
 
         let msgs = store.sender_messages("agent-a", 10).unwrap();
         assert_eq!(msgs.len(), 1);

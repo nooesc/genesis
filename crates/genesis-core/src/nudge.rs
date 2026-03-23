@@ -6,7 +6,8 @@
 
 use genesis_config::LoadedConfig;
 use genesis_storage::{
-    bootstrap, format_user_traits, SessionStore, SkillStore, SkillUsageStore, UserModelStore,
+    bootstrap, format_user_traits, MemoryStore, SessionStore, SkillStore, SkillUsageStore,
+    UserModelStore,
 };
 
 use crate::execution::{SessionExecutionError, SessionExecutionService, SessionTurnInput};
@@ -112,25 +113,8 @@ pub async fn run_nudge(
 }
 
 fn load_memories_section(db_path: &std::path::Path) -> Option<String> {
-    let connection = rusqlite::Connection::open(db_path).ok()?;
-    let mut stmt = connection
-        .prepare(
-            "SELECT kind, content, created_at FROM memories
-             ORDER BY created_at DESC LIMIT 50",
-        )
-        .ok()?;
-
-    let memories: Vec<(String, String, String)> = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
+    let store = MemoryStore::new(db_path);
+    let memories = store.list(50).ok()?;
 
     if memories.is_empty() {
         return None;
@@ -138,7 +122,7 @@ fn load_memories_section(db_path: &std::path::Path) -> Option<String> {
 
     let lines: Vec<String> = memories
         .iter()
-        .map(|(kind, content, created_at)| format!("- [{}] {} ({})", kind, content, created_at))
+        .map(|m| format!("- [{}] {} ({})", m.kind, m.content, m.created_at))
         .collect();
 
     Some(lines.join("\n"))

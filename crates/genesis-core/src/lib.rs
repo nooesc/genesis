@@ -40,7 +40,9 @@ use genesis_config::{load, GenesisConfig, LoadedConfig};
 use genesis_lua::{LuaHostToolExecutor, LuaRuntime, LuaToolOutput};
 use genesis_mcp::McpManager;
 use genesis_provider::resolve;
-use genesis_storage::{bootstrap, inspect, SessionStore, StorageHealth};
+use genesis_storage::{
+    bootstrap, inspect, integrity_check, ScheduleStore, SessionStore, SkillStore, StorageHealth,
+};
 use genesis_tools::{
     default_registry, ApprovalPolicy, ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput,
     ToolRegistry,
@@ -439,20 +441,8 @@ fn check_tool_registry() -> DoctorCheck {
 /// Gather storage statistics: session, skill, and schedule counts.
 fn check_storage_stats(db_path: &Path) -> DoctorCheck {
     let sessions = SessionStore::new(db_path).session_count().unwrap_or(0);
-
-    // Use direct COUNT(*) queries to avoid loading full rows
-    let (skills, schedules) = match rusqlite::Connection::open(db_path) {
-        Ok(conn) => {
-            let skills: i64 = conn
-                .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
-                .unwrap_or(0);
-            let schedules: i64 = conn
-                .query_row("SELECT COUNT(*) FROM schedules", [], |r| r.get(0))
-                .unwrap_or(0);
-            (skills as u64, schedules as u64)
-        }
-        Err(_) => (0, 0),
-    };
+    let skills = SkillStore::new(db_path).count().unwrap_or(0);
+    let schedules = ScheduleStore::new(db_path).count().unwrap_or(0);
 
     DoctorCheck {
         name: "storage_stats".to_owned(),
@@ -463,30 +453,21 @@ fn check_storage_stats(db_path: &Path) -> DoctorCheck {
 
 /// Run PRAGMA integrity_check on the database.
 fn check_database_integrity(db_path: &Path) -> DoctorCheck {
-    match rusqlite::Connection::open(db_path) {
-        Ok(conn) => {
-            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
-                Ok(result) if result == "ok" => DoctorCheck {
-                    name: "db_integrity".to_owned(),
-                    status: CheckStatus::Pass,
-                    detail: "integrity check passed".to_owned(),
-                },
-                Ok(result) => DoctorCheck {
-                    name: "db_integrity".to_owned(),
-                    status: CheckStatus::Fail,
-                    detail: format!("integrity issue: {result}"),
-                },
-                Err(e) => DoctorCheck {
-                    name: "db_integrity".to_owned(),
-                    status: CheckStatus::Fail,
-                    detail: format!("integrity check failed: {e}"),
-                },
-            }
-        }
+    match integrity_check(db_path) {
+        Ok(result) if result == "ok" => DoctorCheck {
+            name: "db_integrity".to_owned(),
+            status: CheckStatus::Pass,
+            detail: "integrity check passed".to_owned(),
+        },
+        Ok(result) => DoctorCheck {
+            name: "db_integrity".to_owned(),
+            status: CheckStatus::Fail,
+            detail: format!("integrity issue: {result}"),
+        },
         Err(e) => DoctorCheck {
             name: "db_integrity".to_owned(),
             status: CheckStatus::Fail,
-            detail: format!("cannot open database: {e}"),
+            detail: format!("integrity check failed: {e}"),
         },
     }
 }
