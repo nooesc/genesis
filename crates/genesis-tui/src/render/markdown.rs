@@ -264,7 +264,13 @@ impl MarkdownWriter {
                 // between items), pulldown-cmark does NOT wrap each item in
                 // a Paragraph, so we must end the line here to prevent items
                 // from running together on one line.
-                self.finish_line();
+                //
+                // Guard: for "loose" lists, End(Paragraph) already flushed
+                // current_spans. Calling finish_line() on empty spans would
+                // produce a spurious blank line after each item.
+                if !self.current_spans.is_empty() {
+                    self.finish_line();
+                }
             }
 
             // ── Code blocks ──────────────────────────────────────────────
