@@ -411,6 +411,11 @@ pub struct ChatCompletionChunk {
     /// Token usage stats included in the final chunk when `stream_options.include_usage` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatUsage>,
+    /// Provider-specific metadata extracted from the final streaming event
+    /// (e.g. reasoning items from the Responses API `response.completed` event).
+    /// Populated only for backends that expose such data in their completion events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
