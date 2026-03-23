@@ -812,6 +812,36 @@ pub fn default_registry() -> ToolRegistry {
             ApprovalPolicy::Never,
             builtins::memory::MemoryRecallTool,
         )
+        .register(
+            ToolDefinition {
+                name: "memory_consolidate".to_owned(),
+                description: "Consolidate similar memories into summary notes. Clusters semantically similar unconsolidated memories and creates summary notes linking back to originals.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "threshold": { "type": "number", "description": "Cosine similarity threshold (default: 0.85)" },
+                        "min_cluster_size": { "type": "integer", "description": "Min cluster size (default: 2)" }
+                    }
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::memory::MemoryConsolidateTool,
+        )
+        .register(
+            ToolDefinition {
+                name: "memory_prune".to_owned(),
+                description: "Prune stale memories with low importance that haven't been accessed recently.".to_owned(),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "importance_threshold": { "type": "number", "description": "Remove below this importance (default: 0.1)" },
+                        "stale_days": { "type": "integer", "description": "Days since last access (default: 90)" }
+                    }
+                })),
+            },
+            ApprovalPolicy::Never,
+            builtins::memory::MemoryPruneTool,
+        )
         .register_cached(
             ToolDefinition {
                 name: "search_files".to_owned(),
@@ -1973,7 +2003,7 @@ mod tests {
         let registry = default_registry();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 74);
+        assert_eq!(definitions.len(), 76);
         assert!(definitions.iter().any(|tool| tool.name == "echo"));
         assert!(definitions.iter().any(|tool| tool.name == "session_info"));
         assert!(definitions.iter().any(|tool| tool.name == "shell_exec"));
@@ -1984,6 +2014,8 @@ mod tests {
         assert!(definitions.iter().any(|tool| tool.name == "list_dir"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_store"));
         assert!(definitions.iter().any(|tool| tool.name == "memory_recall"));
+        assert!(definitions.iter().any(|tool| tool.name == "memory_consolidate"));
+        assert!(definitions.iter().any(|tool| tool.name == "memory_prune"));
         assert!(definitions.iter().any(|tool| tool.name == "search_files"));
         assert!(definitions.iter().any(|tool| tool.name == "web_request"));
         assert!(definitions.iter().any(|tool| tool.name == "skill_create"));
