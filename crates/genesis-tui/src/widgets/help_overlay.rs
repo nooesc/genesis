@@ -107,11 +107,15 @@ impl HelpOverlay {
 
         let commands: &[(&str, &str)] = &[
             ("/clear", "Clear conversation history"),
-            ("/compact", "Compress context window"),
+            ("/compact", "Compact tool display (one-line)"),
             ("/exit", "Exit Eve"),
+            ("/grouped", "Grouped tool display (bordered)"),
             ("/help", "Show this help screen"),
+            ("/models", "Switch AI model"),
             ("/plan", "Toggle Plan/Act mode"),
             ("/theme", "Cycle through built-in themes"),
+            ("/transcript", "View conversation transcript"),
+            ("/verbose", "Verbose tool display (full output)"),
         ];
 
         for (cmd, desc) in commands {

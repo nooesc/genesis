@@ -4,6 +4,8 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use crate::render::diff;
+use unicode_width::UnicodeWidthStr as _;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -420,7 +422,7 @@ impl ToolCell {
         ]);
 
         // Bottom border: `  └─ … ─┘` matching the top border width.
-        let fill_width = self.tool_name.len() + 2; // "─ " + name + " ─"
+        let fill_width = self.tool_name.width() + 2; // "─ " + name + " ─"
         let bottom_fill = "─".repeat(fill_width);
         let bottom = Line::from(vec![Span::styled(
             format!("  └{}┘", bottom_fill),
@@ -482,8 +484,8 @@ impl ToolCell {
                     }
                 } else {
                     // Plain text output — truncate to a reasonable display length.
-                    let truncated = if output.chars().count() > 60 {
-                        let s: String = output.chars().take(60).collect();
+                    let truncated = if output.chars().count() > 500 {
+                        let s: String = output.chars().take(500).collect();
                         format!("{s}…")
                     } else {
                         output.clone()
@@ -506,7 +508,7 @@ impl ToolCell {
             Span::styled(" │", Style::default().fg(UI_DIM)),
         ]);
 
-        let fill_width = self.tool_name.len() + 2; // match top border
+        let fill_width = self.tool_name.width() + 2; // match top border
         let bottom_fill = "─".repeat(fill_width);
         let bottom = Line::from(vec![Span::styled(
             format!("  └{}┘", bottom_fill),
@@ -787,8 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_output_truncated_at_60_chars() {
-        let long_output = "a".repeat(80);
+    fn verbose_output_truncated_at_limit() {
+        let long_output = "a".repeat(600);
         let cell = make_cell(true)
             .with_display_mode(ToolDisplayMode::Verbose)
             .with_output(long_output);
