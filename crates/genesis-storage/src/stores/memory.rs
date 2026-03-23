@@ -5,13 +5,13 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
 use crate::stores::embedding::embedding_to_blob;
 use crate::util::{
     collect_rows, decayed_importance, exec_migration, memory_vec_declared_dimensions,
     memory_vec_table_exists, sql_placeholders, sqlite_table_exists,
 };
+use crate::Database;
 
 /// A stored memory (key-value note persisted by the agent).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -787,8 +787,8 @@ fn reciprocal_rank_fusion(
 
 #[cfg(test)]
 mod memory_store_tests {
-    use crate::{bootstrap, EmbeddingStore, SessionStore};
     use super::{MemoryStore, NewMemoryNote};
+    use crate::{bootstrap, EmbeddingStore, SessionStore};
     use tempfile::tempdir;
 
     fn setup(dir: &std::path::Path) -> std::path::PathBuf {
@@ -1239,4 +1239,3 @@ mod memory_store_tests {
         assert!(page3.is_empty());
     }
 }
-

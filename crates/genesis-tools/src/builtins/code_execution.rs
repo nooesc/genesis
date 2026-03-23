@@ -431,11 +431,16 @@ fn rpc_server_loop(
     use std::io::{BufRead, Write};
 
     // Accept one connection with a timeout
-    let stream = match accept_with_timeout(&listener, Duration::from_secs(timeouts::CODE_EXEC_ACCEPT_SECS)) {
+    let stream = match accept_with_timeout(
+        &listener,
+        Duration::from_secs(timeouts::CODE_EXEC_ACCEPT_SECS),
+    ) {
         Some(s) => s,
         None => return,
     };
-    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS))) {
+    if let Err(e) =
+        stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS)))
+    {
         tracing::warn!(error = %e, "failed to set read timeout on code execution socket");
     }
 
