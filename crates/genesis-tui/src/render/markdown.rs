@@ -1235,4 +1235,134 @@ mod tests {
             "Expected at least 3 numbered lines, got {num_count}"
         );
     }
+
+    #[test]
+    fn paragraphs_separated_by_blank_line() {
+        // Two paragraphs should have a blank line between them.
+        let md = "First paragraph.\n\nSecond paragraph.";
+        let lines = markdown_to_lines(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        eprintln!("Lines: {texts:?}");
+        // Should have: "First paragraph.", "", "Second paragraph."
+        assert!(
+            texts.len() >= 3,
+            "Need at least 3 lines (2 paragraphs + blank)"
+        );
+        assert!(
+            texts.iter().any(|t| t.is_empty()),
+            "Should have a blank line between paragraphs"
+        );
+    }
+
+    #[test]
+    fn heading_followed_by_paragraph() {
+        // Heading and following paragraph should be on separate lines.
+        let md =
+            "## Short version\nA stored memory is not automatically sitting in my active context.";
+        let lines = markdown_to_lines(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        eprintln!("Lines: {texts:?}");
+        // The heading and paragraph text should not be on the same line.
+        let first_text = &texts[0];
+        assert!(
+            !first_text.contains("A stored memory"),
+            "Heading and paragraph should not be on same line: {first_text}"
+        );
+    }
+
+    #[test]
+    fn list_followed_by_paragraph() {
+        // Text after a list should not run into the last bullet.
+        let md = "- first\n- second\n\nSome text after the list.";
+        let lines = markdown_to_lines(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        eprintln!("Lines: {texts:?}");
+        // "Some text after the list." should NOT be on the same line as "• second"
+        let last_bullet = texts.iter().rposition(|t| t.contains('•')).unwrap();
+        let after_text = texts.iter().position(|t| t.contains("Some text")).unwrap();
+        assert!(
+            after_text > last_bullet,
+            "Text after list should be on a later line than the last bullet"
+        );
+    }
+
+    #[test]
+    fn screenshot_repro_full_response() {
+        // Reproduce the exact output pattern from the user's screenshot.
+        let md = "\
+**Short version**
+A stored memory is not automatically sitting in my active context all the time.
+
+**Think of it like this**
+- **Context window** = what I'm actively looking at right now
+- **Stored memory** = notes in a notebook/database
+- **Memory retrieval** = me checking the notebook for relevant notes
+
+**Practical meaning**
+If something was stored earlier:
+- I may not mention or use it unless I retrieve it
+- If I do retrieve it, then it becomes available for this conversation turn
+
+If you want, I can also explain:
+1. how this differs from session history
+2. when I decide to retrieve memory
+3. what kinds of things are best to store";
+
+        let lines = markdown_to_lines(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        for (i, t) in texts.iter().enumerate() {
+            eprintln!("  [{i:2}] {t}");
+        }
+
+        // Each bullet should be on its own line.
+        let bullet_count = texts.iter().filter(|t| t.contains('•')).count();
+        assert_eq!(bullet_count, 5, "Should have 5 bullet lines");
+
+        // Each numbered item should be on its own line.
+        let has_1 = texts.iter().any(|t| t.starts_with("1. "));
+        let has_2 = texts.iter().any(|t| t.starts_with("2. "));
+        let has_3 = texts.iter().any(|t| t.starts_with("3. "));
+        assert!(
+            has_1 && has_2 && has_3,
+            "All 3 numbered items should be on separate lines"
+        );
+
+        // "Practical meaning" should NOT be on same line as preceding bullet.
+        for t in &texts {
+            assert!(
+                !(t.contains("notes") && t.contains("Practical")),
+                "Paragraph after list must not merge with last bullet: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn bold_text_not_on_heading_line() {
+        // "**Bold text**" in a paragraph should be on its own rendered line,
+        // not concatenated with surrounding text.
+        let md = "Normal text.\n\n**Practical meaning**\nSome explanation here.";
+        let lines = markdown_to_lines(md);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        eprintln!("Lines: {texts:?}");
+        // "Practical meaning" should not be concatenated with "Normal text."
+        assert!(
+            !texts[0].contains("Practical meaning"),
+            "Bold text should not be on the same line as preceding paragraph"
+        );
+    }
 }
