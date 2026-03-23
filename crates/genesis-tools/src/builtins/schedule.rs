@@ -174,15 +174,9 @@ mod tests {
         genesis_storage::bootstrap(&dir.join("genesis.db")).expect("bootstrap");
         ToolContext {
             session_id: "test".to_owned(),
-            profile: "test".to_owned(),
             data_dir: dir.to_string_lossy().to_string(),
             allow_destructive_tools: true,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-            embedding_service: None,
-            path_validator: None,
-            approval_mode: genesis_config::ApprovalMode::Auto,
+            ..crate::test_utils::test_ctx()
         }
     }
 

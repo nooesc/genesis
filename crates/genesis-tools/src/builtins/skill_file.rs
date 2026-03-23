@@ -213,15 +213,8 @@ mod tests {
     fn context(data_dir: &str) -> ToolContext {
         ToolContext {
             session_id: "s1".to_owned(),
-            profile: "default".to_owned(),
             data_dir: data_dir.to_owned(),
-            allow_destructive_tools: false,
-            terminal_backend: None,
-            default_working_dir: None,
-            sandbox_manager: None,
-            embedding_service: None,
-            path_validator: None,
-            approval_mode: genesis_config::ApprovalMode::Auto,
+            ..crate::test_utils::test_ctx()
         }
     }
 

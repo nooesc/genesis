@@ -180,6 +180,19 @@ pub struct ToolContext {
     /// When set, file-system tools validate paths against this before I/O.
     #[serde(skip)]
     pub path_validator: Option<Arc<sandbox::PathValidator>>,
+    /// IDs of memories recalled in the current turn. Shared across tool calls
+    /// within a turn so that memory_store can create causal edges from
+    /// recalled memories to newly stored ones.
+    #[serde(skip)]
+    pub recalled_memory_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Optional LLM-powered keyword enricher for memory creation.
+    /// When set, memory tools use this instead of simple tokenization.
+    #[serde(skip)]
+    pub keyword_enricher: Option<Arc<dyn KeywordEnricher>>,
+    /// Auto-consolidation threshold: trigger consolidation after this many
+    /// unconsolidated memories accumulate. 0 = disabled.
+    #[serde(default)]
+    pub auto_consolidation_threshold: u64,
     /// Tool approval mode controlling when tools require interactive confirmation.
     #[serde(default)]
     pub approval_mode: genesis_config::ApprovalMode,
@@ -206,6 +219,24 @@ impl std::fmt::Debug for ToolContext {
                 "path_validator",
                 &self.path_validator.as_ref().map(|_| ".."),
             )
+            .field(
+                "recalled_memory_ids",
+                &format_args!(
+                    "[{} ids]",
+                    self.recalled_memory_ids
+                        .lock()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                ),
+            )
+            .field(
+                "keyword_enricher",
+                &self.keyword_enricher.as_ref().map(|_| ".."),
+            )
+            .field(
+                "auto_consolidation_threshold",
+                &self.auto_consolidation_threshold,
+            )
             .field("approval_mode", &self.approval_mode)
             .finish()
     }
@@ -219,9 +250,12 @@ impl PartialEq for ToolContext {
             && self.allow_destructive_tools == other.allow_destructive_tools
             && self.terminal_backend == other.terminal_backend
             && self.default_working_dir == other.default_working_dir
+            && self.auto_consolidation_threshold == other.auto_consolidation_threshold
             && self.approval_mode == other.approval_mode
         // sandbox_manager intentionally excluded from equality comparison
         // embedding_service intentionally excluded from equality comparison
+        // recalled_memory_ids intentionally excluded from equality comparison
+        // keyword_enricher intentionally excluded from equality comparison
     }
 }
 
@@ -276,6 +310,22 @@ pub trait EmbeddingService: Send + Sync {
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, String>;
     /// Return the model name used for embeddings.
     fn model_name(&self) -> &str;
+}
+
+/// Service for LLM-powered keyword extraction from memory content.
+///
+/// Implemented in genesis-core to bridge the async `ChatClient` into the sync
+/// `ToolHandler` interface. When present in `ToolContext`, memory tools use
+/// this instead of simple tokenization for richer keyword extraction.
+///
+/// # Panics
+///
+/// Implementations use `tokio::task::block_in_place` + `Handle::block_on` to
+/// bridge sync to async. Callers must be on either a blocking thread
+/// (`spawn_blocking`) or a Tokio multi-threaded worker thread.
+pub trait KeywordEnricher: Send + Sync {
+    /// Extract keywords, entities, and concepts from the given text.
+    fn enrich(&self, content: &str) -> Result<Vec<String>, String>;
 }
 
 /// Configurable terminal backend for shell command execution.
@@ -1911,6 +1961,9 @@ pub mod test_utils {
             sandbox_manager: None,
             embedding_service: None,
             path_validator: None,
+            recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            keyword_enricher: None,
+            auto_consolidation_threshold: 0,
             approval_mode: genesis_config::ApprovalMode::Auto,
         }
     }

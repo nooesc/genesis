@@ -231,6 +231,9 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
             sandbox_manager: None,
             embedding_service: None,
             path_validator: Some(Arc::new(genesis_tools::sandbox::PathValidator::new(None))),
+            recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            keyword_enricher: None,
+            auto_consolidation_threshold: 0,
             approval_mode: execution_context.approval_mode,
         },
         mcp: None,
@@ -1090,6 +1093,23 @@ impl ToolRuntime {
         self.context.embedding_service = Some(service);
     }
 
+    /// Set the keyword enricher for LLM-powered keyword extraction.
+    pub fn set_keyword_enricher(&mut self, enricher: Arc<dyn genesis_tools::KeywordEnricher>) {
+        self.context.keyword_enricher = Some(enricher);
+    }
+
+    /// Set the auto-consolidation threshold for background memory consolidation.
+    pub fn set_auto_consolidation_threshold(&mut self, threshold: u64) {
+        self.context.auto_consolidation_threshold = threshold;
+    }
+
+    /// Clear the recalled memory IDs at the start of each new user turn.
+    pub fn clear_recalled_memory_ids(&self) {
+        if let Ok(mut ids) = self.context.recalled_memory_ids.lock() {
+            ids.clear();
+        }
+    }
+
     /// Create a new ToolRuntime with a different session ID.
     /// Used when spawning subagent workstreams.
     pub fn with_session_id(&self, session_id: impl Into<String>) -> Self {
@@ -1097,6 +1117,9 @@ impl ToolRuntime {
             registry: self.registry.clone(),
             context: ToolContext {
                 session_id: session_id.into(),
+                // Fresh recalled IDs for the subagent — must NOT share the
+                // parent's Arc or recall/store events will cross-contaminate.
+                recalled_memory_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 ..self.context.clone()
             },
             mcp: self.mcp.clone(),
@@ -1236,6 +1259,7 @@ pub(crate) mod tests {
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
                 routing: None,
+                memory: genesis_config::MemoryConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),
@@ -1297,6 +1321,7 @@ pub(crate) mod tests {
                 tui: genesis_config::TuiConfig::default(),
                 telemetry: None,
                 routing: None,
+                memory: genesis_config::MemoryConfig::default(),
             },
             paths: AppPaths {
                 config_path: PathBuf::from("/tmp/genesis/config.yaml"),

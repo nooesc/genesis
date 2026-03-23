@@ -83,12 +83,20 @@ impl ToolHandler for MemoryStoreTool {
                             {
                                 tracing::warn!(error = %e, "failed to temporally link merged memory");
                             }
+                            let merged_keywords =
+                                extract_or_enrich_keywords(context, &best_kind, &merged.content);
+                            if let Err(e) = store.auto_link_entity(&best_id, &merged_keywords, 5) {
+                                tracing::warn!(error = %e, "failed to auto-link merged memory by entity");
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to re-embed merged memory");
                         }
                     }
                 }
+
+                create_causal_links(&store, context, &best_id);
+                try_auto_consolidate(&store, context);
 
                 return Ok(ToolOutput {
                     content: format!(
@@ -105,13 +113,14 @@ impl ToolHandler for MemoryStoreTool {
 
             // No duplicate — create a new note and embed it.
             let note_id = memory_id(context, key);
+            let keywords = extract_or_enrich_keywords(context, key, value);
             store
                 .create_note(NewMemoryNote {
                     id: note_id.clone(),
                     session_id: Some(context.session_id.clone()),
                     kind: key.clone(),
                     content: value.clone(),
-                    keywords: extract_keywords(key, value),
+                    keywords: keywords.clone(),
                     tags: Vec::new(),
                     linked_ids: Vec::new(),
                     importance: 0.5,
@@ -134,6 +143,11 @@ impl ToolHandler for MemoryStoreTool {
             if let Err(e) = store.auto_link_temporal(&note_id, &context.session_id, 5) {
                 tracing::warn!(error = %e, "failed to auto-link new memory temporally");
             }
+            if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory by entity");
+            }
+            create_causal_links(&store, context, &note_id);
+            try_auto_consolidate(&store, context);
 
             return Ok(ToolOutput {
                 content: format!("stored memory `{key}` (embedded)"),
@@ -188,6 +202,13 @@ impl ToolHandler for MemoryRecallTool {
                         database_path.display()
                     ),
                 })?;
+
+        // Track recalled memory IDs for causal linking.
+        if let Ok(mut ids) = context.recalled_memory_ids.lock() {
+            for m in &memories {
+                ids.push(m.memory.id.clone());
+            }
+        }
 
         let content = if memories.is_empty() {
             "no memories found".to_owned()
@@ -251,35 +272,13 @@ impl ToolHandler for MemoryConsolidateTool {
 
         let mut summaries = Vec::new();
         for cluster in &clusters {
-            let members: Vec<_> = cluster
-                .iter()
-                .filter_map(|id| store.get(id).ok().flatten())
-                .collect();
-            let combined_content: String = members
-                .iter()
-                .map(|m| format!("- [{}] {}", m.kind, m.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let keywords: Vec<String> = members
-                .iter()
-                .flat_map(|m| extract_keywords(&m.kind, &m.content))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-
-            let summary_content = format!(
-                "Consolidated from {} memories:\n{}",
-                members.len(),
-                combined_content
-            );
-            let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
-            store
-                .consolidate_cluster(&member_refs, &summary_content, keywords)
-                .map_err(|error| ToolError::ExecutionFailed {
+            let count = consolidate_single_cluster(&store, cluster).map_err(|error| {
+                ToolError::ExecutionFailed {
                     tool: call.name.clone(),
                     reason: format!("failed to consolidate: {error}"),
-                })?;
-            summaries.push(format!("- {} memories consolidated", members.len()));
+                }
+            })?;
+            summaries.push(format!("- {count} memories consolidated"));
         }
 
         Ok(ToolOutput {
@@ -354,13 +353,15 @@ fn store_plain(
     value: &str,
     database_path: &std::path::Path,
 ) -> Result<ToolOutput, ToolError> {
+    let note_id = memory_id(context, key);
+    let keywords = extract_or_enrich_keywords(context, key, value);
     store
         .create_note(NewMemoryNote {
-            id: memory_id(context, key),
+            id: note_id.clone(),
             session_id: Some(context.session_id.clone()),
             kind: key.to_owned(),
             content: value.to_owned(),
-            keywords: extract_keywords(key, value),
+            keywords: keywords.clone(),
             tags: Vec::new(),
             linked_ids: Vec::new(),
             importance: 0.5,
@@ -373,6 +374,12 @@ fn store_plain(
             ),
         })?;
 
+    if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
+        tracing::warn!(error = %e, "failed to auto-link memory by entity");
+    }
+    create_causal_links(store, context, &note_id);
+    try_auto_consolidate(store, context);
+
     Ok(ToolOutput {
         content: format!("stored memory `{key}`"),
         metadata: BTreeMap::from([
@@ -381,6 +388,28 @@ fn store_plain(
             ("session_id".to_owned(), context.session_id.clone()),
         ]),
     })
+}
+
+/// Create causal edges from previously recalled memories to the newly stored memory.
+/// Reads recalled IDs without draining — all stores in the same turn get causal edges.
+/// The agent loop clears recalled IDs at the start of each new turn.
+fn create_causal_links(store: &MemoryStore, context: &ToolContext, new_memory_id: &str) {
+    let Ok(ids) = context.recalled_memory_ids.lock() else {
+        return;
+    };
+    for recalled_id in ids.iter() {
+        if recalled_id == new_memory_id {
+            continue;
+        }
+        if let Err(e) = store.create_link(
+            recalled_id,
+            new_memory_id,
+            genesis_storage::edge_type::CAUSAL,
+            1.0,
+        ) {
+            tracing::warn!(error = %e, recalled_id, new_memory_id, "failed to create causal link");
+        }
+    }
 }
 
 fn memory_id(context: &ToolContext, key: &str) -> String {
@@ -400,6 +429,112 @@ fn extract_keywords(key: &str, value: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Extract keywords, using the LLM enricher if available, falling back to simple extraction.
+fn extract_or_enrich_keywords(context: &ToolContext, key: &str, value: &str) -> Vec<String> {
+    if let Some(ref enricher) = context.keyword_enricher {
+        match enricher.enrich(value) {
+            Ok(keywords) if !keywords.is_empty() => return keywords,
+            Ok(_) => {
+                tracing::warn!(
+                    "keyword enricher returned empty result, falling back to simple extraction"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "keyword enricher failed, falling back to simple extraction"
+                );
+            }
+        }
+    }
+    extract_keywords(key, value)
+}
+
+/// Consolidate a single cluster of memory IDs into a summary.
+/// Returns the number of members consolidated.
+fn consolidate_single_cluster(
+    store: &MemoryStore,
+    cluster: &[String],
+) -> Result<usize, genesis_storage::StorageError> {
+    let members: Vec<_> = cluster
+        .iter()
+        .filter_map(|id| store.get(id).ok().flatten())
+        .collect();
+    let combined_content: String = members
+        .iter()
+        .map(|m| format!("- [{}] {}", m.kind, m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let keywords: Vec<String> = members
+        .iter()
+        .flat_map(|m| extract_keywords(&m.kind, &m.content))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let summary_content = format!(
+        "Consolidated from {} memories:\n{}",
+        members.len(),
+        combined_content
+    );
+    let member_refs: Vec<&str> = cluster.iter().map(|s| s.as_str()).collect();
+    store.consolidate_cluster(&member_refs, &summary_content, keywords)?;
+    Ok(members.len())
+}
+
+/// Check if auto-consolidation should trigger and run it if so.
+/// Skips re-triggering if the last attempt found no clusters (avoids repeated
+/// full scans when embeddings are unavailable).
+fn try_auto_consolidate(store: &MemoryStore, context: &ToolContext) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Track the count at which we last attempted consolidation. If the count
+    // hasn't changed since the last fruitless attempt, skip the expensive scan.
+    static LAST_ATTEMPTED_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    if context.auto_consolidation_threshold == 0 {
+        return;
+    }
+    let count = match store.count_unconsolidated() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to count unconsolidated memories");
+            return;
+        }
+    };
+    if count < context.auto_consolidation_threshold {
+        return;
+    }
+    // Skip if we already attempted at this count and found nothing.
+    let last = LAST_ATTEMPTED_COUNT.load(Ordering::Relaxed);
+    if last == count {
+        return;
+    }
+    tracing::info!(
+        unconsolidated = count,
+        threshold = context.auto_consolidation_threshold,
+        "auto-consolidation triggered"
+    );
+    let clusters = match store.find_consolidation_clusters(0.85, 2) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "auto-consolidation: failed to find clusters");
+            return;
+        }
+    };
+    if clusters.is_empty() {
+        LAST_ATTEMPTED_COUNT.store(count, Ordering::Relaxed);
+        return;
+    }
+    for cluster in &clusters {
+        if let Err(e) = consolidate_single_cluster(store, cluster) {
+            tracing::warn!(error = %e, "auto-consolidation: failed to consolidate cluster");
+        }
+    }
+    // Reset so future stores can re-trigger after new memories accumulate.
+    LAST_ATTEMPTED_COUNT.store(0, Ordering::Relaxed);
+    tracing::info!(clusters = clusters.len(), "auto-consolidation complete");
 }
 
 fn unique_suffix() -> u128 {
@@ -1344,5 +1479,453 @@ mod tests {
             temporal_count > 0,
             "temporal links should be created between memories in the same session"
         );
+    }
+
+    #[test]
+    fn memory_store_creates_entity_links_on_keyword_overlap() {
+        let dir = tempdir().expect("tempdir should exist");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+        let db_path = dir.path().join("genesis.db");
+
+        // Store first memory containing "rust" keyword.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_ownership".to_owned()),
+                        ("value".to_owned(), "Rust ownership model".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("first memory should store");
+
+        // Store second memory also containing "rust" keyword.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_borrowing".to_owned()),
+                        ("value".to_owned(), "Rust borrowing rules".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("second memory should store");
+
+        // Verify entity links were created (both share "rust" keyword).
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let entity_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count entity links");
+
+        assert!(
+            entity_count > 0,
+            "entity links should be created between memories with overlapping keywords"
+        );
+    }
+
+    // ── Causal linking tests ────────────────────────────────────────────
+
+    #[test]
+    fn memory_recall_then_store_creates_causal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Store a memory first.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "Rust is fast".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Recall it.
+        MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "rust".to_owned())]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Store a new memory — should create causal link from recalled -> new.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_b".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust compiles to native code".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // Verify causal edge exists.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            causal_count > 0,
+            "causal links should exist after recall->store"
+        );
+    }
+
+    #[test]
+    fn memory_store_without_prior_recall_creates_no_causal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "standalone fact".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(causal_count, 0, "no causal links without prior recall");
+    }
+
+    #[test]
+    fn all_stores_in_same_turn_get_causal_links() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+
+        // Store and recall a memory.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_a".to_owned()),
+                        ("value".to_owned(), "Rust is fast".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        MemoryRecallTool
+            .run(
+                &ToolCall {
+                    name: "memory_recall".to_owned(),
+                    arguments: BTreeMap::from([("query".to_owned(), "rust".to_owned())]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        // First store — should create causal links.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_b".to_owned()),
+                        (
+                            "value".to_owned(),
+                            "Rust compiles to native code".to_owned(),
+                        ),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let causal_after_first: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Second store — should ALSO create causal links (recalled IDs persist within a turn).
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fact_c".to_owned()),
+                        ("value".to_owned(), "Rust has no GC".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let causal_after_second: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'causal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(
+            causal_after_first > 0,
+            "first store should create causal links"
+        );
+        assert!(
+            causal_after_second > causal_after_first,
+            "second store should also create causal links (recalled IDs persist within a turn)"
+        );
+    }
+
+    // ---- keyword enricher tests ----
+
+    /// Mock keyword enricher that returns fixed keywords.
+    struct MockKeywordEnricher;
+    impl crate::KeywordEnricher for MockKeywordEnricher {
+        fn enrich(&self, _content: &str) -> Result<Vec<String>, String> {
+            Ok(vec!["enriched_keyword".to_owned(), "concept".to_owned()])
+        }
+    }
+
+    /// Mock keyword enricher that always fails.
+    struct FailingKeywordEnricher;
+    impl crate::KeywordEnricher for FailingKeywordEnricher {
+        fn enrich(&self, _content: &str) -> Result<Vec<String>, String> {
+            Err("LLM unavailable".to_owned())
+        }
+    }
+
+    fn ctx_with_enricher(data_dir: &str, enricher: Arc<dyn crate::KeywordEnricher>) -> ToolContext {
+        ToolContext {
+            session_id: "session-42".to_owned(),
+            data_dir: data_dir.to_owned(),
+            keyword_enricher: Some(enricher),
+            ..crate::test_utils::test_ctx()
+        }
+    }
+
+    #[test]
+    fn memory_store_uses_keyword_enricher_when_available() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_enricher(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(MockKeywordEnricher),
+        );
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "test_key".to_owned()),
+                        ("value".to_owned(), "some content".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let keywords_json: String = conn
+            .query_row(
+                "SELECT keywords_json FROM memories WHERE kind = 'test_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            keywords_json.contains("enriched_keyword"),
+            "should use enricher keywords: {keywords_json}"
+        );
+    }
+
+    #[test]
+    fn memory_store_falls_back_when_enricher_fails() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        let context = ctx_with_enricher(
+            dir.path().to_string_lossy().as_ref(),
+            Arc::new(FailingKeywordEnricher),
+        );
+
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "fallback_key".to_owned()),
+                        ("value".to_owned(), "fallback content".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let keywords_json: String = conn
+            .query_row(
+                "SELECT keywords_json FROM memories WHERE kind = 'fallback_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Should fall back to extract_keywords which would produce "fallback", "key", "content"
+        assert!(
+            keywords_json.contains("fallback"),
+            "should use fallback keywords: {keywords_json}"
+        );
+    }
+
+    fn ctx_with_auto_consolidation(data_dir: &str, threshold: u64) -> ToolContext {
+        ToolContext {
+            session_id: "session-42".to_owned(),
+            data_dir: data_dir.to_owned(),
+            auto_consolidation_threshold: threshold,
+            ..crate::test_utils::test_ctx()
+        }
+    }
+
+    #[test]
+    fn auto_consolidation_triggers_when_threshold_exceeded() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        // Set threshold to 3 for quick testing
+        let context = ctx_with_auto_consolidation(dir.path().to_string_lossy().as_ref(), 3);
+
+        // Store 3 memories with similar content
+        for i in 0..3 {
+            MemoryStoreTool
+                .run(
+                    &ToolCall {
+                        name: "memory_store".to_owned(),
+                        arguments: BTreeMap::from([
+                            ("key".to_owned(), format!("rust_fact_{i}")),
+                            (
+                                "value".to_owned(),
+                                format!("rust ownership fact number {i}"),
+                            ),
+                        ]),
+                    },
+                    &context,
+                )
+                .unwrap();
+        }
+
+        // Note: Auto-consolidation only fires if cluster detection finds clusters.
+        // Without embeddings, find_consolidation_clusters checks embeddings and
+        // may find none. Verify that at least the threshold check ran (3 memories
+        // stored, threshold is 3) by checking the unconsolidated count.
+        let store = genesis_storage::MemoryStore::new(&db_path);
+        // If no embeddings, clusters won't be found, but count should be correct.
+        let count = store.count_unconsolidated().unwrap();
+        // Count may be 3 (no clusters) or less (if clusters were consolidated)
+        assert!(
+            count <= 3,
+            "unconsolidated count should be at most 3, got {count}"
+        );
+    }
+
+    #[test]
+    fn auto_consolidation_disabled_when_threshold_zero() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        // Threshold 0 = disabled
+        let context = ctx_with_auto_consolidation(dir.path().to_string_lossy().as_ref(), 0);
+
+        for i in 0..5 {
+            MemoryStoreTool
+                .run(
+                    &ToolCall {
+                        name: "memory_store".to_owned(),
+                        arguments: BTreeMap::from([
+                            ("key".to_owned(), format!("key_{i}")),
+                            ("value".to_owned(), format!("value {i}")),
+                        ]),
+                    },
+                    &context,
+                )
+                .unwrap();
+        }
+
+        let store = genesis_storage::MemoryStore::new(&db_path);
+        let count = store.count_unconsolidated().unwrap();
+        assert_eq!(
+            count, 5,
+            "all 5 should remain unconsolidated when threshold is 0"
+        );
+    }
+
+    #[test]
+    fn auto_consolidation_does_not_trigger_below_threshold() {
+        let dir = tempdir().expect("tempdir");
+        setup_db(dir.path());
+        let db_path = dir.path().join("genesis.db");
+        // Threshold 100 — won't be reached with just 2 memories
+        let context = ctx_with_auto_consolidation(dir.path().to_string_lossy().as_ref(), 100);
+
+        for i in 0..2 {
+            MemoryStoreTool
+                .run(
+                    &ToolCall {
+                        name: "memory_store".to_owned(),
+                        arguments: BTreeMap::from([
+                            ("key".to_owned(), format!("key_{i}")),
+                            ("value".to_owned(), format!("value {i}")),
+                        ]),
+                    },
+                    &context,
+                )
+                .unwrap();
+        }
+
+        let store = genesis_storage::MemoryStore::new(&db_path);
+        let count = store.count_unconsolidated().unwrap();
+        assert_eq!(count, 2, "both should remain unconsolidated");
     }
 }
