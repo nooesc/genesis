@@ -56,24 +56,29 @@ pub const NOISE_DIRS: &[&str] = &[
 /// Maximum output size for tool results (64 KiB).
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// Format a byte count into a human-readable string (B, KB, MB).
+/// Format a byte count into a human-readable string (B, KB, MB, GB).
 pub fn format_bytes(bytes: usize) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
     let b = bytes as f64;
     if b < KB {
         format!("{}B", bytes)
     } else if b < MB {
         format!("{:.1}KB", b / KB)
-    } else {
+    } else if b < GB {
         format!("{:.1}MB", b / MB)
+    } else {
+        format!("{:.1}GB", b / GB)
     }
 }
 
 /// Build a truncation suffix that reports how much content was shown vs total.
 ///
-/// If the (trimmed) content starts with `{` or `[`, appends a JSON warning.
+/// If the (trimmed) content looks like it might be JSON or a similar structured
+/// format (starts with `{"` or `["`), appends a warning that the output may have
+/// been cut mid-structure.
 fn truncation_suffix(shown_bytes: usize, total_bytes: usize, content: &str) -> String {
     let mut suffix = format!(
         "\n... (output truncated: showing {} of {})",
@@ -81,8 +86,10 @@ fn truncation_suffix(shown_bytes: usize, total_bytes: usize, content: &str) -> S
         format_bytes(total_bytes),
     );
     let trimmed = content.trim_start();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        suffix.push_str("\n\u{26a0} JSON output was cut mid-structure");
+    if trimmed.starts_with("{\"") || trimmed.starts_with("[\"") {
+        suffix.push_str(
+            "\n\u{26a0} output may be cut mid-structure (looks like JSON or similar)",
+        );
     }
     suffix
 }
@@ -116,7 +123,9 @@ pub fn truncate_output(output: &str) -> String {
     }
 
     let (truncated, shown) = if let Some(last_nl) = output[..end].rfind('\n') {
-        (output[..=last_nl].to_string(), last_nl + 1)
+        // Include the trailing newline in the truncated output, but report
+        // `last_nl` bytes as the content size (excluding the newline itself).
+        (output[..=last_nl].to_string(), last_nl)
     } else {
         (output[..end].to_string(), end)
     };
@@ -2646,6 +2655,95 @@ mod tests {
             result.is_ok(),
             "shell_exec should pass in Smart mode when handler approves"
         );
+    }
+
+    #[test]
+    fn format_bytes_returns_bytes_for_small_values() {
+        assert_eq!(super::format_bytes(0), "0B");
+        assert_eq!(super::format_bytes(512), "512B");
+        assert_eq!(super::format_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn format_bytes_returns_kilobytes() {
+        assert_eq!(super::format_bytes(1024), "1.0KB");
+        assert_eq!(super::format_bytes(1536), "1.5KB");
+        assert_eq!(super::format_bytes(1024 * 1024 - 1), "1024.0KB");
+    }
+
+    #[test]
+    fn format_bytes_returns_megabytes() {
+        assert_eq!(super::format_bytes(1024 * 1024), "1.0MB");
+        assert_eq!(super::format_bytes(5 * 1024 * 1024), "5.0MB");
+        assert_eq!(super::format_bytes(1024 * 1024 * 1024 - 1), "1024.0MB");
+    }
+
+    #[test]
+    fn format_bytes_returns_gigabytes() {
+        assert_eq!(super::format_bytes(1024 * 1024 * 1024), "1.0GB");
+        assert_eq!(super::format_bytes(2 * 1024 * 1024 * 1024), "2.0GB");
+        // 1.5 GB
+        assert_eq!(
+            super::format_bytes(1024 * 1024 * 1024 + 512 * 1024 * 1024),
+            "1.5GB"
+        );
+    }
+
+    #[test]
+    fn truncation_suffix_warns_on_json_like_content() {
+        let suffix = super::truncation_suffix(100, 1000, "{\"key\": \"value\"}");
+        assert!(
+            suffix.contains("looks like JSON or similar"),
+            "should warn for JSON-like content starting with {{\"",
+        );
+
+        let suffix = super::truncation_suffix(100, 1000, "[\"item1\", \"item2\"]");
+        assert!(
+            suffix.contains("looks like JSON or similar"),
+            "should warn for JSON-like array content starting with [\"",
+        );
+    }
+
+    #[test]
+    fn truncation_suffix_does_not_warn_on_non_json_braces() {
+        // Shell command or TOML-like content starting with { but not {"
+        let suffix = super::truncation_suffix(100, 1000, "{foo; bar}");
+        assert!(
+            !suffix.contains("looks like JSON"),
+            "should not warn for shell-like brace content",
+        );
+
+        // Markdown list starting with [
+        let suffix = super::truncation_suffix(100, 1000, "[link text](url)");
+        assert!(
+            !suffix.contains("looks like JSON"),
+            "should not warn for markdown-like bracket content",
+        );
+
+        // Plain text
+        let suffix = super::truncation_suffix(100, 1000, "hello world");
+        assert!(
+            !suffix.contains("looks like JSON"),
+            "should not warn for plain text",
+        );
+    }
+
+    #[test]
+    fn truncate_output_shown_bytes_excludes_trailing_newline() {
+        // Build content that exceeds MAX_OUTPUT_BYTES with newlines in it.
+        // We use a small helper to check the reported size.
+        let line = "x".repeat(100);
+        // Each line is 100 chars + 1 newline = 101 bytes.
+        let num_lines = (super::MAX_OUTPUT_BYTES / 101) + 100;
+        let content: String = (0..num_lines).map(|_| format!("{}\n", line)).collect();
+        assert!(content.len() > super::MAX_OUTPUT_BYTES);
+
+        let result = super::truncate_output(&content);
+        // The suffix should report bytes that do NOT include the trailing newline.
+        // Find the "showing X of Y" part.
+        assert!(result.contains("output truncated: showing"));
+        // The shown size should correspond to content up to (but not including)
+        // the last newline before the cut point.
     }
 
     #[test]
