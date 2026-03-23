@@ -1,10 +1,21 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-/// Default request timeout in seconds.
+/// Default timeout used by the cached fallback client (when no shared client
+/// is provided and no per-request timeout is specified).
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Return a lazily-initialized fallback HTTP client.
+///
+/// Used when `make_http_bridge` was not given an explicit shared client.
+fn fallback_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        genesis_tools::http::build_blocking_client(Duration::from_secs(DEFAULT_TIMEOUT_SECS), |b| b)
+    })
+}
 
 /// Build the `genesis.http` bridge table.
 ///
@@ -16,10 +27,14 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// - `method` (string) — HTTP method: GET (default), POST, PUT, DELETE, PATCH, HEAD
 /// - `headers` (table) — key/value pairs of request headers
 /// - `body` (string) — request body
-/// - `timeout` (number) — timeout in seconds (default 30)
+/// - `timeout` (number) — per-request timeout in seconds (omit to use the
+///   client's default)
+///
+/// URLs are validated before sending to block SSRF (private IPs, localhost,
+/// cloud metadata endpoints, non-HTTP schemes).
 ///
 /// When a shared `reqwest::blocking::Client` is provided it is reused across
-/// calls; otherwise a temporary client is created per request.
+/// calls; otherwise a lazily-initialized cached fallback client is used.
 pub fn make_http_bridge(
     lua: &Lua,
     client: Option<Arc<reqwest::blocking::Client>>,
@@ -35,10 +50,9 @@ pub fn make_http_bridge(
                 .and_then(|o| o.get::<Option<String>>("method").ok().flatten())
                 .unwrap_or_else(|| "GET".to_owned());
 
-            let timeout_secs: u64 = opts
+            let timeout_secs: Option<u64> = opts
                 .as_ref()
-                .and_then(|o| o.get::<Option<u64>>("timeout").ok().flatten())
-                .unwrap_or(DEFAULT_TIMEOUT_SECS);
+                .and_then(|o| o.get::<Option<u64>>("timeout").ok().flatten());
 
             let body: Option<String> = opts
                 .as_ref()
@@ -55,20 +69,14 @@ pub fn make_http_bridge(
                 }
             }
 
-            // Use the shared client or create a temporary one with the
-            // requested timeout.
-            let owned_client;
+            // Validate the URL to prevent SSRF.
+            genesis_tools::url_safety::validate_url(&url)
+                .map_err(|e| mlua::Error::external(format!("http: blocked URL: {e}")))?;
+
+            // Use the shared client or the cached fallback.
             let effective_client: &reqwest::blocking::Client = match client {
                 Some(ref c) => c.as_ref(),
-                None => {
-                    owned_client = reqwest::blocking::Client::builder()
-                        .timeout(Duration::from_secs(timeout_secs))
-                        .build()
-                        .map_err(|e| {
-                            mlua::Error::external(format!("http: failed to build client: {e}"))
-                        })?;
-                    &owned_client
-                }
+                None => fallback_client(),
             };
 
             // Parse the method string.
@@ -79,9 +87,9 @@ pub fn make_http_bridge(
             // Build the request.
             let mut request = effective_client.request(method, &url);
 
-            // When using the shared client, override its default timeout.
-            if client.is_some() {
-                request = request.timeout(Duration::from_secs(timeout_secs));
+            // Only apply per-request timeout when explicitly provided.
+            if let Some(t) = timeout_secs {
+                request = request.timeout(Duration::from_secs(t));
             }
 
             for (key, value) in &header_pairs {
@@ -142,12 +150,52 @@ mod tests {
     }
 
     #[test]
-    fn request_to_invalid_url_returns_error() {
+    fn request_blocks_localhost() {
         let lua = test_lua_with_http();
         let result: mlua::Result<mlua::Value> = lua
             .load("return genesis.http.request('http://localhost:1/nope')")
             .eval();
-        assert!(result.is_err(), "request to localhost:1 should fail");
+        assert!(result.is_err(), "request to localhost should be blocked");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("http: blocked URL"),
+            "error should mention blocked URL, got: {err}"
+        );
+    }
+
+    #[test]
+    fn request_blocks_internal_ips() {
+        let lua = test_lua_with_http();
+        for url in [
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+        ] {
+            let script = format!("return genesis.http.request('{url}')");
+            let result: mlua::Result<mlua::Value> = lua.load(&script).eval();
+            assert!(result.is_err(), "request to {url} should be blocked");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("http: blocked URL"),
+                "error for {url} should mention blocked URL, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_to_unreachable_host_returns_error() {
+        // Use a public but unreachable host:port to test the network error path
+        // without being blocked by URL validation.
+        let lua = test_lua_with_http();
+        let result: mlua::Result<mlua::Value> = lua
+            .load(
+                r#"return genesis.http.request('http://192.0.2.1:1/', {
+                    timeout = 1
+                })"#,
+            )
+            .eval();
+        assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("http: request failed"),
@@ -159,8 +207,8 @@ mod tests {
     fn request_defaults_to_get() {
         // We cannot easily inspect the method without a real server, but we
         // can verify that calling without opts (which defaults to GET)
-        // behaves the same as calling with an invalid host — the error path
-        // is identical regardless of method, confirming no crash.
+        // goes through the same code path. Here we verify URL validation
+        // fires before any method handling.
         let lua = test_lua_with_http();
         let result: mlua::Result<mlua::Value> = lua
             .load("return genesis.http.request('http://localhost:1/')")
@@ -170,15 +218,17 @@ mod tests {
 
     #[test]
     fn request_with_headers_does_not_crash() {
+        // Use a non-internal URL so we test header construction (blocked by
+        // network timeout rather than URL validation).
         let lua = test_lua_with_http();
         let result: mlua::Result<mlua::Value> = lua
             .load(
-                r#"return genesis.http.request('http://localhost:1/', {
-                    headers = { ["X-Custom"] = "value" }
+                r#"return genesis.http.request('http://192.0.2.1:1/', {
+                    headers = { ["X-Custom"] = "value" },
+                    timeout = 1
                 })"#,
             )
             .eval();
-        // Should fail due to connection refused, not due to header handling.
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -192,9 +242,10 @@ mod tests {
         let lua = test_lua_with_http();
         // A method containing a space is not a valid HTTP token and should
         // be rejected by the method parser before any network I/O.
+        // Use a public URL so URL validation passes first.
         let result: mlua::Result<mlua::Value> = lua
             .load(
-                r#"return genesis.http.request('http://localhost:1/', {
+                r#"return genesis.http.request('http://192.0.2.1:1/', {
                     method = "BAD METHOD"
                 })"#,
             )
@@ -209,17 +260,19 @@ mod tests {
 
     #[test]
     fn request_with_body_does_not_crash() {
+        // Use a non-internal URL so we exercise the body/header path.
         let lua = test_lua_with_http();
         let result: mlua::Result<mlua::Value> = lua
             .load(
-                r#"return genesis.http.request('http://localhost:1/', {
+                r#"return genesis.http.request('http://192.0.2.1:1/', {
                     method = "POST",
                     body = '{"key": "value"}',
-                    headers = { ["Content-Type"] = "application/json" }
+                    headers = { ["Content-Type"] = "application/json" },
+                    timeout = 1
                 })"#,
             )
             .eval();
-        // Connection refused, but no crash from body/header construction.
+        // Timeout/connection error, but no crash from body/header construction.
         assert!(result.is_err());
     }
 
