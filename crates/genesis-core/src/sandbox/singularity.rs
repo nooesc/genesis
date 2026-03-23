@@ -47,21 +47,17 @@ pub fn sif_cache_key(image_url: &str) -> String {
 
 fn resolve_scratch_dir() -> PathBuf {
     // 1. TERMINAL_SCRATCH_DIR env var
-    if let Ok(val) = std::env::var("TERMINAL_SCRATCH_DIR") {
-        if !val.is_empty() {
-            return PathBuf::from(val);
-        }
+    if let Some(val) = genesis_config::env::get_opt(genesis_config::env::TERMINAL_SCRATCH_DIR) {
+        return PathBuf::from(val);
     }
 
     // 2. TERMINAL_SANDBOX_DIR + /singularity
-    if let Ok(val) = std::env::var("TERMINAL_SANDBOX_DIR") {
-        if !val.is_empty() {
-            return PathBuf::from(val).join("singularity");
-        }
+    if let Some(val) = genesis_config::env::get_opt(genesis_config::env::TERMINAL_SANDBOX_DIR) {
+        return PathBuf::from(val).join("singularity");
     }
 
     // 3. /scratch/{USER}/genesis — check exists + writable
-    if let Ok(user) = std::env::var("USER") {
+    if let Ok(user) = genesis_config::env::get(genesis_config::env::USER) {
         let candidate = PathBuf::from(format!("/scratch/{user}/genesis"));
         if std::fs::metadata(&candidate)
             .map(|m| !m.permissions().readonly())

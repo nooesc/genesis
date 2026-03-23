@@ -24,11 +24,11 @@ use crate::verify::verify_slack_signature;
 use crate::AppState;
 
 pub fn bot_token() -> Option<String> {
-    std::env::var("SLACK_BOT_TOKEN").ok()
+    genesis_config::env::get_opt(genesis_config::env::SLACK_BOT_TOKEN)
 }
 
 fn signing_secret() -> Option<String> {
-    std::env::var("SLACK_SIGNING_SECRET").ok()
+    genesis_config::env::get_opt(genesis_config::env::SLACK_SIGNING_SECRET)
 }
 
 // --- Slack API types ---

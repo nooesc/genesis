@@ -66,9 +66,8 @@ fn init_tracing(
 ) -> Option<OtelGuard> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let use_json = std::env::var("GENESIS_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
+    let use_json = genesis_config::env::get_opt(genesis_config::env::GENESIS_LOG_FORMAT)
+        .is_some_and(|v| v.eq_ignore_ascii_case("json"));
 
     if tui_active {
         // TUI mode: redirect all logging to ~/.genesis/logs/tui.log so it

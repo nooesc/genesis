@@ -148,7 +148,7 @@ fn print_session_info_plain(info: &BannerInfo) {
 
 /// Shorten home directory prefix to ~.
 fn shorten_home(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = genesis_config::env::get(genesis_config::env::HOME) {
         if path.starts_with(&home) {
             return format!("~{}", &path[home.len()..]);
         }
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn shorten_home_replaces_prefix() {
-        if let Ok(home) = std::env::var("HOME") {
+        if let Ok(home) = genesis_config::env::get(genesis_config::env::HOME) {
             let path = format!("{home}/projects/genesis");
             let short = shorten_home(&path);
             assert!(short.starts_with("~/"), "expected ~/..., got: {short}");

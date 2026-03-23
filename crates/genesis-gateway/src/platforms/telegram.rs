@@ -28,11 +28,11 @@ use crate::AppState;
 
 /// Telegram Bot API token, loaded from environment.
 pub fn bot_token() -> Option<String> {
-    std::env::var("TELEGRAM_BOT_TOKEN").ok()
+    genesis_config::env::get_opt(genesis_config::env::TELEGRAM_BOT_TOKEN)
 }
 
 pub fn webhook_secret() -> Option<String> {
-    std::env::var("TELEGRAM_WEBHOOK_SECRET").ok()
+    genesis_config::env::get_opt(genesis_config::env::TELEGRAM_WEBHOOK_SECRET)
 }
 
 // --- Telegram API types (subset we need) ---
@@ -227,14 +227,17 @@ async fn transcribe_telegram_audio(
     let (audio_bytes, file_path) = telegram_fetch_file(client, token, file_id).await?;
 
     // Transcribe via Whisper API.
-    let api_key =
-        std::env::var("OPENAI_API_KEY").map_err(|_| super::PlatformError::ConfigMissing {
+    let api_key = genesis_config::env::get(genesis_config::env::OPENAI_API_KEY).map_err(
+        |_| super::PlatformError::ConfigMissing {
             platform: DeliveryPlatform::Telegram,
             detail: "OPENAI_API_KEY not set, cannot transcribe".to_owned(),
-        })?;
+        },
+    )?;
 
-    let api_base =
-        std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+    let api_base = genesis_config::env::get_or(
+        genesis_config::env::OPENAI_API_BASE,
+        "https://api.openai.com/v1",
+    );
 
     // Determine file extension from file_path.
     let ext = file_path.rsplit('.').next().unwrap_or("ogg");
@@ -389,7 +392,7 @@ async fn analyze_sticker_image(
     let data_uri = format!("data:{mime};base64,{b64}");
 
     // Step 4: Call the vision LLM.
-    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let env: BTreeMap<String, String> = genesis_config::env::all_vars();
     let provider = genesis_provider::resolve(
         &config.provider.backend,
         &config.provider.model,

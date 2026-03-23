@@ -77,12 +77,11 @@ pub struct DaytonaSandbox {
 
 impl DaytonaSandbox {
     pub fn new() -> Result<Self, SandboxError> {
-        let api_key = std::env::var("DAYTONA_API_KEY").map_err(|_| SandboxError::AuthError {
+        let api_key = genesis_config::env::get(genesis_config::env::DAYTONA_API_KEY).map_err(|_| SandboxError::AuthError {
             reason: "DAYTONA_API_KEY env var not set".into(),
         })?;
 
-        let base_url = std::env::var("DAYTONA_API_URL")
-            .unwrap_or_else(|_| "https://app.daytona.io/api".into());
+        let base_url = genesis_config::env::get_or(genesis_config::env::DAYTONA_API_URL, "https://app.daytona.io/api");
 
         let mut default_headers = HeaderMap::new();
         let auth_value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
@@ -340,12 +339,12 @@ mod tests {
     #[test]
     fn missing_api_key_returns_auth_error() {
         // Temporarily ensure the env var is unset
-        let original = std::env::var("DAYTONA_API_KEY").ok();
-        std::env::remove_var("DAYTONA_API_KEY");
+        let original = std::env::var(genesis_config::env::DAYTONA_API_KEY).ok();
+        std::env::remove_var(genesis_config::env::DAYTONA_API_KEY);
         let result = DaytonaSandbox::new();
         // Restore
         if let Some(val) = original {
-            std::env::set_var("DAYTONA_API_KEY", val);
+            std::env::set_var(genesis_config::env::DAYTONA_API_KEY, val);
         }
         assert!(result.is_err());
         assert!(matches!(

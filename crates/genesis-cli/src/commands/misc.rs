@@ -1147,7 +1147,7 @@ pub(crate) fn run_context(command: ContextCommand) -> Result<String, CliError> {
                 std::fs::write(&context_path, context_template())?;
             }
 
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
+            let editor = genesis_config::env::get_or(genesis_config::env::EDITOR, "vi");
             let path_str = context_path.display().to_string();
             let status = std::process::Command::new(&editor)
                 .arg(&path_str)
@@ -1287,7 +1287,7 @@ pub(crate) async fn run_model(
             let _ = std::fs::create_dir_all(&cache_dir);
 
             // Resolve API key for OpenRouter.
-            let api_key = std::env::var("OPENROUTER_API_KEY").ok();
+            let api_key = genesis_config::env::get_opt(genesis_config::env::OPENROUTER_API_KEY);
 
             // Fetch models.
             let mut models =

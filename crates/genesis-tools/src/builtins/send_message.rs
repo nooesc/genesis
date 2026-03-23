@@ -73,7 +73,7 @@ fn send_slack(
     thread_ts: Option<&String>,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let token = std::env::var("SLACK_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+    let token = genesis_config::env::get(genesis_config::env::SLACK_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "SLACK_BOT_TOKEN environment variable not set".to_owned(),
     })?;
@@ -131,7 +131,7 @@ fn send_telegram(
     reply_to: Option<&String>,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let token = std::env::var("TELEGRAM_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+    let token = genesis_config::env::get(genesis_config::env::TELEGRAM_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "TELEGRAM_BOT_TOKEN environment variable not set".to_owned(),
     })?;
@@ -201,7 +201,7 @@ fn send_telegram(
 }
 
 fn send_discord(channel_id: &str, content: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
-    let token = std::env::var("DISCORD_BOT_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+    let token = genesis_config::env::get(genesis_config::env::DISCORD_BOT_TOKEN).map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "DISCORD_BOT_TOKEN environment variable not set".to_owned(),
     })?;
@@ -249,13 +249,13 @@ fn send_discord(channel_id: &str, content: &str, tool_name: &str) -> Result<Tool
 }
 
 fn send_whatsapp(recipient: &str, text: &str, tool_name: &str) -> Result<ToolOutput, ToolError> {
-    let token = std::env::var("WHATSAPP_TOKEN").map_err(|_| ToolError::ExecutionFailed {
+    let token = genesis_config::env::get(genesis_config::env::WHATSAPP_TOKEN).map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "WHATSAPP_TOKEN environment variable not set".to_owned(),
     })?;
 
     let phone_number_id =
-        std::env::var("WHATSAPP_PHONE_NUMBER_ID").map_err(|_| ToolError::ExecutionFailed {
+        genesis_config::env::get(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID).map_err(|_| ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: "WHATSAPP_PHONE_NUMBER_ID environment variable not set".to_owned(),
         })?;
@@ -317,12 +317,12 @@ fn send_homeassistant(
     message: &str,
     tool_name: &str,
 ) -> Result<ToolOutput, ToolError> {
-    let ha_url = std::env::var("HOMEASSISTANT_URL").map_err(|_| ToolError::ExecutionFailed {
+    let ha_url = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_URL).map_err(|_| ToolError::ExecutionFailed {
         tool: tool_name.to_owned(),
         reason: "HOMEASSISTANT_URL environment variable not set".to_owned(),
     })?;
 
-    let ha_token = std::env::var("HOMEASSISTANT_LONG_LIVED_TOKEN").map_err(|_| {
+    let ha_token = genesis_config::env::get(genesis_config::env::HOMEASSISTANT_LONG_LIVED_TOKEN).map_err(|_| {
         ToolError::ExecutionFailed {
             tool: tool_name.to_owned(),
             reason: "HOMEASSISTANT_LONG_LIVED_TOKEN environment variable not set".to_owned(),

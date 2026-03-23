@@ -359,7 +359,7 @@ pub fn theme_by_name(name: &str) -> Box<dyn Theme> {
 /// Check if NO_COLOR is set and return the appropriate theme.
 /// Falls back to the configured theme name if NO_COLOR is not set.
 pub fn resolve_theme(configured_name: &str) -> Box<dyn Theme> {
-    if std::env::var("NO_COLOR").is_ok() {
+    if genesis_config::env::is_present(genesis_config::env::NO_COLOR) {
         return Box::new(NoColorTheme);
     }
     theme_by_name(configured_name)
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn resolve_theme_without_no_color_uses_configured() {
         // When NO_COLOR is not set, resolve_theme returns the configured theme.
-        if std::env::var("NO_COLOR").is_err() {
+        if !genesis_config::env::is_present(genesis_config::env::NO_COLOR) {
             let theme = resolve_theme("dracula");
             assert_eq!(theme.name(), "dracula");
         }

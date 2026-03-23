@@ -37,7 +37,7 @@ impl ColorMode {
             Self::Always => true,
             Self::Never => false,
             Self::Auto => {
-                if std::env::var_os("NO_COLOR").is_some() {
+                if genesis_config::env::get_os(genesis_config::env::NO_COLOR).is_some() {
                     return false;
                 }
                 std::io::stdout().is_terminal()
@@ -48,7 +48,7 @@ impl ColorMode {
 
 /// Returns `true` if we are running inside tmux.
 pub fn is_tmux() -> bool {
-    std::env::var_os("TMUX").is_some()
+    genesis_config::env::get_os(genesis_config::env::TMUX).is_some()
 }
 
 /// Returns `true` if we are running inside Zellij.
@@ -56,7 +56,7 @@ pub fn is_tmux() -> bool {
 /// Zellij has strict xterm spec compliance — alternate screen and some
 /// DECSTBM features behave differently than in other multiplexers.
 pub fn is_zellij() -> bool {
-    std::env::var_os("ZELLIJ_SESSION_NAME").is_some()
+    genesis_config::env::get_os(genesis_config::env::ZELLIJ_SESSION_NAME).is_some()
 }
 
 #[cfg(test)]

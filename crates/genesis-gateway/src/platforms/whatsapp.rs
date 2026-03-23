@@ -28,19 +28,19 @@ const MAX_WHATSAPP_MESSAGE_LEN: usize = 4096;
 // --- Environment config ---
 
 fn whatsapp_token() -> Option<String> {
-    std::env::var("WHATSAPP_TOKEN").ok()
+    genesis_config::env::get_opt(genesis_config::env::WHATSAPP_TOKEN)
 }
 
 fn phone_number_id() -> Option<String> {
-    std::env::var("WHATSAPP_PHONE_NUMBER_ID").ok()
+    genesis_config::env::get_opt(genesis_config::env::WHATSAPP_PHONE_NUMBER_ID)
 }
 
 fn verify_token() -> Option<String> {
-    std::env::var("WHATSAPP_VERIFY_TOKEN").ok()
+    genesis_config::env::get_opt(genesis_config::env::WHATSAPP_VERIFY_TOKEN)
 }
 
 fn app_secret() -> Option<String> {
-    std::env::var("WHATSAPP_APP_SECRET").ok()
+    genesis_config::env::get_opt(genesis_config::env::WHATSAPP_APP_SECRET)
 }
 
 // --- WhatsApp Cloud API types ---

@@ -88,7 +88,7 @@ impl ToolHandler for CodeExecutionTool {
         // Sandbox: clear env, only pass safe vars through
         cmd.env_clear();
         for key in ALLOWED_ENV {
-            if let Ok(val) = std::env::var(key) {
+            if let Ok(val) = genesis_config::env::get(key) {
                 cmd.env(key, val);
             }
         }
@@ -691,7 +691,7 @@ fn build_sandbox_env(sock_path: &std::path::Path) -> Vec<(String, String)> {
     ];
 
     let mut env: Vec<(String, String)> = Vec::new();
-    for (k, v) in std::env::vars() {
+    for (k, v) in genesis_config::env::all_vars() {
         let k_upper = k.to_uppercase();
         if secret_substrings.iter().any(|s| k_upper.contains(s)) {
             continue;

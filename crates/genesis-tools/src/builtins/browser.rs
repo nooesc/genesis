@@ -64,9 +64,7 @@ impl Default for BrowserManager {
 
 impl BrowserManager {
     pub fn new() -> Self {
-        let timeout_secs: u64 = std::env::var("BROWSER_INACTIVITY_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
+        let timeout_secs: u64 = genesis_config::env::get_u64(genesis_config::env::BROWSER_INACTIVITY_TIMEOUT)
             .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -350,7 +348,8 @@ fn check_bot_detection(title: &str) -> bool {
 
 /// Returns true if both BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are set.
 fn is_cloud_mode() -> bool {
-    std::env::var("BROWSERBASE_API_KEY").is_ok() && std::env::var("BROWSERBASE_PROJECT_ID").is_ok()
+    genesis_config::env::is_present(genesis_config::env::BROWSERBASE_API_KEY)
+        && genesis_config::env::is_present(genesis_config::env::BROWSERBASE_PROJECT_ID)
 }
 
 /// Create a local (non-cloud) session.
@@ -416,7 +415,7 @@ fn apply_browser_env(cmd: &mut Command, session_name: &str) {
     cmd.env("AGENT_BROWSER_SOCKET_DIR", socket_dir);
 
     // Ensure /usr/bin is in PATH (systemd/container deployments may have minimal PATH)
-    let current_path = std::env::var("PATH").unwrap_or_default();
+    let current_path = genesis_config::env::get_or(genesis_config::env::PATH, "");
     if !current_path.contains("/usr/bin") {
         if current_path.is_empty() {
             cmd.env("PATH", "/usr/bin:/usr/local/bin");
@@ -599,12 +598,12 @@ struct BrowserbaseConfig {
 }
 
 fn get_browserbase_config() -> Result<BrowserbaseConfig, ToolError> {
-    let api_key = std::env::var("BROWSERBASE_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+    let api_key = genesis_config::env::get(genesis_config::env::BROWSERBASE_API_KEY).map_err(|_| ToolError::ExecutionFailed {
         tool: "browser".to_owned(),
         reason: "BROWSERBASE_API_KEY environment variable not set".to_owned(),
     })?;
     let project_id =
-        std::env::var("BROWSERBASE_PROJECT_ID").map_err(|_| ToolError::ExecutionFailed {
+        genesis_config::env::get(genesis_config::env::BROWSERBASE_PROJECT_ID).map_err(|_| ToolError::ExecutionFailed {
             tool: "browser".to_owned(),
             reason: "BROWSERBASE_PROJECT_ID environment variable not set".to_owned(),
         })?;
@@ -659,18 +658,14 @@ fn create_browserbase_session(session_id: &str) -> Result<SessionInfo, ToolError
     let url = "https://api.browserbase.com/v1/sessions";
 
     // Read feature flags from environment (with sensible defaults)
-    let enable_proxies = std::env::var("BROWSERBASE_PROXIES")
+    let enable_proxies = genesis_config::env::get_opt(genesis_config::env::BROWSERBASE_PROXIES)
         .map(|v| v.to_lowercase() != "false")
         .unwrap_or(true);
-    let enable_advanced_stealth = std::env::var("BROWSERBASE_ADVANCED_STEALTH")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false); // opt-in, requires Scale plan
-    let enable_keep_alive = std::env::var("BROWSERBASE_KEEP_ALIVE")
+    let enable_advanced_stealth = genesis_config::env::get_bool(genesis_config::env::BROWSERBASE_ADVANCED_STEALTH, false); // opt-in, requires Scale plan
+    let enable_keep_alive = genesis_config::env::get_opt(genesis_config::env::BROWSERBASE_KEEP_ALIVE)
         .map(|v| v.to_lowercase() != "false")
         .unwrap_or(true);
-    let timeout_ms: Option<u64> = std::env::var("BROWSERBASE_SESSION_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    let timeout_ms: Option<u64> = genesis_config::env::get_u64(genesis_config::env::BROWSERBASE_SESSION_TIMEOUT);
 
     // Fallback sequence: full features → no keepAlive → no proxies either
     let attempts = [
@@ -1389,13 +1384,12 @@ impl ToolHandler for BrowserVision {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&screenshot_bytes);
 
         // Get vision model config
-        let api_base = std::env::var("OPENAI_API_BASE")
-            .unwrap_or_else(|_| genesis_provider::OPENAI_BASE_URL.to_owned());
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+        let api_base = genesis_config::env::get_or(genesis_config::env::OPENAI_API_BASE, genesis_provider::OPENAI_BASE_URL);
+        let api_key = genesis_config::env::get(genesis_config::env::OPENAI_API_KEY).map_err(|_| ToolError::ExecutionFailed {
             tool: call.name.clone(),
             reason: "OPENAI_API_KEY environment variable not set".to_owned(),
         })?;
-        let model = std::env::var("AUXILIARY_VISION_MODEL").unwrap_or_else(|_| "gpt-4o".to_owned());
+        let model = genesis_config::env::get_or(genesis_config::env::AUXILIARY_VISION_MODEL, "gpt-4o");
 
         // Build vision API request
         let vision_url = format!("{api_base}/chat/completions");

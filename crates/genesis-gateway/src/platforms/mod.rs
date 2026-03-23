@@ -124,25 +124,18 @@ pub fn check_pairing(
 
     let platform = platform.to_ascii_lowercase();
 
-    let platform_allow_all = match platform.as_str() {
-        "telegram" => "TELEGRAM_ALLOW_ALL_USERS",
-        "discord" => "DISCORD_ALLOW_ALL_USERS",
-        "whatsapp" => "WHATSAPP_ALLOW_ALL_USERS",
-        "slack" => "SLACK_ALLOW_ALL_USERS",
-        "signal" => "SIGNAL_ALLOW_ALL_USERS",
-        _ => "",
-    };
+    let platform_allow_all = genesis_config::env::platform_allow_all_var(platform.as_str());
 
     if is_truthy_env(platform_allow_all) {
         return Ok(PairingCheck::Approved);
     }
 
     let platform_allowlist =
-        std::env::var(platform_allowlist_env(platform.as_str())).unwrap_or_default();
-    let global_allowlist = std::env::var("GATEWAY_ALLOWED_USERS").unwrap_or_default();
+        genesis_config::env::get_or(genesis_config::env::platform_allowlist_var(platform.as_str()), "");
+    let global_allowlist = genesis_config::env::get_or(genesis_config::env::GATEWAY_ALLOWED_USERS, "");
 
     if platform_allowlist.is_empty() && global_allowlist.is_empty() {
-        if is_truthy_env("GATEWAY_ALLOW_ALL_USERS") {
+        if is_truthy_env(genesis_config::env::GATEWAY_ALLOW_ALL_USERS) {
             return Ok(PairingCheck::Approved);
         }
     } else {
@@ -176,30 +169,11 @@ pub fn check_pairing(
     }
 }
 
-fn platform_allowlist_env(platform: &str) -> &'static str {
-    match platform {
-        "telegram" => "TELEGRAM_ALLOWED_USERS",
-        "discord" => "DISCORD_ALLOWED_USERS",
-        "whatsapp" => "WHATSAPP_ALLOWED_USERS",
-        "slack" => "SLACK_ALLOWED_USERS",
-        "signal" => "SIGNAL_ALLOWED_USERS",
-        _ => "",
-    }
-}
-
 fn is_truthy_env(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-
-    matches!(
-        std::env::var(name)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    genesis_config::env::get_bool(name, false)
 }
 
 fn parse_env_id_set(value: &str) -> HashSet<String> {
@@ -317,12 +291,13 @@ mod tests {
 
     #[test]
     fn platform_allowlist_env_maps_known_platforms() {
-        assert_eq!(platform_allowlist_env("telegram"), "TELEGRAM_ALLOWED_USERS");
-        assert_eq!(platform_allowlist_env("discord"), "DISCORD_ALLOWED_USERS");
-        assert_eq!(platform_allowlist_env("whatsapp"), "WHATSAPP_ALLOWED_USERS");
-        assert_eq!(platform_allowlist_env("slack"), "SLACK_ALLOWED_USERS");
-        assert_eq!(platform_allowlist_env("signal"), "SIGNAL_ALLOWED_USERS");
-        assert_eq!(platform_allowlist_env("unknown"), "");
+        use genesis_config::env::platform_allowlist_var;
+        assert_eq!(platform_allowlist_var("telegram"), "TELEGRAM_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_var("discord"), "DISCORD_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_var("whatsapp"), "WHATSAPP_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_var("slack"), "SLACK_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_var("signal"), "SIGNAL_ALLOWED_USERS");
+        assert_eq!(platform_allowlist_var("unknown"), "");
     }
 
     #[test]

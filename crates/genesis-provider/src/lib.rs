@@ -69,7 +69,7 @@ pub async fn client_from_config(
         }
     }
 
-    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let env: BTreeMap<String, String> = genesis_config::env::all_vars();
     let provider = resolve(backend, model, base_url, api_key_env, &env);
     let client = ChatClient::new(&provider)?;
     spawn_warmup(&client);

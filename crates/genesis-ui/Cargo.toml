@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+genesis-config = { path = "../genesis-config" }
 crossterm.workspace = true
 owo-colors.workspace = true
 unicode-width.workspace = true

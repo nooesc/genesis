@@ -49,14 +49,14 @@ impl ToolHandler for VisionTool {
             .arguments
             .get("api_base")
             .cloned()
-            .or_else(|| std::env::var("OPENAI_API_BASE").ok())
+            .or_else(|| genesis_config::env::get_opt(genesis_config::env::OPENAI_API_BASE))
             .unwrap_or_else(|| genesis_provider::OPENAI_BASE_URL.to_owned());
 
         let api_key = call
             .arguments
             .get("api_key")
             .cloned()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| genesis_config::env::get_opt(genesis_config::env::OPENAI_API_KEY))
             .ok_or_else(|| ToolError::ExecutionFailed {
                 tool: call.name.clone(),
                 reason: "No API key provided. Set OPENAI_API_KEY or pass api_key argument."
