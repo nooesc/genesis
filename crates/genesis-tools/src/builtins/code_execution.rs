@@ -431,11 +431,16 @@ fn rpc_server_loop(
     use std::io::{BufRead, Write};
 
     // Accept one connection with a timeout
-    let stream = match accept_with_timeout(&listener, Duration::from_secs(timeouts::CODE_EXEC_ACCEPT_SECS)) {
+    let stream = match accept_with_timeout(
+        &listener,
+        Duration::from_secs(timeouts::CODE_EXEC_ACCEPT_SECS),
+    ) {
         Some(s) => s,
         None => return,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS))).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(timeouts::CODE_EXEC_READ_SECS)))
+        .ok();
 
     let mut reader = std::io::BufReader::new(&stream);
     let mut writer = &stream;

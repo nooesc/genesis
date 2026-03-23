@@ -75,11 +75,13 @@ impl Database {
     /// when dropped.  For mutable access (e.g. transactions), bind the
     /// result as `let mut conn = db.conn()?;`.
     pub fn conn(&self) -> Result<DatabaseGuard<'_>, StorageError> {
-        let mut guard = self.inner.conn.lock().map_err(|_| {
-            StorageError::ConnectionPoolPoisoned {
-                path: self.inner.path.clone(),
-            }
-        })?;
+        let mut guard =
+            self.inner
+                .conn
+                .lock()
+                .map_err(|_| StorageError::ConnectionPoolPoisoned {
+                    path: self.inner.path.clone(),
+                })?;
 
         if guard.is_none() {
             *guard = Some(open(&self.inner.path)?);
@@ -601,10 +603,24 @@ mod session_store_tests {
             .create_session("s-other", "cli", None)
             .expect("session should be created");
         store
-            .append_message("s-match-1", "user", Some("pagination test alpha"), None, None, None)
+            .append_message(
+                "s-match-1",
+                "user",
+                Some("pagination test alpha"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
-            .append_message("s-match-2", "user", Some("pagination test beta"), None, None, None)
+            .append_message(
+                "s-match-2",
+                "user",
+                Some("pagination test beta"),
+                None,
+                None,
+                None,
+            )
             .expect("msg");
         store
             .append_message("s-other", "user", Some("unrelated topic"), None, None, None)
@@ -2448,7 +2464,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -2496,7 +2515,10 @@ impl SessionStore {
             })?;
 
         let rows = stmt
-            .query_map(params![query, limit as i64, offset as i64], Self::row_to_session_summary)
+            .query_map(
+                params![query, limit as i64, offset as i64],
+                Self::row_to_session_summary,
+            )
             .map_err(|source| StorageError::Sqlite {
                 path: self.db.path().to_path_buf(),
                 source,
@@ -3305,7 +3327,10 @@ impl UserModelStore {
         let mut stmt = connection.prepare(data_sql).map_err(me)?;
         let items = if let Some(cat) = category {
             let rows = stmt
-                .query_map(params![cat, limit as i64, offset as i64], Self::row_to_trait)
+                .query_map(
+                    params![cat, limit as i64, offset as i64],
+                    Self::row_to_trait,
+                )
                 .map_err(me)?;
             collect_rows(rows, self.db.path())?
         } else if let Some(threshold) = min_confidence {
@@ -5042,8 +5067,7 @@ impl EmbeddingStore {
     /// Returns the current database-wide embedding dimensions when known.
     pub fn dimensions(&self) -> Result<Option<usize>, StorageError> {
         let connection = self.db.conn()?;
-        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, self.db.path())?
-        {
+        if let Some(dimensions) = memory_vec_declared_dimensions(&connection, self.db.path())? {
             return Ok(Some(dimensions));
         }
         detect_uniform_embedding_dimensions(&connection, self.db.path())
@@ -5584,11 +5608,9 @@ impl PairingStore {
             (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pairing_approved",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM pairing_approved", [], |row| {
+                    row.get(0)
+                })
                 .map_err(me)?;
             let mut stmt = connection
                 .prepare(
@@ -5660,11 +5682,7 @@ impl PairingStore {
             (t, collect_rows(rows, self.db.path())?)
         } else {
             let t: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pairing_pending",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM pairing_pending", [], |row| row.get(0))
                 .map_err(me)?;
             let mut stmt = connection
                 .prepare(
@@ -7037,7 +7055,13 @@ mod tests {
         let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
 
         let schedule = store
-            .create_with_timezone("tz-1", "0 9 * * *", "cli", "morning", Some("America/New_York"))
+            .create_with_timezone(
+                "tz-1",
+                "0 9 * * *",
+                "cli",
+                "morning",
+                Some("America/New_York"),
+            )
             .expect("create should work");
 
         assert_eq!(schedule.id, "tz-1");
@@ -7064,7 +7088,9 @@ mod tests {
         let (_dir, _session_store) = bootstrapped_store();
         let store = super::ScheduleStore::new(&_dir.path().join("genesis.db"));
 
-        store.create("exec-test", "*/5 * * * *", "cli", "job").unwrap();
+        store
+            .create("exec-test", "*/5 * * * *", "cli", "job")
+            .unwrap();
 
         store
             .record_execution("exec-test", "success", None, Some(150))
@@ -10537,7 +10563,12 @@ mod user_model_store_tests {
         let store = UserModelStore::new(&database_path);
         for i in 0..4 {
             store
-                .observe(&format!("trait_{i}"), "category_a", &format!("value_{i}"), None)
+                .observe(
+                    &format!("trait_{i}"),
+                    "category_a",
+                    &format!("value_{i}"),
+                    None,
+                )
                 .expect("observe should succeed");
         }
 
@@ -10561,7 +10592,9 @@ mod user_model_store_tests {
         store.observe("t2", "pref", "v2", None).unwrap();
         store.observe("t3", "skill", "v3", None).unwrap();
 
-        let (page, total) = store.list_paginated(Some("pref"), None, 50, 0).expect("filter by category");
+        let (page, total) = store
+            .list_paginated(Some("pref"), None, 50, 0)
+            .expect("filter by category");
         assert_eq!(total, 2);
         assert_eq!(page.len(), 2);
     }
