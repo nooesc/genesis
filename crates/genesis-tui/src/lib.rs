@@ -194,8 +194,8 @@ pub async fn run_tui(
     );
 
     let animations_enabled =
-        config.tui.animations && std::env::var("REDUCE_MOTION").map_or(true, |v| v != "1");
-    let no_color = std::env::var("NO_COLOR").is_ok();
+        config.tui.animations && genesis_config::env::get_opt(genesis_config::env::REDUCE_MOTION).is_none_or(|v| v != "1");
+    let no_color = genesis_config::env::is_present(genesis_config::env::NO_COLOR);
 
     let mut status_bar =
         crate::widgets::status_bar::StatusBarWidget::new(config.provider.model.clone());

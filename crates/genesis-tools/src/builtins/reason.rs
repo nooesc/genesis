@@ -50,7 +50,7 @@ impl ToolHandler for ReasonWithModelTool {
 
         // Build provider and client. We use the sync wrapper since ToolHandler::run is sync.
         // The actual HTTP call happens in a blocking tokio runtime context.
-        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let env: BTreeMap<String, String> = genesis_config::env::all_vars();
         let resolved = genesis_provider::resolve(backend, model, None, None, &env);
         let client = genesis_provider::ChatClient::new(&resolved).map_err(|e| {
             ToolError::ExecutionFailed {

@@ -81,7 +81,7 @@ impl RemoteEmbeddingProvider {
     /// Resolves the API key from the environment using the same strategy
     /// as the main provider (explicit env var name, then standard fallbacks).
     fn from_config(config: &EmbeddingConfig) -> Result<Self, EmbeddingError> {
-        let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let env: std::collections::BTreeMap<String, String> = genesis_config::env::all_vars();
         let resolved = genesis_provider::resolve(
             &config.backend,
             &config.model,

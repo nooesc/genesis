@@ -66,8 +66,8 @@ impl ModalSandbox {
 
         // Warn if Modal auth is not configured (don't hard-fail — the user may
         // configure auth later or rely on env vars set at runtime).
-        let has_env_auth =
-            std::env::var("MODAL_TOKEN_ID").is_ok() && std::env::var("MODAL_TOKEN_SECRET").is_ok();
+        let has_env_auth = genesis_config::env::is_present(genesis_config::env::MODAL_TOKEN_ID)
+            && genesis_config::env::is_present(genesis_config::env::MODAL_TOKEN_SECRET);
         let has_toml_auth = dirs::home_dir()
             .map(|h| h.join(".modal.toml").exists())
             .unwrap_or(false);

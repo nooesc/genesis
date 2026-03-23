@@ -64,7 +64,7 @@ pub(crate) async fn run_serve(
     let service = build_session_service(&loaded, strict_startup, false, runtime_overrides).await?;
     let mcp = service.mcp_manager();
 
-    let api_key = std::env::var("GENESIS_API_KEY").ok();
+    let api_key = genesis_config::env::get_opt(genesis_config::env::GENESIS_API_KEY);
     let api_key_required = resolve_api_key_required(&loaded.config.profile)?;
 
     // Warn before binding if exposing the server without authentication
@@ -81,9 +81,7 @@ pub(crate) async fn run_serve(
 
     let trusted_proxies = parse_trusted_proxies()?;
     // Env var overrides config file setting
-    let rate_limit_rpm = std::env::var("GENESIS_RATE_LIMIT_RPM")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
+    let rate_limit_rpm = genesis_config::env::get_u32(genesis_config::env::GENESIS_RATE_LIMIT_RPM)
         .or_else(|| {
             loaded
                 .config

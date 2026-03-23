@@ -46,7 +46,7 @@ pub fn detect_platform() -> Result<DisplayPlatform, ClipboardError> {
     if cfg!(target_os = "macos") {
         Ok(DisplayPlatform::MacOs)
     } else if cfg!(target_os = "linux") {
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if genesis_config::env::is_present(genesis_config::env::WAYLAND_DISPLAY) {
             Ok(DisplayPlatform::LinuxWayland)
         } else {
             Ok(DisplayPlatform::LinuxX11)

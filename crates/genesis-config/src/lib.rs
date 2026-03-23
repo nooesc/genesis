@@ -1,4 +1,5 @@
 pub mod defaults;
+pub mod env;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -1015,7 +1016,7 @@ pub enum ConfigError {
 }
 
 pub fn load(config_path_override: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
-    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let env = env::all_vars();
     load_from_map(config_path_override, &env)
 }
 

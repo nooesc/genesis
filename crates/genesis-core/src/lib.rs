@@ -361,7 +361,7 @@ fn mask_api_key(key: &str) -> String {
 
 /// Check whether the configured API key resolves to a non-empty value.
 fn check_api_key(loaded: &LoadedConfig) -> DoctorCheck {
-    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let env: std::collections::BTreeMap<String, String> = genesis_config::env::all_vars();
     let resolved = resolve(
         &loaded.config.provider.backend,
         &loaded.config.provider.model,

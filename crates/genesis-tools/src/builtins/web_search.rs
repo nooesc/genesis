@@ -48,7 +48,7 @@ impl ToolHandler for WebSearchTool {
             .min(MAX_RESULTS);
 
         // Try Brave Search API first, fall back to DuckDuckGo
-        let content = match std::env::var("BRAVE_API_KEY") {
+        let content = match genesis_config::env::get(genesis_config::env::BRAVE_API_KEY) {
             Ok(api_key) if !api_key.is_empty() => {
                 search_brave(query, count, &api_key).map_err(|e| ToolError::ExecutionFailed {
                     tool: call.name.clone(),

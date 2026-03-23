@@ -1135,7 +1135,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
         }
         Command::Config(ConfigCommand::Edit) => {
             let loaded = load(cli.config.as_deref())?;
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
+            let editor = genesis_config::env::get_or(genesis_config::env::EDITOR, "vi");
             let config_path = loaded.paths.config_path.display().to_string();
             let status = std::process::Command::new(&editor)
                 .arg(&config_path)
@@ -1192,7 +1192,7 @@ pub async fn run(cli: Cli) -> Result<String, CliError> {
                         _ => "OPENAI_API_KEY",
                     },
                 );
-            if std::env::var(api_key_env).is_err() {
+            if genesis_config::env::get(api_key_env).is_err() {
                 warnings.push(format!("API key env var '{}' is not set.", api_key_env));
             }
 
@@ -2010,7 +2010,7 @@ fn is_production_profile(profile: &str) -> bool {
 }
 
 fn parse_bool_env(name: &str) -> Option<Result<bool, CliError>> {
-    std::env::var(name).ok().map(|value| {
+    genesis_config::env::get(name).ok().map(|value| {
         value.parse::<bool>().map_err(|_| {
             CliError::Other(format!(
                 "invalid value for {name}: {value} (expected true or false)"
@@ -2020,14 +2020,13 @@ fn parse_bool_env(name: &str) -> Option<Result<bool, CliError>> {
 }
 
 fn is_production_environment() -> bool {
-    std::env::var("GENESIS_ENV")
-        .ok()
+    genesis_config::env::get_opt(genesis_config::env::GENESIS_ENV)
         .map(|value| is_production_profile(&value))
         .unwrap_or(false)
 }
 
 fn mcp_startup_strict(loaded: &LoadedConfig) -> Result<bool, CliError> {
-    if let Some(result) = parse_bool_env("GENESIS_MCP_STRICT_STARTUP") {
+    if let Some(result) = parse_bool_env(genesis_config::env::GENESIS_MCP_STRICT_STARTUP) {
         return result;
     }
 
@@ -2035,7 +2034,7 @@ fn mcp_startup_strict(loaded: &LoadedConfig) -> Result<bool, CliError> {
 }
 
 fn resolve_api_key_required(_profile: &str) -> Result<bool, CliError> {
-    if let Some(result) = parse_bool_env("GENESIS_API_KEY_REQUIRED") {
+    if let Some(result) = parse_bool_env(genesis_config::env::GENESIS_API_KEY_REQUIRED) {
         return result;
     }
 
@@ -2043,7 +2042,7 @@ fn resolve_api_key_required(_profile: &str) -> Result<bool, CliError> {
 }
 
 fn parse_trusted_proxies() -> Result<Vec<std::net::IpAddr>, CliError> {
-    match std::env::var("GENESIS_TRUSTED_PROXIES") {
+    match genesis_config::env::get(genesis_config::env::GENESIS_TRUSTED_PROXIES) {
         Ok(value) => value
             .split(',')
             .map(|entry| entry.trim())

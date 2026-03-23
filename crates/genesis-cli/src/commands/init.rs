@@ -281,7 +281,7 @@ pub(crate) async fn run_init_wizard(config_path: Option<PathBuf>) -> Result<Stri
         eprintln!();
 
         // Check if the key is actually set
-        if std::env::var(&input).is_ok() {
+        if genesis_config::env::is_present(&input) {
             eprintln!("  [ok] ${} is set", input);
         } else {
             eprintln!("  [!!] ${} is NOT set — set it before chatting:", input);
@@ -426,7 +426,7 @@ pub(crate) fn run_init_non_interactive(
         .api_key_env
         .as_deref()
         .unwrap_or("OPENAI_API_KEY");
-    if std::env::var(api_key_var).is_ok() {
+    if genesis_config::env::is_present(api_key_var) {
         steps.push(format!("[ok] API key: ${api_key_var} is set"));
     } else {
         steps.push(format!(

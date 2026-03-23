@@ -46,7 +46,7 @@ pub struct HomeAssistantResponse {
 }
 
 fn webhook_token() -> Option<String> {
-    std::env::var("HOMEASSISTANT_TOKEN").ok()
+    genesis_config::env::get_opt(genesis_config::env::HOMEASSISTANT_TOKEN)
 }
 
 fn extract_provided_token(headers: &HeaderMap) -> Option<&str> {

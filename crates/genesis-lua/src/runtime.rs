@@ -226,21 +226,11 @@ fn config_bool(values: &BTreeMap<String, String>, key: &str, default: bool) -> b
 }
 
 fn env_u64(name: &str) -> Option<u64> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+    genesis_config::env::get_u64(name)
 }
 
 fn env_bool(name: &str, default: bool) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(default)
+    genesis_config::env::get_bool(name, default)
 }
 
 fn strip_unsafe_globals(lua: &Lua) -> Result<(), LuaRuntimeError> {

@@ -48,9 +48,7 @@ fn refresh_client() -> &'static reqwest::Client {
 
 /// Read the Codex base URL, allowing override via `GENESIS_CODEX_BASE_URL` env var.
 fn codex_base_url() -> String {
-    std::env::var("GENESIS_CODEX_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
+    genesis_config::env::get_opt(genesis_config::env::GENESIS_CODEX_BASE_URL)
         .unwrap_or_else(|| CODEX_INFERENCE_URL.to_owned())
 }
 
@@ -74,13 +72,14 @@ pub struct DeviceCodeResponse {
 
 /// Check if running in an SSH/remote session where browser can't be opened.
 pub fn is_remote_session() -> bool {
-    std::env::var("SSH_CLIENT").is_ok() || std::env::var("SSH_TTY").is_ok()
+    genesis_config::env::is_present(genesis_config::env::SSH_CLIENT)
+        || genesis_config::env::is_present(genesis_config::env::SSH_TTY)
 }
 
 /// Try to import tokens from the Codex CLI auth store (~/.codex/auth.json).
 /// Uses `CODEX_HOME` env var or defaults to `~/.codex`.
 pub fn import_codex_cli_tokens() -> Option<CodexTokens> {
-    let codex_dir = std::env::var_os("CODEX_HOME")
+    let codex_dir = genesis_config::env::get_os(genesis_config::env::CODEX_HOME)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))?;

@@ -36,9 +36,11 @@ fn is_blocked_domain(domain: &str) -> bool {
 }
 
 fn ha_config() -> (String, String) {
-    let url =
-        std::env::var("HASS_URL").unwrap_or_else(|_| "http://homeassistant.local:8123".to_owned());
-    let token = std::env::var("HASS_TOKEN").unwrap_or_default();
+    let url = genesis_config::env::get_or(
+        genesis_config::env::HASS_URL,
+        "http://homeassistant.local:8123",
+    );
+    let token = genesis_config::env::get_or(genesis_config::env::HASS_TOKEN, "");
     (url.trim_end_matches('/').to_owned(), token)
 }
 

@@ -24,7 +24,7 @@ use crate::verify::verify_discord_signature;
 use crate::AppState;
 
 pub fn public_key() -> Option<String> {
-    std::env::var("DISCORD_PUBLIC_KEY").ok()
+    genesis_config::env::get_opt(genesis_config::env::DISCORD_PUBLIC_KEY)
 }
 
 // --- Discord API types (subset) ---

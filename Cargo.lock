@@ -1709,6 +1709,7 @@ dependencies = [
 name = "genesis-lua"
 version = "0.1.0"
 dependencies = [
+ "genesis-config",
  "genesis-storage",
  "genesis-types",
  "mlua",
@@ -1834,6 +1835,7 @@ name = "genesis-ui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "genesis-config",
  "image",
  "owo-colors",
  "syntect",

@@ -75,7 +75,7 @@ impl ToolHandler for MixtureOfAgentsTool {
         // Query all models in parallel using threads (since ToolHandler::run is sync).
         // Capture the Tokio handle before spawning scoped threads so each thread
         // can block_on async HTTP calls without needing block_in_place.
-        let env: BTreeMap<String, String> = std::env::vars().collect();
+        let env: BTreeMap<String, String> = genesis_config::env::all_vars();
         let handle = tokio::runtime::Handle::current();
         type MoaResult = Vec<(String, String, Result<String, String>)>;
         let responses: Arc<Mutex<MoaResult>> = Arc::new(Mutex::new(Vec::new()));

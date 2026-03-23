@@ -37,25 +37,24 @@ use crate::AppState;
 
 /// Base URL of the signal-cli HTTP daemon.
 fn signal_http_url() -> String {
-    std::env::var("SIGNAL_HTTP_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
+    genesis_config::env::get_or(genesis_config::env::SIGNAL_HTTP_URL, "http://127.0.0.1:8080")
 }
 
 /// The registered Signal account (phone number) this agent uses.
 fn signal_account() -> Option<String> {
-    std::env::var("SIGNAL_ACCOUNT").ok()
+    genesis_config::env::get_opt(genesis_config::env::SIGNAL_ACCOUNT)
 }
 
 /// Optional shared secret for webhook endpoint authentication.
 /// When set, incoming requests must include an `X-Signal-Secret` header
 /// matching this value; otherwise the request is rejected with 401.
 fn webhook_secret() -> Option<String> {
-    std::env::var("SIGNAL_WEBHOOK_SECRET").ok()
+    genesis_config::env::get_opt(genesis_config::env::SIGNAL_WEBHOOK_SECRET)
 }
 
 /// Comma-separated list of phone numbers allowed to interact in group chats.
 fn group_allowed_users() -> Vec<String> {
-    std::env::var("SIGNAL_GROUP_ALLOWED_USERS")
-        .unwrap_or_default()
+    genesis_config::env::get_or(genesis_config::env::SIGNAL_GROUP_ALLOWED_USERS, "")
         .split(',')
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())

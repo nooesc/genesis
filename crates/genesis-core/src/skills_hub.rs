@@ -990,7 +990,7 @@ fn github_get(
     url: &str,
 ) -> Result<reqwest::blocking::Response, SkillHubError> {
     let mut request = client.get(url);
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+    if let Ok(token) = genesis_config::env::get(genesis_config::env::GITHUB_TOKEN) {
         request = request.bearer_auth(token);
     }
 
@@ -1014,7 +1014,7 @@ fn github_get_optional(
     url: &str,
 ) -> Result<Option<reqwest::blocking::Response>, SkillHubError> {
     let mut request = client.get(url);
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+    if let Ok(token) = genesis_config::env::get(genesis_config::env::GITHUB_TOKEN) {
         request = request.bearer_auth(token);
     }
 
@@ -1042,7 +1042,7 @@ fn github_download(
     url: &str,
 ) -> Result<Vec<u8>, SkillHubError> {
     let mut request = client.get(url);
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+    if let Ok(token) = genesis_config::env::get(genesis_config::env::GITHUB_TOKEN) {
         request = request.bearer_auth(token);
     }
 

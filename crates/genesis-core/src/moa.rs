@@ -93,7 +93,7 @@ pub async fn run_moa(
     }
 
     let layers = config.layers.max(1);
-    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let env: BTreeMap<String, String> = genesis_config::env::all_vars();
 
     let mut proposer_responses = Vec::new();
 
