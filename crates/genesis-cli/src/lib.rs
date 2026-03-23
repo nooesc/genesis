@@ -325,6 +325,18 @@ pub enum PluginsCommand {
         #[arg(help = "Plugin name")]
         name: String,
     },
+    #[command(about = "Install a Lua plugin from a source (GitHub or local path)")]
+    Install {
+        #[arg(help = "Plugin source (e.g. github:owner/repo, github:owner/repo@v1.0, /local/path)")]
+        source: String,
+        #[arg(long, help = "Overwrite if the plugin already exists")]
+        force: bool,
+    },
+    #[command(about = "Uninstall a Lua plugin")]
+    Uninstall {
+        #[arg(help = "Plugin name to uninstall")]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
