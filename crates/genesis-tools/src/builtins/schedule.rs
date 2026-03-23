@@ -1,76 +1,9 @@
 use std::collections::BTreeMap;
 
+use genesis_storage::cron::validate_cron;
 use genesis_storage::ScheduleStore;
 
 use crate::{ToolCall, ToolContext, ToolError, ToolHandler, ToolOutput};
-
-/// Validate a 5-field cron expression. Returns an error message if invalid.
-fn validate_cron(cron: &str) -> Result<(), String> {
-    let fields: Vec<&str> = cron.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Err(format!(
-            "expected 5 fields (minute hour day month weekday), got {}",
-            fields.len()
-        ));
-    }
-
-    for (i, field) in fields.iter().enumerate() {
-        let label = match i {
-            0 => "minute",
-            1 => "hour",
-            2 => "day",
-            3 => "month",
-            _ => "weekday",
-        };
-        validate_cron_field(field, label)?;
-    }
-    Ok(())
-}
-
-fn validate_cron_field(field: &str, label: &str) -> Result<(), String> {
-    if field == "*" {
-        return Ok(());
-    }
-
-    // Handle comma-separated lists
-    if field.contains(',') {
-        for item in field.split(',') {
-            validate_cron_field(item, label)?;
-        }
-        return Ok(());
-    }
-
-    // Handle step: */N
-    if let Some(step) = field.strip_prefix("*/") {
-        let n: u32 = step
-            .parse()
-            .map_err(|_| format!("{label}: step value '{step}' is not a valid number"))?;
-        if n == 0 {
-            return Err(format!("{label}: step value cannot be 0"));
-        }
-        return Ok(());
-    }
-
-    // Handle range: N-M
-    if let Some(dash) = field.find('-') {
-        let start: u32 = field[..dash]
-            .parse()
-            .map_err(|_| format!("{label}: range start is not a valid number"))?;
-        let end: u32 = field[dash + 1..]
-            .parse()
-            .map_err(|_| format!("{label}: range end is not a valid number"))?;
-        if start > end {
-            return Err(format!("{label}: range start ({start}) > end ({end})"));
-        }
-        return Ok(());
-    }
-
-    // Plain number
-    field
-        .parse::<u32>()
-        .map_err(|_| format!("{label}: '{field}' is not a valid number or pattern"))?;
-    Ok(())
-}
 
 /// Validate an IANA timezone name. Returns an error message if invalid.
 fn validate_timezone(tz: &str) -> Result<(), String> {

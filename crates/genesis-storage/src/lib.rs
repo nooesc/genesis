@@ -1,3 +1,5 @@
+pub mod cron;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -850,7 +852,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 executed_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 error_message TEXT,
-                duration_ms INTEGER
+                duration_ms INTEGER,
+                FOREIGN KEY(schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1282,7 +1285,8 @@ fn migrate_to_v13(connection: &Connection, database_path: &Path) -> Result<(), S
             executed_at TEXT NOT NULL,
             status TEXT NOT NULL,
             error_message TEXT,
-            duration_ms INTEGER
+            duration_ms INTEGER,
+            FOREIGN KEY(schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
         );",
     )
 }

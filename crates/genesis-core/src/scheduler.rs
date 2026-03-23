@@ -1,45 +1,15 @@
-//! Cron expression matcher for the scheduler.
+//! Scheduler runtime and cron matching helpers.
 //!
-//! Supports standard 5-field cron:
-//!   minute hour day-of-month month day-of-week
-//!
-//! Field syntax:
-//!
-//! ```text
-//!   *     - matches any value
-//!   N     - matches exact value
-//!   */N   - matches every N (step)
-//!   N-M   - matches range from N to M (inclusive)
-//!   N,M,P - matches any listed value (items can be exact, range, or step)
-//! ```
+//! The cron expression parser and validator live in [`genesis_storage::cron`].
+//! This module re-exports the key types and adds timezone-aware scheduling on
+//! top.
 
 use chrono::Datelike;
 use chrono::Timelike;
 
-/// A parsed cron expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CronExpr {
-    pub minute: CronField,
-    pub hour: CronField,
-    pub day_of_month: CronField,
-    pub month: CronField,
-    pub day_of_week: CronField,
-}
-
-/// A single cron field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CronField {
-    /// Matches any value.
-    Any,
-    /// Matches an exact value.
-    Exact(u32),
-    /// Matches every N values (step), starting from 0.
-    Step(u32),
-    /// Matches any value in an inclusive range.
-    Range(u32, u32),
-    /// Matches any value in a list of sub-fields.
-    List(Vec<CronField>),
-}
+// Re-export the canonical cron types from genesis-storage so existing
+// callers of `genesis_core::scheduler::{CronExpr, CronField, …}` keep working.
+pub use genesis_storage::cron::{CronExpr, CronField, CronParseError, validate_cron};
 
 /// Parsed time components for matching against a cron expression.
 #[derive(Debug, Clone)]
@@ -51,121 +21,11 @@ pub struct CronTime {
     pub day_of_week: u32, // 0 = Sunday
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum CronParseError {
-    #[error("expected 5 fields, got {0}")]
-    WrongFieldCount(usize),
-    #[error("invalid field `{field}`: {reason}")]
-    InvalidField { field: String, reason: String },
-}
-
-impl CronExpr {
-    /// Parse a 5-field cron expression string.
-    pub fn parse(expression: &str) -> Result<Self, CronParseError> {
-        let fields: Vec<&str> = expression.split_whitespace().collect();
-        if fields.len() != 5 {
-            return Err(CronParseError::WrongFieldCount(fields.len()));
-        }
-
-        Ok(Self {
-            minute: CronField::parse(fields[0])?,
-            hour: CronField::parse(fields[1])?,
-            day_of_month: CronField::parse(fields[2])?,
-            month: CronField::parse(fields[3])?,
-            day_of_week: CronField::parse(fields[4])?,
-        })
+impl CronTime {
+    /// Check whether a `CronExpr` matches this time.
+    pub fn matches_expr(&self, expr: &CronExpr) -> bool {
+        expr.matches(self.minute, self.hour, self.day_of_month, self.month, self.day_of_week)
     }
-
-    /// Check whether the given time matches this cron expression.
-    pub fn matches(&self, time: &CronTime) -> bool {
-        self.minute.matches(time.minute)
-            && self.hour.matches(time.hour)
-            && self.day_of_month.matches(time.day_of_month)
-            && self.month.matches(time.month)
-            && self.day_of_week.matches(time.day_of_week)
-    }
-}
-
-impl CronField {
-    fn parse(field: &str) -> Result<Self, CronParseError> {
-        // Check for comma-separated list first
-        if field.contains(',') {
-            let items: Result<Vec<CronField>, CronParseError> = field
-                .split(',')
-                .map(|item| Self::parse_single(item, field))
-                .collect();
-            return Ok(Self::List(items?));
-        }
-
-        Self::parse_single(field, field)
-    }
-
-    /// Parse a single (non-list) cron field token.
-    fn parse_single(token: &str, original: &str) -> Result<Self, CronParseError> {
-        if token == "*" {
-            return Ok(Self::Any);
-        }
-
-        if let Some(step) = token.strip_prefix("*/") {
-            let n: u32 = step.parse().map_err(|_| CronParseError::InvalidField {
-                field: original.to_owned(),
-                reason: format!("step value `{step}` is not a valid number"),
-            })?;
-            if n == 0 {
-                return Err(CronParseError::InvalidField {
-                    field: original.to_owned(),
-                    reason: "step value cannot be 0".to_owned(),
-                });
-            }
-            return Ok(Self::Step(n));
-        }
-
-        // Check for range: N-M
-        if let Some(dash_pos) = token.find('-') {
-            let start_str = &token[..dash_pos];
-            let end_str = &token[dash_pos + 1..];
-            let start: u32 = start_str
-                .parse()
-                .map_err(|_| CronParseError::InvalidField {
-                    field: original.to_owned(),
-                    reason: format!("range start `{start_str}` is not a valid number"),
-                })?;
-            let end: u32 = end_str.parse().map_err(|_| CronParseError::InvalidField {
-                field: original.to_owned(),
-                reason: format!("range end `{end_str}` is not a valid number"),
-            })?;
-            if start > end {
-                return Err(CronParseError::InvalidField {
-                    field: original.to_owned(),
-                    reason: format!("range start ({start}) is greater than end ({end})"),
-                });
-            }
-            return Ok(Self::Range(start, end));
-        }
-
-        let n: u32 = token.parse().map_err(|_| CronParseError::InvalidField {
-            field: original.to_owned(),
-            reason: "not a valid number, *, */N, N-M, or comma-separated list".to_owned(),
-        })?;
-        Ok(Self::Exact(n))
-    }
-
-    fn matches(&self, value: u32) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Exact(n) => value == *n,
-            Self::Step(n) => value.is_multiple_of(*n),
-            Self::Range(start, end) => value >= *start && value <= *end,
-            Self::List(items) => items.iter().any(|item| item.matches(value)),
-        }
-    }
-}
-
-/// Validate that a cron expression is syntactically correct.
-///
-/// Returns `Ok(())` if valid, or an error describing what is wrong.
-pub fn validate_cron(expression: &str) -> Result<(), CronParseError> {
-    CronExpr::parse(expression).map(|_| ())
 }
 
 /// Resolve a schedule's timezone to a `chrono_tz::Tz`.
@@ -230,14 +90,14 @@ pub fn check_due_schedules(schedules: &[genesis_storage::StoredSchedule]) -> Vec
                     tracing::warn!(
                         schedule_id = s.id.as_str(),
                         error = err.as_str(),
-                        "skipping schedule with invalid timezone, falling back to UTC"
+                        "invalid timezone for schedule, falling back to UTC"
                     );
                     chrono_tz::UTC
                 }
             };
 
             let now = cron_time_now(tz);
-            if expr.matches(&now) {
+            if now.matches_expr(&expr) {
                 Some(DueSchedule {
                     id: s.id.clone(),
                     destination: s.destination.clone(),
@@ -261,7 +121,7 @@ pub fn check_due_schedules_at(
         .filter(|s| s.enabled)
         .filter_map(|s| {
             let expr = CronExpr::parse(&s.cron_expression).ok()?;
-            if expr.matches(now) {
+            if now.matches_expr(&expr) {
                 Some(DueSchedule {
                     id: s.id.clone(),
                     destination: s.destination.clone(),
@@ -433,94 +293,35 @@ mod tests {
     fn matches_every_5_minutes() {
         let expr = CronExpr::parse("*/5 * * * *").unwrap();
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 12,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 15,
-            hour: 3,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 7,
-            hour: 3,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
+        let t = |m| CronTime { minute: m, hour: 12, day_of_month: 1, month: 1, day_of_week: 1 };
+        assert!(t(0).matches_expr(&expr));
+        assert!(t(15).matches_expr(&expr));
+        assert!(!t(7).matches_expr(&expr));
     }
 
     #[test]
     fn matches_exact_time() {
         let expr = CronExpr::parse("30 14 * * *").unwrap();
 
-        assert!(expr.matches(&CronTime {
-            minute: 30,
-            hour: 14,
-            day_of_month: 5,
-            month: 3,
-            day_of_week: 6,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 31,
-            hour: 14,
-            day_of_month: 5,
-            month: 3,
-            day_of_week: 6,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 30,
-            hour: 15,
-            day_of_month: 5,
-            month: 3,
-            day_of_week: 6,
-        }));
+        assert!(CronTime { minute: 30, hour: 14, day_of_month: 5, month: 3, day_of_week: 6 }.matches_expr(&expr));
+        assert!(!CronTime { minute: 31, hour: 14, day_of_month: 5, month: 3, day_of_week: 6 }.matches_expr(&expr));
+        assert!(!CronTime { minute: 30, hour: 15, day_of_month: 5, month: 3, day_of_week: 6 }.matches_expr(&expr));
     }
 
     #[test]
     fn matches_daily_at_midnight() {
         let expr = CronExpr::parse("0 0 * * *").unwrap();
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 0,
-            day_of_month: 15,
-            month: 6,
-            day_of_week: 3,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 1,
-            day_of_month: 15,
-            month: 6,
-            day_of_week: 3,
-        }));
+        assert!(CronTime { minute: 0, hour: 0, day_of_month: 15, month: 6, day_of_week: 3 }.matches_expr(&expr));
+        assert!(!CronTime { minute: 0, hour: 1, day_of_month: 15, month: 6, day_of_week: 3 }.matches_expr(&expr));
     }
 
     #[test]
     fn matches_specific_day_of_week() {
         let expr = CronExpr::parse("0 9 * * 1").unwrap(); // Mon 9:00
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 10,
-            month: 3,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 11,
-            month: 3,
-            day_of_week: 2,
-        }));
+        assert!(CronTime { minute: 0, hour: 9, day_of_month: 10, month: 3, day_of_week: 1 }.matches_expr(&expr));
+        assert!(!CronTime { minute: 0, hour: 9, day_of_month: 11, month: 3, day_of_week: 2 }.matches_expr(&expr));
     }
 
     #[test]
@@ -579,41 +380,12 @@ mod tests {
     fn matches_range() {
         let expr = CronExpr::parse("0 9-17 * * *").unwrap(); // 9am-5pm hourly
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 13,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 17,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 8,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 18,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
+        let t = |h| CronTime { minute: 0, hour: h, day_of_month: 1, month: 1, day_of_week: 1 };
+        assert!(t(9).matches_expr(&expr));
+        assert!(t(13).matches_expr(&expr));
+        assert!(t(17).matches_expr(&expr));
+        assert!(!t(8).matches_expr(&expr));
+        assert!(!t(18).matches_expr(&expr));
     }
 
     #[test]
@@ -635,27 +407,10 @@ mod tests {
     fn matches_list() {
         let expr = CronExpr::parse("0,15,30,45 * * * *").unwrap();
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 12,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 30,
-            hour: 12,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 10,
-            hour: 12,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
+        let t = |m| CronTime { minute: m, hour: 12, day_of_month: 1, month: 1, day_of_week: 1 };
+        assert!(t(0).matches_expr(&expr));
+        assert!(t(30).matches_expr(&expr));
+        assert!(!t(10).matches_expr(&expr));
     }
 
     #[test]
@@ -669,38 +424,11 @@ mod tests {
     fn matches_weekdays_only() {
         let expr = CronExpr::parse("0 9 * * 1-5").unwrap();
 
-        // Monday
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 10,
-            month: 3,
-            day_of_week: 1,
-        }));
-        // Friday
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 14,
-            month: 3,
-            day_of_week: 5,
-        }));
-        // Sunday
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 9,
-            month: 3,
-            day_of_week: 0,
-        }));
-        // Saturday
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 9,
-            day_of_month: 15,
-            month: 3,
-            day_of_week: 6,
-        }));
+        let t = |dow| CronTime { minute: 0, hour: 9, day_of_month: 10, month: 3, day_of_week: dow };
+        assert!(t(1).matches_expr(&expr));  // Monday
+        assert!(t(5).matches_expr(&expr));  // Friday
+        assert!(!t(0).matches_expr(&expr)); // Sunday
+        assert!(!t(6).matches_expr(&expr)); // Saturday
     }
 
     #[test]
@@ -717,41 +445,12 @@ mod tests {
             other => panic!("expected List, got {other:?}"),
         }
 
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 1,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 4,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(expr.matches(&CronTime {
-            minute: 0,
-            hour: 7,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 2,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
-        assert!(!expr.matches(&CronTime {
-            minute: 0,
-            hour: 6,
-            day_of_month: 1,
-            month: 1,
-            day_of_week: 1,
-        }));
+        let t = |h| CronTime { minute: 0, hour: h, day_of_month: 1, month: 1, day_of_week: 1 };
+        assert!(t(1).matches_expr(&expr));
+        assert!(t(4).matches_expr(&expr));
+        assert!(t(7).matches_expr(&expr));
+        assert!(!t(2).matches_expr(&expr));
+        assert!(!t(6).matches_expr(&expr));
     }
 
     #[test]
