@@ -38,33 +38,6 @@ const BIG_TEXT_HEIGHT: u16 = 4;
 /// Gap between the title and the portrait/info row.
 const TITLE_GAP: u16 = 1;
 
-const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
-    "          .-''''-.          ",
-    "       .-'  .--.  `-.       ",
-    "      /   .'_  _`.   \\      ",
-    "     /   /  ( \\/ )\\   \\     ",
-    "    /   |      /\\  |   \\    ",
-    "    |   |     /  \\ |   |    ",
-    "    |   |   .-''''-.   |    ",
-    "    |   |  /  .--.  \\  |    ",
-    "    |   |  | (____) |  |    ",
-    "    |    \\  \\______/  /|    ",
-    "     \\    `-._____.-' /     ",
-    "      `-.     __    .-'     ",
-    "         `-._/  \\_.-'       ",
-    "           /_/\\_\\           ",
-];
-
-const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
-    "   _.-._   ",
-    " .'_   _`. ",
-    "/_   _\\\\   ",
-    "| |\\_/| |  ",
-    "| | o | |  ",
-    " \\_.-'._/  ",
-    "   /_\\\\    ",
-];
-
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
     pub model: String,
@@ -112,15 +85,12 @@ pub struct WelcomeWidget {
 }
 
 impl WelcomeWidget {
-    /// Create a new welcome widget from session info with optional portrait art.
-    ///
-    /// When a portrait slice is empty, a minimal built-in fallback is used for
-    /// that mode.
+    /// Create a new welcome widget from session info with portrait art.
     pub fn new(info: WelcomeInfo, full_art: &[String], compact_art: &[String]) -> Self {
         Self {
             info,
-            split_art: parse_portrait_art(full_art, DEFAULT_SPLIT_PORTRAIT_ART),
-            compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
+            split_art: parse_ansi_art(full_art),
+            compact_art: parse_ansi_art(compact_art),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
             braille_pattern: Pattern::default_particles(18),
@@ -553,14 +523,6 @@ fn line_visual_width(line: &Line<'_>) -> usize {
     line.spans.iter().map(|s| s.content.width()).sum()
 }
 
-fn parse_portrait_art(source: &[String], fallback: &[&str]) -> Vec<Line<'static>> {
-    if source.is_empty() {
-        fallback.iter().map(|line| parse_ansi_line(line)).collect()
-    } else {
-        parse_ansi_art(source)
-    }
-}
-
 // ── ANSI → ratatui Line parser ─────────────────────────────────────────────
 
 /// Parse ANSI-escaped half-block art strings into ratatui Lines.
@@ -683,7 +645,9 @@ mod tests {
     }
 
     fn default_widget() -> WelcomeWidget {
-        WelcomeWidget::new(test_info(), &[], &[])
+        let full = genesis_ui::banner::full_art();
+        let compact = genesis_ui::banner::compact_art();
+        WelcomeWidget::new(test_info(), &full, &compact)
     }
 
     fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
@@ -784,7 +748,7 @@ mod tests {
 
     #[test]
     fn welcome_widget_width_100_uses_split_layout() {
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         sample_widget().render(area, &mut buf);
 
@@ -801,16 +765,26 @@ mod tests {
 
     #[test]
     fn welcome_widget_width_99_uses_compact_layout() {
-        let area = Rect::new(0, 0, 99, 24);
+        let area = Rect::new(0, 0, 99, 40);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait =
-            first_match_position(&rows, "_.-._").expect("compact portrait should render");
+        // Compact portrait uses half-block characters (▀ or ▄).
+        let portrait = rows
+            .iter()
+            .enumerate()
+            .find_map(|(idx, row)| {
+                if row.contains('▀') || row.contains('▄') {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .expect("compact portrait should render half-block art");
         let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
         assert!(
-            portrait.0 < title.0,
+            portrait < title.0,
             "compact portrait should render above the title"
         );
     }
@@ -822,14 +796,18 @@ mod tests {
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        assert!(!rows.iter().any(|row| row.contains("_.-._")));
+        // Text-only mode should have no half-block art.
+        assert!(
+            !rows.iter().any(|row| row.contains('▀') || row.contains('▄')),
+            "text-only mode should not render half-block art"
+        );
         assert!(rows.iter().any(|row| row.contains(">_ Eve v0.1.0")));
     }
 
     #[test]
     fn welcome_metadata_renders_all_fields() {
         // Use a taller area to accommodate the new title + portrait + info layout.
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
@@ -946,7 +924,7 @@ mod tests {
 
     #[test]
     fn wide_layout_renders_boot_status_lines() {
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
@@ -965,7 +943,7 @@ mod tests {
     fn wide_layout_renders_big_text_title() {
         // BigText uses block characters. At Quadrant pixel size, "GENESIS"
         // should produce visible characters in the top rows.
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
@@ -987,7 +965,7 @@ mod tests {
 
     #[test]
     fn last_areas_populated_after_render() {
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         let mut widget = default_widget();
         widget.render(area, &mut buf);
