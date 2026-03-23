@@ -2058,4 +2058,87 @@ trusted = true
             "should show empty list after clear: {text}"
         );
     }
+
+    /// Build a bundled test runtime while holding the env lock, returning both
+    /// the runtime and the lock guard so env-dependent invocations stay protected.
+    fn build_bundled_test_runtime_with_env_guard(
+    ) -> (crate::LuaRuntime, std::sync::MutexGuard<'static, ()>) {
+        let guard = env_lock().lock().expect("env lock should not be poisoned");
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let rt = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-messaging".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+        (rt, guard)
+    }
+
+    #[test]
+    fn bundled_send_message_unknown_platform_errors() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "unknown_platform".to_owned()),
+                ("channel".to_owned(), "test".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "unknown platform should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unsupported platform"),
+            "error should mention unsupported platform: {err}"
+        );
+    }
+
+    #[test]
+    fn bundled_send_message_slack_requires_token() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("SLACK_BOT_TOKEN");
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "slack".to_owned()),
+                ("channel".to_owned(), "C123".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "slack without token should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SLACK_BOT_TOKEN"),
+            "error should mention SLACK_BOT_TOKEN: {err}"
+        );
+    }
+
+    #[test]
+    fn bundled_send_message_telegram_requires_token() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        let result = rt.invoke_tool(
+            "send_message",
+            BTreeMap::from([
+                ("platform".to_owned(), "telegram".to_owned()),
+                ("channel".to_owned(), "123456".to_owned()),
+                ("message".to_owned(), "hello".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "telegram without token should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("TELEGRAM_BOT_TOKEN"),
+            "error should mention TELEGRAM_BOT_TOKEN: {err}"
+        );
+    }
 }
