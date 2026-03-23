@@ -1657,6 +1657,7 @@ impl AgentLoop {
                     let mut finished_naturally = true;
                     let mut turn_input_tokens = 0u32;
                     let mut turn_output_tokens = 0u32;
+                    let mut streamed_provider_metadata: Option<serde_json::Value> = None;
 
                     while let Some(chunk) = stream.next().await {
                         let chunk = match chunk {
@@ -1686,6 +1687,10 @@ impl AgentLoop {
                                 turn_input_tokens.saturating_add(usage.prompt_tokens);
                             turn_output_tokens =
                                 turn_output_tokens.saturating_add(usage.completion_tokens);
+                        }
+
+                        if update.provider_metadata.is_some() {
+                            streamed_provider_metadata = update.provider_metadata;
                         }
 
                         merge_streamed_tool_calls(&mut streamed_tool_calls, update.tool_calls);
@@ -1724,17 +1729,21 @@ impl AgentLoop {
                     }
 
                     if !streamed_tool_calls.is_empty() {
-                        // TODO: propagate provider_metadata from response.completed event for streaming reasoning continuity
+                        // Propagate provider_metadata (e.g. reasoning items) from
+                        // the streaming completion event for multi-turn continuity.
+                        let mut msg = ChatMessage::assistant_with_tool_calls(
+                            if response_text.is_empty() {
+                                None
+                            } else {
+                                Some(MessageContent::Text(response_text.clone()))
+                            },
+                            streamed_tool_calls.clone(),
+                        );
+                        // Only response.completed emits provider_metadata today; last write wins is intentional.
+                        msg.provider_metadata = streamed_provider_metadata;
                         if let Some(message) = self.push_message_with_lua_hooks(
                             &hook_session,
-                            ChatMessage::assistant_with_tool_calls(
-                                if response_text.is_empty() {
-                                    None
-                                } else {
-                                    Some(MessageContent::Text(response_text.clone()))
-                                },
-                                streamed_tool_calls.clone(),
-                            ),
+                            msg,
                         ) {
                             if let Some(text) = message.content_text() {
                                 if !text.is_empty() {
@@ -1891,10 +1900,12 @@ impl AgentLoop {
                         continue;
                     }
 
+                    let mut text_msg = ChatMessage::assistant(&response_text);
+                    text_msg.provider_metadata = streamed_provider_metadata;
                     let response_text = self
                         .push_message_with_lua_hooks(
                             &hook_session,
-                            ChatMessage::assistant(&response_text),
+                            text_msg,
                         )
                         .and_then(|message| message.content_text().map(str::to_owned))
                         .unwrap_or_default();
@@ -2826,6 +2837,7 @@ struct StreamUpdate {
     tool_calls: Vec<ToolCallEntry>,
     finish_reason: Option<String>,
     usage: Option<genesis_provider::ChatUsage>,
+    provider_metadata: Option<serde_json::Value>,
 }
 
 fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
@@ -2850,6 +2862,7 @@ fn collect_stream_update(chunk: ChatCompletionChunk) -> StreamUpdate {
         tool_calls,
         finish_reason,
         usage: chunk.usage,
+        provider_metadata: chunk.provider_metadata,
     }
 }
 
@@ -3511,12 +3524,14 @@ tools = [{tools_list}]
                 finish_reason: Some("stop".to_owned()),
             }],
             usage: None,
+            provider_metadata: None,
         });
 
         assert_eq!(update.contents, vec!["hello".to_owned()]);
         assert_eq!(update.finish_reason.as_deref(), Some("stop"));
         assert!(update.tool_calls.is_empty());
         assert!(update.usage.is_none());
+        assert!(update.provider_metadata.is_none());
     }
 
     #[test]
@@ -3529,6 +3544,7 @@ tools = [{tools_list}]
                 completion_tokens: 50,
                 total_tokens: 150,
             }),
+            provider_metadata: None,
         });
 
         let usage = update.usage.expect("usage should be present");
@@ -3543,6 +3559,22 @@ tools = [{tools_list}]
         assert!(config.system_prompt.is_none());
         assert!(config.temperature.is_none());
         assert_eq!(config.memory_nudge_interval, Some(15));
+    }
+
+    #[test]
+    fn collect_stream_update_captures_provider_metadata() {
+        let meta = serde_json::json!({
+            "codex_reasoning_items": [{"type": "reasoning", "id": "r_1"}]
+        });
+        let update = collect_stream_update(ChatCompletionChunk {
+            id: "chunk-meta".to_owned(),
+            choices: vec![],
+            usage: None,
+            provider_metadata: Some(meta.clone()),
+        });
+
+        assert!(update.provider_metadata.is_some());
+        assert_eq!(update.provider_metadata.unwrap(), meta);
     }
 
     #[test]

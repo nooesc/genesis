@@ -632,6 +632,7 @@ pub(crate) fn anthropic_event_to_chunk(
                     .message
                     .as_ref()
                     .and_then(|m| m.usage.as_ref().map(|u| u.to_chat_usage())),
+                provider_metadata: None,
             }))
         }
         "content_block_start" => {
@@ -657,6 +658,7 @@ pub(crate) fn anthropic_event_to_chunk(
                             finish_reason: None,
                         }],
                         usage: None,
+                        provider_metadata: None,
                     }))
                 }
                 _ => Ok(None),
@@ -677,6 +679,7 @@ pub(crate) fn anthropic_event_to_chunk(
                             finish_reason: None,
                         }],
                         usage: None,
+                        provider_metadata: None,
                     })),
                     Some("input_json_delta") => {
                         // Streaming tool call arguments
@@ -702,6 +705,7 @@ pub(crate) fn anthropic_event_to_chunk(
                                 finish_reason: None,
                             }],
                             usage: None,
+                            provider_metadata: None,
                         }))
                     }
                     _ => Ok(None),
@@ -732,6 +736,7 @@ pub(crate) fn anthropic_event_to_chunk(
                     finish_reason,
                 }],
                 usage,
+                provider_metadata: None,
             }))
         }
         "message_stop" | "content_block_stop" | "ping" => Ok(None),

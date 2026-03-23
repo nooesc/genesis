@@ -511,6 +511,7 @@ pub(crate) fn from_gemini_stream_chunk(
             finish_reason,
         }],
         usage,
+        provider_metadata: None,
     })
 }
 

@@ -393,6 +393,7 @@ pub(crate) fn parse_responses_sse_event(
                         finish_reason: None,
                     }],
                     usage: None,
+                    provider_metadata: None,
                 }))
             } else {
                 Ok(None)
@@ -413,6 +414,7 @@ pub(crate) fn parse_responses_sse_event(
                     finish_reason: None,
                 }],
                 usage: None,
+                provider_metadata: None,
             }))
         }
 
@@ -437,12 +439,13 @@ pub(crate) fn parse_responses_sse_event(
                     finish_reason: None,
                 }],
                 usage: None,
+                provider_metadata: None,
             }))
         }
 
         "response.completed" => {
-            // The final event carries the full response. Extract usage and
-            // determine finish_reason from the completed response.
+            // The final event carries the full response. Extract usage,
+            // finish_reason, and reasoning items from the completed response.
             let response = &data["response"];
 
             // Try to parse the full response for usage and finish_reason.
@@ -457,7 +460,8 @@ pub(crate) fn parse_responses_sse_event(
             });
 
             // Determine finish_reason from the completed response.
-            let has_tool_calls = response["output"].as_array().is_some_and(|items| {
+            let output_items = response["output"].as_array();
+            let has_tool_calls = output_items.is_some_and(|items| {
                 items
                     .iter()
                     .any(|i| i["type"].as_str() == Some("function_call"))
@@ -469,6 +473,25 @@ pub(crate) fn parse_responses_sse_event(
                 Some("incomplete".to_owned())
             } else {
                 Some("stop".to_owned())
+            };
+
+            // Extract reasoning items from the output for multi-turn continuity.
+            let reasoning_items: Vec<Value> = output_items
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| i["type"].as_str() == Some("reasoning"))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let provider_metadata = if reasoning_items.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "codex_reasoning_items": reasoning_items
+                }))
             };
 
             let resp_id = response["id"]
@@ -488,6 +511,7 @@ pub(crate) fn parse_responses_sse_event(
                     finish_reason,
                 }],
                 usage,
+                provider_metadata,
             }))
         }
 
@@ -1017,6 +1041,80 @@ mod tests {
         assert_eq!(
             chunk.choices[0].finish_reason.as_deref(),
             Some("tool_calls")
+        );
+    }
+
+    #[test]
+    fn test_parse_sse_completed_extracts_reasoning_items() {
+        let data = json!({
+            "response": {
+                "id": "resp_reasoning",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [{"type": "summary_text", "text": "Thinking..."}]
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "42"}]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50
+                }
+            }
+        });
+
+        let chunk = parse_responses_sse_event("response.completed", &data)
+            .unwrap()
+            .expect("should produce chunk");
+
+        assert_eq!(chunk.id, "resp_reasoning");
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+
+        let meta = chunk
+            .provider_metadata
+            .as_ref()
+            .expect("should have provider_metadata");
+        let items = meta["codex_reasoning_items"]
+            .as_array()
+            .expect("should be array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["id"], "rs_1");
+    }
+
+    #[test]
+    fn test_parse_sse_completed_no_reasoning_no_metadata() {
+        let data = json!({
+            "response": {
+                "id": "resp_simple",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "hello"}]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5
+                }
+            }
+        });
+
+        let chunk = parse_responses_sse_event("response.completed", &data)
+            .unwrap()
+            .expect("should produce chunk");
+
+        assert!(
+            chunk.provider_metadata.is_none(),
+            "no reasoning items means no provider_metadata"
         );
     }
 
