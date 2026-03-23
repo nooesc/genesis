@@ -500,14 +500,30 @@ macro_rules! paginated_response {
     };
 }
 
-paginated_response!(SessionListResponse, sessions, genesis_storage::SessionSummary);
+paginated_response!(
+    SessionListResponse,
+    sessions,
+    genesis_storage::SessionSummary
+);
 paginated_response!(SkillListResponse, skills, genesis_storage::StoredSkill);
 paginated_response!(MemoryListResponse, memories, genesis_storage::StoredMemory);
-paginated_response!(ScheduleListResponse, schedules, genesis_storage::StoredSchedule);
+paginated_response!(
+    ScheduleListResponse,
+    schedules,
+    genesis_storage::StoredSchedule
+);
 paginated_response!(TraitListResponse, traits, genesis_storage::StoredUserTrait);
 paginated_response!(TemplateListResponse, templates, serde_json::Value);
-paginated_response!(ApprovedListResponse, approved, genesis_storage::ApprovedUser);
-paginated_response!(PendingListResponse, pending, genesis_storage::PendingPairing);
+paginated_response!(
+    ApprovedListResponse,
+    approved,
+    genesis_storage::ApprovedUser
+);
+paginated_response!(
+    PendingListResponse,
+    pending,
+    genesis_storage::PendingPairing
+);
 
 /// Response body for GET /tools.
 ///
@@ -1325,13 +1341,20 @@ async fn list_sessions_handler(
     };
 
     let has_more = (offset + sessions.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SessionListResponse {
-        sessions,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SessionListResponse {
+            sessions,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -1828,16 +1851,25 @@ async fn list_skills_handler(
     let limit = clamp_limit(params.limit);
     let offset = validate_offset(params.offset)?;
     let store = SkillStore::new(&state.loaded.config.storage.database_path);
-    let (skills, total) = store.list_all_paginated(limit, offset).map_err(storage_err)?;
+    let (skills, total) = store
+        .list_all_paginated(limit, offset)
+        .map_err(storage_err)?;
 
     let has_more = (offset + skills.len()) < total as usize;
-    Ok(Json(serde_json::to_value(SkillListResponse {
-        skills,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(SkillListResponse {
+            skills,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -2018,13 +2050,20 @@ async fn list_memories_handler(
     let (memories, total) = store.list_paginated(limit, offset).map_err(storage_err)?;
 
     let has_more = (offset + memories.len()) < total as usize;
-    Ok(Json(serde_json::to_value(MemoryListResponse {
-        memories,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(MemoryListResponse {
+            memories,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -2289,13 +2328,20 @@ async fn list_schedules_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + schedules.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ScheduleListResponse {
-        schedules,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ScheduleListResponse {
+            schedules,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -2430,13 +2476,20 @@ async fn list_user_traits_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + traits_list.len()) < total as usize;
-    Ok(Json(serde_json::to_value(TraitListResponse {
-        traits: traits_list,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TraitListResponse {
+            traits: traits_list,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -2612,13 +2665,20 @@ async fn list_tools_handler(
     let mcp_count = mcp_tools.len();
     let total = builtin_count + mcp_count;
 
-    Ok(Json(serde_json::to_value(ToolListResponse {
-        builtin_tools,
-        builtin_count,
-        mcp_tools,
-        mcp_count,
-        total,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ToolListResponse {
+            builtin_tools,
+            builtin_count,
+            mcp_tools,
+            mcp_count,
+            total,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -2830,13 +2890,20 @@ async fn list_templates_handler(
         .collect();
     let has_more = (offset + page.len()) < total as usize;
 
-    Ok(Json(serde_json::to_value(TemplateListResponse {
-        templates: page,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(TemplateListResponse {
+            templates: page,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -3912,59 +3979,58 @@ async fn chat_stream_handler(
             let tx_cb = tx.clone();
             let cancelled_cb = Arc::clone(&cancelled);
 
-            let agent_future = service
-                .run_turn_streaming(
-                    SessionTurnInput {
-                        session_id: &session_id,
-                        session_platform: &platform,
-                        delivery_platform: delivery_platform_from_str(&platform),
-                        prompt: &message,
-                        title: None,
-                        images,
-                    },
-                    |event| match event {
-                        StreamEvent::Chunk(chunk) => {
-                            if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
-                                session_id: session_id.clone(),
-                                content: chunk.to_owned(),
-                            }) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("chunk").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+            let agent_future = service.run_turn_streaming(
+                SessionTurnInput {
+                    session_id: &session_id,
+                    session_platform: &platform,
+                    delivery_platform: delivery_platform_from_str(&platform),
+                    prompt: &message,
+                    title: None,
+                    images,
+                },
+                |event| match event {
+                    StreamEvent::Chunk(chunk) => {
+                        if let Ok(payload) = serde_json::to_string(&StreamChunkResponse {
+                            session_id: session_id.clone(),
+                            content: chunk.to_owned(),
+                        }) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("chunk").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallStart { name, .. } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "tool": name,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("tool_call").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallStart { name, .. } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "tool": name,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("tool_call").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                        StreamEvent::ToolCallEnd { .. }
-                        | StreamEvent::TurnStarted
-                        | StreamEvent::TokenUsage { .. }
-                        | StreamEvent::Warning(_) => {}
-                        StreamEvent::ClarificationNeeded { question } => {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "session_id": &session_id,
-                                "question": question,
-                            })) {
-                                send_sse(
-                                    &tx_cb,
-                                    Ok(Event::default().event("clarification").data(payload)),
-                                    &cancelled_cb,
-                                );
-                            }
+                    }
+                    StreamEvent::ToolCallEnd { .. }
+                    | StreamEvent::TurnStarted
+                    | StreamEvent::TokenUsage { .. }
+                    | StreamEvent::Warning(_) => {}
+                    StreamEvent::ClarificationNeeded { question } => {
+                        if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                            "session_id": &session_id,
+                            "question": question,
+                        })) {
+                            send_sse(
+                                &tx_cb,
+                                Ok(Event::default().event("clarification").data(payload)),
+                                &cancelled_cb,
+                            );
                         }
-                    },
-                );
+                    }
+                },
+            );
 
             let run_result =
                 match tokio::time::timeout(Duration::from_secs(timeout_secs), agent_future).await {
@@ -3972,15 +4038,12 @@ async fn chat_stream_handler(
                     Err(_elapsed) => {
                         warn!(
                             request_id = request_id_for_task.as_str(),
-                            timeout_secs,
-                            "streaming chat request timed out"
+                            timeout_secs, "streaming chat request timed out"
                         );
                         cancelled.store(true, Ordering::Relaxed);
                         if let Ok(payload) = serde_json::to_string(&StreamErrorResponse {
                             session_id,
-                            error: format!(
-                                "streaming request timed out after {timeout_secs}s"
-                            ),
+                            error: format!("streaming request timed out after {timeout_secs}s"),
                         }) {
                             send_sse(
                                 &tx,
@@ -4298,13 +4361,20 @@ async fn list_approved_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + approved.len()) < total as usize;
-    Ok(Json(serde_json::to_value(ApprovedListResponse {
-        approved,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(ApprovedListResponse {
+            approved,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -4320,13 +4390,20 @@ async fn list_pending_handler(
         .map_err(storage_err)?;
 
     let has_more = (offset + pending.len()) < total as usize;
-    Ok(Json(serde_json::to_value(PendingListResponse {
-        pending,
-        total,
-        limit,
-        offset,
-        has_more,
-    }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialization error: {e}")))?,
+    Ok(Json(
+        serde_json::to_value(PendingListResponse {
+            pending,
+            total,
+            limit,
+            offset,
+            has_more,
+        })
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("serialization error: {e}"),
+            )
+        })?,
     ))
 }
 
@@ -5813,11 +5890,26 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("sessions").is_some(), "response must have 'sessions' field");
-        assert!(json.get("total").is_some(), "response must have 'total' field");
-        assert!(json.get("limit").is_some(), "response must have 'limit' field");
-        assert!(json.get("offset").is_some(), "response must have 'offset' field");
-        assert!(json.get("has_more").is_some(), "response must have 'has_more' field");
+        assert!(
+            json.get("sessions").is_some(),
+            "response must have 'sessions' field"
+        );
+        assert!(
+            json.get("total").is_some(),
+            "response must have 'total' field"
+        );
+        assert!(
+            json.get("limit").is_some(),
+            "response must have 'limit' field"
+        );
+        assert!(
+            json.get("offset").is_some(),
+            "response must have 'offset' field"
+        );
+        assert!(
+            json.get("has_more").is_some(),
+            "response must have 'has_more' field"
+        );
     }
 
     #[tokio::test]
@@ -5893,14 +5985,30 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert!(json.get("builtin_tools").is_some(), "response must have 'builtin_tools'");
-        assert!(json.get("mcp_tools").is_some(), "response must have 'mcp_tools'");
-        assert!(json.get("builtin_count").is_some(), "response must have 'builtin_count'");
-        assert!(json.get("mcp_count").is_some(), "response must have 'mcp_count'");
+        assert!(
+            json.get("builtin_tools").is_some(),
+            "response must have 'builtin_tools'"
+        );
+        assert!(
+            json.get("mcp_tools").is_some(),
+            "response must have 'mcp_tools'"
+        );
+        assert!(
+            json.get("builtin_count").is_some(),
+            "response must have 'builtin_count'"
+        );
+        assert!(
+            json.get("mcp_count").is_some(),
+            "response must have 'mcp_count'"
+        );
         assert!(json.get("total").is_some(), "response must have 'total'");
         // All builtin tools should be returned (no pagination)
         let builtin = json["builtin_tools"].as_array().unwrap();
-        assert!(builtin.len() >= 50, "should return all builtin tools, got {}", builtin.len());
+        assert!(
+            builtin.len() >= 50,
+            "should return all builtin tools, got {}",
+            builtin.len()
+        );
         assert_eq!(json["builtin_count"], builtin.len());
         assert_eq!(json["mcp_count"], 0);
     }

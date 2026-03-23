@@ -247,12 +247,10 @@ impl BatchClient {
         timeout: Duration,
     ) -> Result<BatchStatus, ProviderError> {
         let started = std::time::Instant::now();
-        let mut delay = Duration::from_secs(
-            genesis_config::defaults::timeouts::BATCH_POLL_INITIAL_SECS,
-        );
-        let max_delay = Duration::from_secs(
-            genesis_config::defaults::timeouts::BATCH_POLL_MAX_SECS,
-        );
+        let mut delay =
+            Duration::from_secs(genesis_config::defaults::timeouts::BATCH_POLL_INITIAL_SECS);
+        let max_delay =
+            Duration::from_secs(genesis_config::defaults::timeouts::BATCH_POLL_MAX_SECS);
 
         loop {
             if started.elapsed() > timeout {

@@ -37,7 +37,10 @@ use crate::AppState;
 
 /// Base URL of the signal-cli HTTP daemon.
 fn signal_http_url() -> String {
-    genesis_config::env::get_or(genesis_config::env::SIGNAL_HTTP_URL, "http://127.0.0.1:8080")
+    genesis_config::env::get_or(
+        genesis_config::env::SIGNAL_HTTP_URL,
+        "http://127.0.0.1:8080",
+    )
 }
 
 /// The registered Signal account (phone number) this agent uses.
@@ -386,17 +389,14 @@ async fn process_envelope(
             // For DMs, use the shared pipeline.
             let reply = if is_group {
                 // Groups bypass pairing -- run commands/agent directly.
-                let store = genesis_storage::SessionStore::new(
-                    &state.loaded.config.storage.database_path,
-                );
-                if let crate::commands::CommandResult::Reply(r) =
-                    crate::commands::handle_command(
-                        &prompt,
-                        &session_id,
-                        &store,
-                        &state.loaded.config,
-                    )
-                {
+                let store =
+                    genesis_storage::SessionStore::new(&state.loaded.config.storage.database_path);
+                if let crate::commands::CommandResult::Reply(r) = crate::commands::handle_command(
+                    &prompt,
+                    &session_id,
+                    &store,
+                    &state.loaded.config,
+                ) {
                     r
                 } else {
                     crate::commands::check_session_expiry(
@@ -688,12 +688,13 @@ async fn send_rpc(
         });
     }
 
-    let rpc_resp: JsonRpcResponse = resp.json().await.map_err(|source| {
-        super::PlatformError::ResponseParse {
-            platform: DeliveryPlatform::Signal,
-            source,
-        }
-    })?;
+    let rpc_resp: JsonRpcResponse =
+        resp.json()
+            .await
+            .map_err(|source| super::PlatformError::ResponseParse {
+                platform: DeliveryPlatform::Signal,
+                source,
+            })?;
 
     if let Some(err) = rpc_resp.error {
         return Err(super::PlatformError::ApiLogicError {
