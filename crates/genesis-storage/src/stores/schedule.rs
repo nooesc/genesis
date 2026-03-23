@@ -186,6 +186,18 @@ impl ScheduleStore {
         collect_rows(rows, self.db.path())
     }
 
+    /// Return the total number of stored schedules.
+    pub fn count(&self) -> Result<u64, StorageError> {
+        let connection = self.db.conn()?;
+        let total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM schedules", [], |row| row.get(0))
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        Ok(total as u64)
+    }
+
     /// List schedules with offset/limit pagination.
     ///
     /// When `enabled_only` is `true`, only enabled schedules are returned and

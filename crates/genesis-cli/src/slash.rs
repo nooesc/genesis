@@ -532,7 +532,10 @@ pub(crate) fn handle_chat_command(
             }
         }
         "bus" => {
-            let bus_store = genesis_core::agent_bus::AgentBusStore::new(store.database_path());
+            let bus_store = genesis_storage::AgentBusStore::new(store.database_path());
+            if let Err(e) = bus_store.ensure_table() {
+                return Some(format!("Agent bus unavailable: {e}"));
+            }
             let sub = _args.trim();
             if sub == "stats" {
                 match bus_store.channel_stats() {

@@ -22,6 +22,7 @@ use crate::util::{exec_migration, first_existing_dir, first_existing_file, open}
 // ---------------------------------------------------------------------------
 pub use crate::error::StorageError;
 
+pub use crate::stores::agent_bus::{AgentBusStore, AgentMessage, MessageKind};
 pub use crate::stores::audit_log::{AuditEntry, AuditLogStore, LlmAnalytics, ToolAnalytics};
 pub use crate::stores::channel::{CachedChannel, ChannelStore};
 pub use crate::stores::embedding::EmbeddingStore;
@@ -457,6 +458,19 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
         database_path: database_path.to_path_buf(),
         schema_version: SCHEMA_VERSION,
     })
+}
+
+/// Run `PRAGMA integrity_check` on the database and return the result string.
+///
+/// A healthy database returns `"ok"`. Any other value describes the problem.
+pub fn integrity_check(database_path: &Path) -> Result<String, StorageError> {
+    let connection = open(database_path)?;
+    connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .map_err(|source| StorageError::Sqlite {
+            path: database_path.to_path_buf(),
+            source,
+        })
 }
 
 pub fn inspect(database_path: &Path) -> Result<StorageHealth, StorageError> {

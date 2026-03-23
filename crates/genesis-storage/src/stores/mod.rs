@@ -1,3 +1,4 @@
+pub mod agent_bus;
 pub mod audit_log;
 pub mod channel;
 pub mod embedding;
