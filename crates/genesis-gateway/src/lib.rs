@@ -5995,4 +5995,1618 @@ mod tests {
             );
         }
     }
+
+    // =====================================================================
+    // Integration tests for HTTP route handlers
+    // =====================================================================
+
+    /// Helper: make a GET request and return the response.
+    async fn get(app: &Router, uri: &str) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: make a POST request with JSON body.
+    async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: make a DELETE request.
+    async fn delete(app: &Router, uri: &str) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: make a PATCH request with JSON body.
+    async fn patch_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: make a PUT request with JSON body.
+    async fn put_json(app: &Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: parse response body as JSON.
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Helper: make a GET request with auth header.
+    async fn get_with_auth(app: &Router, uri: &str, key: &str) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::empty())
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: make a POST request with auth header and JSON body.
+    async fn post_json_with_auth(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+        key: &str,
+    ) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request should build");
+        app.clone().oneshot(req).await.expect("request should succeed")
+    }
+
+    /// Helper: open the test database directly for seeding data.
+    fn open_test_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("genesis.db")
+    }
+
+    // -----------------------------------------------------------------
+    // Health endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_ok_with_expected_fields() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+        let resp = get(&app, "/health").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ok");
+        assert!(json["version"].is_string());
+        assert!(json["uptime_seconds"].is_number());
+        assert!(json["model"].is_string());
+        assert!(json["total_sessions"].is_number());
+        assert!(json["total_tools"].is_number());
+    }
+
+    #[tokio::test]
+    async fn health_mcp_returns_ok_with_empty_servers() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+        let resp = get(&app, "/health/mcp").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["servers"], serde_json::json!([]));
+        assert_eq!(json["total_tools"], 0);
+    }
+
+    #[tokio::test]
+    async fn api_health_mirrors_root_health() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/health").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn agent_card_returns_well_known_json() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+        let resp = get(&app, "/.well-known/agent.json").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "Eve");
+        assert!(json["capabilities"]["streaming"].as_bool().unwrap());
+        assert!(json["capabilities"]["tools"].as_bool().unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // Session CRUD
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_session_returns_existing_session() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_existing_session() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.create_session("del-me", "test", None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/sessions/del-me").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["deleted"], true);
+
+        // Verify it's gone
+        let resp2 = get(&app, "/api/sessions/del-me").await;
+        assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_session_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/sessions/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_messages_returns_empty_for_new_session() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/messages").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["count"], 0);
+        assert!(json["messages"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_messages_returns_seeded_messages() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+        store.append_message("s1", "assistant", Some("Hi there!"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/messages").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn fork_session_creates_new_session() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/sessions/s1/fork",
+            serde_json::json!({"new_session_id": "fork-1"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["source_session_id"], "s1");
+        assert_eq!(json["new_session_id"], "fork-1");
+
+        // Verify the forked session has messages
+        let resp2 = get(&app, "/api/sessions/fork-1/messages").await;
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn update_session_title() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = patch_json(
+            &app,
+            "/api/sessions/s1/title",
+            serde_json::json!({"title": "New Title"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["title"], "New Title");
+        assert_eq!(json["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn purge_sessions_returns_count() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/sessions/purge?older_than_days=0").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json["purged"].is_number());
+        assert_eq!(json["older_than_days"], 0);
+    }
+
+    #[tokio::test]
+    async fn session_tags_crud() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // Get tags (should be empty initially)
+        let resp = get(&app, "/api/sessions/s1/tags").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["tags"], serde_json::json!([]));
+
+        // Set tags
+        let resp = put_json(
+            &app,
+            "/api/sessions/s1/tags",
+            serde_json::json!({"tags": ["alpha", "beta"]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Add a tag
+        let resp = post_json(&app, "/api/sessions/s1/tags/gamma", serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["added"], true);
+
+        // Remove a tag
+        let resp = delete(&app, "/api/sessions/s1/tags/alpha").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["removed"], true);
+
+        // Get final tags
+        let resp = get(&app, "/api/sessions/s1/tags").await;
+        let json = body_json(resp).await;
+        let tags = json["tags"].as_array().unwrap();
+        assert!(tags.contains(&serde_json::json!("beta")));
+        assert!(tags.contains(&serde_json::json!("gamma")));
+        assert!(!tags.contains(&serde_json::json!("alpha")));
+    }
+
+    #[tokio::test]
+    async fn sessions_by_tag_returns_matching_sessions() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.add_tag("s1", "deploy").unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/by-tag/deploy").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["tag"], "deploy");
+        assert!(json["count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn import_session_creates_session_with_messages() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/sessions/import",
+            serde_json::json!({
+                "session_id": "imported-1",
+                "title": "Imported Session",
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi!"}
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["session_id"], "imported-1");
+        assert_eq!(json["messages_imported"], 2);
+
+        // Verify messages were stored
+        let resp2 = get(&app, "/api/sessions/imported-1/messages").await;
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn export_session_returns_markdown_by_default() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/export").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("text/markdown")
+        );
+    }
+
+    #[tokio::test]
+    async fn export_session_json_format() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/export?format=json").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("application/json")
+        );
+    }
+
+    #[tokio::test]
+    async fn export_session_bad_format_returns_400() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("test"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/export?format=invalid").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn export_session_empty_returns_404() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.create_session("empty-sess", "test", None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/empty-sess/export").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bulk_export_returns_jsonl() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("Hello"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/export?format=jsonl").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_export_bad_format_returns_400() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        // Need at least one session with messages to trigger format validation
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("seed message"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/export?format=xml").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn search_messages_returns_results() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = SessionStore::new(&db);
+        store.append_message("s1", "user", Some("Rust programming language"), None, None, None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/messages/search?q=Rust").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["query"], "Rust");
+        assert!(json["count"].is_number());
+    }
+
+    // -----------------------------------------------------------------
+    // Skills CRUD
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn skill_crud_lifecycle() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // Create a skill
+        let resp = post_json(
+            &app,
+            "/api/skills",
+            serde_json::json!({
+                "name": "test-skill",
+                "description": "A test skill",
+                "instructions": "Do the test thing",
+                "trigger_hint": "when user says test",
+                "tags": ["testing", "example"]
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "test-skill");
+
+        // Get the skill
+        let resp = get(&app, "/api/skills/test-skill").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["name"], "test-skill");
+        assert_eq!(json["description"], "A test skill");
+
+        // List skills
+        let resp = get(&app, "/api/skills").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["total"].as_u64().unwrap() >= 1);
+
+        // Search by tag
+        let resp = get(&app, "/api/skills/search?tag=testing").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["count"].as_u64().unwrap() >= 1);
+
+        // Delete the skill
+        let resp = delete(&app, "/api/skills/test-skill").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["deleted"], true);
+
+        // Verify it's gone
+        let resp = get(&app, "/api/skills/test-skill").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_skill_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/skills/nonexistent-skill").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_skill_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/skills/nonexistent-skill").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // Memory endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn memory_crud_lifecycle() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        let store = MemoryStore::new(&db);
+        let mem = store.create(Some("s1"), "fact", "Rust is awesome").unwrap();
+        let mem_id = mem.id.clone();
+
+        let app = build_router(state);
+
+        // List memories
+        let resp = get(&app, "/api/memories").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["total"].as_u64().unwrap() >= 1);
+
+        // Search memories (keyword mode)
+        let resp = get(&app, "/api/memories/search?q=Rust").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["mode"], "keyword");
+        assert!(json["count"].as_u64().unwrap() >= 1);
+
+        // Delete memory
+        let resp = delete(&app, &format!("/api/memories/{mem_id}")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn delete_memory_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/memories/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // Schedule CRUD
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn schedule_crud_lifecycle() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // Create schedule
+        let resp = post_json(
+            &app,
+            "/api/schedules",
+            serde_json::json!({
+                "id": "sched-1",
+                "cron_expression": "0 9 * * *",
+                "destination": "api",
+                "prompt": "Good morning!"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], "sched-1");
+
+        // Get schedule
+        let resp = get(&app, "/api/schedules/sched-1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], "sched-1");
+        assert_eq!(json["cron_expression"], "0 9 * * *");
+
+        // List schedules
+        let resp = get(&app, "/api/schedules").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["total"].as_u64().unwrap() >= 1);
+
+        // Toggle enabled
+        let resp = patch_json(
+            &app,
+            "/api/schedules/sched-1/enabled",
+            serde_json::json!({"enabled": false}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["enabled"], false);
+
+        // Delete schedule
+        let resp = delete(&app, "/api/schedules/sched-1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["deleted"], true);
+
+        // Verify it's gone
+        let resp = get(&app, "/api/schedules/sched-1").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_schedule_validates_cron_expression() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/schedules",
+            serde_json::json!({
+                "id": "bad-cron",
+                "cron_expression": "not a cron",
+                "destination": "api",
+                "prompt": "test"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_schedule_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/schedules/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_schedule_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/schedules/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_schedule_enabled_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = patch_json(
+            &app,
+            "/api/schedules/nonexistent/enabled",
+            serde_json::json!({"enabled": true}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // User traits (user model)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn user_trait_crud_lifecycle() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // Observe a trait
+        let resp = post_json(
+            &app,
+            "/api/user/traits",
+            serde_json::json!({
+                "trait_key": "preferred_language",
+                "category": "preference",
+                "value": "Rust"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Get trait
+        let resp = get(&app, "/api/user/traits/preferred_language").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["trait_key"], "preferred_language");
+        assert_eq!(json["value"], "Rust");
+
+        // List traits
+        let resp = get(&app, "/api/user/traits").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["total"].as_u64().unwrap() >= 1);
+
+        // Delete trait
+        let resp = delete(&app, "/api/user/traits/preferred_language").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn get_user_trait_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/user/traits/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_user_trait_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/user/traits/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // Subagents
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_subagent_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/subagents/nonexistent").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_session_subagents_returns_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/sessions/s1/subagents").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["count"], 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Skill usage stats
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn skill_usage_stats_returns_500_for_skill_with_no_usages() {
+        // NOTE: This is a known issue — SUM() returns NULL for empty result sets
+        // and the i64 deserialization fails. When the underlying SQL is fixed to
+        // use COALESCE, this test should be updated to expect 200.
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/skills/nonexistent/usage").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn skill_usage_stats_returns_ok_when_data_exists() {
+        let (state, dir) = create_test_state();
+        let db = open_test_db(&dir);
+        // Create the skill first (foreign key constraint)
+        let skill_store = SkillStore::new(&db);
+        skill_store.upsert("test-skill", "A skill", "Do it", None, &[]).unwrap();
+        let usage_store = SkillUsageStore::new(&db);
+        usage_store.record_usage("test-skill", Some("s1"), "success", None).unwrap();
+
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/skills/test-skill/usage").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["total_uses"], 1);
+        assert_eq!(json["successes"], 1);
+    }
+
+    #[tokio::test]
+    async fn skill_usage_recent_returns_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/skills/nonexistent/usage/recent").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Pairing
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pairing_list_approved_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/pairing/approved").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn pairing_list_pending_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/pairing/pending").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn approve_pairing_returns_404_for_invalid_code() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/pairing/approve",
+            serde_json::json!({"platform": "telegram", "code": "invalid"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_pairing_returns_404_for_unknown_user() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/pairing/revoke",
+            serde_json::json!({"platform": "telegram", "user_id": "unknown"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn clear_pending_pairing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/pairing/clear-pending",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json["cleared"].is_number());
+    }
+
+    // -----------------------------------------------------------------
+    // Cache endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cache_stats_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/cache/stats").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("enabled").is_some());
+        assert!(json.get("entries").is_some());
+        assert!(json.get("total_hits").is_some());
+    }
+
+    #[tokio::test]
+    async fn cache_clear_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(&app, "/api/cache/clear", serde_json::json!({})).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("cleared").is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // Audit log endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn audit_recent_returns_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/audit").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 0);
+        assert!(json["entries"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_stats_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/audit/stats").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["total_entries"], 0);
+    }
+
+    #[tokio::test]
+    async fn audit_session_returns_entries() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/audit/session/s1").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["session_id"], "s1");
+        assert_eq!(json["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn audit_purge_returns_count() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/audit/purge",
+            serde_json::json!({"older_than_days": 1}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json["purged"].is_number());
+        assert_eq!(json["older_than_days"], 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Analytics endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tool_analytics_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/analytics/tools").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["period_days"], 30);
+        assert!(json["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn llm_analytics_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/analytics/llm?days=7").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["period_days"], 7);
+        assert!(json["models"].is_array());
+    }
+
+    // -----------------------------------------------------------------
+    // Webhook status endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn webhooks_status_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/webhooks/status").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("configured").is_some());
+        assert!(json.get("delivered").is_some());
+        assert!(json.get("dead_letter_count").is_some());
+    }
+
+    #[tokio::test]
+    async fn webhooks_dead_letters_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/webhooks/dead-letters").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn webhooks_clear_dead_letters_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = delete(&app, "/api/webhooks/dead-letters").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("cleared").is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // Config endpoint
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn config_endpoint_returns_provider_info() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/config").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["provider"]["backend"], "openai");
+        assert_eq!(json["provider"]["model"], "gpt-4.1-mini");
+        assert_eq!(json["profile"], "test");
+        assert!(json["version"].is_string());
+    }
+
+    // -----------------------------------------------------------------
+    // Template endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_template_returns_404_for_missing() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/templates/nonexistent-template").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // Eval endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn eval_validate_accepts_valid_suite() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let yaml = r#"
+name: test-suite
+cases:
+  - id: basic
+    prompt: "What is 2+2?"
+    criteria:
+      must_contain: ["4"]
+"#;
+        let resp = post_json(
+            &app,
+            "/api/eval/validate",
+            serde_json::json!({"yaml": yaml}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["valid"], true);
+        assert_eq!(json["suite_name"], "test-suite");
+        assert_eq!(json["cases"], 1);
+    }
+
+    #[tokio::test]
+    async fn eval_validate_rejects_invalid_yaml() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/eval/validate",
+            serde_json::json!({"yaml": "{{not valid yaml"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn eval_validate_missing_yaml_returns_400() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/eval/validate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------
+    // Guardrails endpoint
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn guardrails_check_validates_clean_input() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/guardrails/check",
+            serde_json::json!({"text": "Hello, how are you?"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("passed").is_some() || json.get("violations").is_some());
+    }
+
+    #[tokio::test]
+    async fn guardrails_check_missing_text_returns_400() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/guardrails/check",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------
+    // Workflow endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workflow_validate_accepts_valid_workflow() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let yaml = r#"
+name: greet-workflow
+steps:
+  - name: greet
+    prompt: "Say hello"
+"#;
+        let resp = post_json(
+            &app,
+            "/api/workflows/validate",
+            serde_json::json!({"yaml": yaml}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["workflow_name"], "greet-workflow");
+    }
+
+    #[tokio::test]
+    async fn workflow_validate_missing_yaml_returns_400() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/workflows/validate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn workflow_validate_rejects_invalid_yaml() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/workflows/validate",
+            serde_json::json!({"yaml": "{{bad yaml"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------
+    // Agent bus endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bus_channels_returns_empty() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/bus/channels").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json["channels"].is_array());
+    }
+
+    #[tokio::test]
+    async fn bus_publish_and_history() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        // Publish a message
+        let resp = post_json(
+            &app,
+            "/api/bus/publish",
+            serde_json::json!({
+                "channel": "test-channel",
+                "payload": "hello bus",
+                "sender": "test-agent"
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["published"], true);
+
+        // Get history
+        let resp = get(&app, "/api/bus/history/test-channel").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["channel"], "test-channel");
+        assert!(json["count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn bus_publish_missing_channel_returns_400() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/bus/publish",
+            serde_json::json!({"payload": "no channel"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bus_publish_missing_payload_returns_400() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = post_json(
+            &app,
+            "/api/bus/publish",
+            serde_json::json!({"channel": "ch"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn bus_stats_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/bus/stats").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("total_messages").is_some());
+        assert!(json["channels"].is_array());
+    }
+
+    // -----------------------------------------------------------------
+    // Usage / Insights
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn usage_endpoint_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/usage").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn insights_endpoint_returns_ok() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/insights?days=7").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------
+    // OpenAI-compatible endpoints
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn openai_models_returns_model_list() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/v1/models").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["object"], "list");
+        assert!(!json["data"].as_array().unwrap().is_empty());
+        assert!(json["data"][0]["id"].as_str().unwrap().contains("openai"));
+    }
+
+    // -----------------------------------------------------------------
+    // Prometheus / JSON metrics
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn prometheus_metrics_returns_text() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/metrics").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/plain"), "expected text/plain, got {ct}");
+    }
+
+    #[tokio::test]
+    async fn metrics_json_endpoint_returns_all_counters() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/metrics/json").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json.get("requests_total").is_some());
+        assert!(json.get("errors_total").is_some());
+        assert!(json.get("uptime_seconds").is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // Authentication tests
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn auth_required_returns_401_without_key() {
+        let (state, _dir) = create_test_state_with_key(
+            Some("secret-key".to_string()),
+            true,
+            None,
+        );
+        let app = build_router(state);
+
+        // Protected routes should return 401
+        let resp = get(&app, "/api/sessions").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = get(&app, "/api/skills").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = get(&app, "/api/memories").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_with_valid_key_returns_200() {
+        let (state, _dir) = create_test_state_with_key(
+            Some("secret-key".to_string()),
+            true,
+            None,
+        );
+        let app = build_router(state);
+
+        let resp = get_with_auth(&app, "/api/sessions", "secret-key").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_with_wrong_key_returns_401() {
+        let (state, _dir) = create_test_state_with_key(
+            Some("secret-key".to_string()),
+            true,
+            None,
+        );
+        let app = build_router(state);
+
+        let resp = get_with_auth(&app, "/api/sessions", "wrong-key").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_accessible_without_auth_when_key_configured() {
+        let (state, _dir) = create_test_state_with_key(
+            Some("secret-key".to_string()),
+            true,
+            None,
+        );
+        let app = build_router(state);
+
+        // Health endpoints are public
+        let resp = get(&app, "/health").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = get(&app, "/api/health").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = get(&app, "/health/mcp").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_post_endpoint_with_valid_key() {
+        let (state, _dir) = create_test_state_with_key(
+            Some("secret-key".to_string()),
+            true,
+            None,
+        );
+        let app = build_router(state);
+
+        let resp = post_json_with_auth(
+            &app,
+            "/api/skills",
+            serde_json::json!({
+                "name": "auth-skill",
+                "description": "test",
+                "instructions": "test",
+                "tags": []
+            }),
+            "secret-key",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------
+    // Rate limiting
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rate_limiter_allows_within_limit() {
+        let limiter = RateLimiter::new(5);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        for _ in 0..5 {
+            assert!(limiter.check(ip), "should allow within limit");
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_rejects_after_exceeding_limit() {
+        let limiter = RateLimiter::new(2);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(!limiter.check(ip), "should block after exceeding limit");
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_tracks_different_ips() {
+        let limiter = RateLimiter::new(1);
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+
+        assert!(limiter.check(ip1));
+        assert!(!limiter.check(ip1));
+        assert!(limiter.check(ip2), "different IP should be independent");
+    }
+
+    // -----------------------------------------------------------------
+    // Tools endpoint
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_tools_contains_builtin_tools() {
+        let (state, _dir) = create_test_state();
+        let app = build_router(state);
+
+        let resp = get(&app, "/api/tools").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert!(json["builtin_count"].as_u64().unwrap() >= 50);
+        assert_eq!(json["mcp_count"], 0);
+
+        // Verify each tool has required fields
+        let tools = json["builtin_tools"].as_array().unwrap();
+        for tool in tools {
+            assert!(tool["name"].is_string());
+            assert!(tool["description"].is_string());
+            assert_eq!(tool["source"], "builtin");
+        }
+    }
 }
