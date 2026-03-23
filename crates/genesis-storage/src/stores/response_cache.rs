@@ -3,8 +3,8 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::Database;
 use crate::error::StorageError;
+use crate::Database;
 
 /// A cached LLM response entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,8 +168,8 @@ impl ResponseCacheStore {
 
 #[cfg(test)]
 mod response_cache_store_tests {
-    use crate::bootstrap;
     use super::ResponseCacheStore;
+    use crate::bootstrap;
     use tempfile::tempdir;
 
     #[test]
@@ -277,4 +277,3 @@ mod response_cache_store_tests {
         assert!(store.get("c").expect("get should succeed").is_none());
     }
 }
-
