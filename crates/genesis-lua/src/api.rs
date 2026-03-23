@@ -28,6 +28,7 @@ pub struct GenesisApi {
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     context_registry: PluginContextRegistry,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     plugin_context: Option<PluginContext>,
     pub(crate) path_validator: Option<Arc<PathValidator>>,
     pub(crate) working_dir: Option<PathBuf>,
@@ -299,6 +300,55 @@ impl UserData for GenesisApi {
 
             Ok(table)
         });
+        fields.add_field_method_get("plugins", |lua, this| {
+            let plugin_names = Arc::clone(&this.plugin_names);
+            let current_plugin = this.plugin_context.as_ref().map(|c| c.name.clone());
+            let table = lua.create_table()?;
+
+            table.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    let names = plugin_names.lock().unwrap_or_else(|p| p.into_inner());
+                    let result = lua.create_table()?;
+                    for (i, name) in names.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("name", name.clone())?;
+                        result.set(i + 1, entry)?;
+                    }
+                    Ok(result)
+                })?,
+            )?;
+
+            table.set(
+                "current",
+                lua.create_function(move |lua, ()| match &current_plugin {
+                    Some(name) => {
+                        let entry = lua.create_table()?;
+                        entry.set("name", name.clone())?;
+                        Ok(mlua::Value::Table(entry))
+                    }
+                    None => Ok(mlua::Value::Nil),
+                })?,
+            )?;
+
+            Ok(table)
+        });
+        fields.add_field_method_get("tools_list", |lua, this| {
+            let tools = Arc::clone(&this.tools);
+            lua.create_function(move |lua, ()| {
+                let registry = tools.lock().unwrap_or_else(|p| p.into_inner());
+                let all_tools = registry.registered_tools();
+                let result = lua.create_table()?;
+                for (i, tool) in all_tools.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("name", tool.definition.name.clone())?;
+                    entry.set("description", tool.definition.description.clone())?;
+                    entry.set("plugin", tool.plugin_name.clone())?;
+                    result.set(i + 1, entry)?;
+                }
+                Ok(result)
+            })
+        });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
             let plugin_context = this.plugin_context.clone();
@@ -402,6 +452,7 @@ pub(crate) fn install_genesis_api(
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
     context_registry: PluginContextRegistry,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
     working_dir: Option<PathBuf>,
@@ -424,6 +475,7 @@ pub(crate) fn install_genesis_api(
         host_tools,
         active_plugin,
         context_registry,
+        plugin_names,
         plugin_context,
         path_validator,
         working_dir,

@@ -54,7 +54,7 @@ pub struct LuaRuntimeConfig {
 
 pub struct LuaRuntime {
     lua: Lua,
-    plugin_names: Vec<String>,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
     plugin_errors: Vec<String>,
     session_state: Arc<Mutex<LuaSessionContext>>,
@@ -76,7 +76,7 @@ pub struct LuaRuntime {
 impl std::fmt::Debug for LuaRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LuaRuntime")
-            .field("plugin_names", &self.plugin_names)
+            .field("plugin_names", &*self.plugin_names.lock().expect("plugin_names mutex should not be poisoned"))
             .field("logs", &self.logs())
             .field("plugin_errors", &self.plugin_errors)
             .finish()
@@ -297,6 +297,7 @@ impl LuaRuntime {
         let host_tool_executor = Arc::new(Mutex::new(None));
         let active_plugin = Arc::new(Mutex::new(Vec::new()));
         let context_registry = PluginContextRegistry::new();
+        let plugin_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let execution_control = Arc::new(Mutex::new(PluginExecutionControl::default()));
         let disabled_plugins = Arc::new(Mutex::new(HashSet::new()));
         let plugin_failures = Arc::new(Mutex::new(HashMap::new()));
@@ -329,6 +330,7 @@ impl LuaRuntime {
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
             context_registry.clone(),
+            Arc::clone(&plugin_names),
             None,
             config.path_validator.clone(),
             config.working_dir.clone(),
@@ -340,7 +342,7 @@ impl LuaRuntime {
 
         let mut runtime = Self {
             lua,
-            plugin_names: Vec::new(),
+            plugin_names,
             logs,
             plugin_errors: Vec::new(),
             session_state,
@@ -422,7 +424,10 @@ impl LuaRuntime {
     }
 
     pub fn plugin_names(&self) -> Vec<String> {
-        self.plugin_names.clone()
+        self.plugin_names
+            .lock()
+            .expect("plugin_names mutex should not be poisoned")
+            .clone()
     }
 
     pub fn logs(&self) -> Vec<String> {
@@ -721,6 +726,7 @@ impl LuaRuntime {
                 root: PathBuf::new(),
                 entrypoint: PathBuf::new(),
                 manifest: PluginManifest::for_single_file(bundled.name),
+                source: None,
             };
             self.load_plugin_source(config, &plugin, bundled.source, false);
         }
@@ -741,7 +747,11 @@ impl LuaRuntime {
                 continue;
             }
             // Skip if a user plugin already registered tools with the same plugin name.
-            if self.plugin_names.iter().any(|n| n == bundled.name) {
+            if self.plugin_names
+                .lock()
+                .expect("plugin_names mutex should not be poisoned")
+                .iter()
+                .any(|n| n == bundled.name) {
                 continue;
             }
 
@@ -768,6 +778,7 @@ impl LuaRuntime {
                 root: bundled_path.clone(),
                 entrypoint: bundled_path,
                 manifest,
+                source: None,
             };
             self.load_plugin_source(config, &plugin, bundled.source, true);
         }
@@ -810,7 +821,10 @@ impl LuaRuntime {
             return;
         }
         if record_plugin_name {
-            self.plugin_names.push(plugin.name.clone());
+            self.plugin_names
+                .lock()
+                .expect("plugin_names mutex should not be poisoned")
+                .push(plugin.name.clone());
         }
         let _ = self.run_on_plugin_load(&plugin.name, plugin.kind);
     }
@@ -836,6 +850,7 @@ impl LuaRuntime {
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
             self.context_registry.clone(),
+            Arc::clone(&self.plugin_names),
             Some(plugin_context.clone()),
             config.path_validator.clone(),
             config.working_dir.clone(),

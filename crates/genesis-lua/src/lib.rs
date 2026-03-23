@@ -3,6 +3,7 @@ mod bundled;
 pub mod context_registry;
 pub mod discovery;
 pub mod hooks;
+pub mod install;
 pub mod manifest;
 pub mod personality;
 pub mod primitives;
@@ -2173,5 +2174,214 @@ trusted = true
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].plugin_name, "weather");
         assert!(entries[0].content.contains("sunny"));
+    }
+
+    #[test]
+    fn introspection_plugins_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir(&plugin_dir).unwrap();
+        fs::write(plugin_dir.join("alpha.lua"), r#"genesis.log("loaded")"#).unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let result = runtime
+            .eval_string(
+                r#"
+            local plugins = genesis.plugins.list()
+            local found = false
+            for _, p in ipairs(plugins) do
+                if p.name == "alpha" then found = true end
+            end
+            return { found = found, count = #plugins }
+        "#,
+            )
+            .expect("plugins.list should work");
+        assert_eq!(result["found"], true);
+        // count should include bundled plugins too
+        assert!(result["count"].as_i64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn introspection_plugins_current() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        write_package_plugin(
+            &plugin_dir,
+            "inspector",
+            r#"
+            local me = genesis.plugins.current()
+            if me then
+                genesis.log("current:" .. me.name)
+            else
+                genesis.log("current:nil")
+            end
+        "#,
+        )
+        .unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let logs = runtime.logs();
+        assert!(
+            logs.iter().any(|entry| entry == "current:inspector"),
+            "plugin should see its own name via plugins.current(): {logs:?}"
+        );
+    }
+
+    #[test]
+    fn introspection_plugins_current_nil_outside_plugin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir(&plugin_dir).unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let result = runtime
+            .eval_string(
+                r#"
+            local me = genesis.plugins.current()
+            return { is_nil = (me == nil) }
+        "#,
+            )
+            .expect("plugins.current should work outside plugin context");
+        assert_eq!(result["is_nil"], true);
+    }
+
+    #[test]
+    fn introspection_tools_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join("test-intro.lua"),
+            r#"
+        genesis.register_tool({
+            name = "intro_tool",
+            description = "Test introspection",
+            parameters = {},
+            run = function() return "ok" end,
+        })
+        "#,
+        )
+        .unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let result = runtime
+            .eval_string(
+                r#"
+            local tools = genesis.tools_list()
+            local found = false
+            for _, t in ipairs(tools) do
+                if t.name == "intro_tool" then found = true end
+            end
+            return { found = found }
+        "#,
+            )
+            .expect("tools_list should work");
+        assert_eq!(result["found"], true);
+    }
+
+    #[test]
+    fn introspection_tools_list_includes_plugin_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plugin_dir = dir.path().join("plugins");
+        fs::create_dir(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join("my-plugin.lua"),
+            r#"
+        genesis.register_tool({
+            name = "my_tool",
+            description = "A test tool",
+            parameters = {},
+            run = function() return "ok" end,
+        })
+        "#,
+        )
+        .unwrap();
+
+        let runtime = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir,
+                session: LuaSessionContext {
+                    id: "test".to_owned(),
+                    model: "test".to_owned(),
+                    platform: "cli".to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let result = runtime
+            .eval_string(
+                r#"
+            local tools = genesis.tools_list()
+            for _, t in ipairs(tools) do
+                if t.name == "my_tool" then
+                    return {
+                        name = t.name,
+                        description = t.description,
+                        plugin = t.plugin,
+                    }
+                end
+            end
+            return { name = "not_found" }
+        "#,
+            )
+            .expect("tools_list should include plugin info");
+        assert_eq!(result["name"], "my_tool");
+        assert_eq!(result["description"], "A test tool");
+        assert_eq!(result["plugin"], "my-plugin");
     }
 }
