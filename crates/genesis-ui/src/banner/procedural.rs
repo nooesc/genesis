@@ -10,16 +10,10 @@
 use super::frames::{HalfBlockCell, HalfBlockFrame, RgbColor};
 use super::geometry;
 use super::silhouette;
-use crate::colors::{EVE_AMBER, EVE_DARK, EVE_LAVENDER, EVE_LILAC, EVE_PURPLE};
+use crate::colors::{EVE_AMBER, EVE_LAVENDER, EVE_LILAC, EVE_PURPLE};
 
 /// Alpha threshold -- pixels below this are considered transparent.
 const ALPHA_THRESHOLD: f32 = 0.05;
-
-/// Hex grid spacing for full-size frames.
-const HEX_SPACING_FULL: u32 = 10;
-
-/// Hex grid spacing for compact frames.
-const HEX_SPACING_COMPACT: u32 = 14;
 
 /// Compact frame width threshold.
 const COMPACT_THRESHOLD: u32 = 35;
@@ -53,26 +47,8 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
     let is_compact = px_w < COMPACT_THRESHOLD;
     let t_f32 = t as f32;
 
-    // ── Layer 1: Hex grid ────────────────────────────────────────────
-    // Very faint — just a hint of structure behind the silhouette.
-    let hex_spacing = if is_compact {
-        HEX_SPACING_COMPACT
-    } else {
-        HEX_SPACING_FULL
-    };
-    let faint_dark = geometry::dim_color(RgbColor::from_tuple(EVE_DARK), 0.35);
-    let hex_grid = geometry::render_hex_grid(
-        px_w,
-        px_h,
-        hex_spacing,
-        faint_dark,
-        0.5,
-        0.35,
-        t_f32,
-    );
-
-    // ── Layer 2: Cruciform ───────────────────────────────────────────
-    // Very subtle — positioned behind the head area as a halo.
+    // ── Layer 1: Cruciform ─────────────────────────────────────────
+    // Subtle cross behind the head area as a halo.
     let cruciform_t = t_f32 + 0.5;
     let faint_amber = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.4);
     let cruciform = geometry::render_cruciform(
@@ -85,7 +61,7 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
         cruciform_t,
     );
 
-    // ── Layer 3: Arcs (skip for compact) ─────────────────────────────
+    // ── Layer 2: Arcs (skip for compact) ─────────────────────────────
     let arcs = if !is_compact {
         let arc_color = geometry::dim_color(RgbColor::from_tuple(EVE_AMBER), 0.25);
         geometry::render_arcs(px_w, px_h, 0.5, 0.10, ARC_RADII, arc_color)
@@ -93,9 +69,8 @@ pub fn compose(width: u16, height: u16, t: f64) -> HalfBlockFrame {
         geometry::new_pixel_grid(px_w, px_h)
     };
 
-    // ── Compose background (painter's algorithm) ─────────────────────
-    let mut background = hex_grid;
-    blend_layers(&mut background, &cruciform);
+    // ── Compose background ───────────────────────────────────────────
+    let mut background = cruciform;
     blend_layers(&mut background, &arcs);
 
     // ── Layer 4: Silhouette ──────────────────────────────────────────

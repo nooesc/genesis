@@ -6,15 +6,6 @@
 use std::f32::consts::TAU;
 
 use super::frames::RgbColor;
-use crate::colors::{EVE_AMBER, EVE_DARK, UI_DIM};
-
-const DARK: RgbColor = RgbColor::from_tuple(EVE_DARK);
-const AMBER: RgbColor = RgbColor::from_tuple(EVE_AMBER);
-const DIM: RgbColor = RgbColor::from_tuple(UI_DIM);
-
-#[allow(dead_code)]
-const _PALETTE_CHECK: [RgbColor; 3] = [DARK, AMBER, DIM];
-
 pub fn new_pixel_grid(width: u32, height: u32) -> Vec<Vec<Option<RgbColor>>> {
     vec![vec![None; width as usize]; height as usize]
 }
@@ -36,63 +27,6 @@ pub fn dim_color(color: RgbColor, factor: f32) -> RgbColor {
         (f32::from(color.g) * f) as u8,
         (f32::from(color.b) * f) as u8,
     )
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
-pub fn render_hex_grid(
-    width: u32,
-    height: u32,
-    spacing: u32,
-    base_color: RgbColor,
-    center_x: f32,
-    center_y: f32,
-    glow_t: f32,
-) -> Vec<Vec<Option<RgbColor>>> {
-    if width == 0 || height == 0 || spacing == 0 {
-        return new_pixel_grid(width, height);
-    }
-
-    let mut grid = new_pixel_grid(width, height);
-    let sp = spacing as f32;
-    let hex_h = sp * (3.0_f32).sqrt();
-    let glow_pulse = 0.15 * (glow_t * TAU).sin();
-    let glow_cx = center_x * width as f32;
-    let glow_cy = center_y * height as f32;
-    let max_dist = ((width as f32).powi(2) + (height as f32).powi(2)).sqrt();
-
-    for py in 0..height {
-        for px in 0..width {
-            let fx = px as f32;
-            let fy = py as f32;
-
-            let row = (fy / hex_h).round() as i32;
-            let x_offset = if row & 1 != 0 { sp * 0.5 } else { 0.0 };
-            let col = ((fx - x_offset) / sp).round() as i32;
-
-            let hx = col as f32 * sp + x_offset;
-            let hy = row as f32 * hex_h;
-
-            let dist = hex_edge_distance(fx - hx, fy - hy, sp * 0.5);
-
-            if dist.abs() <= 1.2 {
-                let glow_dist = ((fx - glow_cx).powi(2) + (fy - glow_cy).powi(2)).sqrt();
-                let norm_dist = (glow_dist / max_dist).min(1.0);
-                let boost = 1.0 + glow_pulse * (1.0 - norm_dist);
-                grid[py as usize][px as usize] = Some(brighten(base_color, boost));
-            }
-        }
-    }
-
-    grid
-}
-
-fn hex_edge_distance(dx: f32, dy: f32, radius: f32) -> f32 {
-    let adx = dx.abs();
-    let ady = dy.abs();
-    let q = adx;
-    let r = adx * (1.0 / (3.0_f32).sqrt()) + ady * (2.0 / (3.0_f32).sqrt()) * 0.5;
-    let hex_dist = q.max(r).max(ady * (2.0 / (3.0_f32).sqrt()) * 0.5);
-    hex_dist - radius
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -219,68 +153,41 @@ pub fn render_arcs(
 mod tests {
     use super::*;
 
-    #[test]
-    fn hex_grid_produces_nonempty_output() {
-        let grid = render_hex_grid(80, 40, 8, DARK, 0.5, 0.5, 0.0);
-        let non_none = grid.iter().flatten().filter(|p| p.is_some()).count();
-        assert!(non_none > 0, "hex grid should have visible pixels");
-    }
-
-    #[test]
-    fn hex_grid_zero_size() {
-        let grid = render_hex_grid(0, 0, 8, DARK, 0.5, 0.5, 0.0);
-        assert!(grid.is_empty());
-    }
+    const TEST_COLOR: RgbColor = RgbColor::new(200, 150, 100);
 
     #[test]
     fn cruciform_centered() {
-        let grid = render_cruciform(100, 60, 0.5, 0.5, 0.02, AMBER, 0.0);
-        let cx = 50;
-        let cy = 30;
-        assert!(
-            grid[cy][cx].is_some(),
-            "center of cruciform should have a pixel"
-        );
+        let grid = render_cruciform(100, 60, 0.5, 0.5, 0.02, TEST_COLOR, 0.0);
+        assert!(grid[30][50].is_some());
     }
 
     #[test]
     fn cruciform_has_vertical_arm() {
-        let grid = render_cruciform(100, 60, 0.5, 0.5, 0.02, AMBER, 0.0);
-        let cx = 50;
-        let vertical_pixels: usize = (0..60).filter(|&y| grid[y][cx].is_some()).count();
-        assert!(
-            vertical_pixels >= 50,
-            "vertical arm should span most of the height, got {vertical_pixels}"
-        );
+        let grid = render_cruciform(100, 60, 0.5, 0.5, 0.02, TEST_COLOR, 0.0);
+        let vertical_pixels: usize = (0..60).filter(|&y| grid[y][50].is_some()).count();
+        assert!(vertical_pixels >= 50);
     }
 
     #[test]
     fn arcs_upper_hemisphere_only() {
-        let grid = render_arcs(100, 60, 0.5, 0.5, &[0.15, 0.25, 0.35], DIM);
-        let center_row = 30;
-        let below_count = grid[center_row..]
+        let grid = render_arcs(100, 60, 0.5, 0.5, &[0.15, 0.25, 0.35], TEST_COLOR);
+        let below_count = grid[30..]
             .iter()
             .flatten()
             .filter(|p| p.is_some())
             .count();
-        assert_eq!(below_count, 0, "arcs should only appear above center_y");
+        assert_eq!(below_count, 0);
     }
 
     #[test]
     fn brighten_clamps_to_255() {
-        let white = RgbColor::new(200, 200, 200);
-        let bright = brighten(white, 2.0);
-        assert_eq!(bright.r, 255);
-        assert_eq!(bright.g, 255);
-        assert_eq!(bright.b, 255);
+        let bright = brighten(RgbColor::new(200, 200, 200), 2.0);
+        assert_eq!(bright, RgbColor::new(255, 255, 255));
     }
 
     #[test]
     fn dim_color_reduces() {
-        let white = RgbColor::new(255, 255, 255);
-        let grey = dim_color(white, 0.5);
+        let grey = dim_color(RgbColor::new(255, 255, 255), 0.5);
         assert_eq!(grey.r, 127);
-        assert_eq!(grey.g, 127);
-        assert_eq!(grey.b, 127);
     }
 }
