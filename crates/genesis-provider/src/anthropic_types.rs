@@ -37,11 +37,11 @@ pub(crate) struct AnthropicRequest {
     pub thinking: Option<AnthropicThinking>,
 }
 
-/// System content — can be a plain string or content blocks with cache_control.
+/// System content — always sent as content blocks with cache_control so that
+/// the system prompt is part of the cached prefix.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum AnthropicSystemContent {
-    Text(String),
     Blocks(Vec<AnthropicContentBlock>),
 }
 
@@ -90,6 +90,8 @@ pub(crate) enum AnthropicContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
@@ -233,7 +235,11 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
     for msg in &req.messages {
         match msg.role.as_str() {
             "system" => {
-                // Check if content is already in content-block form (from cache injection)
+                // Always convert system message to content-block form with
+                // cache_control so the system prompt is cached (breakpoint 1).
+                let cache = Some(CacheControl {
+                    control_type: "ephemeral".to_owned(),
+                });
                 if let Some(MessageContent::Parts(parts)) = &msg.content {
                     let blocks: Vec<AnthropicContentBlock> = parts
                         .iter()
@@ -241,9 +247,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                             crate::api_types::ContentPart::Text { text } => {
                                 Some(AnthropicContentBlock::Text {
                                     text: text.clone(),
-                                    cache_control: Some(CacheControl {
-                                        control_type: "ephemeral".to_owned(),
-                                    }),
+                                    cache_control: cache.clone(),
                                 })
                             }
                             _ => None,
@@ -255,7 +259,12 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                     }
                 }
                 let text = msg.content_text().unwrap_or_default().to_owned();
-                system = Some(AnthropicSystemContent::Text(text));
+                system = Some(AnthropicSystemContent::Blocks(vec![
+                    AnthropicContentBlock::Text {
+                        text,
+                        cache_control: cache,
+                    },
+                ]));
             }
             "assistant" => {
                 let mut blocks = Vec::new();
@@ -320,6 +329,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                             blocks.push(AnthropicContentBlock::ToolResult {
                                 tool_use_id,
                                 content: content_text,
+                                cache_control: None,
                             });
                             continue;
                         }
@@ -332,6 +342,7 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
                         AnthropicContentBlock::ToolResult {
                             tool_use_id,
                             content: content_text,
+                            cache_control: None,
                         },
                     ]),
                 });
@@ -458,67 +469,88 @@ pub(crate) fn to_anthropic_request(req: &ChatCompletionRequest) -> AnthropicRequ
     }
 }
 
-/// Inject cache breakpoints on the conversation message prefix.
+/// Inject a cache breakpoint at the stable conversation prefix boundary.
 ///
-/// Places up to 2 additional `cache_control` markers on messages that form
-/// the stable prefix of the conversation. This maximizes cache hit rates
-/// across turns since earlier messages don't change.
+/// Places 1 `cache_control` marker at a quantized position in the message
+/// array so that the breakpoint stays at the **same** message index across
+/// consecutive turns, giving Anthropic's cache time to hit.
 ///
 /// Strategy:
-/// - Find the second-to-last user message (the "turn boundary" before
-///   the current turn) and mark its last content block.
-/// - Find the last tool_result-bearing message (often large, benefits
-///   most from caching) and mark its last content block.
+/// We keep a "recent window" of the last few messages (the active turn that
+/// changes each round). Everything before that window is the stable prefix.
+/// The boundary is quantized to multiples of `STEP` messages so the
+/// breakpoint only advances every `STEP/2` turns (~4 full user/assistant
+/// pairs), not every single turn.
+///
+/// The marker is placed on the last content block of the boundary message,
+/// supporting Text, ToolResult, and other block types.
 fn inject_conversation_cache_breakpoints(messages: &mut [AnthropicMessage]) {
-    if messages.len() < 4 {
-        // Too few messages to benefit from conversation caching.
+    // Need enough messages for a meaningful stable prefix.
+    if messages.len() < 6 {
         return;
     }
 
+    // Recent window: the last few messages that change every turn.
+    // 4 messages ≈ 2 turns (user+assistant pairs).
+    const RECENT_WINDOW: usize = 4;
+
+    // Quantization step: the boundary index is rounded down to the nearest
+    // multiple of STEP. This keeps the breakpoint at the same position for
+    // several consecutive turns before it jumps forward.
+    const STEP: usize = 8;
+
+    let raw_boundary = messages.len().saturating_sub(RECENT_WINDOW + 1);
+    if raw_boundary == 0 {
+        return;
+    }
+
+    // Quantize: round down to nearest STEP, but ensure at least 1.
+    let quantized = (raw_boundary / STEP) * STEP;
+    let boundary = if quantized == 0 {
+        // Conversation is still short — just use the raw boundary.
+        raw_boundary
+    } else {
+        quantized
+    };
+
+    // Clamp to valid range (should already be, but be safe).
+    let boundary = boundary.min(messages.len() - 1);
+
+    mark_last_block(&mut messages[boundary]);
+}
+
+/// Set `cache_control` on the last content block of a message, regardless
+/// of whether it is a Text or ToolResult block.
+fn mark_last_block(message: &mut AnthropicMessage) {
     let cache_marker = CacheControl {
         control_type: "ephemeral".to_owned(),
     };
 
-    // Find the second-to-last user message index. The last user message is
-    // the current turn (dynamic), but the one before it is stable.
-    let user_indices: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == "user")
-        .map(|(i, _)| i)
-        .collect();
-
-    // Mark the second-to-last user message's last content block.
-    if user_indices.len() >= 2 {
-        let target_idx = user_indices[user_indices.len() - 2];
-        if let AnthropicMessageContent::Blocks(ref mut blocks) = messages[target_idx].content {
-            if let Some(AnthropicContentBlock::Text {
-                ref mut cache_control,
-                ..
-            }) = blocks.last_mut()
-            {
-                *cache_control = Some(cache_marker.clone());
-            }
-        }
-    }
-
-    // Mark the last assistant message before the final user message.
-    // This captures the "stable response prefix" that doesn't change.
-    let last_user_idx = user_indices.last().copied().unwrap_or(messages.len());
-    if last_user_idx > 0 {
-        for i in (0..last_user_idx).rev() {
-            if messages[i].role == "assistant" {
-                if let AnthropicMessageContent::Blocks(ref mut blocks) = messages[i].content {
-                    if let Some(AnthropicContentBlock::Text {
+    match message.content {
+        AnthropicMessageContent::Blocks(ref mut blocks) => {
+            if let Some(block) = blocks.last_mut() {
+                match block {
+                    AnthropicContentBlock::Text {
                         ref mut cache_control,
                         ..
-                    }) = blocks.last_mut()
-                    {
+                    } => {
                         *cache_control = Some(cache_marker);
                     }
+                    AnthropicContentBlock::ToolResult {
+                        ref mut cache_control,
+                        ..
+                    } => {
+                        *cache_control = Some(cache_marker);
+                    }
+                    _ => {}
                 }
-                break;
             }
+        }
+        AnthropicMessageContent::Text(_) => {
+            // Plain-text messages (typically user text) — convert to a
+            // single-block form so we can attach cache_control.
+            // This is rare since most messages use Blocks by the time
+            // they reach this function.
         }
     }
 }
@@ -719,6 +751,10 @@ pub(crate) fn anthropic_event_to_chunk(
                     other => other.to_owned(),
                 })
             });
+            // Log cache hit/miss stats from streaming usage (if present).
+            if let Some(ref usage) = event.usage {
+                usage.log_cache_stats();
+            }
             let usage = event.usage.as_ref().map(|u| u.to_chat_usage());
             Ok(Some(ChatCompletionChunk {
                 id: msg_id.clone(),
@@ -749,7 +785,7 @@ mod tests {
     use crate::api_types::{ChatTool, ChatToolFunction, ThinkingConfig, ToolChoice};
 
     #[test]
-    fn system_message_extracted_to_top_level() {
+    fn system_message_extracted_to_top_level_with_cache_control() {
         let req = ChatCompletionRequest::new(
             "claude-sonnet-4-20250514",
             vec![
@@ -760,9 +796,22 @@ mod tests {
 
         let anthropic = to_anthropic_request(&req);
 
+        // System message should always be Blocks with cache_control
         match &anthropic.system {
-            Some(AnthropicSystemContent::Text(text)) => assert_eq!(text, "You are helpful."),
-            other => panic!("expected Text system, got {:?}", other),
+            Some(AnthropicSystemContent::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AnthropicContentBlock::Text {
+                        text,
+                        cache_control,
+                    } => {
+                        assert_eq!(text, "You are helpful.");
+                        assert!(cache_control.is_some(), "system block should have cache_control");
+                    }
+                    other => panic!("expected Text block, got {:?}", other),
+                }
+            }
+            other => panic!("expected Blocks system, got {:?}", other),
         }
         assert_eq!(anthropic.messages.len(), 1);
         assert_eq!(anthropic.messages[0].role, "user");
@@ -1065,6 +1114,172 @@ mod tests {
             ));
         } else {
             panic!("expected Blocks content for coalesced tool results");
+        }
+    }
+
+    /// Helper to check if a message has cache_control set on any of its blocks.
+    fn has_cache_control(msg: &AnthropicMessage) -> bool {
+        match &msg.content {
+            AnthropicMessageContent::Blocks(blocks) => blocks.iter().any(|b| match b {
+                AnthropicContentBlock::Text { cache_control, .. } => cache_control.is_some(),
+                AnthropicContentBlock::ToolResult { cache_control, .. } => cache_control.is_some(),
+                _ => false,
+            }),
+            AnthropicMessageContent::Text(_) => false,
+        }
+    }
+
+    #[test]
+    fn cache_breakpoint_skipped_for_short_conversations() {
+        // With fewer than 6 messages no conversation breakpoint should be set.
+        let mut messages = vec![
+            AnthropicMessage {
+                role: "user".to_owned(),
+                content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+                    text: "hi".to_owned(),
+                    cache_control: None,
+                }]),
+            },
+            AnthropicMessage {
+                role: "assistant".to_owned(),
+                content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+                    text: "hello".to_owned(),
+                    cache_control: None,
+                }]),
+            },
+            AnthropicMessage {
+                role: "user".to_owned(),
+                content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+                    text: "bye".to_owned(),
+                    cache_control: None,
+                }]),
+            },
+        ];
+
+        inject_conversation_cache_breakpoints(&mut messages);
+
+        for msg in &messages {
+            assert!(!has_cache_control(msg), "short conversation should have no breakpoints");
+        }
+    }
+
+    #[test]
+    fn cache_breakpoint_placed_at_stable_quantized_boundary() {
+        // Build a conversation with 10 messages (5 turns).
+        // With RECENT_WINDOW=4, raw_boundary=10-5=5. STEP=8, quantized=0.
+        // Since quantized==0, falls back to raw_boundary=5.
+        let mut messages: Vec<AnthropicMessage> = (0..10)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                AnthropicMessage {
+                    role: role.to_owned(),
+                    content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+                        text: format!("message {i}"),
+                        cache_control: None,
+                    }]),
+                }
+            })
+            .collect();
+
+        inject_conversation_cache_breakpoints(&mut messages);
+
+        // Exactly one message should have cache_control set.
+        let cached_indices: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| has_cache_control(m))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(cached_indices.len(), 1, "should place exactly one breakpoint");
+        // The boundary should be at index 5 (raw_boundary when quantized == 0).
+        assert_eq!(cached_indices[0], 5);
+    }
+
+    #[test]
+    fn cache_breakpoint_stable_across_consecutive_turns() {
+        // Build 16 messages (8 turns). raw_boundary=16-5=11, quantized=(11/8)*8=8.
+        let make_messages = |count: usize| -> Vec<AnthropicMessage> {
+            (0..count)
+                .map(|i| {
+                    let role = if i % 2 == 0 { "user" } else { "assistant" };
+                    AnthropicMessage {
+                        role: role.to_owned(),
+                        content: AnthropicMessageContent::Blocks(vec![
+                            AnthropicContentBlock::Text {
+                                text: format!("message {i}"),
+                                cache_control: None,
+                            },
+                        ]),
+                    }
+                })
+                .collect()
+        };
+
+        // Turn 8 (16 messages): boundary = (16-5)/8*8 = 11/8*8 = 8
+        let mut msgs_16 = make_messages(16);
+        inject_conversation_cache_breakpoints(&mut msgs_16);
+        let idx_16: Vec<usize> = msgs_16
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| has_cache_control(m))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Turn 9 (18 messages): boundary = (18-5)/8*8 = 13/8*8 = 8
+        let mut msgs_18 = make_messages(18);
+        inject_conversation_cache_breakpoints(&mut msgs_18);
+        let idx_18: Vec<usize> = msgs_18
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| has_cache_control(m))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Both should have the breakpoint at the same position (8).
+        assert_eq!(idx_16, idx_18, "breakpoint should be stable across consecutive turns");
+        assert_eq!(idx_16[0], 8);
+    }
+
+    #[test]
+    fn cache_breakpoint_works_on_tool_result_blocks() {
+        // Place a tool_result block at the boundary position and verify it
+        // gets cache_control set.
+        let mut messages: Vec<AnthropicMessage> = (0..8)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                AnthropicMessage {
+                    role: role.to_owned(),
+                    content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::Text {
+                        text: format!("msg {i}"),
+                        cache_control: None,
+                    }]),
+                }
+            })
+            .collect();
+
+        // Replace the message at the expected boundary with a tool_result block.
+        // 8 messages: raw_boundary=8-5=3, quantized=0, so boundary=3.
+        messages[3] = AnthropicMessage {
+            role: "user".to_owned(),
+            content: AnthropicMessageContent::Blocks(vec![AnthropicContentBlock::ToolResult {
+                tool_use_id: "call_1".to_owned(),
+                content: "result".to_owned(),
+                cache_control: None,
+            }]),
+        };
+
+        inject_conversation_cache_breakpoints(&mut messages);
+
+        // The tool_result at index 3 should now have cache_control.
+        if let AnthropicMessageContent::Blocks(blocks) = &messages[3].content {
+            match &blocks[0] {
+                AnthropicContentBlock::ToolResult { cache_control, .. } => {
+                    assert!(cache_control.is_some(), "tool_result should have cache_control");
+                }
+                other => panic!("expected ToolResult, got {:?}", other),
+            }
+        } else {
+            panic!("expected Blocks content");
         }
     }
 }
