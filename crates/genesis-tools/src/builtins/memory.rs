@@ -83,6 +83,12 @@ impl ToolHandler for MemoryStoreTool {
                             {
                                 tracing::warn!(error = %e, "failed to temporally link merged memory");
                             }
+                            let merged_keywords = extract_keywords(&best_kind, &merged.content);
+                            if let Err(e) =
+                                store.auto_link_entity(&best_id, &merged_keywords, 5)
+                            {
+                                tracing::warn!(error = %e, "failed to auto-link merged memory by entity");
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to re-embed merged memory");
@@ -105,13 +111,14 @@ impl ToolHandler for MemoryStoreTool {
 
             // No duplicate — create a new note and embed it.
             let note_id = memory_id(context, key);
+            let keywords = extract_keywords(key, value);
             store
                 .create_note(NewMemoryNote {
                     id: note_id.clone(),
                     session_id: Some(context.session_id.clone()),
                     kind: key.clone(),
                     content: value.clone(),
-                    keywords: extract_keywords(key, value),
+                    keywords: keywords.clone(),
                     tags: Vec::new(),
                     linked_ids: Vec::new(),
                     importance: 0.5,
@@ -133,6 +140,9 @@ impl ToolHandler for MemoryStoreTool {
             }
             if let Err(e) = store.auto_link_temporal(&note_id, &context.session_id, 5) {
                 tracing::warn!(error = %e, "failed to auto-link new memory temporally");
+            }
+            if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
+                tracing::warn!(error = %e, "failed to auto-link new memory by entity");
             }
 
             return Ok(ToolOutput {
@@ -354,13 +364,15 @@ fn store_plain(
     value: &str,
     database_path: &std::path::Path,
 ) -> Result<ToolOutput, ToolError> {
+    let note_id = memory_id(context, key);
+    let keywords = extract_keywords(key, value);
     store
         .create_note(NewMemoryNote {
-            id: memory_id(context, key),
+            id: note_id.clone(),
             session_id: Some(context.session_id.clone()),
             kind: key.to_owned(),
             content: value.to_owned(),
-            keywords: extract_keywords(key, value),
+            keywords: keywords.clone(),
             tags: Vec::new(),
             linked_ids: Vec::new(),
             importance: 0.5,
@@ -372,6 +384,10 @@ fn store_plain(
                 database_path.display()
             ),
         })?;
+
+    if let Err(e) = store.auto_link_entity(&note_id, &keywords, 5) {
+        tracing::warn!(error = %e, "failed to auto-link memory by entity");
+    }
 
     Ok(ToolOutput {
         content: format!("stored memory `{key}`"),
@@ -1343,6 +1359,57 @@ mod tests {
         assert!(
             temporal_count > 0,
             "temporal links should be created between memories in the same session"
+        );
+    }
+
+    #[test]
+    fn memory_store_creates_entity_links_on_keyword_overlap() {
+        let dir = tempdir().expect("tempdir should exist");
+        setup_db(dir.path());
+        let context = ctx(dir.path().to_string_lossy().as_ref());
+        let db_path = dir.path().join("genesis.db");
+
+        // Store first memory containing "rust" keyword.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_ownership".to_owned()),
+                        ("value".to_owned(), "Rust ownership model".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("first memory should store");
+
+        // Store second memory also containing "rust" keyword.
+        MemoryStoreTool
+            .run(
+                &ToolCall {
+                    name: "memory_store".to_owned(),
+                    arguments: BTreeMap::from([
+                        ("key".to_owned(), "rust_borrowing".to_owned()),
+                        ("value".to_owned(), "Rust borrowing rules".to_owned()),
+                    ]),
+                },
+                &context,
+            )
+            .expect("second memory should store");
+
+        // Verify entity links were created (both share "rust" keyword).
+        let conn = rusqlite::Connection::open(&db_path).expect("db should open");
+        let entity_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("should count entity links");
+
+        assert!(
+            entity_count > 0,
+            "entity links should be created between memories with overlapping keywords"
         );
     }
 }

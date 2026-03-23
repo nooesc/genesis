@@ -900,6 +900,64 @@ impl MemoryStore {
         Ok(linked)
     }
 
+    /// Create `entity` edges between the given memory and others sharing keywords.
+    ///
+    /// Only creates links for pairs that do not already have an edge (to avoid
+    /// overwriting higher-priority semantic or temporal links).
+    /// Returns the number of links created.
+    pub fn auto_link_entity(
+        &self,
+        memory_id: &str,
+        keywords: &[String],
+        max_links: usize,
+    ) -> Result<usize, StorageError> {
+        if keywords.is_empty() {
+            return Ok(0);
+        }
+
+        let keywords_json = serde_json::to_string(keywords).unwrap_or_else(|_| "[]".to_owned());
+
+        let connection = self.db.conn()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT m.id, COUNT(*) AS overlap
+                 FROM memories m, json_each(m.keywords_json) AS mk, json_each(?1) AS ik
+                 WHERE mk.value = ik.value
+                   AND m.id != ?2
+                   AND m.id NOT IN (
+                       SELECT target_id FROM memory_links WHERE source_id = ?2
+                   )
+                 GROUP BY m.id
+                 ORDER BY overlap DESC
+                 LIMIT ?3",
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?;
+        let matches: Vec<(String, i64)> = collect_rows(
+            stmt.query_map(
+                params![&keywords_json, memory_id, max_links as i64],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|source| StorageError::Sqlite {
+                path: self.db.path().to_path_buf(),
+                source,
+            })?,
+            self.db.path(),
+        )?;
+        drop(stmt);
+        drop(connection);
+
+        let mut linked = 0;
+        for (target_id, overlap) in &matches {
+            self.create_link(memory_id, target_id, "entity", *overlap as f64)?;
+            self.create_link(target_id, memory_id, "entity", *overlap as f64)?;
+            linked += 1;
+        }
+        Ok(linked)
+    }
+
     /// Delete a memory by ID.
     pub fn delete(&self, id: &str) -> Result<bool, StorageError> {
         let mut connection = self.db.conn()?;
@@ -2446,5 +2504,131 @@ mod memory_store_tests {
         let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
         assert!(ids.contains(&"mem-hop1"), "1-hop reachable");
         assert!(!ids.contains(&"mem-hop2"), "2-hop NOT reachable at depth 1");
+    }
+
+    #[test]
+    fn auto_link_entity_creates_edges_on_keyword_overlap() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).unwrap();
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        // mem1: ["rust", "memory"]
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust memory management".to_owned(),
+                keywords: vec!["rust".to_owned(), "memory".to_owned()],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        // mem2: ["rust", "sqlite"]
+        store
+            .create_note(NewMemoryNote {
+                id: "mem2".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Rust sqlite integration".to_owned(),
+                keywords: vec!["rust".to_owned(), "sqlite".to_owned()],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        // mem3: ["python", "memory"]
+        store
+            .create_note(NewMemoryNote {
+                id: "mem3".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "Python memory model".to_owned(),
+                keywords: vec!["python".to_owned(), "memory".to_owned()],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        let linked = store
+            .auto_link_entity("mem1", &["rust".to_owned(), "memory".to_owned()], 5)
+            .unwrap();
+        assert_eq!(linked, 2, "should link to both mem2 and mem3");
+
+        // Verify edges exist and are bidirectional.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        // mem1 → mem2 with weight 1.0 (overlap: "rust")
+        let w12: f64 = conn
+            .query_row(
+                "SELECT weight FROM memory_links WHERE source_id = 'mem1' AND target_id = 'mem2' AND edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mem1→mem2 entity edge should exist");
+        assert!((w12 - 1.0).abs() < f64::EPSILON, "mem2 shares 1 keyword (rust)");
+
+        // mem2 → mem1 (reverse)
+        let w21: f64 = conn
+            .query_row(
+                "SELECT weight FROM memory_links WHERE source_id = 'mem2' AND target_id = 'mem1' AND edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mem2→mem1 entity edge should exist");
+        assert!((w21 - 1.0).abs() < f64::EPSILON);
+
+        // mem1 → mem3 with weight 1.0 (overlap: "memory")
+        let w13: f64 = conn
+            .query_row(
+                "SELECT weight FROM memory_links WHERE source_id = 'mem1' AND target_id = 'mem3' AND edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mem1→mem3 entity edge should exist");
+        assert!((w13 - 1.0).abs() < f64::EPSILON, "mem3 shares 1 keyword (memory)");
+
+        // mem3 → mem1 (reverse)
+        let w31: f64 = conn
+            .query_row(
+                "SELECT weight FROM memory_links WHERE source_id = 'mem3' AND target_id = 'mem1' AND edge_type = 'entity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mem3→mem1 entity edge should exist");
+        assert!((w31 - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn auto_link_entity_returns_zero_for_empty_keywords() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).unwrap();
+        let sessions = SessionStore::new(&db_path);
+        sessions.create_session("s1", "test", None).unwrap();
+        let store = MemoryStore::new(&db_path);
+
+        store
+            .create_note(NewMemoryNote {
+                id: "mem1".to_owned(),
+                session_id: Some("s1".to_owned()),
+                kind: "fact".to_owned(),
+                content: "something".to_owned(),
+                keywords: vec!["rust".to_owned()],
+                tags: vec![],
+                linked_ids: vec![],
+                importance: 0.5,
+            })
+            .unwrap();
+
+        let linked = store.auto_link_entity("mem1", &[], 5).unwrap();
+        assert_eq!(linked, 0);
     }
 }
