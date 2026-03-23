@@ -215,6 +215,7 @@ pub async fn run_tui(
         frame_requester,
         turn_running: false,
         should_exit: false,
+        should_suspend: false,
         turn_start: None,
         screen: AppScreen::Welcome,
         welcome,
@@ -274,8 +275,13 @@ pub async fn run_tui(
             tracing::info!(model_id = model_id.as_str(), "model switched via picker");
         }
 
+        // Use `biased;` so arms are polled in declaration order.
+        // This ensures terminal events (resize, keys, Ctrl+C) are always
+        // serviced first, even when the agent is streaming data rapidly.
         tokio::select! {
-            // ── Terminal events — always active ──────────────────────
+            biased;
+
+            // ── 1. Terminal events (resize, keys) — highest priority ──
             ct_event = crossterm_events.next() => {
                 if let Some(Ok(event)) = ct_event {
                     if let Some(tui_event) = translate_crossterm(event) {
@@ -292,7 +298,20 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Accept submissions ONLY when no turn is running ─────
+            // ── 2. Cancel signal — must be responsive ───────────────
+            _cancel = cancel_rx.recv() => {
+                if turn_future.is_some() {
+                    tracing::info!("cancelling running turn via Ctrl+C");
+                    // Drop the turn future, which aborts the in-flight agent
+                    // loop. The agent loop's async operations are cancelled
+                    // cooperatively by the Tokio runtime when the future is
+                    // dropped.
+                    turn_future = None;
+                    let _ = agent_tx.send(AgentEvent::Cancelled);
+                }
+            }
+
+            // ── 3. Accept submissions ONLY when no turn is running ──
             submission = submission_rx.recv(), if turn_future.is_none() => {
                 match submission {
                     Some(Submission::UserMessage { text, .. }) => {
@@ -321,20 +340,7 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Cancel signal — always polled, even during active turns ──
-            _cancel = cancel_rx.recv() => {
-                if turn_future.is_some() {
-                    tracing::info!("cancelling running turn via Ctrl+C");
-                    // Drop the turn future, which aborts the in-flight agent
-                    // loop. The agent loop's async operations are cancelled
-                    // cooperatively by the Tokio runtime when the future is
-                    // dropped.
-                    turn_future = None;
-                    let _ = agent_tx.send(AgentEvent::Cancelled);
-                }
-            }
-
-            // ── Poll the running turn future ────────────────────────
+            // ── 4. Poll the running turn future ─────────────────────
             result = async {
                 match turn_future.as_mut() {
                     Some(fut) => fut.as_mut().await,
@@ -358,7 +364,7 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Agent events (from streaming callback via channel) ──
+            // ── 5. Agent events (from streaming callback via channel) ──
             agent_event = agent_rx.recv() => {
                 if let Some(event) = agent_event {
                     // Batch-process: drain all queued events before scheduling
@@ -373,7 +379,7 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Tool approval requests ───────────────────────────────
+            // ── 6. Tool approval requests ───────────────────────────
             approval = approval_rx.recv() => {
                 if let Some(req) = approval {
                     // Auto-approve if the user previously chose "always approve" for this tool.
@@ -396,7 +402,7 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Internal app events ─────────────────────────────────
+            // ── 7. Internal app events ──────────────────────────────
             app_event = app_rx.recv() => {
                 if let Some(event) = app_event {
                     if matches!(&event, AppEvent::CommitHistory) {
@@ -420,7 +426,7 @@ pub async fn run_tui(
                 }
             }
 
-            // ── Frame draw timer ────────────────────────────────────
+            // ── 8. Frame draw timer — lowest priority ───────────────
             draw_result = draw_rx.recv() => {
                 // Break on channel close to avoid an infinite render spin.
                 if matches!(draw_result, Err(broadcast::error::RecvError::Closed)) {
@@ -493,6 +499,40 @@ pub async fn run_tui(
                     app.frame_requester.schedule_frame_in(interval);
                 }
             }
+        }
+
+        // ── Handle Ctrl+Z suspension (unix only) ────────────────────
+        // This runs outside the select! block so we can safely tear down
+        // and re-initialize terminal state without interfering with async
+        // polling.
+        #[cfg(unix)]
+        if app.should_suspend {
+            app.should_suspend = false;
+            let _ = terminal::restore();
+
+            // SAFETY: Sending SIGTSTP to the process group (pid 0) is the
+            // standard way to suspend a foreground process. The process will
+            // stop here until the user types `fg` in the shell. After
+            // resumption, execution continues at the next line.
+            unsafe {
+                libc::kill(0, libc::SIGTSTP);
+            }
+
+            // Process resumes here after `fg`.
+            terminal::init()?;
+
+            // Re-query terminal size — it may have changed while suspended.
+            let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+            let new_area = Rect::new(0, 0, w, h);
+            term.set_viewport_area(new_area);
+            app.viewport_width = new_area.width;
+            app.viewport_height = new_area.height;
+
+            // Clear stale effect state from the pre-suspend viewport.
+            app.effects.on_resize();
+
+            // Force a full redraw so the screen is repainted cleanly.
+            app.frame_requester.schedule_frame();
         }
 
         if app.should_exit {
