@@ -280,12 +280,14 @@ fn sanitize_database_urls(text: &mut String) {
             };
             let scheme_pos = search_from + rel_pos;
             let after_scheme = scheme_pos + scheme.len();
-            let rest = &text[after_scheme..];
+            // Limit search to the authority component (up to first `/` after scheme, or end of string).
+            let authority_end = text[after_scheme..].find('/').unwrap_or(text.len() - after_scheme);
+            let authority = &text[after_scheme..after_scheme + authority_end];
 
             // Look for the user:password@host pattern.
             // The colon separates user from password, the @ terminates the password.
-            let colon_pos = rest.find(':');
-            let at_pos = rest.find('@');
+            let colon_pos = authority.find(':');
+            let at_pos = authority.find('@');
 
             match (colon_pos, at_pos) {
                 (Some(c), Some(a)) if c < a && a - c > 1 => {
@@ -297,7 +299,10 @@ fn sanitize_database_urls(text: &mut String) {
                     // Advance past the replacement to avoid re-matching.
                     search_from = password_start + replacement.len();
                 }
-                _ => break,
+                _ => {
+                    search_from = after_scheme;
+                    continue;
+                }
             }
         }
     }
@@ -307,18 +312,20 @@ fn sanitize_database_urls(text: &mut String) {
 /// starting with `eyJ` (base64 for `{"` which is the start of all JWT headers).
 fn sanitize_jwt_tokens(text: &mut String) {
     const JWT_PREFIX: &str = "eyJ";
+    let mut search_from = 0;
     loop {
-        let Some(start) = text.find(JWT_PREFIX) else {
+        let Some(rel_pos) = text[search_from..].find(JWT_PREFIX) else {
             break;
         };
+        let start = search_from + rel_pos;
 
         // Check we're at a token boundary (start of string, or preceded by non-alnum).
         if start > 0 {
             let prev = text.as_bytes()[start - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'-' {
                 // Part of a longer token — this was already redacted or not a JWT.
-                // Replace this occurrence to avoid infinite loop and continue.
-                break;
+                search_from = start + JWT_PREFIX.len();
+                continue;
             }
         }
 
@@ -346,8 +353,10 @@ fn sanitize_jwt_tokens(text: &mut String) {
         // A valid JWT must have exactly 2 dots and be reasonably long.
         if dot_count >= 2 && token.len() >= 20 && token.matches('.').count() >= 2 {
             text.replace_range(start..start + end, "[REDACTED:jwt]");
+            search_from = start + "[REDACTED:jwt]".len();
         } else {
-            break;
+            search_from = start + JWT_PREFIX.len();
+            continue;
         }
     }
 }
@@ -355,10 +364,12 @@ fn sanitize_jwt_tokens(text: &mut String) {
 /// Redact Azure connection string `AccountKey=...` values.
 fn sanitize_azure_connection_strings(text: &mut String) {
     const ACCOUNT_KEY: &str = "AccountKey=";
+    let mut search_from = 0;
     loop {
-        let Some(start) = text.find(ACCOUNT_KEY) else {
+        let Some(rel_pos) = text[search_from..].find(ACCOUNT_KEY) else {
             break;
         };
+        let start = search_from + rel_pos;
         let value_start = start + ACCOUNT_KEY.len();
         // AccountKey values end at `;` or end of string.
         let value_end = text[value_start..]
@@ -368,8 +379,10 @@ fn sanitize_azure_connection_strings(text: &mut String) {
         let value_len = value_end - value_start;
         if value_len >= 10 {
             text.replace_range(start..value_end, "[REDACTED:azure-key]");
+            search_from = start + "[REDACTED:azure-key]".len();
         } else {
-            break;
+            search_from = value_start;
+            continue;
         }
     }
 }
@@ -381,21 +394,25 @@ fn sanitize_gcp_service_account_keys(text: &mut String) {
     // The PEM block itself is already handled by sanitize_pem_blocks, but we also
     // want to catch the JSON field pattern. Look for the characteristic JSON key.
     const MARKER: &str = "\"private_key\"";
+    let mut search_from = 0;
     loop {
-        let Some(start) = text.find(MARKER) else {
+        let Some(rel_pos) = text[search_from..].find(MARKER) else {
             break;
         };
+        let start = search_from + rel_pos;
         let after_marker = start + MARKER.len();
         let rest = &text[after_marker..];
 
         // Look for the value: optional whitespace, colon, optional whitespace, quote.
         let trimmed = rest.trim_start();
         if !trimmed.starts_with(':') {
-            break;
+            search_from = after_marker;
+            continue;
         }
         let after_colon = trimmed[1..].trim_start();
         if !after_colon.starts_with('"') {
-            break;
+            search_from = after_marker;
+            continue;
         }
 
         // Find the start of the value string in the original text.
@@ -419,8 +436,10 @@ fn sanitize_gcp_service_account_keys(text: &mut String) {
         if let Some(close_offset) = closing_quote {
             let end = value_content_start + close_offset + 1; // include closing quote
             text.replace_range(start..end, "[REDACTED:gcp-service-key]");
+            search_from = start + "[REDACTED:gcp-service-key]".len();
         } else {
-            break;
+            search_from = after_marker;
+            continue;
         }
     }
 }
@@ -434,29 +453,33 @@ fn sanitize_aws_secret_keys(text: &mut String) {
     ];
 
     for marker in MARKERS {
+        let mut search_from = 0;
         loop {
-            let Some(marker_pos) = text.find(marker) else {
+            let Some(rel_pos) = text[search_from..].find(marker) else {
                 break;
             };
+            let marker_pos = search_from + rel_pos;
             let after_marker = marker_pos + marker.len();
             let rest = &text[after_marker..];
 
-            // Look for the value: skip `=`, `"`, `:`, whitespace to find the key.
+            // Look for the value: skip `=`, `"`, `:`, `>`, whitespace to find the key.
             let value_start_rel = rest
                 .find(|c: char| {
                     c.is_ascii_alphanumeric() || c == '+' || c == '/'
                 });
 
             let Some(rel_start) = value_start_rel else {
-                break;
+                search_from = after_marker;
+                continue;
             };
 
-            // Only allow separators (=, :, ", whitespace) between marker and value.
+            // Only allow separators (=, :, >, ", whitespace) between marker and value.
             let separator = &rest[..rel_start];
             if separator.chars().any(|c| {
-                !c.is_ascii_whitespace() && c != '=' && c != ':' && c != '"' && c != '\''
+                !c.is_ascii_whitespace() && c != '=' && c != ':' && c != '"' && c != '\'' && c != '>'
             }) {
-                break;
+                search_from = after_marker;
+                continue;
             }
 
             let abs_value_start = after_marker + rel_start;
@@ -474,8 +497,10 @@ fn sanitize_aws_secret_keys(text: &mut String) {
                     abs_value_start..value_end,
                     "[REDACTED:aws-secret-key]",
                 );
+                search_from = abs_value_start + "[REDACTED:aws-secret-key]".len();
             } else {
-                break;
+                search_from = after_marker;
+                continue;
             }
         }
     }
@@ -531,33 +556,29 @@ pub fn contains_credentials(text: &str) -> bool {
     }
 
     // Check JWT tokens (eyJ prefix with dots).
-    if text.contains("eyJ") {
+    if let Some(pos) = text.find("eyJ") {
         // Quick heuristic: eyJ followed by content with at least 2 dots.
-        if let Some(pos) = text.find("eyJ") {
-            let rest = &text[pos..];
-            let token_end = rest
-                .find(|c: char| {
-                    c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')'
-                })
-                .unwrap_or(rest.len());
-            let token = &rest[..token_end];
-            if token.len() >= 20 && token.matches('.').count() >= 2 {
-                return true;
-            }
+        let rest = &text[pos..];
+        let token_end = rest
+            .find(|c: char| {
+                c.is_ascii_whitespace() || c == '"' || c == '\'' || c == ')'
+            })
+            .unwrap_or(rest.len());
+        let token = &rest[..token_end];
+        if token.len() >= 20 && token.matches('.').count() >= 2 {
+            return true;
         }
     }
 
     // Check Azure AccountKey.
-    if text.contains("AccountKey=") {
-        if let Some(pos) = text.find("AccountKey=") {
-            let value_start = pos + "AccountKey=".len();
-            let value_end = text[value_start..]
-                .find(|c: char| c == ';' || c.is_ascii_whitespace() || c == '"')
-                .map(|i| value_start + i)
-                .unwrap_or(text.len());
-            if value_end - value_start >= 10 {
-                return true;
-            }
+    if let Some(pos) = text.find("AccountKey=") {
+        let value_start = pos + "AccountKey=".len();
+        let value_end = text[value_start..]
+            .find(|c: char| c == ';' || c.is_ascii_whitespace() || c == '"')
+            .map(|i| value_start + i)
+            .unwrap_or(text.len());
+        if value_end - value_start >= 10 {
+            return true;
         }
     }
 
