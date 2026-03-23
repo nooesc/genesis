@@ -100,7 +100,6 @@ pub fn bundled_personalities() -> &'static [BundledPersonality] {
     BUNDLED_PERSONALITIES
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundledTool {
     pub name: &'static str,
@@ -109,7 +108,6 @@ pub struct BundledTool {
 }
 
 /// Bundled tool plugins — populated in Phase 2-4 as tools migrate from Rust to Lua.
-#[allow(dead_code)]
 pub const BUNDLED_TOOLS: &[BundledTool] = &[
     // Phase 2:
     // BundledTool {
@@ -119,7 +117,6 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
     // },
 ];
 
-#[allow(dead_code)]
 pub fn bundled_tools() -> &'static [BundledTool] {
     BUNDLED_TOOLS
 }

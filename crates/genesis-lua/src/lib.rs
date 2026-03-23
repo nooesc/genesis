@@ -8,7 +8,7 @@ pub mod primitives;
 pub mod runtime;
 pub mod tools;
 
-pub use bundled::{bundled_personalities, BundledPersonality};
+pub use bundled::{bundled_personalities, bundled_tools, BundledPersonality, BundledTool};
 pub use discovery::{discover_plugins, DiscoveredPlugin, PluginKind};
 pub use manifest::{PluginGenesis, PluginManifest, PluginMetadata, PluginPermissions};
 pub use personality::{LuaPersonalityRegistry, LuaRegisteredPersonality};

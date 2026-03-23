@@ -16,7 +16,7 @@ use crate::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
         PreHookOutcome,
     },
-    manifest::PluginManifest,
+    manifest::{PluginManifest, PluginMetadata, PluginPermissions},
     personality::{LuaPersonalityEntry, LuaPersonalityRegistry, LuaRegisteredPersonality},
     tools::{LuaHostToolExecutor, LuaRegisteredTool, LuaToolOutput, LuaToolRegistry},
 };
@@ -407,6 +407,7 @@ impl LuaRuntime {
         }
 
         self.load_bundled_personalities(config, &configured_disabled)?;
+        self.load_bundled_tools(config, &configured_disabled)?;
         Ok(())
     }
 
@@ -693,6 +694,53 @@ impl LuaRuntime {
                 manifest: PluginManifest::for_single_file(bundled.name),
             };
             self.load_plugin_source(config, &plugin, bundled.source, false);
+        }
+        Ok(())
+    }
+
+    fn load_bundled_tools(
+        &mut self,
+        config: &LuaRuntimeConfig,
+        configured_disabled: &HashSet<String>,
+    ) -> Result<(), LuaRuntimeError> {
+        for bundled in crate::bundled::bundled_tools() {
+            if configured_disabled.contains(bundled.name) {
+                self.disabled_plugins
+                    .lock()
+                    .expect("disabled plugins mutex should not be poisoned")
+                    .insert(bundled.name.to_owned());
+                continue;
+            }
+            // Skip if a user plugin already registered tools with the same plugin name.
+            if self.plugin_names.iter().any(|n| n == bundled.name) {
+                continue;
+            }
+
+            let permissions = PluginPermissions {
+                primitives: bundled.primitives.iter().map(|s| s.to_string()).collect(),
+                trusted: false,
+                ..Default::default()
+            };
+            let manifest = PluginManifest {
+                plugin: PluginMetadata {
+                    name: bundled.name.to_owned(),
+                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    description: None,
+                    author: None,
+                    bundled: true,
+                },
+                permissions,
+                genesis: Default::default(),
+            };
+            let bundled_path = PathBuf::from(format!("<bundled:{}>", bundled.name));
+            let plugin = crate::DiscoveredPlugin {
+                name: bundled.name.to_owned(),
+                kind: PluginKind::Bundled,
+                root: bundled_path.clone(),
+                entrypoint: bundled_path,
+                manifest,
+            };
+            self.load_plugin_source(config, &plugin, bundled.source, true);
         }
         Ok(())
     }
