@@ -140,12 +140,16 @@ impl App {
                 self.frame_requester.schedule_frame();
             }
             TuiEvent::MouseScroll(delta) => {
-                if delta > 0 {
-                    self.chat.scroll_up(delta as usize, self.viewport_width);
-                } else if delta < 0 {
-                    self.chat.scroll_down((-delta) as usize);
+                // Only scroll the chat view when no overlay is active and
+                // we're on the Chat screen.
+                if self.overlay.is_none() && matches!(self.screen, AppScreen::Chat) {
+                    if delta > 0 {
+                        self.chat.scroll_up(delta as usize, self.viewport_width);
+                    } else if delta < 0 {
+                        self.chat.scroll_down((-delta) as usize);
+                    }
+                    self.frame_requester.schedule_frame();
                 }
-                self.frame_requester.schedule_frame();
             }
             TuiEvent::Draw | TuiEvent::FocusGained | TuiEvent::FocusLost => {}
         }
