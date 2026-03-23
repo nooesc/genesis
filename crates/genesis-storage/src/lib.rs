@@ -12,9 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::migrations::{
-    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v14, migrate_to_v2,
-    migrate_to_v3, migrate_to_v4, migrate_to_v5, migrate_to_v6, migrate_to_v7, migrate_to_v8,
-    migrate_to_v9,
+    migrate_to_v10, migrate_to_v11, migrate_to_v12, migrate_to_v13, migrate_to_v14,
+    migrate_to_v15, migrate_to_v2, migrate_to_v3, migrate_to_v4, migrate_to_v5, migrate_to_v6,
+    migrate_to_v7, migrate_to_v8, migrate_to_v9,
 };
 use crate::util::{exec_migration, first_existing_dir, first_existing_file, open};
 
@@ -42,7 +42,7 @@ pub use crate::stores::sticker_cache::{CachedSticker, StickerCacheStore};
 pub use crate::stores::subagent::{StoredSubagent, SubagentStore};
 pub use crate::stores::user_model::{format_user_traits, StoredUserTrait, UserModelStore};
 
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageBootstrap {
@@ -248,6 +248,8 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
                 importance REAL NOT NULL DEFAULT 0.5,
                 accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 access_count INTEGER NOT NULL DEFAULT 0,
+                consolidated INTEGER NOT NULL DEFAULT 0,
+                parent_summary_id TEXT REFERENCES memories(id),
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS memory_links (
@@ -446,6 +448,7 @@ pub fn bootstrap(database_path: &Path) -> Result<StorageBootstrap, StorageError>
     migrate_to_v12(&connection, database_path)?;
     migrate_to_v13(&connection, database_path)?;
     migrate_to_v14(&connection, database_path)?;
+    migrate_to_v15(&connection, database_path)?;
 
     connection
         .execute(

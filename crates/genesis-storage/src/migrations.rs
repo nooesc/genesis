@@ -292,6 +292,37 @@ pub(crate) fn migrate_to_v13(
     )
 }
 
+/// Migrate v14 → v15: add consolidation support columns.
+pub(crate) fn migrate_to_v15(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), StorageError> {
+    if !column_exists(connection, "memories", "consolidated") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN consolidated INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !column_exists(connection, "memories", "parent_summary_id") {
+        exec_migration(
+            connection,
+            database_path,
+            "ALTER TABLE memories ADD COLUMN parent_summary_id TEXT REFERENCES memories(id);",
+        )?;
+    }
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE INDEX IF NOT EXISTS idx_memories_consolidated ON memories(consolidated);",
+    )?;
+    exec_migration(
+        connection,
+        database_path,
+        "CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);",
+    )
+}
+
 /// Migrate v13 → v14: add edge_type and weight to memory_links for typed graph edges.
 pub(crate) fn migrate_to_v14(
     connection: &Connection,
@@ -356,5 +387,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx_count, 1, "idx_memory_links_edge_type should exist");
+    }
+
+    #[test]
+    fn migrate_to_v15_adds_consolidated_and_parent_summary_id() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("genesis.db");
+        bootstrap(&db_path).expect("bootstrap");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "SELECT consolidated, parent_summary_id FROM memories LIMIT 0",
+            [],
+        )
+        .expect("columns should exist");
+
+        let idx: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_memories_importance'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(idx);
+
+        let idx2: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='idx_memories_consolidated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(idx2);
     }
 }
