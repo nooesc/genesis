@@ -131,17 +131,17 @@ impl Default for GuardrailConfig {
 
 // PII detection patterns — each compiled once via LazyLock.
 static PII_PHONE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap()
+    Regex::new(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").expect("PII phone regex is a compile-time constant")
 });
 static PII_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").unwrap()
+    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").expect("PII email regex is a compile-time constant")
 });
 static PII_SSN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").unwrap());
+    LazyLock::new(|| Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").expect("PII SSN regex is a compile-time constant"));
 static PII_CREDIT_CARD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b").unwrap());
+    LazyLock::new(|| Regex::new(r"\b(?:\d{4}[-\s]?){3}\d{4}\b").expect("PII credit card regex is a compile-time constant"));
 static PII_IP_ADDRESS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap());
+    LazyLock::new(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").expect("PII IP address regex is a compile-time constant"));
 
 /// All PII patterns paired with their human-readable kind label.
 static PII_PATTERNS: [(&str, &LazyLock<Regex>); 5] = [
