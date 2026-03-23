@@ -374,8 +374,8 @@ fn build_item_line(cmd: &CommandDef, is_selected: bool, inner_width: usize) -> L
     };
 
     let name = cmd.name;
-    // Fixed name column width (longest name "/personality" = 12 chars + leading slash = 12).
-    // We reserve 14 chars for the name (padded with spaces).
+    // Fixed name column width. render() clamps popup_width >= 20, so
+    // inner_width is always >= 18 — no need for narrow-terminal shrinking.
     let name_col_width = 14usize;
     let name_padded = format!("{:<width$}", name, width = name_col_width);
 
