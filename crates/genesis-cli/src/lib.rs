@@ -2846,7 +2846,7 @@ storage:
         .expect("tools command should succeed");
 
         assert!(output.contains("genesis tools"));
-        assert!(output.contains("echo"));
+        assert!(output.contains("session_info"));
         assert!(output.contains("user_observe"));
     }
 
@@ -4645,9 +4645,9 @@ trusted = true
     fn chat_tools_lists_available_tools() {
         let result = handle_chat_command("/tools", "s1", &stub_session_store());
         let output = result.expect("should return tool list");
-        assert!(output.contains("echo"));
+        assert!(output.contains("session_info"));
         assert!(output.contains("patch"));
-        assert!(output.contains("todo"));
+        assert!(output.contains("shell_exec"));
     }
 
     #[test]

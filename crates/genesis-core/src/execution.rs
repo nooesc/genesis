@@ -2833,7 +2833,28 @@ genesis.register_personality({
             .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
             .expect("runtime should load");
 
-        assert_eq!(runtime.plugin_names(), vec!["enabled".to_owned()]);
+        let names = runtime.plugin_names();
+        assert!(
+            names.contains(&"enabled".to_owned()),
+            "should contain enabled plugin"
+        );
+        assert!(
+            !names.contains(&"disabled".to_owned()),
+            "should not contain disabled plugin"
+        );
+        // Bundled plugins (utilities, todo, messaging) are also loaded automatically
+        assert!(
+            names.contains(&"utilities".to_owned()),
+            "should contain bundled utilities"
+        );
+        assert!(
+            names.contains(&"todo".to_owned()),
+            "should contain bundled todo"
+        );
+        assert!(
+            names.contains(&"messaging".to_owned()),
+            "should contain bundled messaging"
+        );
     }
 
     #[tokio::test]
@@ -2852,7 +2873,24 @@ genesis.register_personality({
             .lua_runtime_for_session("session-1", DeliveryPlatform::Cli)
             .expect("runtime should load");
 
-        assert_eq!(runtime.plugin_names(), vec!["logger".to_owned()]);
+        let names = runtime.plugin_names();
+        assert!(
+            names.contains(&"logger".to_owned()),
+            "should contain user plugin"
+        );
+        // Bundled plugins (utilities, todo, messaging) are also loaded automatically
+        assert!(
+            names.contains(&"utilities".to_owned()),
+            "should contain bundled utilities"
+        );
+        assert!(
+            names.contains(&"todo".to_owned()),
+            "should contain bundled todo"
+        );
+        assert!(
+            names.contains(&"messaging".to_owned()),
+            "should contain bundled messaging"
+        );
     }
 
     #[tokio::test]

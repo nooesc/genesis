@@ -219,37 +219,6 @@ pub fn build_default_tool_runtime(execution_context: &ExecutionContext) -> ToolR
         MoaToolPlaceholder,
     );
 
-    // Auto-inject the think tool for Anthropic backends.
-    // Zero-cost reasoning scratchpad — 54% improvement on Tau-Bench.
-    // Not injected for other providers to avoid wasting a tool slot.
-    if execution_context.provider_backend == "anthropic" {
-        use genesis_tools::builtins::think::ThinkTool;
-        registry.register(
-            ToolDefinition {
-                name: "think".to_owned(),
-                description:
-                    "Use this tool to think through a problem step-by-step before acting. \
-                     Write your reasoning in the `thought` parameter. The output is always \
-                     empty — the value is in organizing your thoughts, not the response. \
-                     Use this between tool calls when you need to plan, analyze results, \
-                     or reason about the next step."
-                        .to_owned(),
-                parameters: Some(json!({
-                    "type": "object",
-                    "properties": {
-                        "thought": {
-                            "type": "string",
-                            "description": "Your step-by-step reasoning, analysis, or plan."
-                        }
-                    },
-                    "required": ["thought"]
-                })),
-            },
-            ApprovalPolicy::Never,
-            ThinkTool,
-        );
-    }
-
     ToolRuntime {
         registry,
         context: ToolContext {
