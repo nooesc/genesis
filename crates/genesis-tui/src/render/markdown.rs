@@ -270,6 +270,9 @@ impl MarkdownWriter {
                 if self.at_list_item_start && !self.in_table {
                     self.emit_list_prefix();
                     self.at_list_item_start = false;
+                    // Flush the bullet line before code block content is
+                    // written directly to self.lines.
+                    self.finish_line();
                 }
                 let lang = match kind {
                     CodeBlockKind::Fenced(lang) => lang.to_string(),
