@@ -48,7 +48,7 @@ pub(crate) fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
         // Walk words and simulate how ratatui fills rows.
         let mut col: usize = 0;
         let mut line_rows: usize = 1;
-        for word in text.split(' ') {
+        for word in text.split(char::is_whitespace) {
             let w = word.width();
             if col == 0 {
                 // First word on a row — always placed (even if oversized).
