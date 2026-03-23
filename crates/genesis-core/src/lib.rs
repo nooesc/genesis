@@ -602,9 +602,14 @@ impl ToolRuntime {
             }
 
             existing.insert(tool.definition.name.clone());
+            let policy = match tool.approval_policy.as_deref() {
+                Some("always") => ApprovalPolicy::Always,
+                Some("destructive") => ApprovalPolicy::Destructive,
+                _ => ApprovalPolicy::Never,
+            };
             self.registry.register(
                 tool.definition.clone(),
-                ApprovalPolicy::Never,
+                policy,
                 LuaToolHandler {
                     runtime: Arc::clone(&runtime),
                     tool_name: tool.definition.name.clone(),
@@ -1176,15 +1181,13 @@ impl ToolHandler for LuaToolHandler {
                 reason: error.to_string(),
             })?;
 
-        let content = match output {
-            LuaToolOutput::Text(text) => text,
-            LuaToolOutput::Json(value) => value.to_string(),
+        let (content, metadata) = match output {
+            LuaToolOutput::Text(text) => (text, std::collections::BTreeMap::new()),
+            LuaToolOutput::Json(value) => (value.to_string(), std::collections::BTreeMap::new()),
+            LuaToolOutput::TextWithMetadata { content, metadata } => (content, metadata),
         };
 
-        Ok(ToolOutput {
-            content,
-            metadata: std::collections::BTreeMap::new(),
-        })
+        Ok(ToolOutput { content, metadata })
     }
 }
 
@@ -1799,5 +1802,152 @@ genesis.register_tool({
         assert_eq!(infer_backend("gemini-2.5-pro").0, "gemini");
         assert_eq!(infer_backend("o4-mini").0, "openai");
         assert_eq!(infer_backend("llama-3.1-70b").0, "openrouter");
+    }
+
+    #[test]
+    fn lua_tool_handler_passes_metadata_through_to_tool_output() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("meta_tool.lua"),
+            r#"
+genesis.register_tool({
+    name = "meta_tool",
+    description = "Tool that returns metadata",
+    run = function(_)
+        return {
+            content = "Please clarify your request.",
+            metadata = { requires_input = "true" },
+        }
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    disabled_plugins: Vec::new(),
+                    plugin_verbose: None,
+                    config_values: BTreeMap::new(),
+                    ..Default::default()
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        let output = runtime
+            .execute(&ToolCall {
+                name: "meta_tool".to_owned(),
+                arguments: BTreeMap::new(),
+            })
+            .expect("lua tool should execute");
+
+        assert_eq!(output.content, "Please clarify your request.");
+        assert_eq!(
+            output.metadata.get("requires_input").unwrap(),
+            "true",
+            "metadata should be passed through from Lua tool"
+        );
+    }
+
+    #[test]
+    fn lua_tool_with_approval_always_is_registered_with_correct_policy() {
+        let dir = tempdir().expect("tempdir should exist");
+        let plugin_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugin_dir).expect("plugin dir should exist");
+        std::fs::write(
+            plugin_dir.join("approval_tool.lua"),
+            r#"
+genesis.register_tool({
+    name = "approval_tool",
+    description = "Tool requiring approval",
+    approval = "always",
+    run = function(_)
+        return "sent"
+    end,
+})
+"#,
+        )
+        .expect("plugin should write");
+
+        let loaded = test_loaded_config(dir.path().to_path_buf(), dir.path().join("genesis.db"));
+        let context = build_execution_context_from_loaded(
+            &loaded,
+            "session-42".to_owned(),
+            DeliveryPlatform::Cli,
+        );
+        let lua_runtime = Arc::new(
+            LuaRuntime::builder()
+                .with_config(LuaRuntimeConfig {
+                    plugin_dir: loaded.paths.plugin_dir.clone(),
+                    session: LuaSessionContext {
+                        id: "session-42".to_owned(),
+                        model: context.plan.model.model.clone(),
+                        turn_count: 0,
+                        total_tokens: 0,
+                        platform: "cli".to_owned(),
+                        personality: None,
+                    },
+                    disabled_plugins: Vec::new(),
+                    plugin_verbose: None,
+                    config_values: BTreeMap::new(),
+                    ..Default::default()
+                })
+                .build()
+                .expect("lua runtime should build"),
+        );
+
+        // Verify the Lua tool has approval_policy set
+        let tools = lua_runtime.registered_tools();
+        let approval_tool = tools
+            .iter()
+            .find(|t| t.definition.name == "approval_tool")
+            .expect("approval_tool should be registered");
+        assert_eq!(approval_tool.approval_policy.as_deref(), Some("always"));
+
+        let mut runtime = build_default_tool_runtime(&context);
+        runtime.set_lua_runtime(lua_runtime);
+
+        // The tool should be registered (we verify it exists in definitions)
+        let defs = runtime.definitions();
+        assert!(
+            defs.iter().any(|d| d.name == "approval_tool"),
+            "approval_tool should be in definitions"
+        );
+
+        // Execute without approval handler — in default mode (interactive) with
+        // ApprovalPolicy::Always, execution should be denied because no approval handler
+        // is configured. This proves the policy was wired up correctly.
+        // However, in the default test config, approval_mode is Interactive and there's no
+        // handler, so Always-policy tools get denied.
+        let result = runtime.execute(&ToolCall {
+            name: "approval_tool".to_owned(),
+            arguments: BTreeMap::new(),
+        });
+        assert!(
+            result.is_err(),
+            "always-approval tool should fail without approval handler"
+        );
     }
 }

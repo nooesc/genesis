@@ -17,6 +17,10 @@ pub trait LuaHostToolExecutor: Send + Sync {
 pub enum LuaToolOutput {
     Text(String),
     Json(serde_json::Value),
+    TextWithMetadata {
+        content: String,
+        metadata: BTreeMap<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +28,7 @@ pub struct LuaRegisteredTool {
     pub definition: ToolDefinition,
     pub plugin_name: String,
     pub permissions: PluginPermissions,
+    pub approval_policy: Option<String>,
 }
 
 struct LuaToolEntry {
@@ -60,6 +65,7 @@ impl LuaToolRegistry {
         }
 
         let parameters = optional_parameter_schema(lua, &spec, plugin_name)?;
+        let approval_policy: Option<String> = spec.get("approval").ok();
         let run = required_function(&spec, "run", plugin_name)?;
         let handler = lua.create_registry_value(run)?;
         let registration = LuaRegisteredTool {
@@ -70,6 +76,7 @@ impl LuaToolRegistry {
             },
             plugin_name: plugin_name.to_owned(),
             permissions: permissions.clone(),
+            approval_policy,
         };
 
         self.tools.insert(
@@ -223,12 +230,258 @@ fn to_output(lua: &Lua, tool_name: &str, value: Value) -> Result<LuaToolOutput, 
     match value {
         Value::Nil => Ok(LuaToolOutput::Text(String::new())),
         Value::String(text) => Ok(LuaToolOutput::Text(text.to_str()?.to_owned())),
-        Value::Boolean(_) | Value::Integer(_) | Value::Number(_) | Value::Table(_) => {
+        Value::Boolean(_) | Value::Integer(_) | Value::Number(_) => {
+            Ok(LuaToolOutput::Json(lua.from_value(value)?))
+        }
+        Value::Table(ref t) => {
+            // Check if this is a {content, metadata} response.
+            // Both `content` (string) and `metadata` (table) keys must be present
+            // to distinguish from a plain structured table that happens to have
+            // a `content` field.
+            if let (Ok(Some(content)), Ok(Some(metadata_table))) = (
+                t.get::<Option<String>>("content"),
+                t.get::<Option<Table>>("metadata"),
+            ) {
+                let mut metadata = BTreeMap::new();
+                for (k, v) in metadata_table.pairs::<String, String>().flatten() {
+                    metadata.insert(k, v);
+                }
+                return Ok(LuaToolOutput::TextWithMetadata { content, metadata });
+            }
+            // Otherwise treat as JSON
             Ok(LuaToolOutput::Json(lua.from_value(value)?))
         }
         other => Err(LuaRuntimeError::InvalidLuaToolResult {
             tool_name: tool_name.to_owned(),
             value_type: other.type_name().to_owned(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::Lua;
+
+    fn make_lua() -> Lua {
+        Lua::new()
+    }
+
+    fn make_permissions() -> PluginPermissions {
+        PluginPermissions::default()
+    }
+
+    #[test]
+    fn register_extracts_approval_policy_from_spec() {
+        let lua = make_lua();
+        let mut registry = LuaToolRegistry::default();
+
+        lua.scope(|scope| {
+            let spec = lua.create_table().unwrap();
+            spec.set("name", "send_msg").unwrap();
+            spec.set("description", "Send a message").unwrap();
+            spec.set("approval", "always").unwrap();
+            spec.set(
+                "run",
+                scope
+                    .create_function(|_, _args: Value| Ok(Value::Nil))
+                    .unwrap(),
+            )
+            .unwrap();
+            registry
+                .register(&lua, "test_plugin", &make_permissions(), spec)
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let tools = registry.registered_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].approval_policy.as_deref(), Some("always"));
+    }
+
+    #[test]
+    fn register_approval_policy_defaults_to_none() {
+        let lua = make_lua();
+        let mut registry = LuaToolRegistry::default();
+
+        lua.scope(|scope| {
+            let spec = lua.create_table().unwrap();
+            spec.set("name", "echo").unwrap();
+            spec.set("description", "Echo text").unwrap();
+            spec.set(
+                "run",
+                scope
+                    .create_function(|_, _args: Value| Ok(Value::Nil))
+                    .unwrap(),
+            )
+            .unwrap();
+            registry
+                .register(&lua, "test_plugin", &make_permissions(), spec)
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let tools = registry.registered_tools();
+        assert_eq!(tools.len(), 1);
+        assert!(tools[0].approval_policy.is_none());
+    }
+
+    #[test]
+    fn to_output_returns_text_with_metadata_for_content_metadata_table() {
+        let lua = make_lua();
+        let result = lua
+            .load(
+                r#"
+            return {
+                content = "Please clarify your request.",
+                metadata = { requires_input = "true" },
+            }
+        "#,
+            )
+            .eval::<Value>()
+            .unwrap();
+
+        let output = to_output(&lua, "clarify", result).unwrap();
+        match output {
+            LuaToolOutput::TextWithMetadata { content, metadata } => {
+                assert_eq!(content, "Please clarify your request.");
+                assert_eq!(metadata.get("requires_input").unwrap(), "true");
+            }
+            other => panic!("expected TextWithMetadata, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_output_returns_text_with_metadata_with_empty_metadata() {
+        let lua = make_lua();
+        let result = lua
+            .load(
+                r#"
+            return {
+                content = "hello",
+                metadata = {},
+            }
+        "#,
+            )
+            .eval::<Value>()
+            .unwrap();
+
+        let output = to_output(&lua, "test", result).unwrap();
+        match output {
+            LuaToolOutput::TextWithMetadata { content, metadata } => {
+                assert_eq!(content, "hello");
+                assert!(metadata.is_empty());
+            }
+            other => panic!("expected TextWithMetadata, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn to_output_returns_json_for_table_without_content_key() {
+        let lua = make_lua();
+        let result = lua
+            .load(
+                r#"
+            return { ok = true, count = 42 }
+        "#,
+            )
+            .eval::<Value>()
+            .unwrap();
+
+        let output = to_output(&lua, "test", result).unwrap();
+        assert!(matches!(output, LuaToolOutput::Json(_)));
+    }
+
+    #[test]
+    fn to_output_returns_json_for_table_with_content_but_no_metadata_key() {
+        let lua = make_lua();
+        let result = lua
+            .load(
+                r#"
+            return { content = "hello", other = "field" }
+        "#,
+            )
+            .eval::<Value>()
+            .unwrap();
+
+        let output = to_output(&lua, "test", result).unwrap();
+        // Has content string but no metadata key — treated as plain JSON to avoid
+        // breaking existing tools that return structured tables with a content field.
+        assert!(
+            matches!(output, LuaToolOutput::Json(_)),
+            "table with content but no metadata key should be Json"
+        );
+    }
+
+    #[test]
+    fn to_output_returns_text_with_metadata_multiple_metadata_entries() {
+        let lua = make_lua();
+        let result = lua
+            .load(
+                r#"
+            return {
+                content = "done",
+                metadata = {
+                    requires_input = "true",
+                    priority = "high",
+                },
+            }
+        "#,
+            )
+            .eval::<Value>()
+            .unwrap();
+
+        let output = to_output(&lua, "test", result).unwrap();
+        match output {
+            LuaToolOutput::TextWithMetadata { content, metadata } => {
+                assert_eq!(content, "done");
+                assert_eq!(metadata.len(), 2);
+                assert_eq!(metadata["requires_input"], "true");
+                assert_eq!(metadata["priority"], "high");
+            }
+            other => panic!("expected TextWithMetadata, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn invoke_returns_text_with_metadata() {
+        let lua = make_lua();
+        let mut registry = LuaToolRegistry::default();
+
+        lua.scope(|scope| {
+            let spec = lua.create_table().unwrap();
+            spec.set("name", "clarify").unwrap();
+            spec.set("description", "Ask for clarification").unwrap();
+            spec.set(
+                "run",
+                scope
+                    .create_function(|lua, _args: Value| {
+                        let t = lua.create_table()?;
+                        t.set("content", "What did you mean?")?;
+                        let meta = lua.create_table()?;
+                        meta.set("requires_input", "true")?;
+                        t.set("metadata", meta)?;
+                        Ok(Value::Table(t))
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            registry
+                .register(&lua, "test_plugin", &make_permissions(), spec)
+                .unwrap();
+
+            let output = registry.invoke(&lua, "clarify", BTreeMap::new()).unwrap();
+            match output {
+                LuaToolOutput::TextWithMetadata { content, metadata } => {
+                    assert_eq!(content, "What did you mean?");
+                    assert_eq!(metadata["requires_input"], "true");
+                }
+                other => panic!("expected TextWithMetadata, got {:?}", other),
+            }
+            Ok(())
+        })
+        .unwrap();
     }
 }

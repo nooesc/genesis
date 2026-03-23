@@ -1821,6 +1821,7 @@ trusted = true
         let text = match &output {
             crate::LuaToolOutput::Text(s) => s.clone(),
             crate::LuaToolOutput::Json(v) => v.to_string(),
+            crate::LuaToolOutput::TextWithMetadata { content, .. } => content.clone(),
         };
         let parsed: serde_json::Value =
             serde_json::from_str(&text).expect("output should be valid JSON");
