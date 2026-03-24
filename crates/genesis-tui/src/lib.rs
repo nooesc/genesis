@@ -28,6 +28,7 @@ pub mod events;
 pub mod frame_requester;
 pub mod history;
 pub mod render;
+pub mod streaming;
 pub mod terminal;
 pub mod theme;
 pub mod widgets;
@@ -319,15 +320,25 @@ pub async fn run_tui(
             ct_event = crossterm_events.next() => {
                 if let Some(Ok(event)) = ct_event {
                     if let Some(tui_event) = translate_crossterm(event) {
-                        // Intercept Resize to update the terminal viewport
-                        // before delegating to App (which schedules a frame).
+                        // Intercept Resize to defer viewport update until
+                        // the next frame draw. This coalesces rapid resize
+                        // events (common during tmux drag-resize) into one
+                        // screen clear + full redraw per frame interval.
                         if let TuiEvent::Resize { width, height } = &tui_event {
                             let clamped = Rect::new(0, 0, *width, *height);
                             term.set_viewport_area(clamped);
+                            // Update App dimensions eagerly so layout queries
+                            // between now and the frame draw use correct values.
                             app.viewport_width = clamped.width;
                             app.viewport_height = clamped.height;
+                            // Schedule frame but skip App::handle_tui_event for
+                            // Resize — the actual effects/scroll/overlay work
+                            // happens when apply_pending_resize runs in the
+                            // frame draw path.
+                            app.frame_requester.schedule_frame();
+                        } else {
+                            app.handle_tui_event(tui_event);
                         }
-                        app.handle_tui_event(tui_event);
                     }
                 }
             }
@@ -470,6 +481,9 @@ pub async fn run_tui(
                 // Advance status bar animation (sprite / spinner + heartbeat).
                 app.status_bar.tick();
 
+                // Advance streaming animation: commit buffered text line-by-line.
+                app.chat.tick_streaming();
+
                 // Check if the approval overlay has timed out.
                 app.check_approval_timeout();
 
@@ -518,8 +532,13 @@ pub async fn run_tui(
                     && (matches!(app.screen, AppScreen::Welcome)
                         || (!app.turn_running && matches!(app.screen, AppScreen::Chat)));
                 let has_approval = app.approval.is_some();
-                if has_tachyonfx || has_sprite_anim || has_braille || has_approval {
-                    let interval = if has_tachyonfx {
+                let has_streaming = app.chat.has_streaming_pending();
+                if has_tachyonfx || has_sprite_anim || has_braille || has_approval || has_streaming {
+                    let interval = if has_streaming {
+                        // ~120fps for smooth streaming animation — matches Codex's
+                        // TARGET_FRAME_INTERVAL for line-by-line commit ticks.
+                        std::time::Duration::from_millis(8)
+                    } else if has_tachyonfx {
                         std::time::Duration::from_millis(16) // ~60fps for tachyonfx effects
                     } else if has_sprite_anim {
                         app.status_bar.animation_interval()
@@ -594,6 +613,34 @@ fn render_frame(
     app: &mut App,
     frame_dt: std::time::Duration,
 ) {
+    // Apply any deferred resize before rendering. This coalesces rapid resize
+    // events (tmux drag-resize sends many SIGWINCH in quick succession) into
+    // a single screen clear + full redraw per frame interval.
+    if term.apply_pending_resize() {
+        let area = term.viewport_area();
+        app.viewport_width = area.width;
+        app.viewport_height = area.height;
+
+        // Cancel all running effects — they hold stale coordinates from
+        // the pre-resize viewport.
+        app.effects.on_resize();
+
+        // Reclamp scroll offset for the new width.
+        app.chat.reclamp_scroll(area.width);
+
+        // Rebuild the transcript overlay if open.
+        if let Some(app::ActiveOverlay::Transcript(_)) = &app.overlay {
+            let visible_rows = app.viewport_height.saturating_sub(1).max(1);
+            app.overlay = Some(app::ActiveOverlay::Transcript(
+                crate::widgets::transcript::TranscriptOverlay::from_cells(
+                    app.chat.committed_cells(),
+                    app.viewport_width,
+                    visible_rows,
+                ),
+            ));
+        }
+    }
+
     let area = term.viewport_area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -801,8 +848,9 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
         CrosstermEvent::Mouse(mouse) => {
             use crossterm::event::MouseEventKind;
             match mouse.kind {
-                MouseEventKind::ScrollUp => Some(TuiEvent::MouseScroll(3)),
-                MouseEventKind::ScrollDown => Some(TuiEvent::MouseScroll(-3)),
+                // Scroll 1 row per wheel notch for smoother feel (was 3).
+                MouseEventKind::ScrollUp => Some(TuiEvent::MouseScroll(1)),
+                MouseEventKind::ScrollDown => Some(TuiEvent::MouseScroll(-1)),
                 _ => None,
             }
         }

@@ -11,6 +11,7 @@ use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
 use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
+use crate::streaming::StreamingBuffer;
 use crate::widgets::input_widget::InputWidget;
 use ratatui::{
     buffer::Buffer,
@@ -96,6 +97,9 @@ pub struct ChatWidget {
     scroll_offset: usize,
     /// True when the user has scrolled up and auto-scroll is disabled.
     scroll_locked: bool,
+    /// Streaming animation buffer — buffers incoming text deltas and releases
+    /// them line-by-line for smooth typewriter-like animation.
+    streaming_buffer: StreamingBuffer,
 }
 
 impl ChatWidget {
@@ -112,6 +116,7 @@ impl ChatWidget {
             theme_dim: crate::history::rgb(genesis_ui::colors::UI_DIM),
             scroll_offset: 0,
             scroll_locked: false,
+            streaming_buffer: StreamingBuffer::new(),
         }
     }
 
@@ -200,15 +205,43 @@ impl ChatWidget {
             tool_calls: Vec::new(),
         });
         self.active_cell_cache = None;
+        self.streaming_buffer.reset();
     }
 
-    /// Append streaming text to the active cell's text buffer.
+    /// Append streaming text to the active cell via the streaming buffer.
     ///
-    /// If no turn is active, this is a no-op.
-    pub fn append_text(&mut self, text: &str) {
-        if let Some(cell) = &mut self.active_cell {
-            cell.text_buffer.push_str(text);
+    /// Text is buffered until newlines are found, then released line-by-line
+    /// by [`tick_streaming`] for smooth typewriter-like animation. If no turn
+    /// is active, this is a no-op.
+    ///
+    /// Returns `true` if new lines were enqueued (caller should ensure the
+    /// streaming tick timer is running).
+    pub fn append_text(&mut self, text: &str) -> bool {
+        if self.active_cell.is_none() {
+            return false;
         }
+        self.streaming_buffer.push_delta(text)
+    }
+
+    /// Drain buffered streaming text and commit it to the active cell.
+    ///
+    /// Called once per frame tick. In smooth mode, commits one line. In
+    /// catch-up mode, commits all queued lines at once.
+    ///
+    /// Returns `true` if text was committed (frame needs redraw).
+    pub fn tick_streaming(&mut self) -> bool {
+        if let Some(text) = self.streaming_buffer.tick() {
+            if let Some(cell) = &mut self.active_cell {
+                cell.text_buffer.push_str(&text);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the streaming buffer has pending content to animate.
+    pub fn has_streaming_pending(&self) -> bool {
+        self.streaming_buffer.has_pending()
     }
 
     /// Record a tool call starting in the active cell.
@@ -250,6 +283,13 @@ impl ChatWidget {
     /// Returns the newly committed cells and queues them for the commit path.
     /// Alternate-screen mode keeps this in-memory only.
     pub fn complete_turn(&mut self) -> Vec<HistoryCell> {
+        // Flush any remaining buffered streaming text before freezing the cell.
+        if let Some(remaining) = self.streaming_buffer.finalize() {
+            if let Some(cell) = &mut self.active_cell {
+                cell.text_buffer.push_str(&remaining);
+            }
+        }
+
         let Some(cell) = self.active_cell.take() else {
             return Vec::new();
         };
@@ -912,15 +952,41 @@ mod tests {
     }
 
     #[test]
-    fn append_text_accumulates() {
+    fn append_text_buffers_through_streaming() {
         let mut cw = ChatWidget::new();
         cw.start_turn();
-        cw.append_text("Hello");
-        cw.append_text(", ");
-        cw.append_text("world.");
+        cw.append_text("Hello\n");
+        cw.append_text("world\n");
 
+        // Text is in the streaming buffer, not yet in text_buffer.
         let active = cw.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello, world.");
+        assert_eq!(active.text_buffer, "");
+        assert!(cw.has_streaming_pending());
+
+        // Ticking commits one line at a time.
+        assert!(cw.tick_streaming());
+        let active = cw.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "Hello\n");
+
+        assert!(cw.tick_streaming());
+        let active = cw.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "Hello\nworld\n");
+    }
+
+    #[test]
+    fn append_text_no_newline_stays_pending() {
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        cw.append_text("partial");
+
+        // No newline means it stays in streaming buffer pending area.
+        let active = cw.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "");
+        assert!(cw.has_streaming_pending());
+
+        // Finalize flushes the partial text (used at turn completion).
+        let cells = cw.complete_turn();
+        assert!(!cells.is_empty());
     }
 
     #[test]
@@ -1211,7 +1277,9 @@ mod tests {
     fn streaming_cursor_shown_during_active_cell() {
         let mut cw = ChatWidget::new();
         cw.start_turn();
-        cw.append_text("streaming text");
+        cw.append_text("streaming text\n");
+        // Tick to commit the buffered line to the active cell.
+        cw.tick_streaming();
 
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);

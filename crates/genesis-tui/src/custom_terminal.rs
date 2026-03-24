@@ -30,6 +30,11 @@ pub struct CustomTerminal {
     buffers: [Buffer; 2],
     current: usize,
     viewport_area: Rect,
+    /// Deferred resize: stored on `set_viewport_area`, applied by
+    /// `apply_pending_resize` just before the next frame render. This lets
+    /// rapid resize events (tmux drag-resize) coalesce so only one screen
+    /// clear + full redraw happens per frame interval.
+    pending_resize: Option<Rect>,
 }
 
 impl CustomTerminal {
@@ -44,6 +49,7 @@ impl CustomTerminal {
             buffers: [Buffer::empty(area), Buffer::empty(area)],
             current: 0,
             viewport_area: area,
+            pending_resize: None,
         })
     }
 
@@ -52,18 +58,47 @@ impl CustomTerminal {
         self.viewport_area
     }
 
-    /// Update the viewport area and resize both buffers to match.
+    /// Record a pending viewport resize without clearing the screen yet.
     ///
-    /// The previous buffer is reset after resizing so that `draw_diff` treats
-    /// every cell as changed on the first post-resize frame. Without this,
-    /// stale pre-resize content in the previous buffer can suppress redraws
-    /// where cells happen to match by coincidence, producing ghost artifacts.
+    /// The actual buffer resize and screen clear happen in [`apply_pending_resize`],
+    /// which the render loop calls just before drawing a frame. This lets rapid
+    /// resize events (common during tmux drag-resize) coalesce so only one
+    /// clear+redraw cycle occurs per frame interval.
     pub fn set_viewport_area(&mut self, area: Rect) {
+        if area == self.viewport_area && self.pending_resize.is_none() {
+            return;
+        }
+        self.pending_resize = Some(area);
+    }
+
+    /// Apply a pending viewport resize, clearing the terminal screen and
+    /// resizing both buffers so that `draw_diff` redraws every cell from
+    /// scratch.
+    ///
+    /// Returns `true` if a resize was applied (caller should reclamp scroll,
+    /// cancel effects, etc.), `false` if no resize was pending.
+    ///
+    /// The screen clear prevents ghost artifacts in multiplexers (tmux/Zellij)
+    /// where pane resize can leave orphaned characters that the diff renderer
+    /// would never overwrite.
+    pub fn apply_pending_resize(&mut self) -> bool {
+        let Some(area) = self.pending_resize.take() else {
+            return false;
+        };
+        if area == self.viewport_area {
+            return false;
+        }
+        // Clear the physical terminal so stale pre-resize content is erased.
+        let _ = write!(self.backend, "\x1b[2J\x1b[H");
+        let _ = self.backend.flush();
+
         self.buffers[self.current].resize(area);
         self.buffers[1 - self.current].resize(area);
-        // Force a full redraw on the next frame by clearing the previous buffer.
+        // Reset BOTH buffers so draw_diff treats every cell as changed.
+        self.buffers[self.current].reset();
         self.buffers[1 - self.current].reset();
         self.viewport_area = area;
+        true
     }
 
     /// Get a mutable reference to the current (front) buffer for drawing into.
@@ -276,26 +311,74 @@ mod tests {
             buffers,
             current: 0,
             viewport_area: area,
+            pending_resize: None,
         };
         assert_eq!(ct.viewport_area(), Rect::new(0, 0, 80, 24));
     }
 
     #[test]
-    fn set_viewport_area_resizes_buffers() {
+    fn set_viewport_area_defers_resize() {
         let initial = Rect::new(0, 0, 80, 24);
         let mut ct = CustomTerminal {
             backend: CrosstermBackend::new(io::stdout()),
             buffers: make_buffers(initial),
             current: 0,
             viewport_area: initial,
+            pending_resize: None,
         };
 
-        let new_area = Rect::new(0, 5, 120, 30);
+        let new_area = Rect::new(0, 0, 120, 30);
         ct.set_viewport_area(new_area);
 
+        // Resize is deferred — viewport_area should NOT have changed yet.
+        assert_eq!(ct.viewport_area(), initial);
+        assert!(ct.pending_resize.is_some());
+
+        // Apply the pending resize.
+        assert!(ct.apply_pending_resize());
         assert_eq!(ct.viewport_area(), new_area);
         assert_eq!(*ct.buffers[0].area(), new_area);
         assert_eq!(*ct.buffers[1].area(), new_area);
+    }
+
+    #[test]
+    fn set_viewport_area_no_op_for_same_size() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut ct = CustomTerminal {
+            backend: CrosstermBackend::new(io::stdout()),
+            buffers: make_buffers(area),
+            current: 0,
+            viewport_area: area,
+            pending_resize: None,
+        };
+
+        ct.set_viewport_area(area);
+        assert!(ct.pending_resize.is_none());
+        assert!(!ct.apply_pending_resize());
+    }
+
+    #[test]
+    fn rapid_resizes_coalesce_to_final() {
+        let initial = Rect::new(0, 0, 80, 24);
+        let mut ct = CustomTerminal {
+            backend: CrosstermBackend::new(io::stdout()),
+            buffers: make_buffers(initial),
+            current: 0,
+            viewport_area: initial,
+            pending_resize: None,
+        };
+
+        // Simulate rapid resize events (like tmux drag-resize).
+        ct.set_viewport_area(Rect::new(0, 0, 90, 24));
+        ct.set_viewport_area(Rect::new(0, 0, 100, 24));
+        ct.set_viewport_area(Rect::new(0, 0, 110, 30));
+
+        // Only one apply should happen, with the final dimensions.
+        let final_area = Rect::new(0, 0, 110, 30);
+        assert!(ct.apply_pending_resize());
+        assert_eq!(ct.viewport_area(), final_area);
+        // Second apply should be a no-op.
+        assert!(!ct.apply_pending_resize());
     }
 
     #[test]
@@ -306,6 +389,7 @@ mod tests {
             buffers: make_buffers(area),
             current: 0,
             viewport_area: area,
+            pending_resize: None,
         };
 
         assert_eq!(ct.current, 0);
