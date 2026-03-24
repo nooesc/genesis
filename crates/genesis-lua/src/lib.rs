@@ -2185,4 +2185,36 @@ trusted = true
         std::env::remove_var("HASS_URL");
         std::env::remove_var("HASS_TOKEN");
     }
+
+    #[test]
+    fn bundled_web_search_registers_with_correct_params() {
+        let rt = build_bundled_test_runtime();
+        let tools = rt.registered_tools();
+        let ws = tools
+            .iter()
+            .find(|t| t.definition.name == "web_search")
+            .expect("web_search tool should be registered");
+        assert!(ws.definition.description.to_lowercase().contains("search"));
+        let params = ws.definition.parameters.as_ref().expect("should have params");
+        let props = params["properties"].as_object().expect("should have properties");
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("count"));
+        let required = params["required"].as_array().expect("should have required");
+        assert!(required.iter().any(|v| v.as_str() == Some("query")));
+    }
+
+    #[test]
+    fn bundled_web_search_rejects_empty_query() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool(
+            "web_search",
+            BTreeMap::from([("query".to_owned(), "   ".to_owned())]),
+        );
+        assert!(result.is_err(), "empty query should error");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("empty"),
+            "error should mention empty: {err}"
+        );
+    }
 }
