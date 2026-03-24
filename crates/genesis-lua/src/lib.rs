@@ -2195,8 +2195,14 @@ trusted = true
             .find(|t| t.definition.name == "web_search")
             .expect("web_search tool should be registered");
         assert!(ws.definition.description.to_lowercase().contains("search"));
-        let params = ws.definition.parameters.as_ref().expect("should have params");
-        let props = params["properties"].as_object().expect("should have properties");
+        let params = ws
+            .definition
+            .parameters
+            .as_ref()
+            .expect("should have params");
+        let props = params["properties"]
+            .as_object()
+            .expect("should have properties");
         assert!(props.contains_key("query"));
         assert!(props.contains_key("count"));
         let required = params["required"].as_array().expect("should have required");
@@ -2227,8 +2233,14 @@ trusted = true
             .find(|t| t.definition.name == "text_to_speech")
             .expect("text_to_speech tool should be registered");
         assert!(tts.definition.description.to_lowercase().contains("speech"));
-        let params = tts.definition.parameters.as_ref().expect("should have params");
-        let props = params["properties"].as_object().expect("should have properties");
+        let params = tts
+            .definition
+            .parameters
+            .as_ref()
+            .expect("should have params");
+        let props = params["properties"]
+            .as_object()
+            .expect("should have properties");
         assert!(props.contains_key("text"));
         assert!(props.contains_key("output_path"));
         assert!(props.contains_key("voice"));
@@ -2263,10 +2275,22 @@ trusted = true
         let rt = build_bundled_test_runtime();
         let tools = rt.registered_tools();
         let tool_names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
-        assert!(tool_names.contains(&"ha_list_entities"), "ha_list_entities missing: {tool_names:?}");
-        assert!(tool_names.contains(&"ha_get_state"), "ha_get_state missing: {tool_names:?}");
-        assert!(tool_names.contains(&"ha_list_services"), "ha_list_services missing: {tool_names:?}");
-        assert!(tool_names.contains(&"ha_call_service"), "ha_call_service missing: {tool_names:?}");
+        assert!(
+            tool_names.contains(&"ha_list_entities"),
+            "ha_list_entities missing: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"ha_get_state"),
+            "ha_get_state missing: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"ha_list_services"),
+            "ha_list_services missing: {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains(&"ha_call_service"),
+            "ha_call_service missing: {tool_names:?}"
+        );
     }
 
     #[test]
@@ -2286,7 +2310,10 @@ trusted = true
         );
         assert!(result.is_err(), "invalid entity_id should error");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid") || err.contains("entity_id"), "error should mention invalid entity_id: {err}");
+        assert!(
+            err.contains("invalid") || err.contains("entity_id"),
+            "error should mention invalid entity_id: {err}"
+        );
         std::env::remove_var("HASS_TOKEN");
     }
 
@@ -2318,7 +2345,14 @@ trusted = true
     #[test]
     fn bundled_ha_call_service_blocks_all_dangerous_domains() {
         let rt = build_bundled_test_runtime();
-        for domain in &["shell_command", "command_line", "python_script", "pyscript", "hassio", "rest_command"] {
+        for domain in &[
+            "shell_command",
+            "command_line",
+            "python_script",
+            "pyscript",
+            "hassio",
+            "rest_command",
+        ] {
             let result = rt.invoke_tool(
                 "ha_call_service",
                 BTreeMap::from([
@@ -2360,6 +2394,9 @@ trusted = true
         let result = rt.invoke_tool("ha_list_entities", BTreeMap::new());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("HASS_TOKEN"), "error should mention token: {err}");
+        assert!(
+            err.contains("HASS_TOKEN"),
+            "error should mention token: {err}"
+        );
     }
 }
