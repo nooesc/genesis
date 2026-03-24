@@ -114,8 +114,8 @@ impl Pattern {
         let columns = (0..num_columns)
             .map(|_| {
                 let y_head = next() * 1.8 - 0.4;
-                let speed = 0.08 + next() * 0.15; // slower for subtlety
-                let length = 0.10 + next() * 0.20; // shorter trails
+                let speed = 0.10 + next() * 0.20;
+                let length = 0.20 + next() * 0.35; // longer trails
                 let brightness = 0.4 + next() * 0.6;
                 (y_head, speed, length, brightness)
             })
@@ -286,7 +286,7 @@ impl<'a> BrailleCanvas<'a> {
         //   7 8      bit 6  bit 7
         const LEFT_DOTS: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
         const RIGHT_DOTS: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
-        const DOTS_PER_TRAIL: usize = 5;
+        const DOTS_PER_TRAIL: usize = 8;
         const DIM_LAVENDER: Color = Color::Rgb(60, 55, 72);
 
         let num_cols = columns.len().max(1);
