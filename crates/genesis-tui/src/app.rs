@@ -123,9 +123,30 @@ impl App {
                 debug_assert!(false, "Resize events must not reach App::handle_tui_event");
             }
             TuiEvent::MouseScroll(delta) => {
-                // Only scroll the chat view when no overlay is active and
-                // we're on the Chat screen.
-                if self.overlay.is_none() && matches!(self.screen, AppScreen::Chat) {
+                // Route scroll to the active overlay, or to the chat view.
+                if let Some(overlay) = &mut self.overlay {
+                    let visible_rows = self.viewport_height.saturating_sub(1).max(1);
+                    match overlay {
+                        ActiveOverlay::Transcript(t) => {
+                            if delta > 0 {
+                                t.scroll_up(delta as usize);
+                            } else if delta < 0 {
+                                t.scroll_down((-delta) as usize, visible_rows);
+                            }
+                        }
+                        ActiveOverlay::Help(h) => {
+                            if delta > 0 {
+                                h.scroll_up(delta as usize);
+                            } else if delta < 0 {
+                                h.scroll_down((-delta) as usize, visible_rows);
+                            }
+                        }
+                        ActiveOverlay::Models(_) => {
+                            // Model picker handles navigation via keyboard only.
+                        }
+                    }
+                    self.frame_requester.schedule_frame();
+                } else if matches!(self.screen, AppScreen::Chat) {
                     if delta > 0 {
                         self.chat.scroll_up(delta as usize, self.viewport_width);
                     } else if delta < 0 {
@@ -326,6 +347,8 @@ impl App {
                 "/exit" | "/quit" => self.should_exit = true,
                 "/clear" => {
                     self.chat = ChatWidget::new();
+                    self.chat.set_theme(&*self.active_theme);
+                    let _ = self.app_tx.send(AppEvent::ClearScreen);
                     self.frame_requester.schedule_frame();
                 }
                 "/help" => {
@@ -398,6 +421,12 @@ impl App {
                         Err(err) => picker.set_error(err),
                     }
                 }
+                self.frame_requester.schedule_frame();
+            }
+            AppEvent::ClearScreen => {
+                // Actual terminal clear is handled in lib.rs event loop.
+                // App state (ChatWidget) is already reset by the Ctrl+L or
+                // /clear handler before this event is sent.
                 self.frame_requester.schedule_frame();
             }
         }
@@ -520,6 +549,15 @@ impl App {
             } else {
                 self.command_popup.hide();
             }
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        // Ctrl+L — clear chat (same as /clear but via keyboard).
+        if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.chat = ChatWidget::new();
+            self.chat.set_theme(&*self.active_theme);
+            let _ = self.app_tx.send(AppEvent::ClearScreen);
             self.frame_requester.schedule_frame();
             return;
         }
