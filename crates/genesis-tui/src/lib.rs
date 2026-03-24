@@ -265,6 +265,13 @@ pub async fn run_tui(
     app.status_bar.set_theme(&*app.active_theme);
     app.chat.set_theme(&*app.active_theme);
 
+    // Set initial terminal title.
+    set_terminal_title(
+        term.backend_mut(),
+        &format!("Eve | {}", app.status_bar.model),
+    );
+    let _ = term.flush();
+
     // If an initial prompt was provided, skip the welcome screen and submit
     // the prompt as the first user message once the event loop starts.
     let pending_initial_prompt = if initial_prompt.is_some() {
@@ -637,6 +644,10 @@ pub async fn run_tui(
             break;
         }
     }
+
+    // Reset terminal title before exiting so it doesn't linger as "Eve | model".
+    set_terminal_title(term.backend_mut(), "");
+    let _ = term.flush();
 
     // TerminalGuard handles terminal::restore() on drop, covering both
     // normal exit and early `?` returns.

@@ -867,9 +867,13 @@ impl App {
                                 self.should_exit = true;
                             } else {
                                 self.last_quit_press = Some(now);
+                                self.status_bar
+                                    .show_transient_warning("Ctrl+D again to quit");
                             }
                         } else {
                             self.last_quit_press = Some(now);
+                            self.status_bar
+                                .show_transient_warning("Ctrl+D again to quit");
                         }
                     }
                     InputAction::Interrupt => {
