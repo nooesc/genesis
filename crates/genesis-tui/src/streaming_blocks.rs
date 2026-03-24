@@ -22,6 +22,10 @@ pub struct StreamingBlockCollector {
     fence_marker: Option<String>,
     /// Number of lines accumulated in the current block.
     line_count: usize,
+    /// Deferred block waiting to be returned on the next `push_line` call.
+    /// Used when a single `push_line` would need to emit two blocks (e.g.
+    /// a paragraph followed by a heading on the same call).
+    pending_emit: Option<String>,
 }
 
 impl Default for StreamingBlockCollector {
@@ -38,6 +42,7 @@ impl StreamingBlockCollector {
             in_code_fence: false,
             fence_marker: None,
             line_count: 0,
+            pending_emit: None,
         }
     }
 
@@ -46,6 +51,14 @@ impl StreamingBlockCollector {
     /// Returns `Some(block_text)` when a complete block should be committed.
     /// The returned text includes all lines of the block.
     pub fn push_line(&mut self, line: &str) -> Option<String> {
+        // Return any previously deferred block first. The current line is
+        // accumulated into the buffer and will be processed on the next call.
+        if let Some(deferred) = self.pending_emit.take() {
+            self.buffer.push_str(line);
+            self.line_count += 1;
+            return Some(deferred);
+        }
+
         let trimmed = line.trim_end_matches('\n');
 
         // Inside a code fence — accumulate until closing marker.
@@ -94,14 +107,9 @@ impl StreamingBlockCollector {
             self.buffer.push_str(line);
             self.line_count = 1;
             let heading = self.emit();
-            // Return the prior block if it exists, otherwise the heading.
-            // If both exist, we need to handle this — store heading for next call.
             if prev.is_some() {
-                // Push heading back into buffer for the next tick to emit.
-                if let Some(h) = heading {
-                    self.buffer = h;
-                    self.line_count = 1;
-                }
+                // Two blocks in one call — defer the heading for next call.
+                self.pending_emit = heading;
                 return prev;
             }
             return heading;
@@ -135,6 +143,17 @@ impl StreamingBlockCollector {
     pub fn finalize(&mut self) -> Option<String> {
         self.in_code_fence = false;
         self.fence_marker = None;
+        // If there's a pending deferred block, merge it with the buffer.
+        if let Some(deferred) = self.pending_emit.take() {
+            let mut combined = deferred;
+            combined.push_str(&self.buffer);
+            self.buffer.clear();
+            self.line_count = 0;
+            if combined.is_empty() {
+                return None;
+            }
+            return Some(combined);
+        }
         self.emit()
     }
 
@@ -149,6 +168,7 @@ impl StreamingBlockCollector {
         self.in_code_fence = false;
         self.fence_marker = None;
         self.line_count = 0;
+        self.pending_emit = None;
     }
 
     /// Emit the current buffer as a complete block.
@@ -307,5 +327,32 @@ mod tests {
         let block = c.push_line("~~~\n");
         assert!(block.is_some());
         assert!(block.unwrap().contains("code"));
+    }
+
+    #[test]
+    fn heading_followed_by_text_stays_separate() {
+        // Regression test: heading after paragraph must not merge with following text.
+        let mut c = StreamingBlockCollector::new();
+        c.push_line("intro\n");
+        let b1 = c.push_line("# Title\n"); // emits "intro\n", defers heading
+        assert!(b1.is_some());
+        assert!(b1.unwrap().contains("intro"), "first block should be intro");
+
+        // The heading should be returned as a deferred block on the next push.
+        let b2 = c.push_line("body text\n"); // returns deferred "# Title\n"
+        assert!(b2.is_some());
+        assert!(
+            b2.as_ref().unwrap().contains("# Title"),
+            "second block should be the heading, got: {:?}",
+            b2
+        );
+        assert!(
+            !b2.as_ref().unwrap().contains("body"),
+            "heading must NOT contain body text"
+        );
+
+        // "body text\n" is now in the buffer, not yet emitted.
+        let b3 = c.finalize().unwrap();
+        assert!(b3.contains("body text"), "third block should be body text");
     }
 }
