@@ -254,17 +254,27 @@ impl ChatWidget {
     /// Returns `true` if text was committed (frame needs redraw).
     pub fn tick_streaming(&mut self) -> bool {
         if let Some(text) = self.streaming_buffer.tick() {
+            // In catch-up mode, tick() may return multiple lines joined
+            // as one string (e.g. "line1\nline2\n"). Split into individual
+            // lines before feeding to the block collector, which expects
+            // single-line input for correct boundary detection.
+            //
+            // Collect emitted blocks first to avoid borrow conflicts with
+            // self.committed_cells and self.active_cell.
+            let mut emitted_blocks: Vec<String> = Vec::new();
             if let Some(cell) = &mut self.active_cell {
-                // Feed the line through the block collector. If a complete
-                // block is detected (paragraph, code fence, heading), commit
-                // it as a frozen HistoryCell immediately.
-                if let Some(block) = cell.block_collector.push_line(&text) {
-                    let agent_cell = AgentCell::new(block);
-                    self.committed_cells.push(HistoryCell::Agent(agent_cell));
-                    self.bump_revision();
+                for line in SplitKeepNewlines::new(&text) {
+                    if let Some(block) = cell.block_collector.push_line(line) {
+                        emitted_blocks.push(block);
+                    }
                 }
-                return true;
             }
+            for block in emitted_blocks {
+                self.committed_cells
+                    .push(HistoryCell::Agent(AgentCell::new(block)));
+                self.bump_revision();
+            }
+            return true;
         }
         false
     }
@@ -340,11 +350,14 @@ impl ChatWidget {
     /// Alternate-screen mode keeps this in-memory only.
     pub fn complete_turn(&mut self) -> Vec<HistoryCell> {
         // Flush any remaining buffered streaming text through the block collector.
+        // The finalize output may contain multiple lines, so split them.
         if let Some(remaining) = self.streaming_buffer.finalize() {
             if let Some(cell) = &mut self.active_cell {
-                if let Some(block) = cell.block_collector.push_line(&remaining) {
-                    self.committed_cells
-                        .push(HistoryCell::Agent(AgentCell::new(block)));
+                for line in SplitKeepNewlines::new(&remaining) {
+                    if let Some(block) = cell.block_collector.push_line(line) {
+                        self.committed_cells
+                            .push(HistoryCell::Agent(AgentCell::new(block)));
+                    }
                 }
             }
         }
@@ -1099,6 +1112,42 @@ impl Default for ChatWidget {
 /// markdown formatting applied so styles appear live as the agent types.
 fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
     prefix_markdown_lines(text)
+}
+
+/// Iterator that splits a string at newline boundaries, keeping the trailing
+/// `\n` on each segment. Used to split catch-up mode multi-line output into
+/// individual lines for the block collector.
+struct SplitKeepNewlines<'a> {
+    remaining: &'a str,
+}
+
+impl<'a> SplitKeepNewlines<'a> {
+    fn new(s: &'a str) -> Self {
+        Self { remaining: s }
+    }
+}
+
+impl<'a> Iterator for SplitKeepNewlines<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        match self.remaining.find('\n') {
+            Some(pos) => {
+                let (line, rest) = self.remaining.split_at(pos + 1);
+                self.remaining = rest;
+                Some(line)
+            }
+            None => {
+                // Remaining text with no trailing newline.
+                let s = self.remaining;
+                self.remaining = "";
+                Some(s)
+            }
+        }
+    }
 }
 
 /// Draw a dim horizontal `─` separator across a single row.

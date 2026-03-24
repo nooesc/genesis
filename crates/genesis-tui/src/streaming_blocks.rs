@@ -158,8 +158,14 @@ impl StreamingBlockCollector {
     }
 
     /// Return the current incomplete block text for rendering preview.
-    pub fn preview(&self) -> &str {
-        &self.buffer
+    ///
+    /// Includes both the deferred pending_emit (if any) and the current
+    /// buffer contents, so the display always shows all unfinished text.
+    pub fn preview(&self) -> String {
+        match &self.pending_emit {
+            Some(deferred) => format!("{deferred}{}", self.buffer),
+            None => self.buffer.clone(),
+        }
     }
 
     /// Reset the collector, discarding any accumulated text.
