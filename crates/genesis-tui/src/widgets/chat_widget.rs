@@ -825,7 +825,13 @@ impl ChatWidget {
                 // the bottom portion). Without this, very long messages
                 // would disappear entirely because no cell fits.
                 if entries.is_empty() {
-                    let clamped_h = remaining_rows.saturating_sub(if needs_sep { 1 } else { 0 });
+                    // Reserve 1 row for the "↑ N more" top hint that will
+                    // appear (if entries is empty and this cell didn't fit,
+                    // there are older messages above → skipped_message_count > 0).
+                    let hint_reserve: u16 = 1;
+                    let clamped_h = remaining_rows
+                        .saturating_sub(if needs_sep { 1 } else { 0 })
+                        .saturating_sub(hint_reserve);
                     if clamped_h > 0 {
                         entries.push(RowEntry {
                             height: clamped_h,
