@@ -49,6 +49,24 @@ struct ActiveCellCache {
     lines: Vec<Line<'static>>,
 }
 
+/// A visual entry in the rendered message list — either a normal cell
+/// or a collapsed tool group summary.
+enum VisualEntry<'a> {
+    /// A single committed cell rendered normally.
+    Cell(&'a HistoryCell),
+    /// A collapsed tool group summary line.
+    GroupSummary(Line<'static>),
+}
+
+/// A row-allocated entry ready for rendering, with its pre-computed height
+/// and whether a turn separator follows it.
+struct RowEntry<'a> {
+    height: u16,
+    visual: VisualEntry<'a>,
+    /// True when a separator should be rendered *below* this entry.
+    separator_after: bool,
+}
+
 /// Composes committed history cells, an optional active streaming cell,
 /// and the input widget into a single renderable unit.
 pub struct ChatWidget {
@@ -107,14 +125,18 @@ impl ChatWidget {
 
     // ── Scroll ────────────────────────────────────────────────────────────
 
-    /// Scroll the chat view up by `rows` rows, clamped to the total
-    /// committed content height so the offset never grows unbounded.
+    /// Compute the maximum allowed scroll offset for the current content
+    /// at the given viewport width. Accounts for collapsed tool groups
+    /// and turn separators so the offset matches what `render_messages`
+    /// actually displays.
+    fn scroll_max(&self, viewport_width: u16) -> usize {
+        self.visible_content_height(viewport_width) as usize
+    }
+
+    /// Scroll the chat view up by `rows` rows, clamped to the visible
+    /// content height so the offset never grows unbounded.
     pub fn scroll_up(&mut self, rows: usize, viewport_width: u16) {
-        let max: usize = self
-            .committed_cells
-            .iter()
-            .map(|c| c.height(viewport_width).max(1) as usize)
-            .sum();
+        let max = self.scroll_max(viewport_width);
         self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
         self.scroll_locked = true;
     }
@@ -137,6 +159,24 @@ impl ChatWidget {
     /// Whether the user has scrolled up from the bottom.
     pub fn is_scrolled_up(&self) -> bool {
         self.scroll_locked
+    }
+
+    /// Reclamp the scroll offset after a resize or content change.
+    ///
+    /// When the terminal width changes, wrapped content takes a different
+    /// number of rows. If the old offset now exceeds the new maximum,
+    /// this brings it back in range (or snaps to bottom if it would be 0).
+    pub fn reclamp_scroll(&mut self, viewport_width: u16) {
+        if !self.scroll_locked {
+            return;
+        }
+        let max = self.scroll_max(viewport_width);
+        if self.scroll_offset > max {
+            self.scroll_offset = max;
+        }
+        if self.scroll_offset == 0 {
+            self.scroll_locked = false;
+        }
     }
 
     // ── Turn management ───────────────────────────────────────────────────
@@ -504,20 +544,6 @@ impl ChatWidget {
         let group_count: std::collections::HashMap<usize, usize> =
             tool_groups.iter().copied().collect();
 
-        enum VisualEntry<'a> {
-            /// A single committed cell rendered normally.
-            Cell(&'a HistoryCell),
-            /// A collapsed tool group summary line.
-            GroupSummary(Line<'static>),
-        }
-
-        struct RowEntry<'a> {
-            height: u16,
-            visual: VisualEntry<'a>,
-            /// True when a separator should be rendered *below* this entry.
-            separator_after: bool,
-        }
-
         let mut entries: Vec<RowEntry<'_>> = Vec::new();
         let mut used = 0u16;
         let mut prev_is_user: Option<bool> = None;
@@ -654,14 +680,8 @@ impl ChatWidget {
             entries.drain(..skip_idx);
         }
 
-        let total_committed_rows: usize = self
-            .committed_cells
-            .iter()
-            .map(|c| c.height(area.width).max(1) as usize)
-            .sum();
-
         let below_count = if self.scroll_locked {
-            self.scroll_offset.min(total_committed_rows)
+            self.scroll_offset
         } else {
             0
         };

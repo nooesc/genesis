@@ -13,7 +13,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io::{self, stdout, IsTerminal};
+use std::io::{self, stdout, IsTerminal, Write};
 use std::panic;
 use std::sync::Once;
 
@@ -45,6 +45,12 @@ pub fn init() -> io::Result<()> {
     let _ = execute!(stdout(), EnableFocusChange);
     let _ = execute!(stdout(), EnableMouseCapture);
 
+    // Enable alternate scroll mode (DEC private mode 1007).
+    // Translates mouse wheel events into up/down arrow key sequences in
+    // alternate screen mode — required for tmux to forward scroll events.
+    let _ = stdout().write_all(b"\x1b[?1007h");
+    let _ = stdout().flush();
+
     // Flush any buffered input from before raw mode
     flush_stdin();
 
@@ -57,6 +63,9 @@ pub fn init() -> io::Result<()> {
 pub fn restore() -> io::Result<()> {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);
+    // Disable alternate scroll mode (DEC private mode 1007).
+    let _ = stdout().write_all(b"\x1b[?1007l");
+    let _ = stdout().flush();
     let _ = execute!(stdout(), DisableBracketedPaste);
     let _ = execute!(stdout(), DisableFocusChange);
     let _ = execute!(stdout(), LeaveAlternateScreen);

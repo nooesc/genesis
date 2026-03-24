@@ -10,11 +10,12 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Widget as _},
+    widgets::{Paragraph, Widget as _, Wrap},
 };
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::cell::HistoryCell;
+use crate::history::wrapped_row_count;
 
 /// Action returned by [`TranscriptOverlay::handle_key`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,10 +30,12 @@ pub enum TranscriptAction {
 pub struct TranscriptOverlay {
     /// All conversation cells rendered as styled lines.
     lines: Vec<Line<'static>>,
-    /// First visible line index (0-based, from top of the full line list).
+    /// First visible *row* (0-based). When wrapping is enabled, a single
+    /// `Line` may occupy multiple rows, so this is a row offset, not a
+    /// line index.
     scroll_offset: usize,
-    /// Total number of lines (cached from `lines.len()` for convenience).
-    total_lines: usize,
+    /// Total rendered rows (accounting for word-wrap at the given width).
+    total_rows: usize,
 }
 
 impl TranscriptOverlay {
@@ -47,11 +50,11 @@ impl TranscriptOverlay {
             lines.extend(cell.to_scrollback_lines(width));
             lines.push(Line::default()); // blank separator between cells
         }
-        let total = lines.len();
+        let total_rows = wrapped_row_count(&lines, width) as usize;
         Self {
-            scroll_offset: total.saturating_sub(visible_rows as usize),
+            scroll_offset: total_rows.saturating_sub(visible_rows as usize),
             lines,
-            total_lines: total,
+            total_rows,
         }
     }
 
@@ -127,7 +130,7 @@ impl TranscriptOverlay {
     // ── Private helpers ───────────────────────────────────────────────────
 
     fn scroll_down(&mut self, n: usize, visible_rows: u16) {
-        let max = self.total_lines.saturating_sub(visible_rows as usize);
+        let max = self.total_rows.saturating_sub(visible_rows as usize);
         self.scroll_offset = (self.scroll_offset + n).min(max);
     }
 
@@ -140,15 +143,15 @@ impl TranscriptOverlay {
     }
 
     fn scroll_to_bottom(&mut self, visible_rows: u16) {
-        self.scroll_offset = self.total_lines.saturating_sub(visible_rows as usize);
+        self.scroll_offset = self.total_rows.saturating_sub(visible_rows as usize);
     }
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         let hint = " Transcript — j/k scroll, Ctrl+D/U page, g/G top/bottom, q to close ";
-        let pos_text = if self.total_lines == 0 {
+        let pos_text = if self.total_rows == 0 {
             "[empty]".to_owned()
         } else {
-            format!("[{}/{}]", self.scroll_offset + 1, self.total_lines)
+            format!("[{}/{}]", self.scroll_offset + 1, self.total_rows)
         };
 
         // Left-aligned hint.
@@ -174,17 +177,13 @@ impl TranscriptOverlay {
     }
 
     fn render_content(&self, area: Rect, buf: &mut Buffer) {
-        let visible_rows = area.height as usize;
-        let start = self.scroll_offset;
-        let end = (start + visible_rows).min(self.total_lines);
-
-        let visible: Vec<Line<'static>> = if start < self.total_lines {
-            self.lines[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let paragraph = Paragraph::new(visible);
+        // Render all lines with word-wrapping enabled and use Paragraph's
+        // built-in scroll to offset by the correct number of *rendered rows*
+        // (not logical lines). This ensures long lines that wrap to multiple
+        // rows are scrolled correctly.
+        let paragraph = Paragraph::new(self.lines.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll_offset as u16, 0));
         paragraph.render(area, buf);
     }
 }
@@ -215,7 +214,7 @@ mod tests {
         let cells = make_cells();
         let t = TranscriptOverlay::from_cells(&cells, 80, 24);
         // 2 cells → 2 content lines + 2 blank separators = 4 total lines
-        assert_eq!(t.total_lines, 4);
+        assert_eq!(t.total_rows, 4);
         assert_eq!(t.lines.len(), 4);
     }
 
@@ -265,7 +264,7 @@ mod tests {
         assert_eq!(t.scroll_offset, 0);
 
         t.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), 24);
-        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(24));
+        assert_eq!(t.scroll_offset, t.total_rows.saturating_sub(24));
     }
 
     /// `from_cells` starts at the bottom (most recent).
@@ -273,7 +272,7 @@ mod tests {
     fn starts_at_bottom() {
         let cells = make_cells();
         let t = TranscriptOverlay::from_cells(&cells, 80, 24);
-        assert_eq!(t.scroll_offset, t.total_lines.saturating_sub(24));
+        assert_eq!(t.scroll_offset, t.total_rows.saturating_sub(24));
     }
 
     /// `q` returns `TranscriptAction::Close`.
@@ -322,7 +321,7 @@ mod tests {
     #[test]
     fn from_empty_cells() {
         let t = TranscriptOverlay::from_cells(&[], 80, 24);
-        assert_eq!(t.total_lines, 0);
+        assert_eq!(t.total_rows, 0);
         assert_eq!(t.scroll_offset, 0);
     }
 
@@ -339,6 +338,6 @@ mod tests {
         ))];
         let t = TranscriptOverlay::from_cells(&cells, 80, 24);
         // ToolCell with default Grouped mode produces 4 lines + 1 blank = 5
-        assert_eq!(t.total_lines, 5);
+        assert_eq!(t.total_rows, 5);
     }
 }

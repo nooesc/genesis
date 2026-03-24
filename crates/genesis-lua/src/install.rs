@@ -272,7 +272,7 @@ fn install_from_github(
     };
 
     // Extract to a temp directory.
-    let tmp_dir = tempfile::tempdir().map_err(|err| InstallError::Io(err.into()))?;
+    let tmp_dir = tempfile::tempdir().map_err(|err| InstallError::Io(err))?;
     let decoder = flate2::read::GzDecoder::new(limited);
     let mut archive = tar::Archive::new(decoder);
     archive
@@ -403,8 +403,7 @@ struct LimitedReader<R: Read> {
 impl<R: Read> Read for LimitedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.remaining == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("download exceeded {MAX_DOWNLOAD_BYTES} byte limit"),
             ));
         }
@@ -563,7 +562,7 @@ fn write_source_info(
         commit,
     };
     let json = serde_json::to_string_pretty(&info).map_err(|err| InstallError::Io(
-        io::Error::new(io::ErrorKind::Other, err),
+        io::Error::other(err),
     ))?;
     let target = if plugin_path.is_dir() {
         plugin_path.join(SOURCE_METADATA_FILE)
