@@ -536,9 +536,8 @@ impl ChatWidget {
                 .as_ref()
                 .is_none_or(|c| c.parsed_len != text_len || c.parsed_width != width);
             if needs_reparse {
-                // Re-borrow text_buffer for the actual parse.
-                let text = self.active_cell.as_ref().unwrap().text_buffer.clone();
-                let lines = active_cell_lines(&text, width);
+                let lines =
+                    active_cell_lines(&self.active_cell.as_ref().unwrap().text_buffer, width);
                 self.active_cell_cache = Some(ActiveCellCache {
                     parsed_len: text_len,
                     parsed_width: width,
