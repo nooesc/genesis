@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use genesis_config::{load, set_plugin_disabled_in_file, LoadedConfig};
 use genesis_lua::discovery::{discover_plugins_best_effort, DiscoveryReport};
+use genesis_lua::install::{self, PluginSource};
 use genesis_lua::{DiscoveredPlugin, LuaRuntimeError, PluginKind};
 
 use crate::{CliError, PluginsCommand};
@@ -88,6 +89,10 @@ pub(crate) fn run_plugins(
                 Ok(format!("plugin `{name}` is already enabled"))
             }
         }
+        PluginsCommand::Install { source, force } => {
+            run_install(&loaded.paths.plugin_dir, &source, force, json)
+        }
+        PluginsCommand::Uninstall { name } => run_uninstall(&loaded.paths.plugin_dir, &name, json),
     }
 }
 
@@ -185,11 +190,15 @@ fn collect_plugin_entries(
 }
 
 fn plugin_entry_from_discovery(plugin: DiscoveredPlugin, disabled: bool) -> PluginCommandEntry {
+    let source = match &plugin.source {
+        Some(s) => s.clone(),
+        None => plugin.root.display().to_string(),
+    };
     PluginCommandEntry {
         name: plugin.name,
         status: if disabled { "disabled" } else { "enabled" }.to_owned(),
         kind: plugin_kind_name(plugin.kind).to_owned(),
-        source: plugin.root.display().to_string(),
+        source,
         version: Some(plugin.manifest.plugin.version),
         description: plugin.manifest.plugin.description,
         author: plugin.manifest.plugin.author,
@@ -378,8 +387,50 @@ fn short_plugin_source(source: &str) -> &str {
         "built-in"
     } else if source == "config" {
         "config"
+    } else if source.starts_with("github:") {
+        "github"
     } else {
         "local"
+    }
+}
+
+fn run_install(
+    plugin_dir: &std::path::Path,
+    source_str: &str,
+    force: bool,
+    json: bool,
+) -> Result<String, CliError> {
+    let source = PluginSource::parse(source_str).map_err(|err| CliError::Other(err.to_string()))?;
+
+    match install::install_plugin(&source, plugin_dir, force) {
+        Ok(name) => {
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "installed": true,
+                    "plugin": name,
+                    "source": source_str,
+                }))?)
+            } else {
+                Ok(format!("installed plugin `{name}` from {source_str}"))
+            }
+        }
+        Err(err) => Err(CliError::Other(err.to_string())),
+    }
+}
+
+fn run_uninstall(plugin_dir: &std::path::Path, name: &str, json: bool) -> Result<String, CliError> {
+    match install::uninstall_plugin(name, plugin_dir) {
+        Ok(()) => {
+            if json {
+                Ok(serde_json::to_string_pretty(&serde_json::json!({
+                    "uninstalled": true,
+                    "plugin": name,
+                }))?)
+            } else {
+                Ok(format!("uninstalled plugin `{name}`"))
+            }
+        }
+        Err(err) => Err(CliError::Other(err.to_string())),
     }
 }
 

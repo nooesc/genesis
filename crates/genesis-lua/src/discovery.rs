@@ -12,6 +12,8 @@ pub struct DiscoveredPlugin {
     pub root: PathBuf,
     pub entrypoint: PathBuf,
     pub manifest: PluginManifest,
+    /// Source string from `.genesis-source.json`, if present.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +129,7 @@ fn discover_plugin_entry(
             root: path.clone(),
             entrypoint: path,
             manifest,
+            source: None,
         }));
     }
 
@@ -152,12 +155,15 @@ fn discover_plugin_entry(
         let name = manifest.plugin.name.clone();
         ensure_unique_name(names, &name)?;
 
+        let source = crate::install::read_source_info(&path).map(|s| s.source);
+
         return Ok(Some(DiscoveredPlugin {
             name,
             kind: PluginKind::Package,
             root: path,
             entrypoint,
             manifest,
+            source,
         }));
     }
 

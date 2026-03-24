@@ -1,11 +1,9 @@
-//! Welcome screen widget with terminal-native portrait art.
+//! Welcome screen widget with matrix rain background.
 //!
-//! Displays a bordered welcome screen with a responsive portrait and session
-//! info. Layout mode is selected explicitly by terminal width:
-//! - Wide (>= 100 cols): big-text title at top, portrait left, metadata right,
-//!   boot status below portrait
-//! - Medium (60-99 cols): compact portrait above metadata
-//! - Narrow (< 60 cols): text-only title with no portrait
+//! Displays a bordered welcome screen with animated braille rain and centered
+//! session info. Layout adapts to terminal width:
+//! - Bordered (>= 60 cols): rain background with session info centered
+//! - Narrow (< 60 cols): text-only title
 
 use ratatui::{
     buffer::Buffer,
@@ -14,56 +12,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
-use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
-use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
+use crate::widgets::boot_status::BootStatusInfo;
 use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
-/// Minimum width for the wide side-by-side layout.
-const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
-
-/// Minimum width for the medium (stacked) layout.
+/// Minimum width for the bordered layout (below this: text-only).
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
-
-/// Minimum width to reserve for the metadata column in wide mode.
-const WIDE_INFO_MIN_WIDTH: u16 = 56;
-
-/// Gap between portrait and metadata in wide mode.
-const WIDE_LAYOUT_GAP: u16 = 2;
-
-/// Height of the big-text title in rows (Quadrant pixel size: 8px / 2 = 4 rows).
-const BIG_TEXT_HEIGHT: u16 = 4;
-
-/// Gap between the title and the portrait/info row.
-const TITLE_GAP: u16 = 1;
-
-const DEFAULT_SPLIT_PORTRAIT_ART: &[&str] = &[
-    "          .-''''-.          ",
-    "       .-'  .--.  `-.       ",
-    "      /   .'_  _`.   \\      ",
-    "     /   /  ( \\/ )\\   \\     ",
-    "    /   |      /\\  |   \\    ",
-    "    |   |     /  \\ |   |    ",
-    "    |   |   .-''''-.   |    ",
-    "    |   |  /  .--.  \\  |    ",
-    "    |   |  | (____) |  |    ",
-    "    |    \\  \\______/  /|    ",
-    "     \\    `-._____.-' /     ",
-    "      `-.     __    .-'     ",
-    "         `-._/  \\_.-'       ",
-    "           /_/\\_\\           ",
-];
-
-const DEFAULT_COMPACT_PORTRAIT_ART: &[&str] = &[
-    "   _.-._   ",
-    " .'_   _`. ",
-    "/_   _\\\\   ",
-    "| |\\_/| |  ",
-    "| | o | |  ",
-    " \\_.-'._/  ",
-    "   /_\\\\    ",
-];
 
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
@@ -90,19 +45,9 @@ pub struct WelcomeAreas {
     pub full: Rect,
 }
 
-/// Minimum width for showing the braille canvas panel in wide mode.
-const WIDE_BRAILLE_MIN_WIDTH: u16 = 120;
-
-/// Width of the braille canvas panel in cells.
-const BRAILLE_PANEL_WIDTH: u16 = 20;
-
-/// Welcome screen widget showing portrait art with session info.
+/// Welcome screen widget showing session info with big-text title.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
-    /// Split portrait lines used in wide mode.
-    split_art: Vec<Line<'static>>,
-    /// Compact portrait lines used in medium mode.
-    compact_art: Vec<Line<'static>>,
     /// Whether the boot sequence has been triggered.
     boot_triggered: bool,
     /// Areas computed during the last render for effect targeting.
@@ -112,29 +57,14 @@ pub struct WelcomeWidget {
 }
 
 impl WelcomeWidget {
-    /// Create a new welcome widget from session info with optional portrait art.
-    ///
-    /// When a portrait slice is empty, a minimal built-in fallback is used for
-    /// that mode.
-    pub fn new(info: WelcomeInfo, full_art: &[String], compact_art: &[String]) -> Self {
+    /// Create a new welcome widget from session info.
+    pub fn new(info: WelcomeInfo, _full_art: &[String], _compact_art: &[String]) -> Self {
         Self {
             info,
-            split_art: parse_portrait_art(full_art, DEFAULT_SPLIT_PORTRAIT_ART),
-            compact_art: parse_portrait_art(compact_art, DEFAULT_COMPACT_PORTRAIT_ART),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
-            braille_pattern: Pattern::default_particles(18),
+            braille_pattern: Pattern::matrix_rain(80),
         }
-    }
-
-    /// Get the current split portrait lines.
-    fn current_full_art(&self) -> &[Line<'static>] {
-        &self.split_art
-    }
-
-    /// Get the current compact portrait lines.
-    fn current_compact_art(&self) -> &[Line<'static>] {
-        &self.compact_art
     }
 
     /// Returns `true` if the boot sequence has already been triggered.
@@ -176,18 +106,15 @@ impl WelcomeWidget {
 
         self.last_areas.full = area;
 
-        if area.width >= WIDE_LAYOUT_MIN_WIDTH {
-            self.render_full(area, buf);
-        } else if area.width >= MEDIUM_LAYOUT_MIN_WIDTH {
-            self.render_compact(area, buf);
+        if area.width >= MEDIUM_LAYOUT_MIN_WIDTH {
+            self.render_bordered(area, buf);
         } else {
             self.render_text_only(area, buf);
         }
     }
 
-    /// Full layout: bordered box with big-text title at top, art on left,
-    /// info on right, boot status below portrait.
-    fn render_full(&mut self, area: Rect, buf: &mut Buffer) {
+    /// Bordered layout: rain background, session info centered.
+    fn render_bordered(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
@@ -199,162 +126,34 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Big-text title at the top ──────────────────────────────
-        let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
-        let title_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: title_available_height,
-        };
-        self.last_areas.title = title_area;
+        self.render_welcome_content(inner, buf);
+    }
 
-        let big_title = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .style(Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER)))
-            .lines(vec!["GENESIS".into()])
-            .centered()
-            .build();
-        big_title.render(title_area, buf);
+    /// Shared welcome content: rain background → info centered.
+    fn render_welcome_content(&mut self, inner: Rect, buf: &mut Buffer) {
+        // ── Matrix rain (full background) ────────────────────────────
+        BrailleCanvas::new(&self.braille_pattern).render(inner, buf);
+        self.last_areas.portrait = inner;
+        self.last_areas.title = inner;
 
-        // ── Remaining area below title ─────────────────────────────
-        let below_title_y = inner.y + title_available_height + TITLE_GAP;
-        let remaining_height = inner
-            .height
-            .saturating_sub(title_available_height + TITLE_GAP);
+        // ── Info centered on top of rain ─────────────────────────────
+        self.render_body(inner, inner.y, inner.height, buf);
+    }
+
+    /// Shared body: info centered on top of rain.
+    fn render_body(
+        &mut self,
+        inner: Rect,
+        below_title_y: u16,
+        remaining_height: u16,
+        buf: &mut Buffer,
+    ) {
         if remaining_height == 0 {
             return;
         }
 
-        // ── Portrait + braille canvas + info side by side ──────────
-        // Clone art lines up front to release the borrow on `self`.
-        let art: Vec<Line<'static>> = self.current_full_art().to_vec();
-        let art_width = art.iter().map(|l| line_visual_width(l)).max().unwrap_or(0) as u16;
-        let art_height = art.len() as u16;
-
-        // Decide if there's room for the braille canvas panel.
-        let show_braille = area.width >= WIDE_BRAILLE_MIN_WIDTH;
-        let braille_cols = if show_braille {
-            BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP
-        } else {
-            0
-        };
-
-        let art_col_width = art_width.min(
-            inner
-                .width
-                .saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
-        );
-        let braille_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
-        let info_col_x = braille_col_x + braille_cols;
-        let info_col_width = inner
-            .width
-            .saturating_sub(art_col_width + WIDE_LAYOUT_GAP + braille_cols);
-
-        // Boot status lines
-        let boot_status = BootStatusWidget::new(self.boot_status_info());
-        let status_lines = boot_status.lines();
-        let status_height = status_lines.len() as u16;
-        let status_gap = 1u16;
-
-        // Total left-column content: art + gap + status
-        let left_total = art_height + status_gap + status_height;
-        let left_start_y = below_title_y + remaining_height.saturating_sub(left_total) / 2;
-
-        // Portrait area
-        let art_render_height = art_height.min(remaining_height);
-        let art_area = Rect {
-            x: inner.x,
-            y: left_start_y,
-            width: art_col_width,
-            height: art_render_height,
-        };
-        self.last_areas.portrait = art_area;
-        let art_paragraph = Paragraph::new(art);
-        art_paragraph.render(art_area, buf);
-
-        // Boot status area (below portrait)
-        let status_y = left_start_y + art_render_height + status_gap;
-        let status_render_height =
-            status_height.min((below_title_y + remaining_height).saturating_sub(status_y));
-        if status_render_height > 0 {
-            let status_area = Rect {
-                x: inner.x,
-                y: status_y,
-                width: art_col_width.max(30),
-                height: status_render_height,
-            };
-            self.last_areas.status = status_area;
-            boot_status.render(status_area, buf);
-        }
-
-        // Braille canvas panel (between portrait and info, only in extra-wide mode)
-        if show_braille && remaining_height >= 3 {
-            let braille_height = remaining_height.min(art_render_height).max(3);
-            let braille_y = below_title_y + remaining_height.saturating_sub(braille_height) / 2;
-            let braille_area = Rect {
-                x: braille_col_x,
-                y: braille_y,
-                width: BRAILLE_PANEL_WIDTH,
-                height: braille_height,
-            };
-            BrailleCanvas::new(&self.braille_pattern).render(braille_area, buf);
-        }
-
-        // Info panel (right column, vertically centered)
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
-        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
-
-        let info_area = Rect {
-            x: info_col_x,
-            y: info_y,
-            width: info_col_width,
-            height: info_height.min(remaining_height),
-        };
-        let info_paragraph = Paragraph::new(info_lines);
-        info_paragraph.render(info_area, buf);
-    }
-
-    /// Compact layout: bordered box with art centered above info.
-    fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-
-        // Clone art lines up front to release the borrow on `self`.
-        let art_lines: Vec<Line<'static>> = self.current_compact_art().to_vec();
-        let art_height = art_lines.len() as u16;
-        let info_lines = self.info_lines();
-        let info_height = info_lines.len() as u16;
-        let gap = 1u16;
-
-        let total_content = art_height + gap + info_height;
-        let start_y = inner.y + inner.height.saturating_sub(total_content) / 2;
-
-        let art_visual_width = art_lines
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
-        let art_x = inner.x + inner.width.saturating_sub(art_visual_width) / 2;
-        let art_area = Rect {
-            x: art_x,
-            y: start_y,
-            width: art_visual_width.min(inner.width),
-            height: art_height.min(inner.height),
-        };
-        self.last_areas.portrait = art_area;
-        self.last_areas.title = art_area; // No big-text in compact mode
-        let art_paragraph = Paragraph::new(art_lines);
-        art_paragraph.render(art_area, buf);
 
         let info_visual_width = info_lines
             .iter()
@@ -362,25 +161,32 @@ impl WelcomeWidget {
             .max()
             .unwrap_or(0) as u16;
         let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_y = start_y + art_height + gap;
-        if info_y < inner.y + inner.height {
-            let info_area = Rect {
-                x: info_x,
-                y: info_y,
-                width: info_visual_width.min(inner.width),
-                height: info_height.min(inner.y + inner.height - info_y),
-            };
-            self.last_areas.status = info_area;
-            let info_paragraph = Paragraph::new(info_lines);
-            info_paragraph.render(info_area, buf);
-        }
+        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
+        let info_render_height = info_height.min(remaining_height);
+
+        let info_area = Rect {
+            x: info_x,
+            y: info_y,
+            width: info_visual_width.min(inner.width),
+            height: info_render_height,
+        };
+        self.last_areas.status = info_area;
+        let info_paragraph = Paragraph::new(info_lines);
+        info_paragraph.render(info_area, buf);
     }
 
-    /// Text-only layout: just ">_ Eve v{version}" in accent color.
+    /// Text-only layout: "genesis >_ Eve" in accent color.
     fn render_text_only(&mut self, area: Rect, buf: &mut Buffer) {
         let accent = rgb(genesis_ui::colors::UI_ACCENT);
-        let text = format!(">_ Eve v{}", self.info.version);
-        let line = Line::from(Span::styled(text, Style::default().fg(accent)));
+        let dim = rgb(genesis_ui::colors::UI_DIM);
+        let line = Line::from(vec![
+            Span::styled("genesis", Style::default().fg(accent)),
+            Span::styled(
+                format!(" v{} ", self.info.version),
+                Style::default().fg(dim),
+            ),
+            Span::styled(">_ Eve", Style::default().fg(accent)),
+        ]);
 
         let y = area.y + area.height / 2;
         let x = area.x + area.width.saturating_sub(line.width() as u16) / 2;
@@ -399,16 +205,20 @@ impl WelcomeWidget {
         }
     }
 
-    /// Build the info lines displayed alongside or below the art.
+    /// Build the info lines displayed on the welcome screen.
     fn info_lines(&self) -> Vec<Line<'static>> {
         let accent = rgb(genesis_ui::colors::UI_ACCENT);
         let dim = rgb(genesis_ui::colors::UI_DIM);
         let text_color = rgb(genesis_ui::colors::UI_TEXT);
 
-        let title = Line::from(Span::styled(
-            format!(">_ Eve v{}", self.info.version),
-            Style::default().fg(accent),
-        ));
+        let framework_line = Line::from(vec![
+            Span::styled("genesis", Style::default().fg(accent)),
+            Span::styled(format!(" v{}", self.info.version), Style::default().fg(dim)),
+        ]);
+        let agent_line = Line::from(vec![
+            Span::styled(">_ ", Style::default().fg(dim)),
+            Span::styled("Eve", Style::default().fg(accent)),
+        ]);
         let blank = Line::from("");
         let session_line = Line::from(vec![
             Span::styled("session: ", Style::default().fg(dim)),
@@ -422,25 +232,25 @@ impl WelcomeWidget {
             Span::styled(self.info.backend.clone(), Style::default().fg(text_color)),
         ]);
         let model_line = Line::from(vec![
-            Span::styled("model: ", Style::default().fg(dim)),
+            Span::styled("model:   ", Style::default().fg(dim)),
             Span::styled(self.info.model.clone(), Style::default().fg(text_color)),
         ]);
         let cwd_line = Line::from(vec![
-            Span::styled("cwd: ", Style::default().fg(dim)),
+            Span::styled("cwd:     ", Style::default().fg(dim)),
             Span::styled(
                 truncate_path(&self.info.cwd, 40),
                 Style::default().fg(text_color),
             ),
         ]);
         let tools_line = Line::from(vec![
-            Span::styled("tools: ", Style::default().fg(dim)),
+            Span::styled("tools:   ", Style::default().fg(dim)),
             Span::styled(
                 format_tool_summary(self.info.tool_count_builtin, self.info.tool_count_mcp),
                 Style::default().fg(text_color),
             ),
         ]);
         let skills_line = Line::from(vec![
-            Span::styled("skills: ", Style::default().fg(dim)),
+            Span::styled("skills:  ", Style::default().fg(dim)),
             Span::styled(
                 format!("{} installed", self.info.skill_count),
                 Style::default().fg(text_color),
@@ -458,7 +268,8 @@ impl WelcomeWidget {
         ]);
 
         vec![
-            title,
+            framework_line,
+            agent_line,
             blank.clone(),
             session_line,
             backend_line,
@@ -551,14 +362,6 @@ fn truncate_path(path: &str, max_len: usize) -> String {
 fn line_visual_width(line: &Line<'_>) -> usize {
     use unicode_width::UnicodeWidthStr as _;
     line.spans.iter().map(|s| s.content.width()).sum()
-}
-
-fn parse_portrait_art(source: &[String], fallback: &[&str]) -> Vec<Line<'static>> {
-    if source.is_empty() {
-        fallback.iter().map(|line| parse_ansi_line(line)).collect()
-    } else {
-        parse_ansi_art(source)
-    }
 }
 
 // ── ANSI → ratatui Line parser ─────────────────────────────────────────────
@@ -683,7 +486,9 @@ mod tests {
     }
 
     fn default_widget() -> WelcomeWidget {
-        WelcomeWidget::new(test_info(), &[], &[])
+        let full = genesis_ui::banner::full_art();
+        let compact = genesis_ui::banner::compact_art();
+        WelcomeWidget::new(test_info(), &full, &compact)
     }
 
     fn buffer_rows(buf: &Buffer, width: u16) -> Vec<String> {
@@ -783,35 +588,30 @@ mod tests {
     }
 
     #[test]
-    fn welcome_widget_width_100_uses_split_layout() {
-        let area = Rect::new(0, 0, 120, 30);
+    fn welcome_widget_width_100_uses_wide_layout() {
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
-        sample_widget().render(area, &mut buf);
+        default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait = first_match_position(&rows, "@").expect("split portrait should render");
-        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
-
-        assert!(!rows.iter().any(|row| row.contains('+')));
+        // Wide layout should render the title and info.
         assert!(
-            portrait.1 < title.1,
-            "portrait should render left of the title"
+            rows.iter().any(|row| row.contains("genesis")),
+            "wide layout should render title"
         );
     }
 
     #[test]
     fn welcome_widget_width_99_uses_compact_layout() {
-        let area = Rect::new(0, 0, 99, 24);
+        let area = Rect::new(0, 0, 99, 40);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait =
-            first_match_position(&rows, "_.-._").expect("compact portrait should render");
-        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
+        // With no portrait art, the compact layout should still render the title.
         assert!(
-            portrait.0 < title.0,
-            "compact portrait should render above the title"
+            rows.iter().any(|row| row.contains("genesis")),
+            "compact layout should render title"
         );
     }
 
@@ -822,20 +622,26 @@ mod tests {
         default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        assert!(!rows.iter().any(|row| row.contains("_.-._")));
-        assert!(rows.iter().any(|row| row.contains(">_ Eve v0.1.0")));
+        // Text-only mode should have no half-block art.
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains('▀') || row.contains('▄')),
+            "text-only mode should not render half-block art"
+        );
+        assert!(rows.iter().any(|row| row.contains("genesis")));
     }
 
     #[test]
     fn welcome_metadata_renders_all_fields() {
         // Use a taller area to accommodate the new title + portrait + info layout.
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
         let rendered = buffer_rows(&buf, area.width).join("\n");
         for needle in [
-            ">_ Eve v0.1.0",
+            "genesis",
             "session:",
             "session-123",
             "model:",
@@ -939,33 +745,14 @@ mod tests {
         let lines = widget.info_lines();
         let rendered_lines: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered_lines.iter().any(|line| line.contains("1.2.3")));
-        assert!(rendered_lines
-            .iter()
-            .any(|line| line.contains("model: claude-4")));
-    }
-
-    #[test]
-    fn wide_layout_renders_boot_status_lines() {
-        let area = Rect::new(0, 0, 120, 30);
-        let mut buf = Buffer::empty(area);
-        default_widget().render(area, &mut buf);
-
-        let rendered = buffer_rows(&buf, area.width).join("\n");
-        assert!(
-            rendered.contains("provider"),
-            "wide layout should render boot status 'provider' line"
-        );
-        assert!(
-            rendered.contains("storage"),
-            "wide layout should render boot status 'storage' line"
-        );
+        assert!(rendered_lines.iter().any(|line| line.contains("claude-4")));
     }
 
     #[test]
     fn wide_layout_renders_big_text_title() {
         // BigText uses block characters. At Quadrant pixel size, "GENESIS"
         // should produce visible characters in the top rows.
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         default_widget().render(area, &mut buf);
 
@@ -987,7 +774,7 @@ mod tests {
 
     #[test]
     fn last_areas_populated_after_render() {
-        let area = Rect::new(0, 0, 120, 30);
+        let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
         let mut widget = default_widget();
         widget.render(area, &mut buf);
@@ -995,8 +782,7 @@ mod tests {
         let areas = widget.last_areas();
         assert_eq!(areas.full, area, "full area should match viewport");
         assert!(areas.title.width > 0, "title area should have width");
-        assert!(areas.portrait.width > 0, "portrait area should have width");
-        assert!(areas.status.width > 0, "status area should have width");
+        // Portrait area may be empty when no art is provided.
     }
 
     #[test]

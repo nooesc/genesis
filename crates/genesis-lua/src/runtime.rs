@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use thiserror::Error;
 use crate::{
     api::{install_genesis_api, PluginContext},
     bundled::BUNDLED_PERSONALITIES,
+    context_registry::PluginContextRegistry,
     discovery::{discover_plugins_best_effort, PluginKind},
     hooks::{
         parse_post_hook_result, parse_pre_hook_result, HookEvent, HookRegistry, PostHookOutcome,
@@ -53,7 +55,7 @@ pub struct LuaRuntimeConfig {
 
 pub struct LuaRuntime {
     lua: Lua,
-    plugin_names: Vec<String>,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
     plugin_errors: Vec<String>,
     session_state: Arc<Mutex<LuaSessionContext>>,
@@ -62,6 +64,8 @@ pub struct LuaRuntime {
     personality_registry: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tool_executor: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
+    session_hooks_fired: AtomicBool,
     execution_control: Arc<Mutex<PluginExecutionControl>>,
     disabled_plugins: Arc<Mutex<HashSet<String>>>,
     plugin_failures: Arc<Mutex<HashMap<String, u32>>>,
@@ -74,7 +78,13 @@ pub struct LuaRuntime {
 impl std::fmt::Debug for LuaRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LuaRuntime")
-            .field("plugin_names", &self.plugin_names)
+            .field(
+                "plugin_names",
+                &*self
+                    .plugin_names
+                    .lock()
+                    .expect("plugin_names mutex should not be poisoned"),
+            )
             .field("logs", &self.logs())
             .field("plugin_errors", &self.plugin_errors)
             .finish()
@@ -294,6 +304,8 @@ impl LuaRuntime {
         let personality_registry = Arc::new(Mutex::new(LuaPersonalityRegistry::default()));
         let host_tool_executor = Arc::new(Mutex::new(None));
         let active_plugin = Arc::new(Mutex::new(Vec::new()));
+        let context_registry = PluginContextRegistry::new();
+        let plugin_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let execution_control = Arc::new(Mutex::new(PluginExecutionControl::default()));
         let disabled_plugins = Arc::new(Mutex::new(HashSet::new()));
         let plugin_failures = Arc::new(Mutex::new(HashMap::new()));
@@ -325,6 +337,8 @@ impl LuaRuntime {
             Arc::clone(&personality_registry),
             Arc::clone(&host_tool_executor),
             Arc::clone(&active_plugin),
+            context_registry.clone(),
+            Arc::clone(&plugin_names),
             None,
             config.path_validator.clone(),
             config.working_dir.clone(),
@@ -336,7 +350,7 @@ impl LuaRuntime {
 
         let mut runtime = Self {
             lua,
-            plugin_names: Vec::new(),
+            plugin_names,
             logs,
             plugin_errors: Vec::new(),
             session_state,
@@ -345,6 +359,8 @@ impl LuaRuntime {
             personality_registry,
             host_tool_executor,
             active_plugin,
+            context_registry,
+            session_hooks_fired: AtomicBool::new(false),
             execution_control,
             disabled_plugins,
             plugin_failures,
@@ -358,54 +374,53 @@ impl LuaRuntime {
     }
 
     pub fn load_plugins(&mut self, config: &LuaRuntimeConfig) -> Result<(), LuaRuntimeError> {
-        if config.plugin_dir.as_os_str().is_empty() {
-            return Ok(());
-        }
-
-        let report = match discover_plugins_best_effort(&config.plugin_dir) {
-            Ok(report) => report,
-            Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(());
-            }
-            Err(err) => {
-                self.plugin_errors.push(err.to_string());
-                return Ok(());
-            }
-        };
-        self.plugin_errors
-            .extend(report.errors.into_iter().map(|err| err.to_string()));
-
         let configured_disabled = config
             .disabled_plugins
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
 
-        for plugin in report.plugins {
-            if configured_disabled.contains(&plugin.name) {
-                self.disabled_plugins
-                    .lock()
-                    .expect("disabled plugins mutex should not be poisoned")
-                    .insert(plugin.name.clone());
-                continue;
-            }
-            let source = match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
-                LuaRuntimeError::ReadPluginSource {
-                    path: plugin.entrypoint.clone(),
-                    source,
+        // Load user plugins from the filesystem (skip if plugin_dir is empty
+        // or missing — but don't bail entirely, bundled plugins still need to load).
+        if !config.plugin_dir.as_os_str().is_empty() {
+            match discover_plugins_best_effort(&config.plugin_dir) {
+                Ok(report) => {
+                    self.plugin_errors
+                        .extend(report.errors.into_iter().map(|err| err.to_string()));
+                    for plugin in report.plugins {
+                        if configured_disabled.contains(&plugin.name) {
+                            self.disabled_plugins
+                                .lock()
+                                .expect("disabled plugins mutex should not be poisoned")
+                                .insert(plugin.name.clone());
+                            continue;
+                        }
+                        let source =
+                            match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
+                                LuaRuntimeError::ReadPluginSource {
+                                    path: plugin.entrypoint.clone(),
+                                    source,
+                                }
+                            }) {
+                                Ok(source) => source,
+                                Err(err) => {
+                                    self.plugin_errors.push(err.to_string());
+                                    continue;
+                                }
+                            };
+                        self.load_plugin_source(config, &plugin, &source, true);
+                    }
                 }
-            }) {
-                Ok(source) => source,
+                Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
                     self.plugin_errors.push(err.to_string());
-                    continue;
                 }
-            };
-            self.load_plugin_source(config, &plugin, &source, true);
+            }
         }
 
+        // Always load bundled personalities and tools, even when the user
+        // plugin directory is empty or missing.
         self.load_bundled_personalities(config, &configured_disabled)?;
         self.load_bundled_tools(config, &configured_disabled)?;
         Ok(())
@@ -417,7 +432,10 @@ impl LuaRuntime {
     }
 
     pub fn plugin_names(&self) -> Vec<String> {
-        self.plugin_names.clone()
+        self.plugin_names
+            .lock()
+            .expect("plugin_names mutex should not be poisoned")
+            .clone()
     }
 
     pub fn logs(&self) -> Vec<String> {
@@ -429,6 +447,10 @@ impl LuaRuntime {
 
     pub fn plugin_errors(&self) -> &[String] {
         &self.plugin_errors
+    }
+
+    pub fn context_registry(&self) -> &PluginContextRegistry {
+        &self.context_registry
     }
 
     pub fn registered_tools(&self) -> Vec<LuaRegisteredTool> {
@@ -652,6 +674,31 @@ impl LuaRuntime {
         self.run_observe_hook(HookEvent::OnComplete, context)
     }
 
+    /// Fire `OnSessionStart`. Fires at most once per runtime lifetime.
+    pub fn run_on_session_start(
+        &self,
+        session_id: &str,
+        is_new: bool,
+    ) -> Result<(), LuaRuntimeError> {
+        if self.session_hooks_fired.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let context = self.lua.create_table()?;
+        context.set("session_id", session_id)?;
+        context.set("is_new", is_new)?;
+        self.run_observe_hook(HookEvent::OnSessionStart, context)
+    }
+
+    /// Fire `OnSessionResume`. Fires at most once per runtime lifetime.
+    pub fn run_on_session_resume(&self, session_id: &str) -> Result<(), LuaRuntimeError> {
+        if self.session_hooks_fired.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let context = self.lua.create_table()?;
+        context.set("session_id", session_id)?;
+        self.run_observe_hook(HookEvent::OnSessionResume, context)
+    }
+
     pub fn run_on_plugin_load(
         &self,
         plugin_name: &str,
@@ -692,6 +739,7 @@ impl LuaRuntime {
                 root: PathBuf::new(),
                 entrypoint: PathBuf::new(),
                 manifest: PluginManifest::for_single_file(bundled.name),
+                source: None,
             };
             self.load_plugin_source(config, &plugin, bundled.source, false);
         }
@@ -712,7 +760,13 @@ impl LuaRuntime {
                 continue;
             }
             // Skip if a user plugin already registered tools with the same plugin name.
-            if self.plugin_names.iter().any(|n| n == bundled.name) {
+            if self
+                .plugin_names
+                .lock()
+                .expect("plugin_names mutex should not be poisoned")
+                .iter()
+                .any(|n| n == bundled.name)
+            {
                 continue;
             }
 
@@ -739,6 +793,7 @@ impl LuaRuntime {
                 root: bundled_path.clone(),
                 entrypoint: bundled_path,
                 manifest,
+                source: None,
             };
             self.load_plugin_source(config, &plugin, bundled.source, true);
         }
@@ -781,7 +836,10 @@ impl LuaRuntime {
             return;
         }
         if record_plugin_name {
-            self.plugin_names.push(plugin.name.clone());
+            self.plugin_names
+                .lock()
+                .expect("plugin_names mutex should not be poisoned")
+                .push(plugin.name.clone());
         }
         let _ = self.run_on_plugin_load(&plugin.name, plugin.kind);
     }
@@ -806,6 +864,8 @@ impl LuaRuntime {
             Arc::clone(&self.personality_registry),
             Arc::clone(&self.host_tool_executor),
             Arc::clone(&self.active_plugin),
+            self.context_registry.clone(),
+            Arc::clone(&self.plugin_names),
             Some(plugin_context.clone()),
             config.path_validator.clone(),
             config.working_dir.clone(),

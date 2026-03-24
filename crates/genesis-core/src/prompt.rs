@@ -84,6 +84,7 @@ pub struct SystemPromptBuilder<'a> {
     skills_section: Option<&'a str>,
     user_model_section: Option<&'a str>,
     context_section: Option<&'a str>,
+    plugin_context: Option<&'a str>,
     memories_section: Option<&'a str>,
     delivery_platform: Option<&'a str>,
 }
@@ -99,6 +100,7 @@ impl<'a> SystemPromptBuilder<'a> {
             skills_section: None,
             user_model_section: None,
             context_section: None,
+            plugin_context: None,
             memories_section: None,
             delivery_platform: None,
         }
@@ -133,6 +135,11 @@ impl<'a> SystemPromptBuilder<'a> {
 
     pub fn context(mut self, section: &'a str) -> Self {
         self.context_section = Some(section);
+        self
+    }
+
+    pub fn plugin_context(mut self, section: &'a str) -> Self {
+        self.plugin_context = Some(section);
         self
     }
 
@@ -182,6 +189,13 @@ impl<'a> SystemPromptBuilder<'a> {
         if let Some(context) = self.context_section {
             parts.push(format!(
                 "## Project Context\n\nThe following instructions come from the project's context file. Follow them carefully.\n\n{context}"
+            ));
+        }
+
+        // Plugin-contributed context
+        if let Some(plugin_ctx) = self.plugin_context {
+            parts.push(format!(
+                "## Plugin Context\n\nThe following context was contributed by active plugins.\n\n{plugin_ctx}"
             ));
         }
 

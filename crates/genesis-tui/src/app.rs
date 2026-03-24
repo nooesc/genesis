@@ -125,6 +125,11 @@ impl App {
                 // idle transition.
                 self.effects.on_resize();
 
+                // Reclamp scroll offset: wrapped content height changes with
+                // terminal width, so the old offset may now exceed the new
+                // maximum, causing the chat history to vanish.
+                self.chat.reclamp_scroll(width);
+
                 // Rebuild the transcript overlay if it is currently open so
                 // that lines are re-wrapped at the new width and scroll bounds
                 // reflect the new height.

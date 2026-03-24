@@ -49,6 +49,24 @@ struct ActiveCellCache {
     lines: Vec<Line<'static>>,
 }
 
+/// A visual entry in the rendered message list — either a normal cell
+/// or a collapsed tool group summary.
+enum VisualEntry<'a> {
+    /// A single committed cell rendered normally.
+    Cell(&'a HistoryCell),
+    /// A collapsed tool group summary line.
+    GroupSummary(Line<'static>),
+}
+
+/// A row-allocated entry ready for rendering, with its pre-computed height
+/// and whether a turn separator follows it.
+struct RowEntry<'a> {
+    height: u16,
+    visual: VisualEntry<'a>,
+    /// True when a separator should be rendered *below* this entry.
+    separator_after: bool,
+}
+
 /// Composes committed history cells, an optional active streaming cell,
 /// and the input widget into a single renderable unit.
 pub struct ChatWidget {
@@ -107,14 +125,18 @@ impl ChatWidget {
 
     // ── Scroll ────────────────────────────────────────────────────────────
 
-    /// Scroll the chat view up by `rows` rows, clamped to the total
-    /// committed content height so the offset never grows unbounded.
+    /// Compute the maximum allowed scroll offset for the current content
+    /// at the given viewport width. Only counts committed cells (not the
+    /// active streaming cell) because `render_messages` hides the active
+    /// cell when the user has scrolled up.
+    fn scroll_max(&self, viewport_width: u16) -> usize {
+        self.committed_content_height(viewport_width)
+    }
+
+    /// Scroll the chat view up by `rows` rows, clamped to the visible
+    /// content height so the offset never grows unbounded.
     pub fn scroll_up(&mut self, rows: usize, viewport_width: u16) {
-        let max: usize = self
-            .committed_cells
-            .iter()
-            .map(|c| c.height(viewport_width).max(1) as usize)
-            .sum();
+        let max = self.scroll_max(viewport_width);
         self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
         self.scroll_locked = true;
     }
@@ -137,6 +159,24 @@ impl ChatWidget {
     /// Whether the user has scrolled up from the bottom.
     pub fn is_scrolled_up(&self) -> bool {
         self.scroll_locked
+    }
+
+    /// Reclamp the scroll offset after a resize or content change.
+    ///
+    /// When the terminal width changes, wrapped content takes a different
+    /// number of rows. If the old offset now exceeds the new maximum,
+    /// this brings it back in range (or snaps to bottom if it would be 0).
+    pub fn reclamp_scroll(&mut self, viewport_width: u16) {
+        if !self.scroll_locked {
+            return;
+        }
+        let max = self.scroll_max(viewport_width);
+        if self.scroll_offset > max {
+            self.scroll_offset = max;
+        }
+        if self.scroll_offset == 0 {
+            self.scroll_locked = false;
+        }
     }
 
     // ── Turn management ───────────────────────────────────────────────────
@@ -377,6 +417,67 @@ impl ChatWidget {
         total
     }
 
+    /// Compute the total height of committed cells only (no active cell),
+    /// accounting for collapsed tool groups and turn separators.
+    ///
+    /// Used by [`scroll_max`] because the active streaming cell is hidden
+    /// when the user scrolls up.
+    fn committed_content_height(&self, width: u16) -> usize {
+        if width == 0 {
+            return 0;
+        }
+
+        let tool_groups = self.find_tool_groups();
+        let mut collapsed_indices: HashSet<usize> = HashSet::new();
+        let mut collapsed_group_starts: HashSet<usize> = HashSet::new();
+        for &(start, count) in &tool_groups {
+            if !self.expanded_tool_groups.contains(&start) {
+                for idx in start..start + count {
+                    collapsed_indices.insert(idx);
+                }
+                collapsed_group_starts.insert(start);
+            }
+        }
+
+        let mut total: usize = 0;
+        let mut prev_is_user: Option<bool> = None;
+        let mut i = 0;
+        while i < self.committed_cells.len() {
+            if collapsed_indices.contains(&i) && collapsed_group_starts.contains(&i) {
+                let cur_is_user = false;
+                if let Some(prev) = prev_is_user {
+                    if cur_is_user != prev {
+                        total += 1;
+                    }
+                }
+                prev_is_user = Some(cur_is_user);
+                total += 1;
+                let count = tool_groups
+                    .iter()
+                    .find(|&&(s, _)| s == i)
+                    .map(|&(_, c)| c)
+                    .unwrap_or(1);
+                i += count;
+                continue;
+            } else if collapsed_indices.contains(&i) {
+                i += 1;
+                continue;
+            }
+
+            let cell = &self.committed_cells[i];
+            let cur_is_user = matches!(cell, HistoryCell::User(_));
+            if let Some(prev) = prev_is_user {
+                if cur_is_user != prev {
+                    total += 1;
+                }
+            }
+            prev_is_user = Some(cur_is_user);
+            total += cell.height(width).max(1) as usize;
+            i += 1;
+        }
+        total
+    }
+
     // ── Rendering ─────────────────────────────────────────────────────────
 
     /// Render the chat widget into the given area.
@@ -503,20 +604,6 @@ impl ChatWidget {
         // For each group, store the count for quick lookup.
         let group_count: std::collections::HashMap<usize, usize> =
             tool_groups.iter().copied().collect();
-
-        enum VisualEntry<'a> {
-            /// A single committed cell rendered normally.
-            Cell(&'a HistoryCell),
-            /// A collapsed tool group summary line.
-            GroupSummary(Line<'static>),
-        }
-
-        struct RowEntry<'a> {
-            height: u16,
-            visual: VisualEntry<'a>,
-            /// True when a separator should be rendered *below* this entry.
-            separator_after: bool,
-        }
 
         let mut entries: Vec<RowEntry<'_>> = Vec::new();
         let mut used = 0u16;
@@ -654,14 +741,8 @@ impl ChatWidget {
             entries.drain(..skip_idx);
         }
 
-        let total_committed_rows: usize = self
-            .committed_cells
-            .iter()
-            .map(|c| c.height(area.width).max(1) as usize)
-            .sum();
-
         let below_count = if self.scroll_locked {
-            self.scroll_offset.min(total_committed_rows)
+            self.scroll_offset
         } else {
             0
         };

@@ -938,6 +938,12 @@ impl<'a> SessionExecutionService<'a> {
         if let Some(c) = context_section.as_deref() {
             prompt_builder = prompt_builder.context(c);
         }
+        let plugin_context_section = lua_runtime
+            .as_ref()
+            .and_then(|rt| rt.context_registry().build_section());
+        if let Some(pc) = plugin_context_section.as_deref() {
+            prompt_builder = prompt_builder.plugin_context(pc);
+        }
         if let Some(m) = memories_section.as_deref() {
             prompt_builder = prompt_builder.memories(m);
         }
@@ -1114,6 +1120,22 @@ impl<'a> SessionExecutionService<'a> {
     {
         let created_session =
             self.ensure_session(input.session_id, input.session_platform, input.title)?;
+
+        // Fire Lua session lifecycle hooks
+        if let Some(ref runtime) =
+            self.lua_runtime_for_session(input.session_id, input.delivery_platform.clone())
+        {
+            if created_session {
+                if let Err(e) = runtime.run_on_session_start(input.session_id, true) {
+                    tracing::warn!(error = %e, "lua OnSessionStart hook failed");
+                }
+            } else {
+                if let Err(e) = runtime.run_on_session_resume(input.session_id) {
+                    tracing::warn!(error = %e, "lua OnSessionResume hook failed");
+                }
+            }
+        }
+
         let history = self.load_history(input.session_id)?;
         debug!(history_messages = history.len(), "starting turn execution");
         let executed = runner(history).await?;
@@ -1168,6 +1190,22 @@ impl<'a> SessionExecutionService<'a> {
     {
         let created_session =
             self.ensure_session(input.session_id, input.session_platform, input.title)?;
+
+        // Fire Lua session lifecycle hooks
+        if let Some(ref runtime) =
+            self.lua_runtime_for_session(input.session_id, input.delivery_platform.clone())
+        {
+            if created_session {
+                if let Err(e) = runtime.run_on_session_start(input.session_id, true) {
+                    tracing::warn!(error = %e, "lua OnSessionStart hook failed");
+                }
+            } else {
+                if let Err(e) = runtime.run_on_session_resume(input.session_id) {
+                    tracing::warn!(error = %e, "lua OnSessionResume hook failed");
+                }
+            }
+        }
+
         let history = self.load_history(input.session_id)?;
         debug!(
             history_messages = history.len(),
