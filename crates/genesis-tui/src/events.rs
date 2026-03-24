@@ -84,6 +84,12 @@ pub enum AppEvent {
     ClearScreen,
     /// Copy text to the system clipboard via OSC 52.
     CopyToClipboard(String),
+    /// Send a desktop notification via OSC 9 (turn complete, etc.).
+    Notify(String),
+    /// Set the terminal title via OSC 2.
+    SetTerminalTitle(String),
+    /// Show an inline warning message in the chat (rate limit, etc.).
+    InlineWarning(String),
 }
 
 /// Status bar states.
