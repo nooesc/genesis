@@ -589,6 +589,10 @@ impl ChatClient {
                 }
             }
 
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
+            }
+
             info!(
                 endpoint = endpoint.as_str(),
                 model = model.as_str(),
@@ -659,6 +663,10 @@ impl ChatClient {
                         return;
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -741,6 +749,10 @@ impl ChatClient {
                         }
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -828,6 +840,10 @@ impl ChatClient {
                         return;
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -1139,8 +1155,8 @@ fn decode_chunk(carry: &mut Vec<u8>, chunk: &[u8], buffer: &mut String) {
         carry.extend_from_slice(leftover);
     } else {
         carry.extend_from_slice(chunk);
-        // Decode the combined carry + chunk. We must collect the leftover
-        // before mutating carry, so copy it out.
+        // Compute the leftover start index before draining, since we need
+        // the current length of carry for the subtraction.
         let leftover_start = carry.len() - decode_all(carry, buffer).len();
         carry.drain(..leftover_start);
     }
@@ -1502,7 +1518,7 @@ mod tests {
     fn decode_chunk_handles_text_then_split_character() {
         let mut buffer = String::new();
         let mut carry = Vec::new();
-        // "hi" + first 2 bytes of a 3-byte UTF-8 char (U+00E9 = C3 A9)
+        // "hi" + first byte of a 2-byte UTF-8 char (U+00E9 = C3 A9)
         let mut chunk = b"hi".to_vec();
         chunk.push(0xC3);
         decode_chunk(&mut carry, &chunk, &mut buffer);
