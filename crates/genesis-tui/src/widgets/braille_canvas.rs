@@ -169,12 +169,23 @@ impl Pattern {
 /// with `Marker::Braille`.
 pub struct BrailleCanvas<'a> {
     pattern: &'a Pattern,
+    /// Background color for the canvas. Defaults to `Color::Reset` (transparent).
+    bg: Color,
 }
 
 impl<'a> BrailleCanvas<'a> {
     /// Create a new braille canvas widget for the given pattern.
     pub const fn new(pattern: &'a Pattern) -> Self {
-        Self { pattern }
+        Self {
+            pattern,
+            bg: Color::Reset,
+        }
+    }
+
+    /// Set the background color (use this to match the status bar background).
+    pub const fn bg(mut self, color: Color) -> Self {
+        self.bg = color;
+        self
     }
 
     /// Render into a buffer at the given area.
@@ -201,6 +212,19 @@ impl<'a> BrailleCanvas<'a> {
             }
             Pattern::MatrixRain { columns, .. } => {
                 Self::render_matrix_rain(columns, area, buf);
+            }
+        }
+
+        // Apply background color to all cells in the canvas area.
+        // ratatui's Canvas defaults to black background which creates a
+        // visible artifact when embedded in a non-black status bar.
+        if self.bg != Color::Reset {
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_bg(self.bg);
+                    }
+                }
             }
         }
     }
