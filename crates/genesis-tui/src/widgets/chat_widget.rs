@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use crate::history::agent_cell::{prefix_markdown_lines, AgentCell};
+use crate::history::agent_cell::{continuation_markdown_lines, prefix_markdown_lines, AgentCell};
 use crate::history::cell::HistoryCell;
 use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
@@ -41,6 +41,10 @@ pub struct ActiveCell {
     /// and emits complete blocks for committing as `HistoryCell` entries.
     pub block_collector: StreamingBlockCollector,
     pub tool_calls: Vec<ActiveToolCall>,
+    /// Whether the first text block of this turn has been committed.
+    /// Used to decide whether subsequent blocks are continuations (indent
+    /// only, no `eve> ` prefix).
+    pub first_block_committed: bool,
 }
 
 /// Cache for the active cell's rendered markdown lines.
@@ -226,6 +230,7 @@ impl ChatWidget {
         self.active_cell = Some(ActiveCell {
             block_collector: StreamingBlockCollector::new(),
             tool_calls: Vec::new(),
+            first_block_committed: false,
         });
         self.active_cell_cache = None;
         self.streaming_buffer.reset();
@@ -270,8 +275,19 @@ impl ChatWidget {
                 }
             }
             for block in emitted_blocks {
-                self.committed_cells
-                    .push(HistoryCell::Agent(AgentCell::new(block)));
+                let is_continuation = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
+                let agent_cell = if is_continuation {
+                    AgentCell::new_continuation(block)
+                } else {
+                    if let Some(ac) = &mut self.active_cell {
+                        ac.first_block_committed = true;
+                    }
+                    AgentCell::new(block)
+                };
+                self.committed_cells.push(HistoryCell::Agent(agent_cell));
                 self.bump_revision();
             }
             return true;
@@ -355,17 +371,29 @@ impl ChatWidget {
             if let Some(cell) = &mut self.active_cell {
                 for line in SplitKeepNewlines::new(&remaining) {
                     if let Some(block) = cell.block_collector.push_line(line) {
-                        self.committed_cells
-                            .push(HistoryCell::Agent(AgentCell::new(block)));
+                        let agent_cell = if cell.first_block_committed {
+                            AgentCell::new_continuation(block)
+                        } else {
+                            cell.first_block_committed = true;
+                            AgentCell::new(block)
+                        };
+                        self.committed_cells.push(HistoryCell::Agent(agent_cell));
                     }
                 }
             }
         }
         // Flush any remaining partial block in the collector.
         if let Some(cell) = &mut self.active_cell {
-            if let Some(block) = cell.block_collector.finalize() {
-                self.committed_cells
-                    .push(HistoryCell::Agent(AgentCell::new(block)));
+            let agent_cell_opt = cell.block_collector.finalize().map(|block| {
+                if cell.first_block_committed {
+                    AgentCell::new_continuation(block)
+                } else {
+                    cell.first_block_committed = true;
+                    AgentCell::new(block)
+                }
+            });
+            if let Some(agent_cell) = agent_cell_opt {
+                self.committed_cells.push(HistoryCell::Agent(agent_cell));
             }
         }
 
@@ -577,15 +605,19 @@ impl ChatWidget {
                 }
                 // Reuse the active cell cache when possible to avoid redundant
                 // markdown re-parsing.
+                let is_cont = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
                 let h = if let Some(cache) = self.active_cell_cache.as_ref() {
                     if cache.parsed_len == preview.len() && cache.parsed_width == width {
                         wrapped_row_count(&cache.lines, width).max(1)
                     } else {
-                        let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
+                        let lines = active_cell_lines(&preview, width, is_cont);
                         wrapped_row_count(&lines, width).max(1)
                     }
                 } else {
-                    let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
+                    let lines = active_cell_lines(&preview, width, is_cont);
                     wrapped_row_count(&lines, width).max(1)
                 };
                 total = total.saturating_add(h);
@@ -723,7 +755,12 @@ impl ChatWidget {
                 .as_ref()
                 .is_none_or(|c| c.parsed_len != text_len || c.parsed_width != width);
             if needs_reparse {
-                let lines = active_cell_lines(active_preview.as_ref().unwrap(), width);
+                let is_continuation = self
+                    .active_cell
+                    .as_ref()
+                    .is_some_and(|c| c.first_block_committed);
+                let lines =
+                    active_cell_lines(active_preview.as_ref().unwrap(), width, is_continuation);
                 self.active_cell_cache = Some(ActiveCellCache {
                     parsed_len: text_len,
                     parsed_width: width,
@@ -1110,8 +1147,12 @@ impl Default for ChatWidget {
 ///
 /// Uses the same `eve> ` prefix/indent pattern as [`AgentCell`], with
 /// markdown formatting applied so styles appear live as the agent types.
-fn active_cell_lines(text: &str, _width: u16) -> Vec<Line<'static>> {
-    prefix_markdown_lines(text)
+fn active_cell_lines(text: &str, _width: u16, is_continuation: bool) -> Vec<Line<'static>> {
+    if is_continuation {
+        continuation_markdown_lines(text)
+    } else {
+        prefix_markdown_lines(text)
+    }
 }
 
 /// Iterator that splits a string at newline boundaries, keeping the trailing

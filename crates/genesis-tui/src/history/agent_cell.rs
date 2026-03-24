@@ -24,6 +24,9 @@ const PREFIX: &str = "eve> ";
 pub struct AgentCell {
     /// The raw response text (private — use `text()` accessor).
     text: String,
+    /// When true, this cell is a continuation of a prior agent block in the
+    /// same turn — rendered with indent instead of the `eve> ` prefix.
+    continuation: bool,
     /// Lazily-computed styled lines (avoids re-parsing markdown in both
     /// `height()` and `to_scrollback_lines()`).
     cached_lines: OnceCell<Vec<Line<'static>>>,
@@ -42,6 +45,7 @@ impl Clone for AgentCell {
         }
         Self {
             text: self.text.clone(),
+            continuation: self.continuation,
             cached_lines,
             cached_height: self.cached_height.clone(),
         }
@@ -50,9 +54,24 @@ impl Clone for AgentCell {
 
 impl AgentCell {
     /// Construct a new `AgentCell` with the given response text.
+    ///
+    /// This is the first block of an agent turn — rendered with the `eve> ` prefix.
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            continuation: false,
+            cached_lines: OnceCell::new(),
+            cached_height: Cell::new(None),
+        }
+    }
+
+    /// Construct a continuation `AgentCell` — a subsequent block in the same turn.
+    ///
+    /// Rendered with matching-width indent instead of the `eve> ` prefix.
+    pub fn new_continuation(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            continuation: true,
             cached_lines: OnceCell::new(),
             cached_height: Cell::new(None),
         }
@@ -65,8 +84,13 @@ impl AgentCell {
 
     /// Return the cached (or lazily computed) styled lines.
     fn lines(&self) -> &Vec<Line<'static>> {
-        self.cached_lines
-            .get_or_init(|| prefix_markdown_lines(&self.text))
+        self.cached_lines.get_or_init(|| {
+            if self.continuation {
+                continuation_markdown_lines(&self.text)
+            } else {
+                prefix_markdown_lines(&self.text)
+            }
+        })
     }
 
     /// Render the cell into the given buffer area.
@@ -101,10 +125,31 @@ impl AgentCell {
 }
 
 /// Parse `text` as markdown and prepend the `eve> ` prefix/indent.
+///
+/// The first line gets the coloured `eve> ` prefix; continuation lines
+/// get a matching-width space indent.
 pub(crate) fn prefix_markdown_lines(text: &str) -> Vec<Line<'static>> {
+    format_markdown_lines_inner(text, false)
+}
+
+/// Parse `text` as markdown with indent only (no `eve> ` prefix).
+///
+/// Used for continuation blocks within the same agent turn — all lines
+/// get the matching-width space indent so they align with the first block.
+pub(crate) fn continuation_markdown_lines(text: &str) -> Vec<Line<'static>> {
+    format_markdown_lines_inner(text, true)
+}
+
+/// Shared implementation: render markdown with either `eve> ` prefix or
+/// indent-only on the first line.
+fn format_markdown_lines_inner(text: &str, continuation: bool) -> Vec<Line<'static>> {
     let md_lines = markdown_to_lines(text);
 
     if md_lines.is_empty() {
+        if continuation {
+            // Continuation of empty text — produce nothing visible.
+            return vec![];
+        }
         // Even for empty text, produce one line with just the prefix so the
         // cell is visible.
         return vec![Line::from(Span::styled(
@@ -122,7 +167,7 @@ pub(crate) fn prefix_markdown_lines(text: &str) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(i, line)| {
             let mut spans = Vec::with_capacity(1 + line.spans.len());
-            if i == 0 {
+            if i == 0 && !continuation {
                 spans.push(Span::styled(PREFIX.to_owned(), prefix_style));
             } else {
                 spans.push(Span::raw(indent.clone()));
