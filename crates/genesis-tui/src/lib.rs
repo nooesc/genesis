@@ -582,7 +582,16 @@ pub async fn run_tui(
                 // Re-query terminal size — it may have changed while suspended.
                 let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
                 let new_area = Rect::new(0, 0, w, h);
+
+                // Always clear the terminal and force a full redraw after
+                // resume. The alternate screen is freshly re-entered (blank),
+                // so the diff renderer must emit all cells. Using clear_all
+                // ensures this even when the size hasn't changed.
+                let _ = term.clear_all();
                 term.set_viewport_area(new_area);
+                // If size changed, apply_pending_resize in render_frame will
+                // handle it. If size is the same, clear_all already reset the
+                // buffers for a full redraw.
                 app.viewport_width = new_area.width;
                 app.viewport_height = new_area.height;
 
