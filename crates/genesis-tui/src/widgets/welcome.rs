@@ -69,13 +69,11 @@ const WIDE_BRAILLE_MIN_WIDTH: u16 = 120;
 /// Width of the braille canvas panel in cells.
 const BRAILLE_PANEL_WIDTH: u16 = 20;
 
-/// Welcome screen widget showing portrait art with session info.
+/// Welcome screen widget showing session info with big-text title.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
     /// Split portrait lines used in wide mode.
     split_art: Vec<Line<'static>>,
-    /// Compact portrait lines used in medium mode.
-    compact_art: Vec<Line<'static>>,
     /// Whether the boot sequence has been triggered.
     boot_triggered: bool,
     /// Areas computed during the last render for effect targeting.
@@ -85,12 +83,11 @@ pub struct WelcomeWidget {
 }
 
 impl WelcomeWidget {
-    /// Create a new welcome widget from session info with portrait art.
-    pub fn new(info: WelcomeInfo, full_art: &[String], compact_art: &[String]) -> Self {
+    /// Create a new welcome widget from session info with optional portrait art.
+    pub fn new(info: WelcomeInfo, full_art: &[String], _compact_art: &[String]) -> Self {
         Self {
             info,
             split_art: parse_ansi_art(full_art),
-            compact_art: parse_ansi_art(compact_art),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
             braille_pattern: Pattern::default_particles(18),
@@ -100,11 +97,6 @@ impl WelcomeWidget {
     /// Get the current split portrait lines.
     fn current_full_art(&self) -> &[Line<'static>] {
         &self.split_art
-    }
-
-    /// Get the current compact portrait lines.
-    fn current_compact_art(&self) -> &[Line<'static>] {
-        &self.compact_art
     }
 
     /// Returns `true` if the boot sequence has already been triggered.
@@ -286,7 +278,7 @@ impl WelcomeWidget {
         info_paragraph.render(info_area, buf);
     }
 
-    /// Compact layout: bordered box with art centered above info.
+    /// Compact layout: bordered box with big-text title and info centered.
     fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -299,51 +291,53 @@ impl WelcomeWidget {
             return;
         }
 
-        // Clone art lines up front to release the borrow on `self`.
-        let art_lines: Vec<Line<'static>> = self.current_compact_art().to_vec();
-        let art_height = art_lines.len() as u16;
+        // ── Big-text title at the top ──────────────────────────────
+        let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
+        let title_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: title_available_height,
+        };
+        self.last_areas.title = title_area;
+
+        let big_title = BigText::builder()
+            .pixel_size(PixelSize::Quadrant)
+            .style(Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER)))
+            .lines(vec!["GENESIS".into()])
+            .centered()
+            .build();
+        big_title.render(title_area, buf);
+
+        // ── Info lines centered below title ──────────────────────────
+        let below_title_y = inner.y + title_available_height + TITLE_GAP;
+        let remaining_height = inner
+            .height
+            .saturating_sub(title_available_height + TITLE_GAP);
+        if remaining_height == 0 {
+            return;
+        }
+
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
-        let gap = 1u16;
-
-        let total_content = art_height + gap + info_height;
-        let start_y = inner.y + inner.height.saturating_sub(total_content) / 2;
-
-        let art_visual_width = art_lines
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
-        let art_x = inner.x + inner.width.saturating_sub(art_visual_width) / 2;
-        let art_area = Rect {
-            x: art_x,
-            y: start_y,
-            width: art_visual_width.min(inner.width),
-            height: art_height.min(inner.height),
-        };
-        self.last_areas.portrait = art_area;
-        self.last_areas.title = art_area; // No big-text in compact mode
-        let art_paragraph = Paragraph::new(art_lines);
-        art_paragraph.render(art_area, buf);
-
         let info_visual_width = info_lines
             .iter()
             .map(|l| line_visual_width(l))
             .max()
             .unwrap_or(0) as u16;
         let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_y = start_y + art_height + gap;
-        if info_y < inner.y + inner.height {
-            let info_area = Rect {
-                x: info_x,
-                y: info_y,
-                width: info_visual_width.min(inner.width),
-                height: info_height.min(inner.y + inner.height - info_y),
-            };
-            self.last_areas.status = info_area;
-            let info_paragraph = Paragraph::new(info_lines);
-            info_paragraph.render(info_area, buf);
-        }
+        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
+
+        let info_area = Rect {
+            x: info_x,
+            y: info_y,
+            width: info_visual_width.min(inner.width),
+            height: info_height.min(remaining_height),
+        };
+        self.last_areas.portrait = info_area;
+        self.last_areas.status = info_area;
+        let info_paragraph = Paragraph::new(info_lines);
+        info_paragraph.render(info_area, buf);
     }
 
     /// Text-only layout: just ">_ Eve v{version}" in accent color.
