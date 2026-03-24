@@ -56,9 +56,7 @@ impl PluginSource {
         let segments: Vec<&str> = path_part.split('/').collect();
         if segments.len() < 2 {
             return Err(InstallError::InvalidSource {
-                reason: format!(
-                    "github source must be at least `owner/repo`, got `{path_part}`"
-                ),
+                reason: format!("github source must be at least `owner/repo`, got `{path_part}`"),
             });
         }
 
@@ -193,7 +191,15 @@ pub fn install_plugin(
             repo,
             git_ref,
             path,
-        } => install_from_github(owner, repo, git_ref.as_deref(), path.as_deref(), plugin_dir, force, &source_label),
+        } => install_from_github(
+            owner,
+            repo,
+            git_ref.as_deref(),
+            path.as_deref(),
+            plugin_dir,
+            force,
+            &source_label,
+        ),
         PluginSource::Local(local_path) => install_from_local(local_path, plugin_dir, force),
     }
 }
@@ -257,9 +263,7 @@ fn install_from_github(
     if let Some(len) = response.content_length() {
         if len > MAX_DOWNLOAD_BYTES {
             return Err(InstallError::DownloadFailed {
-                reason: format!(
-                    "tarball too large ({len} bytes, max {MAX_DOWNLOAD_BYTES})"
-                ),
+                reason: format!("tarball too large ({len} bytes, max {MAX_DOWNLOAD_BYTES})"),
             });
         }
     }
@@ -272,7 +276,7 @@ fn install_from_github(
     };
 
     // Extract to a temp directory.
-    let tmp_dir = tempfile::tempdir().map_err(|err| InstallError::Io(err))?;
+    let tmp_dir = tempfile::tempdir().map_err(InstallError::Io)?;
     let decoder = flate2::read::GzDecoder::new(limited);
     let mut archive = tar::Archive::new(decoder);
     archive
@@ -312,9 +316,7 @@ fn install_from_github(
         plugin_dir.join(&plugin_name)
     };
     if dest.exists() && !force {
-        return Err(InstallError::AlreadyExists {
-            name: plugin_name,
-        });
+        return Err(InstallError::AlreadyExists { name: plugin_name });
     }
 
     // Ensure plugin_dir exists.
@@ -363,9 +365,7 @@ fn install_from_local(
     };
 
     if dest.exists() && !force {
-        return Err(InstallError::AlreadyExists {
-            name: plugin_name,
-        });
+        return Err(InstallError::AlreadyExists { name: plugin_name });
     }
 
     // Ensure plugin_dir exists.
@@ -403,9 +403,9 @@ struct LimitedReader<R: Read> {
 impl<R: Read> Read for LimitedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.remaining == 0 {
-            return Err(io::Error::other(
-                format!("download exceeded {MAX_DOWNLOAD_BYTES} byte limit"),
-            ));
+            return Err(io::Error::other(format!(
+                "download exceeded {MAX_DOWNLOAD_BYTES} byte limit"
+            )));
         }
         let to_read = buf.len().min(self.remaining as usize);
         let n = self.inner.read(&mut buf[..to_read])?;
@@ -561,9 +561,8 @@ fn write_source_info(
         installed_at: now_iso8601(),
         commit,
     };
-    let json = serde_json::to_string_pretty(&info).map_err(|err| InstallError::Io(
-        io::Error::other(err),
-    ))?;
+    let json = serde_json::to_string_pretty(&info)
+        .map_err(|err| InstallError::Io(io::Error::other(err)))?;
     let target = if plugin_path.is_dir() {
         plugin_path.join(SOURCE_METADATA_FILE)
     } else {
@@ -691,8 +690,7 @@ mod tests {
 
     #[test]
     fn parse_github_url_with_tree() {
-        let src =
-            PluginSource::parse("https://github.com/acme/plugins/tree/main/weather").unwrap();
+        let src = PluginSource::parse("https://github.com/acme/plugins/tree/main/weather").unwrap();
         assert_eq!(
             src,
             PluginSource::GitHub {
@@ -875,7 +873,10 @@ version = "0.1.0"
             git_ref: Some("v1.0".into()),
             path: Some("plugins/weather".into()),
         };
-        assert_eq!(src.display_string(), "github:acme/weather/plugins/weather@v1.0");
+        assert_eq!(
+            src.display_string(),
+            "github:acme/weather/plugins/weather@v1.0"
+        );
     }
 
     #[test]

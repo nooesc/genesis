@@ -126,11 +126,11 @@ impl ChatWidget {
     // ── Scroll ────────────────────────────────────────────────────────────
 
     /// Compute the maximum allowed scroll offset for the current content
-    /// at the given viewport width. Accounts for collapsed tool groups
-    /// and turn separators so the offset matches what `render_messages`
-    /// actually displays.
+    /// at the given viewport width. Only counts committed cells (not the
+    /// active streaming cell) because `render_messages` hides the active
+    /// cell when the user has scrolled up.
     fn scroll_max(&self, viewport_width: u16) -> usize {
-        self.visible_content_height(viewport_width) as usize
+        self.committed_content_height(viewport_width) as usize
     }
 
     /// Scroll the chat view up by `rows` rows, clamped to the visible
@@ -413,6 +413,67 @@ impl ChatWidget {
                 };
                 total = total.saturating_add(h);
             }
+        }
+        total
+    }
+
+    /// Compute the total height of committed cells only (no active cell),
+    /// accounting for collapsed tool groups and turn separators.
+    ///
+    /// Used by [`scroll_max`] because the active streaming cell is hidden
+    /// when the user scrolls up.
+    fn committed_content_height(&self, width: u16) -> u16 {
+        if width == 0 {
+            return 0;
+        }
+
+        let tool_groups = self.find_tool_groups();
+        let mut collapsed_indices: HashSet<usize> = HashSet::new();
+        let mut collapsed_group_starts: HashSet<usize> = HashSet::new();
+        for &(start, count) in &tool_groups {
+            if !self.expanded_tool_groups.contains(&start) {
+                for idx in start..start + count {
+                    collapsed_indices.insert(idx);
+                }
+                collapsed_group_starts.insert(start);
+            }
+        }
+
+        let mut total: u16 = 0;
+        let mut prev_is_user: Option<bool> = None;
+        let mut i = 0;
+        while i < self.committed_cells.len() {
+            if collapsed_indices.contains(&i) && collapsed_group_starts.contains(&i) {
+                let cur_is_user = false;
+                if let Some(prev) = prev_is_user {
+                    if cur_is_user != prev {
+                        total = total.saturating_add(1);
+                    }
+                }
+                prev_is_user = Some(cur_is_user);
+                total = total.saturating_add(1);
+                let count = tool_groups
+                    .iter()
+                    .find(|&&(s, _)| s == i)
+                    .map(|&(_, c)| c)
+                    .unwrap_or(1);
+                i += count;
+                continue;
+            } else if collapsed_indices.contains(&i) {
+                i += 1;
+                continue;
+            }
+
+            let cell = &self.committed_cells[i];
+            let cur_is_user = matches!(cell, HistoryCell::User(_));
+            if let Some(prev) = prev_is_user {
+                if cur_is_user != prev {
+                    total = total.saturating_add(1);
+                }
+            }
+            prev_is_user = Some(cur_is_user);
+            total = total.saturating_add(cell.height(width).max(1));
+            i += 1;
         }
         total
     }
