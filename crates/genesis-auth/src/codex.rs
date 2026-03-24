@@ -413,7 +413,26 @@ async fn resolve_credentials_inner(
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "token refresh failed, using existing token");
+                    tracing::warn!(error = %e, "token refresh failed, trying Codex CLI import");
+
+                    // Refresh token is likely revoked (e.g. user re-logged in
+                    // via Codex CLI, which rotates the refresh token). Try to
+                    // import fresh tokens from the Codex CLI auth store.
+                    if let Some(imported) = import_codex_cli_tokens() {
+                        if !jwt::is_expiring(&imported.access_token, TOKEN_REFRESH_SKEW_SECS) {
+                            let api_key = imported.access_token.clone();
+                            let source = store::CredentialSource::CodexMigration;
+                            store::save_codex_tokens(auth_store_path, imported, source.clone())?;
+                            tracing::info!("re-imported fresh tokens from Codex CLI");
+                            return Ok(ResolvedCredentials {
+                                provider: CODEX_PROVIDER_ID.to_owned(),
+                                base_url,
+                                api_key,
+                                source,
+                            });
+                        }
+                    }
+                    tracing::warn!("no valid tokens available — run `genesis login`");
                 }
             }
         }
