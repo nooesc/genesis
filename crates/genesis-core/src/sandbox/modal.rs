@@ -11,9 +11,9 @@ use tonic::transport::{Channel, Endpoint};
 
 use genesis_modal_proto::modal::client::modal_client_client::ModalClientClient;
 use genesis_modal_proto::modal::client::{
-    AuthTokenGetRequest, GpuConfig, Resources, Sandbox, SandboxCreateRequest,
-    SandboxGetTaskIdRequest, SandboxSnapshotFsRequest, SandboxTerminateRequest,
-    TaskGetCommandRouterAccessRequest,
+    AppGetOrCreateRequest, AuthTokenGetRequest, GpuConfig, ObjectCreationType, Resources, Sandbox,
+    SandboxCreateRequest, SandboxGetTaskIdRequest, SandboxSnapshotFsRequest,
+    SandboxTerminateRequest, TaskGetCommandRouterAccessRequest,
 };
 use genesis_modal_proto::modal::task_command_router::task_command_router_client::TaskCommandRouterClient;
 use genesis_modal_proto::modal::task_command_router::{
@@ -157,8 +157,8 @@ impl AuthTokenManager {
             let guard = self.cache.read().await;
             if let Some(ref cached) = *guard {
                 let remaining = cached.expires_at - now;
-                if remaining > 60 {
-                    // Valid with plenty of margin.
+                if remaining > 300 {
+                    // Valid with plenty of margin (>5 min).
                     return Ok(cached.token.clone());
                 }
                 if remaining > 0 {
@@ -215,8 +215,8 @@ impl AuthTokenManager {
 
         let token = resp.into_inner().token;
         let expires_at = decode_jwt_expiry(&token).unwrap_or_else(|| {
-            // Default to 10 minutes from now if we can't decode.
-            chrono::Utc::now().timestamp() + 600
+            // Default to 20 minutes from now if we can't decode (matches Go SDK DefaultExpiryOffset).
+            chrono::Utc::now().timestamp() + 1200
         });
 
         let entry = TokenAndExpiry {
@@ -246,8 +246,18 @@ impl tonic::service::Interceptor for StaticCredsInterceptor {
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
         let md = request.metadata_mut();
-        md.insert("x-modal-token-id", self.token_id.parse().unwrap());
-        md.insert("x-modal-token-secret", self.token_secret.parse().unwrap());
+        md.insert(
+            "x-modal-token-id",
+            self.token_id
+                .parse()
+                .map_err(|_| tonic::Status::internal("invalid header value for token_id"))?,
+        );
+        md.insert(
+            "x-modal-token-secret",
+            self.token_secret
+                .parse()
+                .map_err(|_| tonic::Status::internal("invalid header value for token_secret"))?,
+        );
         md.insert(
             "x-modal-client-type",
             "CLIENT_TYPE_GENESIS".parse().unwrap(),
@@ -273,8 +283,18 @@ impl tonic::service::Interceptor for ModalAuthInterceptor {
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
         let md = request.metadata_mut();
-        md.insert("x-modal-token-id", self.token_id.parse().unwrap());
-        md.insert("x-modal-token-secret", self.token_secret.parse().unwrap());
+        md.insert(
+            "x-modal-token-id",
+            self.token_id
+                .parse()
+                .map_err(|_| tonic::Status::internal("invalid header value for token_id"))?,
+        );
+        md.insert(
+            "x-modal-token-secret",
+            self.token_secret
+                .parse()
+                .map_err(|_| tonic::Status::internal("invalid header value for token_secret"))?,
+        );
         md.insert(
             "x-modal-client-type",
             "CLIENT_TYPE_GENESIS".parse().unwrap(),
@@ -295,9 +315,11 @@ impl tonic::service::Interceptor for ModalAuthInterceptor {
 }
 
 /// Interceptor for the TaskCommandRouter channel — injects the router JWT.
+/// Uses `Arc<RwLock<String>>` so the JWT can be refreshed on UNAUTHENTICATED without
+/// rebuilding the channel.
 #[derive(Clone)]
 struct RouterJwtInterceptor {
-    jwt: String,
+    jwt: Arc<RwLock<String>>,
 }
 
 impl tonic::service::Interceptor for RouterJwtInterceptor {
@@ -306,8 +328,11 @@ impl tonic::service::Interceptor for RouterJwtInterceptor {
         mut request: tonic::Request<()>,
     ) -> Result<tonic::Request<()>, tonic::Status> {
         let md = request.metadata_mut();
-        if let Ok(val) = format!("Bearer {}", self.jwt).parse() {
-            md.insert("authorization", val);
+        // Best-effort: use try_read to avoid blocking in the sync interceptor.
+        if let Ok(guard) = self.jwt.try_read() {
+            if let Ok(val) = format!("Bearer {}", *guard).parse() {
+                md.insert("authorization", val);
+            }
         }
         Ok(request)
     }
@@ -339,14 +364,29 @@ fn map_grpc_error(operation: &str, status: tonic::Status) -> SandboxError {
 type RouterClient =
     TaskCommandRouterClient<InterceptedService<Channel, RouterJwtInterceptor>>;
 
+/// Holds a router client and its shared JWT handle for auth-retry.
+struct RouterEntry {
+    client: RouterClient,
+    jwt: Arc<RwLock<String>>,
+}
+
+impl Clone for RouterEntry {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            jwt: self.jwt.clone(),
+        }
+    }
+}
+
 pub struct ModalSandbox {
     client: ModalClientClient<InterceptedService<Channel, ModalAuthInterceptor>>,
     raw_channel: Channel,
     auth_manager: Arc<AuthTokenManager>,
     /// Maps genesis sandbox_id -> Modal's internal task_id.
     modal_task_ids: tokio::sync::Mutex<HashMap<String, String>>,
-    /// Maps modal_task_id -> router client.
-    routers: tokio::sync::Mutex<HashMap<String, RouterClient>>,
+    /// Maps modal_task_id -> router entry (client + shared JWT).
+    routers: tokio::sync::Mutex<HashMap<String, RouterEntry>>,
     app_name: Option<String>,
 }
 
@@ -375,7 +415,10 @@ impl ModalSandbox {
 
         let endpoint = Endpoint::from_static(MODAL_API_URL)
             .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(30));
+            .connect_timeout(Duration::from_secs(30))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true);
 
         // connect_lazy() is synchronous — no .await needed.
         let channel = endpoint.connect_lazy();
@@ -395,7 +438,8 @@ impl ModalSandbox {
             token_secret,
         ));
 
-        let client = ModalClientClient::with_interceptor(channel.clone(), auth_interceptor);
+        let client = ModalClientClient::with_interceptor(channel.clone(), auth_interceptor)
+            .max_decoding_message_size(4 * 1024 * 1024);
 
         Ok(Self {
             client,
@@ -428,7 +472,31 @@ impl SandboxBackend for ModalSandbox {
 
         let app_name = app_name_override
             .or_else(|| self.app_name.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| "genesis-sandbox".to_owned());
+
+        // Resolve the human-readable app name to Modal's internal app_id (format `ap-...`).
+        // Uses AppGetOrCreate with CREATE_IF_MISSING so a first-time user doesn't need to
+        // pre-create the app in the Modal dashboard.
+        let app_id = match self
+            .client
+            .clone()
+            .app_get_or_create(AppGetOrCreateRequest {
+                app_name: app_name.clone(),
+                environment_name: String::new(),
+                object_creation_type: ObjectCreationType::CreateIfMissing as i32,
+            })
+            .await
+        {
+            Ok(resp) => resp.into_inner().app_id,
+            Err(e) => {
+                tracing::warn!(
+                    app_name,
+                    error = %e,
+                    "AppGetOrCreate failed, falling back to app_name as app_id"
+                );
+                app_name
+            }
+        };
 
         // Build the GPU config if requested.
         let gpu_config = gpu.map(|g| GpuConfig {
@@ -461,6 +529,11 @@ impl SandboxBackend for ModalSandbox {
         };
 
         let definition = Some(Sandbox {
+            entrypoint_args: vec![
+                "/usr/bin/env".to_owned(),
+                "bash".to_owned(),
+                "-l".to_owned(),
+            ],
             image_id,
             resources,
             workdir: config.working_dir.clone(),
@@ -471,7 +544,7 @@ impl SandboxBackend for ModalSandbox {
         });
 
         let request = SandboxCreateRequest {
-            app_id: app_name,
+            app_id,
             definition,
             environment_name: String::new(),
         };
@@ -521,32 +594,43 @@ impl SandboxBackend for ModalSandbox {
             command.to_owned(),
         ];
 
-        // Get a clone of the router client (to avoid holding the mutex during streaming).
-        let mut router = {
+        // Get a clone of the router entry (to avoid holding the mutex during streaming).
+        let entry = {
             self.ensure_router_client(&modal_task_id).await?;
             let guard = self.routers.lock().await;
             guard.get(&modal_task_id).cloned().ok_or_else(|| {
                 SandboxError::Other("router client disappeared".to_owned())
             })?
         };
+        let mut router = entry.client.clone();
 
-        // 3. TaskExecStart (unary).
-        router
-            .task_exec_start(TaskExecStartRequest {
-                task_id: modal_task_id.clone(),
-                exec_id: exec_id.clone(),
-                command_args,
-                stdout_config: TaskExecStdoutConfig::Pipe as i32,
-                stderr_config: TaskExecStderrConfig::Pipe as i32,
-                timeout_secs,
-                workdir: working_dir.map(|s| s.to_owned()),
-                secret_ids: vec![],
-                pty_info: None,
-                runtime_debug: false,
-                container_id: String::new(),
-            })
-            .await
-            .map_err(|s| map_grpc_error("task_exec_start", s))?;
+        // 3. TaskExecStart (unary) with auth retry.
+        let exec_start_req = TaskExecStartRequest {
+            task_id: modal_task_id.clone(),
+            exec_id: exec_id.clone(),
+            command_args,
+            stdout_config: TaskExecStdoutConfig::Pipe as i32,
+            stderr_config: TaskExecStderrConfig::Pipe as i32,
+            timeout_secs,
+            workdir: working_dir.map(|s| s.to_owned()),
+            secret_ids: vec![],
+            pty_info: None,
+            runtime_debug: false,
+            container_id: String::new(),
+        };
+
+        match router.task_exec_start(exec_start_req.clone()).await {
+            Ok(_) => {}
+            Err(status) if status.code() == tonic::Code::Unauthenticated => {
+                // Refresh the router JWT and retry once.
+                self.refresh_router_jwt(&modal_task_id, &entry.jwt).await?;
+                router
+                    .task_exec_start(exec_start_req)
+                    .await
+                    .map_err(|s| map_grpc_error("task_exec_start", s))?;
+            }
+            Err(status) => return Err(map_grpc_error("task_exec_start", status)),
+        }
 
         // 4. Concurrently read stdout and stderr streams.
         let mut stdout_router = router.clone();
@@ -756,24 +840,72 @@ impl ModalSandbox {
         let jwt = inner.jwt;
         let url = inner.url;
 
+        // Enforce HTTPS for router URLs.
+        if !url.starts_with("https://") {
+            return Err(SandboxError::AuthError {
+                reason: format!("TaskCommandRouter URL must use HTTPS, got: {url}"),
+            });
+        }
+
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| SandboxError::Other(format!("invalid router URL {url}: {e}")))?
             .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(30));
+            .connect_timeout(Duration::from_secs(30))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .keep_alive_while_idle(true);
 
         let channel = endpoint
             .connect()
             .await
             .map_err(|e| SandboxError::Other(format!("failed to connect to router at {url}: {e}")))?;
 
-        let interceptor = RouterJwtInterceptor { jwt };
-        let router_client = TaskCommandRouterClient::with_interceptor(channel, interceptor);
+        let shared_jwt = Arc::new(RwLock::new(jwt));
+        let interceptor = RouterJwtInterceptor {
+            jwt: shared_jwt.clone(),
+        };
+        let router_client = TaskCommandRouterClient::with_interceptor(channel, interceptor)
+            .max_decoding_message_size(4 * 1024 * 1024);
 
         {
             let mut guard = self.routers.lock().await;
-            guard.insert(modal_task_id.to_owned(), router_client);
+            guard.insert(
+                modal_task_id.to_owned(),
+                RouterEntry {
+                    client: router_client,
+                    jwt: shared_jwt,
+                },
+            );
         }
 
+        Ok(())
+    }
+
+    /// Refresh the router JWT for a given task_id by calling `TaskGetCommandRouterAccess`
+    /// again and updating the shared JWT handle so the interceptor picks it up.
+    async fn refresh_router_jwt(
+        &self,
+        modal_task_id: &str,
+        shared_jwt: &Arc<RwLock<String>>,
+    ) -> Result<(), SandboxError> {
+        self.auth_manager
+            .get_token(&self.raw_channel)
+            .await?;
+
+        let resp = self
+            .client
+            .clone()
+            .task_get_command_router_access(TaskGetCommandRouterAccessRequest {
+                task_id: modal_task_id.to_owned(),
+            })
+            .await
+            .map_err(|s| map_grpc_error("task_get_command_router_access (refresh)", s))?;
+
+        let new_jwt = resp.into_inner().jwt;
+        {
+            let mut guard = shared_jwt.write().await;
+            *guard = new_jwt;
+        }
         Ok(())
     }
 }

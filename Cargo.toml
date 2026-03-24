@@ -81,7 +81,7 @@ notify = "8"
 opentelemetry = "0.28"
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls-native-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 tracing-opentelemetry = "0.29"
