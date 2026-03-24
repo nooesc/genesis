@@ -103,23 +103,38 @@ impl Pattern {
         }
     }
 
-    /// Create a matrix rain pattern with the given number of columns.
-    pub fn matrix_rain(num_columns: usize) -> Self {
+    /// Create a dense two-layer matrix rain pattern.
+    ///
+    /// Background layer: many slow, dim columns.
+    /// Foreground layer: fewer fast, bright columns with long trails.
+    pub fn matrix_rain(density: usize) -> Self {
         let mut seed: u64 = 7;
         let mut next = || -> f64 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             ((seed >> 33) as f64) / (u32::MAX as f64)
         };
 
-        let columns = (0..num_columns)
-            .map(|_| {
-                let y_head = next() * 1.8 - 0.4;
-                let speed = 0.10 + next() * 0.20;
-                let length = 0.25 + next() * 0.45; // long trails
-                let brightness = 0.4 + next() * 0.6;
-                (y_head, speed, length, brightness)
-            })
-            .collect();
+        let mut columns = Vec::with_capacity(density);
+
+        // Background layer — slow, dim, many columns
+        let bg_count = density * 2 / 3;
+        for _ in 0..bg_count {
+            let y_head = next() * 2.2 - 0.6;
+            let speed = 0.04 + next() * 0.08;
+            let length = 0.15 + next() * 0.30;
+            let brightness = 0.15 + next() * 0.25; // dim
+            columns.push((y_head, speed, length, brightness));
+        }
+
+        // Foreground layer — fast, bright, long trails
+        let fg_count = density - bg_count;
+        for _ in 0..fg_count {
+            let y_head = next() * 2.2 - 0.6;
+            let speed = 0.12 + next() * 0.25;
+            let length = 0.30 + next() * 0.50;
+            let brightness = 0.6 + next() * 0.4; // bright
+            columns.push((y_head, speed, length, brightness));
+        }
 
         Pattern::MatrixRain { columns, accum: 0.0 }
     }
@@ -268,10 +283,12 @@ impl<'a> BrailleCanvas<'a> {
         Widget::render(canvas, area, buf);
     }
 
-    /// Direct-to-buffer matrix rain renderer. Bypasses the Canvas widget
-    /// entirely — no internal bitmap allocation, just writes braille chars
-    /// directly to the cells that need them. O(columns × dots) instead of
-    /// O(area_width × area_height).
+    /// Direct-to-buffer matrix rain renderer with full braille glyphs.
+    ///
+    /// Each column generates a trail of random braille characters (not just
+    /// single dots). Head cells are bright with dense glyphs; tail cells
+    /// fade with sparser patterns. Creates an alien data-stream aesthetic.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn render_matrix_rain(
         columns: &[(f64, f64, f64, f64)],
         _w: f64,
@@ -279,82 +296,114 @@ impl<'a> BrailleCanvas<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
-        // Braille dot layout per cell (2 wide × 4 tall):
-        //   1 4      bit 0  bit 3
-        //   2 5      bit 1  bit 4
-        //   3 6      bit 2  bit 5
-        //   7 8      bit 6  bit 7
-        const LEFT_DOTS: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
-        const RIGHT_DOTS: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
-        const DOTS_PER_TRAIL: usize = 12;
-        const DIM_LAVENDER: Color = Color::Rgb(90, 82, 110);
+        const BRIGHT_HEAD: Color = Color::Rgb(210, 200, 235);
+        const BRIGHT_TRAIL: Color = Color::Rgb(150, 140, 185);
+        const MID_TRAIL: Color = Color::Rgb(100, 92, 130);
+        const DIM_TRAIL: Color = Color::Rgb(55, 50, 70);
+
+        // Glyph tables — denser patterns for heads, sparser for tails.
+        // Each u8 is the braille dot bitmask (0x00-0xFF).
+        const DENSE_GLYPHS: [u8; 16] = [
+            0xFF, 0xF7, 0x7F, 0xBF, 0xFE, 0xDB, 0xED, 0xBE,
+            0x77, 0xEE, 0xD7, 0x7D, 0xBB, 0xEB, 0xF5, 0xAF,
+        ];
+        const MID_GLYPHS: [u8; 16] = [
+            0x49, 0x92, 0x24, 0x6C, 0x36, 0x5A, 0xA5, 0xC3,
+            0x1E, 0x78, 0x4B, 0xD2, 0x69, 0x96, 0x33, 0xCC,
+        ];
+        const SPARSE_GLYPHS: [u8; 16] = [
+            0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80,
+            0x09, 0x12, 0x24, 0x48, 0x03, 0x18, 0x06, 0x30,
+        ];
 
         let num_cols = columns.len().max(1);
-        let area_w = area.width as f64;
-        let area_h = area.height as f64;
+        let area_w = area.width;
+        let area_h = area.height;
 
-        // Track which cells have been touched and their accumulated braille bits.
-        // Key: (col, row), Value: (bits, is_bright)
-        let mut cell_bits: std::collections::HashMap<(u16, u16), (u8, bool)> =
-            std::collections::HashMap::new();
-
-        for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
-            // Map column index to pixel x in the area.
-            let norm_x = (i as f64 + 0.5) / num_cols as f64;
-            let px_x = norm_x * area_w * 2.0; // braille has 2 sub-pixels per cell width
-            let cell_col = (px_x / 2.0) as u16;
-            let sub_x = (px_x as u16) % 2; // 0 = left column, 1 = right column
-            let dot_col = if sub_x == 0 { &LEFT_DOTS } else { &RIGHT_DOTS };
-
-            if cell_col >= area.width {
-                continue;
-            }
-
-            for d in 0..DOTS_PER_TRAIL {
-                let frac = d as f64 / DOTS_PER_TRAIL as f64;
-                let norm_y = y_head - frac * length;
-
-                if norm_y < 0.0 || norm_y >= 1.0 {
-                    continue;
-                }
-
-                // Map to sub-pixel y (4 sub-pixels per cell height).
-                let px_y = norm_y * area_h * 4.0;
-                let cell_row = (px_y / 4.0) as u16;
-                let sub_y = (px_y as usize) % 4;
-
-                if cell_row >= area.height {
-                    continue;
-                }
-
-                let is_bright = d == 0 && brightness > 0.6;
-                let entry = cell_bits.entry((cell_col, cell_row)).or_insert((0, false));
-                entry.0 |= dot_col[sub_y];
-                if is_bright {
-                    entry.1 = true;
-                }
-            }
+        if area_w == 0 || area_h == 0 {
+            return;
         }
 
-        // Write accumulated braille characters to the buffer.
-        for (&(col, row), &(bits, is_bright)) in &cell_bits {
-            if bits == 0 {
+        // Deterministic hash for glyph selection (varies by position).
+        let glyph_hash = |col: u16, row: u16, salt: u16| -> usize {
+            let v = (col as u32)
+                .wrapping_mul(2654435761)
+                .wrapping_add(row as u32)
+                .wrapping_mul(2246822519)
+                .wrapping_add(salt as u32);
+            (v >> 16) as usize
+        };
+
+        for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
+            // Map column to a terminal cell column.
+            let cell_col = ((i as f64 + 0.5) / num_cols as f64 * area_w as f64) as u16;
+            if cell_col >= area_w {
                 continue;
             }
 
-            let x = area.x + col;
-            let y = area.y + row;
-
-            if x >= area.x + area.width || y >= area.y + area.height {
+            // How many terminal rows this trail covers.
+            let trail_cells = (length * area_h as f64) as u16;
+            if trail_cells == 0 {
                 continue;
             }
 
-            let ch = char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' ');
-            let color = if is_bright { EVE_LAVENDER } else { DIM_LAVENDER };
+            // Head row in terminal cells.
+            let head_row = (y_head * area_h as f64) as i32;
 
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(ch);
-                cell.set_fg(color);
+            for d in 0..trail_cells {
+                let row = head_row - d as i32;
+                if row < 0 || row >= area_h as i32 {
+                    continue;
+                }
+                let row = row as u16;
+
+                let frac = d as f64 / trail_cells as f64;
+                let salt = i as u16;
+                let h = glyph_hash(cell_col, row, salt);
+
+                // Select glyph and color based on position in trail.
+                let (glyph_bits, color) = if d == 0 && brightness > 0.5 {
+                    // Bright head — dense glyph, white-ish
+                    (DENSE_GLYPHS[h % DENSE_GLYPHS.len()], BRIGHT_HEAD)
+                } else if frac < 0.2 {
+                    // Near head — dense, bright
+                    (DENSE_GLYPHS[h % DENSE_GLYPHS.len()], BRIGHT_TRAIL)
+                } else if frac < 0.5 {
+                    // Mid trail
+                    (MID_GLYPHS[h % MID_GLYPHS.len()], MID_TRAIL)
+                } else if frac < 0.8 {
+                    // Fading
+                    (SPARSE_GLYPHS[h % SPARSE_GLYPHS.len()], DIM_TRAIL)
+                } else {
+                    // Tail — very sparse
+                    let sparse = SPARSE_GLYPHS[h % SPARSE_GLYPHS.len()];
+                    // Randomly drop some tail cells entirely.
+                    if h % 3 == 0 {
+                        continue;
+                    }
+                    (sparse, DIM_TRAIL)
+                };
+
+                if glyph_bits == 0 {
+                    continue;
+                }
+
+                let x = area.x + cell_col;
+                let y = area.y + row;
+
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    // Merge with existing braille character if present.
+                    let existing = cell.symbol().chars().next().unwrap_or(' ');
+                    let existing_bits = if ('\u{2800}'..='\u{28FF}').contains(&existing) {
+                        (existing as u32 - 0x2800) as u8
+                    } else {
+                        0
+                    };
+                    let merged = existing_bits | glyph_bits;
+                    let ch = char::from_u32(0x2800 + u32::from(merged)).unwrap_or(' ');
+                    cell.set_char(ch);
+                    cell.set_fg(color);
+                }
             }
         }
     }
