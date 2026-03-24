@@ -41,17 +41,49 @@ impl HistoryCell {
         }
     }
 
-    /// Render the cell with a vertical scroll offset.
+    /// Render the cell showing the bottom portion (for oversized cells).
     ///
-    /// Used to show the bottom portion of oversized cells that exceed the
-    /// viewport height. `skip_rows` is the number of rows to skip from the top.
-    pub fn render_scrolled(&self, area: Rect, buf: &mut Buffer, skip_rows: u16) {
+    /// Renders into a virtual buffer tall enough for all content, then
+    /// copies the bottom `area.height` rows to `buf`. This avoids relying
+    /// on Paragraph::scroll with an estimated skip offset that may disagree
+    /// with ratatui's actual wrap behavior.
+    pub fn render_bottom(&self, area: Rect, buf: &mut Buffer) {
         use ratatui::widgets::{Paragraph, Widget as _, Wrap};
+
         let lines = self.to_scrollback_lines(area.width);
-        let paragraph = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((skip_rows, 0));
-        paragraph.render(area, buf);
+        let estimated_h = super::wrapped_row_count(&lines, area.width.max(1));
+        let virtual_h = estimated_h.max(area.height).min(2000);
+
+        let virtual_area = Rect::new(0, 0, area.width, virtual_h);
+        let mut virtual_buf = Buffer::empty(virtual_area);
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        paragraph.render(virtual_area, &mut virtual_buf);
+
+        // Find actual rendered height by scanning for last non-empty row.
+        let actual_h = (0..virtual_h)
+            .rev()
+            .find(|&row| {
+                (0..area.width).any(|col| {
+                    virtual_buf
+                        .cell((col, row))
+                        .is_some_and(|c| c.symbol() != " ")
+                })
+            })
+            .map(|row| row + 1)
+            .unwrap_or(1);
+
+        let visible = actual_h.min(area.height);
+        let skip = actual_h.saturating_sub(visible);
+        for row in 0..visible {
+            for col in 0..area.width {
+                if let (Some(src), Some(dst)) = (
+                    virtual_buf.cell((col, skip + row)),
+                    buf.cell_mut((area.x + col, area.y + row)),
+                ) {
+                    *dst = src.clone();
+                }
+            }
+        }
     }
 
     /// Produce the styled [`Line`]s for insertion into terminal scrollback.

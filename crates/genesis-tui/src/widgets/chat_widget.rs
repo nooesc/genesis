@@ -696,26 +696,62 @@ impl ChatWidget {
                 last_line.spans.push(Span::styled("\u{258D}", cursor_style));
             }
 
-            let wrap_width = width.max(1);
-            let cell_height = wrapped_row_count(&lines, wrap_width).max(1);
-            let rows_to_use = cell_height.min(remaining_rows);
+            // Render the active cell content, showing the bottom (most recent)
+            // portion when it exceeds the viewport.
+            //
+            // Instead of computing a scroll offset from wrapped_row_count (which
+            // can disagree with ratatui's actual Paragraph::wrap behavior), we
+            // render into a tall virtual buffer and copy the bottom rows. This
+            // guarantees the visible content matches what ratatui produces.
+            let rows_to_use = remaining_rows;
 
             if rows_to_use > 0 {
-                let cell_area = Rect {
-                    x: area.x,
-                    y: bottom_y - rows_to_use,
+                // Estimate virtual height (generous: double what we think + headroom).
+                let estimated = wrapped_row_count(&lines, width.max(1)).max(1);
+                let virtual_h = estimated.max(rows_to_use).min(2000);
+                let virtual_area = Rect {
+                    x: 0,
+                    y: 0,
                     width: area.width,
-                    height: rows_to_use,
+                    height: virtual_h,
                 };
+                let mut virtual_buf = Buffer::empty(virtual_area);
+                let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+                paragraph.render(virtual_area, &mut virtual_buf);
 
-                let skip = cell_height.saturating_sub(rows_to_use);
-                let paragraph = Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((skip, 0));
-                paragraph.render(cell_area, buf);
+                // Find the last non-empty row in the virtual buffer to
+                // determine the actual rendered height.
+                let actual_h = (0..virtual_h)
+                    .rev()
+                    .find(|&row| {
+                        (0..area.width).any(|col| {
+                            virtual_buf
+                                .cell((col, row))
+                                .is_some_and(|c| c.symbol() != " ")
+                        })
+                    })
+                    .map(|row| row + 1)
+                    .unwrap_or(1);
 
-                active_cell_rows = rows_to_use;
-                remaining_rows -= rows_to_use;
+                let visible_rows = actual_h.min(rows_to_use);
+                let skip_rows = actual_h.saturating_sub(visible_rows);
+                let dest_y = bottom_y - visible_rows;
+
+                // Copy the bottom portion of the virtual buffer to the real buffer.
+                for row in 0..visible_rows {
+                    let src_row = skip_rows + row;
+                    for col in 0..area.width {
+                        if let (Some(src), Some(dst)) = (
+                            virtual_buf.cell((col, src_row)),
+                            buf.cell_mut((area.x + col, dest_y + row)),
+                        ) {
+                            *dst = src.clone();
+                        }
+                    }
+                }
+
+                active_cell_rows = visible_rows;
+                remaining_rows -= visible_rows;
             }
         }
 
@@ -948,14 +984,13 @@ impl ChatWidget {
             };
             match &entry.visual {
                 VisualEntry::Cell(cell) => {
-                    // Only use render_scrolled for cells that were explicitly
-                    // clamped during collection (actual height > stored height).
-                    // Compare against entry.height, NOT the runtime h (which can
-                    // be smaller due to hint rows stealing space from normal cells).
+                    // If the cell's actual height exceeds its stored height
+                    // (meaning it was clamped during collection), render the
+                    // bottom portion using a virtual buffer to avoid wrapping
+                    // mismatches between our height estimate and ratatui's.
                     let actual_h = cell.height(area.width).max(1);
                     if actual_h > entry.height {
-                        let skip = actual_h.saturating_sub(h);
-                        cell.render_scrolled(cell_area, buf, skip);
+                        cell.render_bottom(cell_area, buf);
                     } else {
                         cell.render(cell_area, buf);
                     }
