@@ -936,11 +936,12 @@ impl ChatWidget {
             };
             match &entry.visual {
                 VisualEntry::Cell(cell) => {
-                    // If the cell is taller than the allocated space, scroll
-                    // to show the bottom (most recent content). This handles
-                    // oversized messages that exceed the viewport.
+                    // Only use render_scrolled for cells that were explicitly
+                    // clamped during collection (actual height > stored height).
+                    // Compare against entry.height, NOT the runtime h (which can
+                    // be smaller due to hint rows stealing space from normal cells).
                     let actual_h = cell.height(area.width).max(1);
-                    if actual_h > h {
+                    if actual_h > entry.height {
                         let skip = actual_h.saturating_sub(h);
                         cell.render_scrolled(cell_area, buf, skip);
                     } else {
