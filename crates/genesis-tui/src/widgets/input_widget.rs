@@ -54,6 +54,8 @@ pub enum InputAction {
     Interrupt,
     /// User pressed Ctrl+D on an empty buffer (request exit).
     Exit,
+    /// User pressed Ctrl+G (open external editor).
+    OpenEditor,
 }
 
 /// Multi-line text input with readline-style key bindings and
@@ -78,6 +80,8 @@ pub struct InputWidget {
     /// also uses a single-entry buffer. A full kill ring adds complexity for a
     /// niche use case — users needing multi-kill recall can use the clipboard.
     pub(crate) kill_buffer: String,
+    /// Whether persistent history has been loaded from disk.
+    disk_history_loaded: bool,
 }
 
 impl InputWidget {
@@ -90,6 +94,7 @@ impl InputWidget {
             history_index: None,
             saved_input: None,
             kill_buffer: String::new(),
+            disk_history_loaded: false,
         }
     }
 
@@ -109,17 +114,34 @@ impl InputWidget {
     /// Push a new entry onto the history stack (call after each submission).
     ///
     /// Duplicate consecutive entries are silently dropped to avoid cluttering
-    /// history when the user re-submits the same command.
+    /// history when the user re-submits the same command. Also appends to the
+    /// persistent history file on disk.
     pub fn push_history(&mut self, entry: String) {
         if entry.is_empty() {
             return;
         }
         if self.history.last().map(|s| s.as_str()) != Some(&entry) {
+            // Append to disk (best-effort, ignore errors).
+            append_history_to_disk(&entry);
             self.history.push(entry);
         }
         // Reset navigation state.
         self.history_index = None;
         self.saved_input = None;
+    }
+
+    /// Ensure persistent history is loaded from disk (lazy, called on first Up).
+    fn ensure_disk_history_loaded(&mut self) {
+        if self.disk_history_loaded {
+            return;
+        }
+        self.disk_history_loaded = true;
+        if let Some(entries) = load_history_from_disk() {
+            // Prepend disk history before any in-session entries.
+            let session_entries = std::mem::take(&mut self.history);
+            self.history = entries;
+            self.history.extend(session_entries);
+        }
     }
 
     /// Number of visual rows the content occupies (for dynamic layout).
@@ -201,6 +223,9 @@ impl InputWidget {
                     InputAction::None
                 }
             }
+
+            // ── External editor ────────────────────────────────────────
+            (KeyCode::Char('g'), KeyModifiers::CONTROL) => InputAction::OpenEditor,
 
             // ── Kill / clear line (fills kill buffer for Ctrl+Y yank) ────
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
@@ -811,6 +836,8 @@ impl InputWidget {
 
     /// Navigate to the previous (older) history entry.
     fn history_prev(&mut self) {
+        // Lazy-load persistent history on first Up press.
+        self.ensure_disk_history_loaded();
         if self.history.is_empty() {
             return;
         }
@@ -858,6 +885,97 @@ impl Default for InputWidget {
 /// Used for word-boundary navigation (Ctrl+Left/Right, Alt+Backspace, Ctrl+W).
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
+}
+
+// ── Persistent history I/O ────────────────────────────────────────────────
+
+/// Maximum number of history entries to load from disk.
+const MAX_DISK_HISTORY: usize = 500;
+
+/// Path to the persistent history file: `~/.genesis/input_history`.
+fn history_file_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".genesis/input_history"))
+}
+
+/// Load history entries from disk (oldest first). Returns `None` on any error.
+fn load_history_from_disk() -> Option<Vec<String>> {
+    let path = history_file_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let entries: Vec<String> = content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            // Each line is either bare text or JSON-escaped string.
+            if l.starts_with('"') {
+                serde_json_unescape(l)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    // Take the last MAX_DISK_HISTORY entries.
+    let start = entries.len().saturating_sub(MAX_DISK_HISTORY);
+    Some(entries[start..].to_vec())
+}
+
+/// Append one history entry to the persistent file.
+fn append_history_to_disk(entry: &str) {
+    let Some(path) = history_file_path() else {
+        return;
+    };
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    // Escape newlines for multi-line prompts by JSON-encoding.
+    if entry.contains('\n') {
+        let escaped = entry
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
+        let _ = writeln!(f, "\"{escaped}\"");
+    } else {
+        let _ = writeln!(f, "{entry}");
+    }
+}
+
+/// Minimal JSON string unescaper for history file entries.
+fn serde_json_unescape(s: &str) -> String {
+    let inner = s
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(s);
+    let mut result = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -998,6 +1116,7 @@ mod tests {
     #[test]
     fn history_recall_up_down() {
         let mut w = InputWidget::new();
+        w.disk_history_loaded = true; // Skip disk I/O in tests.
         w.push_history("first".to_string());
         w.push_history("second".to_string());
 
@@ -1494,5 +1613,37 @@ mod tests {
         // Yank still works.
         w.handle_key(ctrl('y'));
         assert_eq!(w.text(), "hello");
+    }
+
+    // ── Persistent history / JSON escape tests ──────────────────────
+
+    #[test]
+    fn serde_json_unescape_simple() {
+        assert_eq!(
+            super::serde_json_unescape(r#""hello\nworld""#),
+            "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn serde_json_unescape_all_escapes() {
+        assert_eq!(
+            super::serde_json_unescape(r#""a\\b\"c\td\re""#),
+            "a\\b\"c\td\re"
+        );
+    }
+
+    #[test]
+    fn serde_json_unescape_bare_text() {
+        // Bare text (no surrounding quotes) passes through.
+        assert_eq!(super::serde_json_unescape("hello"), "hello");
+    }
+
+    #[test]
+    fn ctrl_g_returns_open_editor() {
+        let mut w = InputWidget::new();
+        w.handle_paste("some text");
+        let action = w.handle_key(ctrl('g'));
+        assert_eq!(action, InputAction::OpenEditor);
     }
 }

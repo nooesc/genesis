@@ -469,6 +469,22 @@ pub async fn run_tui(
                     if let AppEvent::SetTerminalTitle(ref title) = &event {
                         set_terminal_title(term.backend_mut(), title);
                     }
+                    if let AppEvent::OpenEditor(ref initial_text) = &event {
+                        // Restore terminal, launch editor, reinit terminal.
+                        let _ = terminal::restore();
+                        let result = launch_external_editor(initial_text);
+                        let _ = terminal::init();
+                        let _ = term.clear_all();
+                        let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+                        term.set_viewport_area(Rect::new(0, 0, w, h));
+                        app.viewport_width = w;
+                        app.viewport_height = h;
+                        app.effects.on_resize();
+                        if let Some(text) = result {
+                            let _ = app.app_tx.send(AppEvent::EditorResult(text));
+                        }
+                        app.frame_requester.schedule_frame();
+                    }
                     if matches!(&event, AppEvent::FetchModels) {
                         // Spawn async model fetch.
                         let tx = app.app_tx.clone();
@@ -892,6 +908,49 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
 ///
 /// Supported by iTerm2, WezTerm, VS Code terminal, and most modern terminals.
 /// Also sends BEL as a fallback for terminals that use it for notifications.
+/// Launch `$VISUAL` or `$EDITOR` with a temp file containing `initial_text`.
+///
+/// Returns the edited text, or `None` if the editor exited with an error or
+/// the env vars are not set.
+fn launch_external_editor(initial_text: &str) -> Option<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()?;
+
+    // Create temp file with .md extension for syntax highlighting in editors.
+    let dir = std::env::temp_dir();
+    let path = dir.join("genesis_editor_input.md");
+    std::fs::write(&path, initial_text).ok()?;
+
+    // Parse editor command (handles "code --wait", "vim", etc.).
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let (cmd, args) = parts.split_first()?;
+
+    let status = std::process::Command::new(cmd)
+        .args(args.iter())
+        .arg(&path)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .ok()?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    // Trim trailing whitespace that editors often add.
+    let trimmed = text.trim_end().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn send_osc9_notification<W: std::io::Write>(w: &mut W, message: &str) {
     // OSC 9 notification — the sequence itself ends with BEL (\x07),
     // which also acts as a bell/badge trigger on unsupported terminals.
