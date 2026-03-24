@@ -105,10 +105,10 @@ impl Pattern {
 
         let columns = (0..num_columns)
             .map(|_| {
-                let y_head = next() * 1.8 - 0.4; // stagger start positions
-                let speed = 0.15 + next() * 0.25; // varying fall speeds
-                let length = 0.15 + next() * 0.35; // trail length
-                let brightness = 0.4 + next() * 0.6; // varying brightness
+                let y_head = next() * 1.8 - 0.4;
+                let speed = 0.08 + next() * 0.15; // slower for subtlety
+                let length = 0.10 + next() * 0.20; // shorter trails
+                let brightness = 0.4 + next() * 0.6;
                 (y_head, speed, length, brightness)
             })
             .collect();
@@ -269,26 +269,24 @@ impl<'a> BrailleCanvas<'a> {
     ) {
         let num_cols = columns.len().max(1);
 
-        // Each column produces a vertical trail of dots.
-        // Brighter dots at the head, fading toward the tail.
-        let mut bright_coords: Vec<(f64, f64)> = Vec::new();
-        let mut dim_coords: Vec<(f64, f64)> = Vec::new();
+        // Keep total point count low for performance — 4 dots per trail max.
+        const DOTS_PER_TRAIL: usize = 4;
+
+        let mut bright_coords: Vec<(f64, f64)> = Vec::with_capacity(num_cols);
+        let mut dim_coords: Vec<(f64, f64)> = Vec::with_capacity(num_cols * DOTS_PER_TRAIL);
 
         for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
             let x = (i as f64 + 0.5) / num_cols as f64 * w;
 
-            // Draw dots from head downward (tail).
-            let num_dots = (length * h * 2.0) as usize;
-            for d in 0..num_dots.max(1) {
-                let frac = d as f64 / num_dots.max(1) as f64;
+            for d in 0..DOTS_PER_TRAIL {
+                let frac = d as f64 / DOTS_PER_TRAIL as f64;
                 let y = (y_head - frac * length) * h;
 
                 if y < 0.0 || y > h {
                     continue;
                 }
 
-                // Head dots are bright, tail fades out.
-                if frac < 0.3 && brightness > 0.6 {
+                if d == 0 && brightness > 0.6 {
                     bright_coords.push((x, y));
                 } else {
                     dim_coords.push((x, y));
