@@ -66,8 +66,6 @@ pub enum Pattern {
     /// Matrix-style falling rain columns with varying speeds and offsets.
     MatrixRain {
         columns: Vec<RainColumn>,
-        /// Accumulated time since last position update (throttles to ~12fps).
-        accum: f64,
     },
 }
 
@@ -107,18 +105,11 @@ impl Pattern {
                 }
             }
             Pattern::Flatline => {}
-            Pattern::MatrixRain { columns, accum } => {
-                const TICK_INTERVAL: f64 = 0.08;
-                *accum += secs;
-                if *accum >= TICK_INTERVAL {
-                    let steps = (*accum / TICK_INTERVAL) as u32;
-                    let advance = TICK_INTERVAL * f64::from(steps);
-                    *accum -= advance;
-                    for col in columns.iter_mut() {
-                        col.y_head += advance * col.speed;
-                        if col.y_head > 1.8 {
-                            col.y_head -= 2.0;
-                        }
+            Pattern::MatrixRain { columns } => {
+                for col in columns.iter_mut() {
+                    col.y_head += secs * col.speed;
+                    if col.y_head > 1.8 {
+                        col.y_head -= 2.0;
                     }
                 }
             }
@@ -154,7 +145,7 @@ impl Pattern {
             });
         }
 
-        Pattern::MatrixRain { columns, accum: 0.0 }
+        Pattern::MatrixRain { columns }
     }
 
     /// Create a default set of particles for the welcome screen.
