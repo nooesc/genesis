@@ -458,6 +458,9 @@ pub async fn run_tui(
                     if matches!(&event, AppEvent::ClearScreen) {
                         let _ = term.clear_all();
                     }
+                    if let AppEvent::CopyToClipboard(ref text) = &event {
+                        copy_to_clipboard_osc52(term.backend_mut(), text);
+                    }
                     if matches!(&event, AppEvent::FetchModels) {
                         // Spawn async model fetch.
                         let tx = app.app_tx.clone();
@@ -871,6 +874,49 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
     }
 }
 
+/// Copy text to the system clipboard via OSC 52 escape sequence.
+///
+/// OSC 52 is widely supported: iTerm2, kitty, WezTerm, Alacritty, foot,
+/// Ghostty, tmux (with `set -g set-clipboard on`), and most modern terminals.
+/// For tmux, the sequence is wrapped in a DCS passthrough so it reaches the
+/// outer terminal.
+fn copy_to_clipboard_osc52<W: std::io::Write>(w: &mut W, text: &str) {
+    let encoded = base64_encode(text.as_bytes());
+
+    if terminal::is_tmux() {
+        // Wrap in tmux DCS passthrough: \x1bPtmux;\x1b<OSC52>\x1b\\
+        let _ = write!(w, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\");
+    } else {
+        let _ = write!(w, "\x1b]52;c;{encoded}\x07");
+    }
+    let _ = w.flush();
+}
+
+/// Minimal base64 encoder (no external dependency needed for this).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[(triple >> 18 & 0x3F) as usize] as char);
+        result.push(CHARS[(triple >> 12 & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[(triple >> 6 & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
 /// Errors that can occur in the TUI.
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -950,5 +996,31 @@ mod tests {
         let p = path.unwrap();
         assert!(p.ends_with("tui.log"));
         assert!(p.to_string_lossy().contains(".genesis/logs"));
+    }
+
+    #[test]
+    fn base64_encode_hello_world() {
+        assert_eq!(base64_encode(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
+    }
+
+    #[test]
+    fn base64_encode_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_encode_single_char() {
+        assert_eq!(base64_encode(b"A"), "QQ==");
+    }
+
+    #[test]
+    fn osc52_clipboard_writes_correct_sequence() {
+        let mut buf = Vec::new();
+        copy_to_clipboard_osc52(&mut buf, "test");
+        let output = String::from_utf8(buf).unwrap();
+        // Should contain OSC 52 with base64-encoded "test" = "dGVzdA=="
+        assert!(output.contains("dGVzdA=="), "expected base64 of 'test'");
+        assert!(output.starts_with("\x1b]52;c;"));
+        assert!(output.ends_with("\x07"));
     }
 }

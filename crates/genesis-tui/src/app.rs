@@ -345,6 +345,14 @@ impl App {
             }
             AppEvent::SlashCommand(cmd) => match cmd.as_str() {
                 "/exit" | "/quit" => self.should_exit = true,
+                "/copy" => {
+                    if let Some(text) = self.chat.last_copyable() {
+                        let _ = self
+                            .app_tx
+                            .send(AppEvent::CopyToClipboard(text.to_string()));
+                    }
+                    self.frame_requester.schedule_frame();
+                }
                 "/clear" => {
                     self.chat = ChatWidget::new();
                     self.chat.set_theme(&*self.active_theme);
@@ -428,6 +436,10 @@ impl App {
                 // App state (ChatWidget) is already reset by the Ctrl+L or
                 // /clear handler before this event is sent.
                 self.frame_requester.schedule_frame();
+            }
+            AppEvent::CopyToClipboard(_) => {
+                // Actual clipboard write is handled in lib.rs event loop
+                // via OSC 52. Nothing to do here on the App side.
             }
         }
     }
