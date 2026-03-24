@@ -813,6 +813,23 @@ impl ChatWidget {
             let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
             let cost = h + if needs_sep { 1 } else { 0 };
             if used + cost > remaining_rows {
+                // If this is the FIRST cell we're trying to add and it's
+                // taller than the viewport, add it anyway — it will be
+                // clipped to the viewport height during rendering (showing
+                // the bottom portion). Without this, very long messages
+                // would disappear entirely because no cell fits.
+                if entries.is_empty() {
+                    let clamped_h = remaining_rows.saturating_sub(if needs_sep { 1 } else { 0 });
+                    if clamped_h > 0 {
+                        entries.push(RowEntry {
+                            height: clamped_h,
+                            visual: VisualEntry::Cell(cell),
+                            separator_after: needs_sep,
+                        });
+                        used += clamped_h + if needs_sep { 1 } else { 0 };
+                        cells_collected += 1;
+                    }
+                }
                 break;
             }
 
@@ -918,7 +935,19 @@ impl ChatWidget {
                 height: h,
             };
             match &entry.visual {
-                VisualEntry::Cell(cell) => cell.render(cell_area, buf),
+                VisualEntry::Cell(cell) => {
+                    // Only use render_scrolled for cells that were explicitly
+                    // clamped during collection (actual height > stored height).
+                    // Compare against entry.height, NOT the runtime h (which can
+                    // be smaller due to hint rows stealing space from normal cells).
+                    let actual_h = cell.height(area.width).max(1);
+                    if actual_h > entry.height {
+                        let skip = actual_h.saturating_sub(h);
+                        cell.render_scrolled(cell_area, buf, skip);
+                    } else {
+                        cell.render(cell_area, buf);
+                    }
+                }
                 VisualEntry::GroupSummary(line) => {
                     let paragraph = Paragraph::new(vec![line.clone()]);
                     paragraph.render(cell_area, buf);
@@ -1602,6 +1631,53 @@ mod tests {
         assert!(
             expanded_height > collapsed_height,
             "expanded height ({expanded_height}) should be greater than collapsed ({collapsed_height})"
+        );
+    }
+
+    #[test]
+    fn oversized_committed_cell_renders_bottom_portion() {
+        // Regression test: a committed cell taller than the viewport should
+        // render the bottom portion (most recent content), not disappear.
+        let mut cw = ChatWidget::new();
+        cw.start_turn();
+        // Create a very long response (100+ lines).
+        let mut long_text = String::new();
+        for i in 0..100 {
+            long_text.push_str(&format!("Line number {i} of a very long response.\n"));
+        }
+        cw.append_text(&long_text);
+        cw.complete_turn();
+
+        // Render into a small viewport (10 rows).
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // The buffer should NOT be empty — the bottom of the long message
+        // should be visible. Check that at least one row has non-space content.
+        let has_content = (0..area.height).any(|row| {
+            (0..area.width).any(|col| {
+                buf.cell((col, row))
+                    .is_some_and(|c| c.symbol() != " " && !c.symbol().is_empty())
+            })
+        });
+        assert!(
+            has_content,
+            "oversized committed cell should render bottom portion, not disappear"
+        );
+
+        // The last lines of the response should be visible.
+        let mut all_text = String::new();
+        for row in 0..area.height {
+            for col in 0..area.width {
+                if let Some(c) = buf.cell((col, row)) {
+                    all_text.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(
+            all_text.contains("99") || all_text.contains("98"),
+            "should show the end of the long message (lines 98/99), got: {all_text:?}"
         );
     }
 }
