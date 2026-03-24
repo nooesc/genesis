@@ -183,10 +183,12 @@ impl AuthTokenManager {
         let _lock = self.refresh_mutex.lock().await;
 
         // Double-check after acquiring lock — another task may have refreshed.
+        // Re-capture `now` since time elapsed while waiting on the mutex.
         {
+            let fresh_now = chrono::Utc::now().timestamp();
             let guard = self.cache.read().await;
             if let Some(ref cached) = *guard {
-                if cached.expires_at - now > 0 {
+                if cached.expires_at - fresh_now > 0 {
                     return Ok(cached.token.clone());
                 }
             }
@@ -253,7 +255,7 @@ fn insert_static_creds(
     );
     md.insert(
         "x-modal-client-type",
-        "CLIENT_TYPE_GENESIS".parse().unwrap(),
+        "CLIENT_TYPE_CLIENT".parse().unwrap(),
     );
     md.insert("x-modal-client-version", "1.0.0".parse().unwrap());
     Ok(())
@@ -802,12 +804,15 @@ impl ModalSandbox {
     }
 
     /// Ensures a router client exists for the given Modal task_id.
-    /// Holds the routers lock for the entire creation to prevent duplicate channels
-    /// from concurrent `execute()` calls.
+    /// Uses fast-path check, does expensive work outside the lock, then
+    /// re-checks before inserting to avoid duplicate channels.
     async fn ensure_router_client(&self, modal_task_id: &str) -> Result<(), SandboxError> {
-        let mut guard = self.routers.lock().await;
-        if guard.contains_key(modal_task_id) {
-            return Ok(());
+        // Fast path: check without holding the lock during network calls.
+        {
+            let guard = self.routers.lock().await;
+            if guard.contains_key(modal_task_id) {
+                return Ok(());
+            }
         }
 
         self.auth_manager
@@ -850,13 +855,12 @@ impl ModalSandbox {
         let router_client = TaskCommandRouterClient::with_interceptor(channel, interceptor)
             .max_decoding_message_size(4 * 1024 * 1024);
 
-        guard.insert(
-            modal_task_id.to_owned(),
-            RouterEntry {
-                client: router_client,
-                jwt: shared_jwt,
-            },
-        );
+        // Re-acquire lock and insert only if still missing (handles concurrent creation race).
+        let mut guard = self.routers.lock().await;
+        guard.entry(modal_task_id.to_owned()).or_insert(RouterEntry {
+            client: router_client,
+            jwt: shared_jwt,
+        });
 
         Ok(())
     }

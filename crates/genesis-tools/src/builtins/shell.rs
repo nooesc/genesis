@@ -172,7 +172,12 @@ pub fn build_command(
             cmd
         }
         Some(crate::TerminalBackend::Modal { .. }) => {
-            unreachable!("Modal backend uses lifecycle-managed sandbox execution, not CLI commands")
+            // Modal uses lifecycle-managed sandbox execution, not CLI commands.
+            // If we reach here, the sandbox_manager failed to initialize (e.g., missing
+            // credentials). Return a command that fails gracefully with an explanation.
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg("echo 'Error: Modal sandbox backend is not available. Check MODAL_TOKEN_ID/MODAL_TOKEN_SECRET credentials.' >&2; exit 1");
+            cmd
         }
         Some(crate::TerminalBackend::Daytona {
             working_dir: default_dir,
