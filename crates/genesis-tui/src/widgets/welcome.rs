@@ -280,10 +280,12 @@ impl WelcomeWidget {
         let status_render_height =
             status_height.min((body_y + body_height).saturating_sub(status_y));
         if status_render_height > 0 {
+            let status_width = inner.width.min(40);
+            let status_x = inner.x + inner.width.saturating_sub(status_width) / 2;
             let status_area = Rect {
-                x: inner.x,
+                x: status_x,
                 y: status_y,
-                width: inner.width.min(40),
+                width: status_width,
                 height: status_render_height,
             };
             self.last_areas.status = status_area;
