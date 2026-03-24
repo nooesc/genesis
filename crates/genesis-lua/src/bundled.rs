@@ -129,6 +129,11 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
         source: include_str!("../bundled/tools/web_search.lua"),
         primitives: &["http"],
     },
+    BundledTool {
+        name: "tts",
+        source: include_str!("../bundled/tools/tts.lua"),
+        primitives: &["fs", "process"],
+    },
 ];
 
 pub fn bundled_tools() -> &'static [BundledTool] {

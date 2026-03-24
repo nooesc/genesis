@@ -2217,4 +2217,44 @@ trusted = true
             "error should mention empty: {err}"
         );
     }
+
+    #[test]
+    fn bundled_tts_registers_with_correct_params() {
+        let rt = build_bundled_test_runtime();
+        let tools = rt.registered_tools();
+        let tts = tools
+            .iter()
+            .find(|t| t.definition.name == "text_to_speech")
+            .expect("text_to_speech tool should be registered");
+        assert!(tts.definition.description.to_lowercase().contains("speech"));
+        let params = tts.definition.parameters.as_ref().expect("should have params");
+        let props = params["properties"].as_object().expect("should have properties");
+        assert!(props.contains_key("text"));
+        assert!(props.contains_key("output_path"));
+        assert!(props.contains_key("voice"));
+        assert!(props.contains_key("rate"));
+        let required = params["required"].as_array().expect("should have required");
+        assert!(required.iter().any(|v| v.as_str() == Some("text")));
+        assert!(required.iter().any(|v| v.as_str() == Some("output_path")));
+    }
+
+    #[test]
+    fn bundled_tts_requires_text_argument() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool(
+            "text_to_speech",
+            BTreeMap::from([("output_path".to_owned(), "/tmp/out.mp3".to_owned())]),
+        );
+        assert!(result.is_err(), "missing text should error");
+    }
+
+    #[test]
+    fn bundled_tts_requires_output_path_argument() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool(
+            "text_to_speech",
+            BTreeMap::from([("text".to_owned(), "hello".to_owned())]),
+        );
+        assert!(result.is_err(), "missing output_path should error");
+    }
 }
