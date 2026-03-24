@@ -70,6 +70,14 @@ pub struct InputWidget {
     /// Snapshot of the buffer taken when the user first pressed Up,
     /// so we can restore it when they press Down past the end.
     saved_input: Option<String>,
+    /// Single-entry kill buffer for Ctrl+U/Ctrl+K/Alt+Backspace/Ctrl+W.
+    /// Ctrl+Y yanks (pastes) the last killed text back at cursor.
+    ///
+    /// Deliberately single-entry (not a kill ring, no append-on-consecutive-kills).
+    /// Standard readline appends successive kills into one entry, but Codex CLI
+    /// also uses a single-entry buffer. A full kill ring adds complexity for a
+    /// niche use case — users needing multi-kill recall can use the clipboard.
+    pub(crate) kill_buffer: String,
 }
 
 impl InputWidget {
@@ -81,6 +89,7 @@ impl InputWidget {
             history: Vec::new(),
             history_index: None,
             saved_input: None,
+            kill_buffer: String::new(),
         }
     }
 
@@ -193,23 +202,61 @@ impl InputWidget {
                 }
             }
 
-            // ── Kill / clear line ────────────────────────────────────────
+            // ── Kill / clear line (fills kill buffer for Ctrl+Y yank) ────
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 // Kill from cursor to start of current line.
+                // Only update kill buffer when there is text to kill,
+                // so a no-op Ctrl+U at line start doesn't erase the
+                // previous kill (preserving Ctrl+Y yank behavior).
                 let line_start = self.current_line_start();
-                self.buffer.drain(line_start..self.cursor);
-                self.cursor = line_start;
+                if line_start < self.cursor {
+                    self.kill_buffer = self.buffer[line_start..self.cursor].to_string();
+                    self.buffer.drain(line_start..self.cursor);
+                    self.cursor = line_start;
+                }
                 InputAction::None
             }
 
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                 // Kill from cursor to end of current line.
+                // Only update kill buffer when there is text to kill.
                 let line_end = self.current_line_end();
-                self.buffer.drain(self.cursor..line_end);
+                if self.cursor < line_end {
+                    self.kill_buffer = self.buffer[self.cursor..line_end].to_string();
+                    self.buffer.drain(self.cursor..line_end);
+                }
+                InputAction::None
+            }
+
+            // Ctrl+W — delete word backward (fills kill buffer).
+            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                self.delete_word_backward();
+                InputAction::None
+            }
+
+            // Ctrl+Y — yank (paste) the last killed text.
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                if !self.kill_buffer.is_empty() {
+                    let text = self.kill_buffer.clone();
+                    self.buffer.insert_str(self.cursor, &text);
+                    self.cursor += text.len();
+                }
                 InputAction::None
             }
 
             // ── Cursor movement ──────────────────────────────────────────
+            // Ctrl+Left — word left
+            (KeyCode::Left, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.move_word_left();
+                InputAction::None
+            }
+
+            // Ctrl+Right — word right
+            (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                self.move_word_right();
+                InputAction::None
+            }
+
             (KeyCode::Left, _) => {
                 self.move_cursor_left();
                 InputAction::None
@@ -233,6 +280,12 @@ impl InputWidget {
             }
 
             // ── Delete ───────────────────────────────────────────────────
+            // Alt+Backspace — delete word backward (fills kill buffer).
+            (KeyCode::Backspace, mods) if mods.contains(KeyModifiers::ALT) => {
+                self.delete_word_backward();
+                InputAction::None
+            }
+
             (KeyCode::Backspace, _) => {
                 self.delete_char_before_cursor();
                 InputAction::None
@@ -626,6 +679,116 @@ impl InputWidget {
         self.cursor = self.next_char_boundary(self.cursor);
     }
 
+    /// Move cursor left to the beginning of the previous word.
+    ///
+    /// Words are delimited by whitespace and punctuation. Skips any
+    /// non-word characters, then skips back through word characters.
+    fn move_word_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let text = &self.buffer[..self.cursor];
+
+        // Skip non-word characters (whitespace, punctuation).
+        let mut last_pos = 0;
+        for (i, ch) in text.char_indices().rev() {
+            last_pos = i;
+            if is_word_char(ch) {
+                break;
+            }
+        }
+
+        // Skip word characters to reach the start of the word.
+        if last_pos > 0 && is_word_char(self.buffer[last_pos..].chars().next().unwrap_or(' ')) {
+            for (i, ch) in self.buffer[..last_pos].char_indices().rev() {
+                if !is_word_char(ch) {
+                    self.cursor = i + ch.len_utf8();
+                    return;
+                }
+            }
+            self.cursor = 0;
+        } else {
+            self.cursor = last_pos;
+        }
+    }
+
+    /// Move cursor right to the end of the next word.
+    ///
+    /// Words are delimited by whitespace and punctuation. Skips any
+    /// non-word characters, then skips through word characters.
+    fn move_word_right(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        let text = &self.buffer[self.cursor..];
+
+        // Skip non-word characters (whitespace, punctuation).
+        let mut offset = 0;
+        for (i, ch) in text.char_indices() {
+            if is_word_char(ch) {
+                offset = i;
+                break;
+            }
+            offset = i + ch.len_utf8();
+        }
+
+        // Skip word characters to reach the end of the word.
+        if offset < text.len() && is_word_char(text[offset..].chars().next().unwrap_or(' ')) {
+            for (i, ch) in text[offset..].char_indices() {
+                if !is_word_char(ch) {
+                    self.cursor += offset + i;
+                    return;
+                }
+            }
+            self.cursor = self.buffer.len();
+        } else {
+            self.cursor += offset;
+        }
+    }
+
+    /// Delete the word before the cursor and store it in the kill buffer.
+    fn delete_word_backward(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let start = self.word_start_before_cursor();
+        self.kill_buffer = self.buffer[start..self.cursor].to_string();
+        self.buffer.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    /// Find the byte offset of the start of the word before the cursor.
+    fn word_start_before_cursor(&self) -> usize {
+        if self.cursor == 0 {
+            return 0;
+        }
+        let text = &self.buffer[..self.cursor];
+
+        // Skip whitespace/punctuation backwards.
+        let mut pos = text.len();
+        for (i, ch) in text.char_indices().rev() {
+            if is_word_char(ch) {
+                pos = i + ch.len_utf8();
+                break;
+            }
+            pos = i;
+        }
+
+        // Now skip word characters backwards to find the start.
+        if pos > 0 {
+            let word_text = &self.buffer[..pos];
+            if word_text.chars().next_back().is_some_and(is_word_char) {
+                for (i, ch) in word_text.char_indices().rev() {
+                    if !is_word_char(ch) {
+                        return i + ch.len_utf8();
+                    }
+                }
+                return 0;
+            }
+        }
+        pos
+    }
+
     /// Return the byte offset of the previous char boundary before `pos`.
     fn prev_char_boundary(&self, pos: usize) -> usize {
         let mut p = pos;
@@ -689,6 +852,12 @@ impl Default for InputWidget {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns `true` if `ch` is a word character (alphanumeric or underscore).
+/// Used for word-boundary navigation (Ctrl+Left/Right, Alt+Backspace, Ctrl+W).
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -1180,5 +1349,150 @@ mod tests {
             "expected at least 3 rows from wrapping + newline; got {}",
             w.height(20)
         );
+    }
+
+    // ── Word navigation tests ────────────────────────────────────────
+
+    fn ctrl_left() -> KeyEvent {
+        KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)
+    }
+
+    fn ctrl_right() -> KeyEvent {
+        KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)
+    }
+
+    fn alt_backspace() -> KeyEvent {
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn ctrl_left_moves_to_word_start() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        // Cursor at end (11), Ctrl+Left should land at "world" start (6).
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 6);
+        // Another Ctrl+Left lands at "hello" start (0).
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 0);
+        // At start, stays at 0.
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_right_moves_to_word_end() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        w.handle_key(key(KeyCode::Home));
+        // Cursor at 0, Ctrl+Right should land after "hello" (5).
+        w.handle_key(ctrl_right());
+        assert_eq!(w.cursor, 5);
+        // Another Ctrl+Right lands after "world" (11).
+        w.handle_key(ctrl_right());
+        assert_eq!(w.cursor, 11);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_backward() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        w.handle_key(ctrl('w'));
+        assert_eq!(w.text(), "hello ");
+        assert_eq!(w.kill_buffer, "world");
+    }
+
+    #[test]
+    fn alt_backspace_deletes_word_backward() {
+        let mut w = InputWidget::new();
+        w.handle_paste("foo bar baz");
+        w.handle_key(alt_backspace());
+        assert_eq!(w.text(), "foo bar ");
+        assert_eq!(w.kill_buffer, "baz");
+    }
+
+    #[test]
+    fn ctrl_y_yanks_killed_text() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        // Kill "world" with Ctrl+W.
+        w.handle_key(ctrl('w'));
+        assert_eq!(w.text(), "hello ");
+        // Yank it back.
+        w.handle_key(ctrl('y'));
+        assert_eq!(w.text(), "hello world");
+    }
+
+    #[test]
+    fn ctrl_u_fills_kill_buffer() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        // Move to middle.
+        w.handle_key(key(KeyCode::Home));
+        for _ in 0..6 {
+            w.handle_key(key(KeyCode::Right));
+        }
+        // Ctrl+U kills from cursor to line start.
+        w.handle_key(ctrl('u'));
+        assert_eq!(w.text(), "world");
+        assert_eq!(w.kill_buffer, "hello ");
+        // Yank it back.
+        w.handle_key(ctrl('y'));
+        assert_eq!(w.text(), "hello world");
+    }
+
+    #[test]
+    fn ctrl_k_fills_kill_buffer() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello world");
+        w.handle_key(key(KeyCode::Home));
+        for _ in 0..5 {
+            w.handle_key(key(KeyCode::Right));
+        }
+        // Ctrl+K kills from cursor to line end.
+        w.handle_key(ctrl('k'));
+        assert_eq!(w.text(), "hello");
+        assert_eq!(w.kill_buffer, " world");
+    }
+
+    #[test]
+    fn word_nav_handles_punctuation() {
+        let mut w = InputWidget::new();
+        w.handle_paste("foo.bar-baz");
+        // Ctrl+Left from end should stop at each punctuation boundary.
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 8); // start of "baz"
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 4); // start of "bar"
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 0); // start of "foo"
+    }
+
+    #[test]
+    fn word_nav_empty_buffer() {
+        let mut w = InputWidget::new();
+        w.handle_key(ctrl_left());
+        assert_eq!(w.cursor, 0);
+        w.handle_key(ctrl_right());
+        assert_eq!(w.cursor, 0);
+    }
+
+    #[test]
+    fn noop_kill_preserves_kill_buffer() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello");
+        // Kill to end, filling kill buffer.
+        w.handle_key(key(KeyCode::Home));
+        w.handle_key(ctrl('k'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Cursor is at start, Ctrl+U is a no-op — kill buffer preserved.
+        w.handle_key(ctrl('u'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Ctrl+K at end is also a no-op — kill buffer preserved.
+        w.handle_key(ctrl('k'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Yank still works.
+        w.handle_key(ctrl('y'));
+        assert_eq!(w.text(), "hello");
     }
 }
