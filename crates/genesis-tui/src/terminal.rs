@@ -98,6 +98,9 @@ pub fn restore() -> io::Result<()> {
     if is_alt_screen_enabled() {
         let _ = execute!(stdout(), LeaveAlternateScreen);
     }
+    // Reset the flag to the default so that the global reliably reflects
+    // "no session in flight" between restore() and the next init() call.
+    ALT_SCREEN_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), cursor::Show);
     Ok(())

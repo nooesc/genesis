@@ -72,7 +72,12 @@ pub struct InputWidget {
     saved_input: Option<String>,
     /// Single-entry kill buffer for Ctrl+U/Ctrl+K/Alt+Backspace/Ctrl+W.
     /// Ctrl+Y yanks (pastes) the last killed text back at cursor.
-    kill_buffer: String,
+    ///
+    /// Deliberately single-entry (not a kill ring, no append-on-consecutive-kills).
+    /// Standard readline appends successive kills into one entry, but Codex CLI
+    /// also uses a single-entry buffer. A full kill ring adds complexity for a
+    /// niche use case — users needing multi-kill recall can use the clipboard.
+    pub(crate) kill_buffer: String,
 }
 
 impl InputWidget {
@@ -683,16 +688,14 @@ impl InputWidget {
             return;
         }
         let text = &self.buffer[..self.cursor];
-        let mut chars = text.char_indices().rev();
 
         // Skip non-word characters (whitespace, punctuation).
-        let mut last_pos = self.cursor;
-        for (i, ch) in chars.by_ref() {
+        let mut last_pos = 0;
+        for (i, ch) in text.char_indices().rev() {
+            last_pos = i;
             if is_word_char(ch) {
-                last_pos = i;
                 break;
             }
-            last_pos = i;
         }
 
         // Skip word characters to reach the start of the word.
@@ -718,11 +721,10 @@ impl InputWidget {
             return;
         }
         let text = &self.buffer[self.cursor..];
-        let mut chars = text.char_indices();
 
         // Skip non-word characters (whitespace, punctuation).
         let mut offset = 0;
-        for (i, ch) in chars.by_ref() {
+        for (i, ch) in text.char_indices() {
             if is_word_char(ch) {
                 offset = i;
                 break;
