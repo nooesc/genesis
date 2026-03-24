@@ -90,6 +90,10 @@ pub enum AppEvent {
     SetTerminalTitle(String),
     /// Show an inline warning message in the chat (rate limit, etc.).
     InlineWarning(String),
+    /// Open external editor with current input buffer. Returns edited text.
+    OpenEditor(String),
+    /// External editor returned with new text.
+    EditorResult(String),
 }
 
 /// Status bar states.

@@ -491,6 +491,15 @@ impl App {
                     .add_system_warning(HistoryCell::Agent(AgentCell::new(msg)));
                 self.frame_requester.schedule_frame();
             }
+            AppEvent::OpenEditor(_) => {
+                // Actual editor launch is handled in lib.rs (needs terminal restore).
+            }
+            AppEvent::EditorResult(text) => {
+                // Replace input buffer with editor result.
+                self.chat.input.clear();
+                self.chat.input.handle_paste(&text);
+                self.frame_requester.schedule_frame();
+            }
         }
     }
 
@@ -867,6 +876,10 @@ impl App {
                         if self.turn_running {
                             let _ = self.cancel_tx.send(());
                         }
+                    }
+                    InputAction::OpenEditor => {
+                        let current = self.chat.input.text().to_owned();
+                        let _ = self.app_tx.send(AppEvent::OpenEditor(current));
                     }
                     InputAction::None => {}
                 }
