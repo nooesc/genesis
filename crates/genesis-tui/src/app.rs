@@ -115,34 +115,12 @@ impl App {
                 }
                 self.frame_requester.schedule_frame();
             }
-            TuiEvent::Resize { width, height } => {
-                self.viewport_width = width;
-                self.viewport_height = height;
-
-                // Cancel all running effects — they hold stale coordinates
-                // from the pre-resize viewport and would paint into the wrong
-                // region.  They will be recreated on the next status change or
-                // idle transition.
-                self.effects.on_resize();
-
-                // Reclamp scroll offset: wrapped content height changes with
-                // terminal width, so the old offset may now exceed the new
-                // maximum, causing the chat history to vanish.
-                self.chat.reclamp_scroll(width);
-
-                // Rebuild the transcript overlay if it is currently open so
-                // that lines are re-wrapped at the new width and scroll bounds
-                // reflect the new height.
-                if let Some(ActiveOverlay::Transcript(_)) = &self.overlay {
-                    let visible_rows = self.viewport_height.saturating_sub(1).max(1);
-                    self.overlay = Some(ActiveOverlay::Transcript(TranscriptOverlay::from_cells(
-                        self.chat.committed_cells(),
-                        self.viewport_width,
-                        visible_rows,
-                    )));
-                }
-
-                self.frame_requester.schedule_frame();
+            TuiEvent::Resize { .. } => {
+                // Resize is fully handled in lib.rs (deferred to render_frame
+                // via apply_pending_resize). This arm should never be reached
+                // because lib.rs intercepts Resize events before dispatching
+                // to handle_tui_event.
+                debug_assert!(false, "Resize events must not reach App::handle_tui_event");
             }
             TuiEvent::MouseScroll(delta) => {
                 // Only scroll the chat view when no overlay is active and
@@ -567,16 +545,16 @@ impl App {
             }
             _ => {}
         }
-        // Shift+Up/Down for fine scrolling.
+        // Shift+Up/Down for fine scrolling (1 row per press).
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up => {
-                    self.chat.scroll_up(3, self.viewport_width);
+                    self.chat.scroll_up(1, self.viewport_width);
                     self.frame_requester.schedule_frame();
                     return;
                 }
                 KeyCode::Down => {
-                    self.chat.scroll_down(3);
+                    self.chat.scroll_down(1);
                     self.frame_requester.schedule_frame();
                     return;
                 }
@@ -1087,13 +1065,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_delta_appends_to_active_cell() {
+    async fn text_delta_buffers_through_streaming() {
         let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         app.handle_agent_event(AgentEvent::TurnStarted);
-        app.handle_agent_event(AgentEvent::TextDelta("Hello".into()));
-        app.handle_agent_event(AgentEvent::TextDelta(" world".into()));
+        app.handle_agent_event(AgentEvent::TextDelta("Hello\n".into()));
+        app.handle_agent_event(AgentEvent::TextDelta("world\n".into()));
+        // Text is buffered in the streaming system, not yet in text_buffer.
         let active = app.chat.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello world");
+        assert_eq!(active.text_buffer, "");
+        assert!(app.chat.has_streaming_pending());
+        // Ticking commits one line at a time (smooth mode).
+        assert!(app.chat.tick_streaming());
+        let active = app.chat.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "Hello\n");
+        assert!(app.chat.tick_streaming());
+        let active = app.chat.active_cell.as_ref().unwrap();
+        assert_eq!(active.text_buffer, "Hello\nworld\n");
     }
 
     #[tokio::test]
