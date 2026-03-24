@@ -127,14 +127,14 @@ impl TranscriptOverlay {
         self.render_content(content_area, buf);
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────
+    // ── Scroll helpers (public for mouse-scroll routing from App) ────────
 
-    fn scroll_down(&mut self, n: usize, visible_rows: u16) {
+    pub fn scroll_down(&mut self, n: usize, visible_rows: u16) {
         let max = self.total_rows.saturating_sub(visible_rows as usize);
         self.scroll_offset = (self.scroll_offset + n).min(max);
     }
 
-    fn scroll_up(&mut self, n: usize) {
+    pub fn scroll_up(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
     }
 

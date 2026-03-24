@@ -31,8 +31,10 @@ use crate::history::rgb;
 
 // ── Eve / UI palette ─────────────────────────────────────────────────────────
 
-/// `EVE_LAVENDER` — accent colour for headers.
+/// `EVE_LAVENDER` — accent colour for H1/H2 headers.
 const ACCENT: Color = rgb(genesis_ui::colors::EVE_LAVENDER);
+/// Dimmer accent for H3+ headers — slightly muted lavender.
+const ACCENT_DIM: Color = Color::Rgb(150, 130, 190);
 /// Default plain-text colour.
 const TEXT: Color = rgb(genesis_ui::colors::UI_TEXT);
 /// Dim colour for blockquote prefix, horizontal rules, code-fence dashes.
@@ -214,8 +216,20 @@ impl MarkdownWriter {
         match event {
             // ── Block elements ────────────────────────────────────────────
             Event::Start(Tag::Heading { level, .. }) => {
-                let _ = level; // all heading levels get same style
-                self.push_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
+                // Differentiate heading levels visually:
+                // H1: bold + underline + accent color (most prominent)
+                // H2: bold + accent color
+                // H3+: bold + dimmer accent
+                let style = match level {
+                    pulldown_cmark::HeadingLevel::H1 => Style::default()
+                        .fg(ACCENT)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    pulldown_cmark::HeadingLevel::H2 => {
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    }
+                    _ => Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD),
+                };
+                self.push_style(style);
             }
             Event::End(TagEnd::Heading(_)) => {
                 self.pop_style();
@@ -910,27 +924,43 @@ mod tests {
     // ── Headers ──────────────────────────────────────────────────────────
 
     #[test]
-    fn headers_are_bold_with_accent_color() {
+    fn h1_is_bold_underlined_accent() {
         let lines = markdown_to_lines("# Hello");
         assert_eq!(lines.len(), 1);
         let span = find_span(&lines, "Hello").unwrap();
-        assert_eq!(
-            span.style.fg,
-            Some(ACCENT),
-            "header should use accent colour"
-        );
+        assert_eq!(span.style.fg, Some(ACCENT), "H1 should use accent colour");
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
-            "header should be bold"
+            "H1 should be bold"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "H1 should be underlined"
         );
     }
 
     #[test]
-    fn h2_header_is_bold_accent() {
+    fn h2_is_bold_accent_not_underlined() {
         let lines = markdown_to_lines("## Section");
         let span = find_span(&lines, "Section").unwrap();
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(span.style.fg, Some(ACCENT));
+        assert!(
+            !span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "H2 should NOT be underlined"
+        );
+    }
+
+    #[test]
+    fn h3_uses_dimmer_accent() {
+        let lines = markdown_to_lines("### Subsection");
+        let span = find_span(&lines, "Subsection").unwrap();
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            span.style.fg,
+            Some(ACCENT_DIM),
+            "H3+ should use dimmer accent"
+        );
     }
 
     // ── List items ───────────────────────────────────────────────────────

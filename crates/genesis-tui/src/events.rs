@@ -80,6 +80,8 @@ pub enum AppEvent {
     FetchModels,
     /// Model list fetched — deliver to the picker overlay.
     ModelsFetched(Result<Vec<genesis_provider::openrouter_models::OpenRouterModel>, String>),
+    /// Clear the terminal screen (Ctrl+L).
+    ClearScreen,
 }
 
 /// Status bar states.

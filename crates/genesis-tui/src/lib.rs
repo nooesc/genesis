@@ -455,6 +455,9 @@ pub async fn run_tui(
                         // by the transcript overlay and does not write to
                         // terminal scrollback.
                     }
+                    if matches!(&event, AppEvent::ClearScreen) {
+                        let _ = term.clear_all();
+                    }
                     if matches!(&event, AppEvent::FetchModels) {
                         // Spawn async model fetch.
                         let tx = app.app_tx.clone();
