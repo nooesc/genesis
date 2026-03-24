@@ -260,57 +260,95 @@ impl<'a> BrailleCanvas<'a> {
         Widget::render(canvas, area, buf);
     }
 
+    /// Direct-to-buffer matrix rain renderer. Bypasses the Canvas widget
+    /// entirely — no internal bitmap allocation, just writes braille chars
+    /// directly to the cells that need them. O(columns × dots) instead of
+    /// O(area_width × area_height).
     fn render_matrix_rain(
         columns: &[(f64, f64, f64, f64)],
-        w: f64,
-        h: f64,
+        _w: f64,
+        _h: f64,
         area: Rect,
         buf: &mut Buffer,
     ) {
+        // Braille dot layout per cell (2 wide × 4 tall):
+        //   1 4      bit 0  bit 3
+        //   2 5      bit 1  bit 4
+        //   3 6      bit 2  bit 5
+        //   7 8      bit 6  bit 7
+        const LEFT_DOTS: [u8; 4] = [0x01, 0x02, 0x04, 0x40];
+        const RIGHT_DOTS: [u8; 4] = [0x08, 0x10, 0x20, 0x80];
+        const DOTS_PER_TRAIL: usize = 5;
+        const DIM_LAVENDER: Color = Color::Rgb(60, 55, 72);
+
         let num_cols = columns.len().max(1);
+        let area_w = area.width as f64;
+        let area_h = area.height as f64;
 
-        // Keep total point count low for performance — 4 dots per trail max.
-        const DOTS_PER_TRAIL: usize = 4;
-
-        let mut bright_coords: Vec<(f64, f64)> = Vec::with_capacity(num_cols);
-        let mut dim_coords: Vec<(f64, f64)> = Vec::with_capacity(num_cols * DOTS_PER_TRAIL);
+        // Track which cells have been touched and their accumulated braille bits.
+        // Key: (col, row), Value: (bits, is_bright)
+        let mut cell_bits: std::collections::HashMap<(u16, u16), (u8, bool)> =
+            std::collections::HashMap::new();
 
         for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
-            let x = (i as f64 + 0.5) / num_cols as f64 * w;
+            // Map column index to pixel x in the area.
+            let norm_x = (i as f64 + 0.5) / num_cols as f64;
+            let px_x = norm_x * area_w * 2.0; // braille has 2 sub-pixels per cell width
+            let cell_col = (px_x / 2.0) as u16;
+            let sub_x = (px_x as u16) % 2; // 0 = left column, 1 = right column
+            let dot_col = if sub_x == 0 { &LEFT_DOTS } else { &RIGHT_DOTS };
+
+            if cell_col >= area.width {
+                continue;
+            }
 
             for d in 0..DOTS_PER_TRAIL {
                 let frac = d as f64 / DOTS_PER_TRAIL as f64;
-                let y = (y_head - frac * length) * h;
+                let norm_y = y_head - frac * length;
 
-                if y < 0.0 || y > h {
+                if norm_y < 0.0 || norm_y >= 1.0 {
                     continue;
                 }
 
-                if d == 0 && brightness > 0.6 {
-                    bright_coords.push((x, y));
-                } else {
-                    dim_coords.push((x, y));
+                // Map to sub-pixel y (4 sub-pixels per cell height).
+                let px_y = norm_y * area_h * 4.0;
+                let cell_row = (px_y / 4.0) as u16;
+                let sub_y = (px_y as usize) % 4;
+
+                if cell_row >= area.height {
+                    continue;
+                }
+
+                let is_bright = d == 0 && brightness > 0.6;
+                let entry = cell_bits.entry((cell_col, cell_row)).or_insert((0, false));
+                entry.0 |= dot_col[sub_y];
+                if is_bright {
+                    entry.1 = true;
                 }
             }
         }
 
-        let dim_lavender = Color::Rgb(60, 55, 72);
+        // Write accumulated braille characters to the buffer.
+        for (&(col, row), &(bits, is_bright)) in &cell_bits {
+            if bits == 0 {
+                continue;
+            }
 
-        let canvas = Canvas::default()
-            .marker(Marker::Braille)
-            .x_bounds([0.0, w])
-            .y_bounds([0.0, h])
-            .paint(|ctx| {
-                ctx.draw(&Points {
-                    coords: &dim_coords,
-                    color: dim_lavender,
-                });
-                ctx.draw(&Points {
-                    coords: &bright_coords,
-                    color: EVE_LAVENDER,
-                });
-            });
-        Widget::render(canvas, area, buf);
+            let x = area.x + col;
+            let y = area.y + row;
+
+            if x >= area.x + area.width || y >= area.y + area.height {
+                continue;
+            }
+
+            let ch = char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' ');
+            let color = if is_bright { EVE_LAVENDER } else { DIM_LAVENDER };
+
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch);
+                cell.set_fg(color);
+            }
+        }
     }
 
     fn render_flatline(w: f64, h: f64, area: Rect, buf: &mut Buffer) {
