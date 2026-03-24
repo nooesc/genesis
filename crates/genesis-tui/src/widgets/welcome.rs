@@ -17,7 +17,7 @@ use ratatui::{
 use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
-use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
+use crate::widgets::boot_status::BootStatusInfo;
 use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 /// Minimum width for the wide side-by-side layout.
@@ -196,7 +196,7 @@ impl WelcomeWidget {
         self.render_body(inner, below_title_y, remaining_height, buf);
     }
 
-    /// Shared body: info + boot status, centered.
+    /// Shared body: info centered on top of rain.
     fn render_body(
         &mut self,
         inner: Rect,
@@ -204,57 +204,31 @@ impl WelcomeWidget {
         remaining_height: u16,
         buf: &mut Buffer,
     ) {
-        // ── Info + boot status centered on top of rain ───────────────
-        let body_y = below_title_y;
-        let body_height = remaining_height;
-        if body_height == 0 {
+        if remaining_height == 0 {
             return;
         }
-
-        let boot_status = BootStatusWidget::new(self.boot_status_info());
-        let status_lines = boot_status.lines();
-        let status_height = status_lines.len() as u16;
-        let status_gap = 1u16;
 
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
 
-        let total_content = info_height + status_gap + status_height;
-        let content_start_y = body_y + body_height.saturating_sub(total_content) / 2;
-
-        // Info panel
         let info_visual_width = info_lines
             .iter()
             .map(|l| line_visual_width(l))
             .max()
             .unwrap_or(0) as u16;
         let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_render_height = info_height.min(body_height);
+        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
+        let info_render_height = info_height.min(remaining_height);
+
         let info_area = Rect {
             x: info_x,
-            y: content_start_y,
+            y: info_y,
             width: info_visual_width.min(inner.width),
             height: info_render_height,
         };
+        self.last_areas.status = info_area;
         let info_paragraph = Paragraph::new(info_lines);
         info_paragraph.render(info_area, buf);
-
-        // Boot status below info
-        let status_y = content_start_y + info_render_height + status_gap;
-        let status_render_height =
-            status_height.min((body_y + body_height).saturating_sub(status_y));
-        if status_render_height > 0 {
-            let status_width = inner.width.min(40);
-            let status_x = inner.x + inner.width.saturating_sub(status_width) / 2;
-            let status_area = Rect {
-                x: status_x,
-                y: status_y,
-                width: status_width,
-                height: status_render_height,
-            };
-            self.last_areas.status = status_area;
-            boot_status.render(status_area, buf);
-        }
     }
 
     /// Text-only layout: just ">_ Eve v{version}" in accent color.
@@ -818,22 +792,7 @@ mod tests {
             .any(|line| line.contains("model: claude-4")));
     }
 
-    #[test]
-    fn wide_layout_renders_boot_status_lines() {
-        let area = Rect::new(0, 0, 120, 50);
-        let mut buf = Buffer::empty(area);
-        default_widget().render(area, &mut buf);
 
-        let rendered = buffer_rows(&buf, area.width).join("\n");
-        assert!(
-            rendered.contains("provider"),
-            "wide layout should render boot status 'provider' line"
-        );
-        assert!(
-            rendered.contains("storage"),
-            "wide layout should render boot status 'storage' line"
-        );
-    }
 
     #[test]
     fn wide_layout_renders_big_text_title() {

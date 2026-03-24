@@ -14,7 +14,6 @@ use ratatui::layout::Rect;
 use tachyonfx::{fx, Interpolation};
 
 use super::EffectId;
-use crate::history::rgb;
 
 /// Register the full boot sequence on the given effect manager.
 ///
