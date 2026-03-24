@@ -948,4 +948,69 @@ token_secret = "as-staging"
         let err = map_grpc_error("test", tonic::Status::internal("oops"));
         assert!(matches!(err, SandboxError::Other(_)));
     }
+
+    // --- Task 9: gated integration test ---
+
+    /// Integration test — requires real Modal credentials.
+    /// Run with: GENESIS_TEST_MODAL=1 cargo test -p genesis-core -- sandbox::modal::tests::integration --no-capture --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn integration_full_lifecycle() {
+        if std::env::var("GENESIS_TEST_MODAL").is_err() {
+            return;
+        }
+
+        let (token_id, token_secret) =
+            resolve_credentials().expect("Modal credentials required for integration test");
+
+        let sandbox =
+            ModalSandbox::new(token_id, token_secret, None).expect("failed to create ModalSandbox");
+
+        // Create
+        let config = super::SandboxConfig {
+            task_id: "integration-test".to_owned(),
+            image: "python:3.11".to_owned(),
+            cpu: 1.0,
+            memory_mb: 512,
+            disk_mb: 1024,
+            persistent: false,
+            working_dir: Some("/root".to_owned()),
+            snapshot_data: None,
+            backend_specific: super::BackendSpecific::Modal {
+                gpu: None,
+                app: None,
+            },
+        };
+
+        let instance = sandbox.create(&config).await.expect("create failed");
+        assert!(!instance.id.is_empty());
+        assert_eq!(instance.backend_type, "modal");
+
+        // Execute
+        let result = sandbox
+            .execute(
+                &instance,
+                "echo hello",
+                Some("/root"),
+                Some(std::time::Duration::from_secs(30)),
+            )
+            .await
+            .expect("execute failed");
+        assert!(result.output.contains("hello"));
+        assert_eq!(result.exit_code, 0);
+
+        // Snapshot
+        let snap = sandbox.snapshot(&instance).await.expect("snapshot failed");
+        assert!(snap.is_some());
+        let snap_data: ModalSnapshotData =
+            serde_json::from_str(snap.as_ref().unwrap()).unwrap();
+        assert!(!snap_data.sandbox_id.is_empty());
+        assert!(snap_data.image_id.is_some());
+
+        // Cleanup
+        sandbox
+            .cleanup(&instance, false)
+            .await
+            .expect("cleanup failed");
+    }
 }
