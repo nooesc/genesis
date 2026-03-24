@@ -22,9 +22,7 @@ use tachyonfx::EffectManager;
 pub enum EffectId {
     #[default]
     BootTitle,
-    BootPortrait,
     BootStatus,
-    BootSettle,
     TransitionOut,
     TransitionIn,
     ErrorFlash,
@@ -106,9 +104,7 @@ impl GenesisEffects {
     pub fn cancel_all(&mut self) {
         const ALL_IDS: &[EffectId] = &[
             EffectId::BootTitle,
-            EffectId::BootPortrait,
             EffectId::BootStatus,
-            EffectId::BootSettle,
             EffectId::TransitionOut,
             EffectId::TransitionIn,
             EffectId::ErrorFlash,
@@ -123,9 +119,7 @@ impl GenesisEffects {
         const _: () = {
             let _guard = |id: EffectId| match id {
                 EffectId::BootTitle
-                | EffectId::BootPortrait
                 | EffectId::BootStatus
-                | EffectId::BootSettle
                 | EffectId::TransitionOut
                 | EffectId::TransitionIn
                 | EffectId::ErrorFlash
@@ -217,27 +211,15 @@ impl GenesisEffects {
         );
     }
 
-    /// Launch the boot sequence animation across the four target areas.
+    /// Launch the boot sequence animation targeting title and status areas.
     ///
-    /// No-op when effects are disabled.  Safe to call multiple times — each
+    /// No-op when effects are disabled. Safe to call multiple times — each
     /// call replaces any in-flight boot effects via the unique-effect system.
-    pub fn start_boot_sequence(
-        &mut self,
-        title_area: Rect,
-        portrait_area: Rect,
-        status_area: Rect,
-        full_area: Rect,
-    ) {
+    pub fn start_boot_sequence(&mut self, title_area: Rect, status_area: Rect) {
         if !self.enabled || !self.config.boot_sequence {
             return;
         }
-        boot::start_boot_sequence(
-            &mut self.manager,
-            title_area,
-            portrait_area,
-            status_area,
-            full_area,
-        );
+        boot::start_boot_sequence(&mut self.manager, title_area, status_area);
     }
 
     // ── Status bar transition effects ────────────────────────────────────
@@ -398,24 +380,20 @@ mod tests {
     #[test]
     fn start_boot_sequence_makes_is_running_true() {
         let mut effects = GenesisEffects::new(true, false, Default::default());
-        let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
-        let portrait = Rect::new(5, 6, 30, 14);
         let status = Rect::new(5, 20, 40, 4);
 
-        effects.start_boot_sequence(title, portrait, status, area);
+        effects.start_boot_sequence(title, status);
         assert!(effects.is_running());
     }
 
     #[test]
     fn start_boot_sequence_noop_when_disabled() {
         let mut effects = GenesisEffects::new(false, false, Default::default());
-        let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
-        let portrait = Rect::new(5, 6, 30, 14);
         let status = Rect::new(5, 20, 40, 4);
 
-        effects.start_boot_sequence(title, portrait, status, area);
+        effects.start_boot_sequence(title, status);
         assert!(!effects.is_running());
     }
 
@@ -424,11 +402,9 @@ mod tests {
         let mut effects = GenesisEffects::new(true, false, Default::default());
         let area = Rect::new(0, 0, 120, 24);
         let title = Rect::new(5, 1, 40, 4);
-        let portrait = Rect::new(5, 6, 30, 14);
         let status = Rect::new(5, 20, 40, 4);
 
-        // Start the boot sequence first.
-        effects.start_boot_sequence(title, portrait, status, area);
+        effects.start_boot_sequence(title, status);
         assert!(effects.is_running(), "boot effects should be running");
 
         // Transition should cancel boot and register the dissolve-out effect.

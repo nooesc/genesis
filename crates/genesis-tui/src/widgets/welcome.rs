@@ -1,11 +1,9 @@
-//! Welcome screen widget with terminal-native portrait art.
+//! Welcome screen widget with matrix rain background.
 //!
-//! Displays a bordered welcome screen with a responsive portrait and session
-//! info. Layout mode is selected explicitly by terminal width:
-//! - Wide (>= 100 cols): big-text title at top, portrait left, metadata right,
-//!   boot status below portrait
-//! - Medium (60-99 cols): compact portrait above metadata
-//! - Narrow (< 60 cols): text-only title with no portrait
+//! Displays a bordered welcome screen with animated braille rain and centered
+//! session info. Layout adapts to terminal width:
+//! - Bordered (>= 60 cols): rain background with session info centered
+//! - Narrow (< 60 cols): text-only title
 
 use ratatui::{
     buffer::Buffer,
@@ -19,10 +17,7 @@ use crate::history::rgb;
 use crate::widgets::boot_status::BootStatusInfo;
 use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
-/// Minimum width for the wide side-by-side layout.
-const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
-
-/// Minimum width for the medium (stacked) layout.
+/// Minimum width for the bordered layout (below this: text-only).
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
 
@@ -113,34 +108,15 @@ impl WelcomeWidget {
 
         self.last_areas.full = area;
 
-        if area.width >= WIDE_LAYOUT_MIN_WIDTH {
-            self.render_full(area, buf);
-        } else if area.width >= MEDIUM_LAYOUT_MIN_WIDTH {
-            self.render_compact(area, buf);
+        if area.width >= MEDIUM_LAYOUT_MIN_WIDTH {
+            self.render_bordered(area, buf);
         } else {
             self.render_text_only(area, buf);
         }
     }
 
-    /// Full layout: bordered box with big-text title at top, art on left,
-    /// info on right, boot status below portrait.
-    fn render_full(&mut self, area: Rect, buf: &mut Buffer) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        if inner.width == 0 || inner.height == 0 {
-            return;
-        }
-
-        self.render_welcome_content(inner, buf);
-    }
-
-    /// Compact layout: bordered box with big-text title, rain, and info.
-    fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
+    /// Bordered layout: rain background, session info centered.
+    fn render_bordered(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);

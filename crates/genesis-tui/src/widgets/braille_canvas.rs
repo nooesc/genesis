@@ -25,6 +25,29 @@ const EVE_LAVENDER: Color = crate::history::rgb(genesis_ui::colors::EVE_LAVENDER
 /// Dim grey for flatline / inactive (slightly dimmer than UI_DIM).
 const DIM_GREY: Color = Color::Rgb(98, 98, 98);
 
+// ── Deterministic RNG ───────────────────────────────────────────────────────
+
+/// Deterministic LCG-based pseudo-random float generator.
+/// Returns values in [0.0, 1.0).
+fn lcg_rng(seed: u64) -> impl FnMut() -> f64 {
+    let mut s = seed;
+    move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((s >> 33) as f64) / (u32::MAX as f64)
+    }
+}
+
+// ── Rain Column ─────────────────────────────────────────────────────────────
+
+/// State for a single falling rain column.
+#[derive(Debug, Clone)]
+pub struct RainColumn {
+    pub y_head: f64,
+    pub speed: f64,
+    pub length: f64,
+    pub brightness: f64,
+}
+
 // ── Pattern ─────────────────────────────────────────────────────────────────
 
 /// An animatable pattern that can be rendered on a braille canvas.
@@ -42,9 +65,8 @@ pub enum Pattern {
     Flatline,
     /// Matrix-style falling rain columns with varying speeds and offsets.
     MatrixRain {
-        /// Per-column state: (y_head, speed, length, brightness).
-        columns: Vec<(f64, f64, f64, f64)>,
-        /// Accumulated time since last position update (throttles to ~7fps).
+        columns: Vec<RainColumn>,
+        /// Accumulated time since last position update (throttles to ~12fps).
         accum: f64,
     },
 }
@@ -86,16 +108,16 @@ impl Pattern {
             }
             Pattern::Flatline => {}
             Pattern::MatrixRain { columns, accum } => {
-                const TICK_INTERVAL: f64 = 0.08; // update positions ~12 times/sec
+                const TICK_INTERVAL: f64 = 0.08;
                 *accum += secs;
                 if *accum >= TICK_INTERVAL {
-                    let steps = *accum / TICK_INTERVAL;
-                    let advance = TICK_INTERVAL * steps.floor();
+                    let steps = (*accum / TICK_INTERVAL) as u32;
+                    let advance = TICK_INTERVAL * f64::from(steps);
                     *accum -= advance;
-                    for (y_head, speed, _, _) in columns.iter_mut() {
-                        *y_head += advance * *speed;
-                        if *y_head > 1.8 {
-                            *y_head -= 2.0;
+                    for col in columns.iter_mut() {
+                        col.y_head += advance * col.speed;
+                        if col.y_head > 1.8 {
+                            col.y_head -= 2.0;
                         }
                     }
                 }
@@ -108,32 +130,28 @@ impl Pattern {
     /// Background layer: many slow, dim columns.
     /// Foreground layer: fewer fast, bright columns with long trails.
     pub fn matrix_rain(density: usize) -> Self {
-        let mut seed: u64 = 7;
-        let mut next = || -> f64 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((seed >> 33) as f64) / (u32::MAX as f64)
-        };
-
+        let mut next = lcg_rng(7);
         let mut columns = Vec::with_capacity(density);
 
         // Background layer — slow, dim, many columns
         let bg_count = density * 2 / 3;
         for _ in 0..bg_count {
-            let y_head = next() * 2.2 - 0.6;
-            let speed = 0.10 + next() * 0.15;
-            let length = 0.15 + next() * 0.30;
-            let brightness = 0.15 + next() * 0.25; // dim
-            columns.push((y_head, speed, length, brightness));
+            columns.push(RainColumn {
+                y_head: next() * 2.2 - 0.6,
+                speed: 0.10 + next() * 0.15,
+                length: 0.15 + next() * 0.30,
+                brightness: 0.15 + next() * 0.25,
+            });
         }
 
         // Foreground layer — fast, bright, long trails
-        let fg_count = density - bg_count;
-        for _ in 0..fg_count {
-            let y_head = next() * 2.2 - 0.6;
-            let speed = 0.25 + next() * 0.40;
-            let length = 0.30 + next() * 0.50;
-            let brightness = 0.6 + next() * 0.4; // bright
-            columns.push((y_head, speed, length, brightness));
+        for _ in 0..(density - bg_count) {
+            columns.push(RainColumn {
+                y_head: next() * 2.2 - 0.6,
+                speed: 0.25 + next() * 0.40,
+                length: 0.30 + next() * 0.50,
+                brightness: 0.6 + next() * 0.4,
+            });
         }
 
         Pattern::MatrixRain { columns, accum: 0.0 }
@@ -141,13 +159,7 @@ impl Pattern {
 
     /// Create a default set of particles for the welcome screen.
     pub fn default_particles(count: usize) -> Self {
-        // Deterministic "random" using a simple linear congruential generator.
-        let mut seed: u64 = 42;
-        let mut next = || -> f64 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((seed >> 33) as f64) / (u32::MAX as f64)
-        };
-
+        let mut next = lcg_rng(42);
         let points = (0..count)
             .map(|_| {
                 let x = next();
@@ -199,7 +211,7 @@ impl<'a> BrailleCanvas<'a> {
                 Self::render_flatline(w, h, area, buf);
             }
             Pattern::MatrixRain { columns, .. } => {
-                Self::render_matrix_rain(columns, w, h, area, buf);
+                Self::render_matrix_rain(columns, area, buf);
             }
         }
     }
@@ -283,26 +295,17 @@ impl<'a> BrailleCanvas<'a> {
         Widget::render(canvas, area, buf);
     }
 
-    /// Direct-to-buffer matrix rain renderer with full braille glyphs.
+    /// Direct-to-buffer matrix rain with full braille glyphs.
     ///
-    /// Each column generates a trail of random braille characters (not just
-    /// single dots). Head cells are bright with dense glyphs; tail cells
-    /// fade with sparser patterns. Creates an alien data-stream aesthetic.
+    /// Columns are evenly distributed across the width, so at typical densities
+    /// (80 columns on a 120-cell terminal) they never overlap — no merge needed.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn render_matrix_rain(
-        columns: &[(f64, f64, f64, f64)],
-        _w: f64,
-        _h: f64,
-        area: Rect,
-        buf: &mut Buffer,
-    ) {
+    fn render_matrix_rain(columns: &[RainColumn], area: Rect, buf: &mut Buffer) {
         const BRIGHT_HEAD: Color = Color::Rgb(210, 200, 235);
         const BRIGHT_TRAIL: Color = Color::Rgb(150, 140, 185);
         const MID_TRAIL: Color = Color::Rgb(100, 92, 130);
         const DIM_TRAIL: Color = Color::Rgb(55, 50, 70);
 
-        // Glyph tables — denser patterns for heads, sparser for tails.
-        // Each u8 is the braille dot bitmask (0x00-0xFF).
         const DENSE_GLYPHS: [u8; 16] = [
             0xFF, 0xF7, 0x7F, 0xBF, 0xFE, 0xDB, 0xED, 0xBE,
             0x77, 0xEE, 0xD7, 0x7D, 0xBB, 0xEB, 0xF5, 0xAF,
@@ -316,72 +319,65 @@ impl<'a> BrailleCanvas<'a> {
             0x09, 0x12, 0x24, 0x48, 0x03, 0x18, 0x06, 0x30,
         ];
 
-        let num_cols = columns.len().max(1);
         let area_w = area.width;
         let area_h = area.height;
-
         if area_w == 0 || area_h == 0 {
             return;
         }
 
-        // Deterministic hash for glyph selection (varies by position).
-        let glyph_hash = |col: u16, row: u16, salt: u16| -> usize {
+        // Hoist loop-invariant conversions.
+        let num_cols_f = columns.len().max(1) as f64;
+        let area_w_f = f64::from(area_w);
+        let area_h_f = f64::from(area_h);
+        let area_h_i = area_h as i32;
+
+        fn glyph_hash(col: u16, row: u16, salt: u16) -> usize {
             let v = (col as u32)
                 .wrapping_mul(2654435761)
                 .wrapping_add(row as u32)
                 .wrapping_mul(2246822519)
                 .wrapping_add(salt as u32);
             (v >> 16) as usize
-        };
+        }
 
-        for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
-            // Map column to a terminal cell column.
-            let cell_col = ((i as f64 + 0.5) / num_cols as f64 * area_w as f64) as u16;
+        for (i, col) in columns.iter().enumerate() {
+            let cell_col = ((i as f64 + 0.5) / num_cols_f * area_w_f) as u16;
             if cell_col >= area_w {
                 continue;
             }
 
-            // How many terminal rows this trail covers.
-            let trail_cells = (length * area_h as f64) as u16;
+            let trail_cells = (col.length * area_h_f) as u16;
             if trail_cells == 0 {
                 continue;
             }
 
-            // Head row in terminal cells.
-            let head_row = (y_head * area_h as f64) as i32;
+            let head_row = (col.y_head * area_h_f) as i32;
+            let trail_recip = 1.0 / f64::from(trail_cells);
+            let salt = i as u16;
 
             for d in 0..trail_cells {
                 let row = head_row - d as i32;
-                if row < 0 || row >= area_h as i32 {
+                if row < 0 || row >= area_h_i {
                     continue;
                 }
                 let row = row as u16;
 
-                let frac = d as f64 / trail_cells as f64;
-                let salt = i as u16;
+                let frac = f64::from(d) * trail_recip;
                 let h = glyph_hash(cell_col, row, salt);
 
-                // Select glyph and color based on position in trail.
-                let (glyph_bits, color) = if d == 0 && brightness > 0.5 {
-                    // Bright head — dense glyph, white-ish
-                    (DENSE_GLYPHS[h % DENSE_GLYPHS.len()], BRIGHT_HEAD)
+                let (glyph_bits, color) = if d == 0 && col.brightness > 0.5 {
+                    (DENSE_GLYPHS[h & 0xF], BRIGHT_HEAD)
                 } else if frac < 0.2 {
-                    // Near head — dense, bright
-                    (DENSE_GLYPHS[h % DENSE_GLYPHS.len()], BRIGHT_TRAIL)
+                    (DENSE_GLYPHS[h & 0xF], BRIGHT_TRAIL)
                 } else if frac < 0.5 {
-                    // Mid trail
-                    (MID_GLYPHS[h % MID_GLYPHS.len()], MID_TRAIL)
+                    (MID_GLYPHS[h & 0xF], MID_TRAIL)
                 } else if frac < 0.8 {
-                    // Fading
-                    (SPARSE_GLYPHS[h % SPARSE_GLYPHS.len()], DIM_TRAIL)
+                    (SPARSE_GLYPHS[h & 0xF], DIM_TRAIL)
                 } else {
-                    // Tail — very sparse
-                    let sparse = SPARSE_GLYPHS[h % SPARSE_GLYPHS.len()];
-                    // Randomly drop some tail cells entirely.
                     if h % 3 == 0 {
                         continue;
                     }
-                    (sparse, DIM_TRAIL)
+                    (SPARSE_GLYPHS[h & 0xF], DIM_TRAIL)
                 };
 
                 if glyph_bits == 0 {
@@ -390,17 +386,8 @@ impl<'a> BrailleCanvas<'a> {
 
                 let x = area.x + cell_col;
                 let y = area.y + row;
-
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    // Merge with existing braille character if present.
-                    let existing = cell.symbol().chars().next().unwrap_or(' ');
-                    let existing_bits = if ('\u{2800}'..='\u{28FF}').contains(&existing) {
-                        (existing as u32 - 0x2800) as u8
-                    } else {
-                        0
-                    };
-                    let merged = existing_bits | glyph_bits;
-                    let ch = char::from_u32(0x2800 + u32::from(merged)).unwrap_or(' ');
+                    let ch = char::from_u32(0x2800 + u32::from(glyph_bits)).unwrap_or(' ');
                     cell.set_char(ch);
                     cell.set_fg(color);
                 }

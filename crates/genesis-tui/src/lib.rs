@@ -630,12 +630,7 @@ fn render_frame(
             if !app.welcome.boot_triggered() {
                 app.welcome.mark_boot_triggered();
                 let areas = app.welcome.last_areas();
-                app.effects.start_boot_sequence(
-                    areas.title,
-                    areas.portrait,
-                    areas.status,
-                    areas.full,
-                );
+                app.effects.start_boot_sequence(areas.title, areas.status);
             }
         }
         AppScreen::Chat => {
