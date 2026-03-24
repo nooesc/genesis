@@ -41,6 +41,19 @@ impl HistoryCell {
         }
     }
 
+    /// Render the cell with a vertical scroll offset.
+    ///
+    /// Used to show the bottom portion of oversized cells that exceed the
+    /// viewport height. `skip_rows` is the number of rows to skip from the top.
+    pub fn render_scrolled(&self, area: Rect, buf: &mut Buffer, skip_rows: u16) {
+        use ratatui::widgets::{Paragraph, Widget as _, Wrap};
+        let lines = self.to_scrollback_lines(area.width);
+        let paragraph = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((skip_rows, 0));
+        paragraph.render(area, buf);
+    }
+
     /// Produce the styled [`Line`]s for insertion into terminal scrollback.
     pub fn to_scrollback_lines(&self, width: u16) -> Vec<Line<'static>> {
         match self {
