@@ -114,6 +114,11 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // Reset terminal title so it doesn't linger as "Eve | model" after exit.
+        // This runs on ALL exit paths (normal, error, panic) via RAII.
+        use std::io::Write;
+        let _ = write!(std::io::stdout(), "\x1b]2;\x07");
+        let _ = std::io::stdout().flush();
         let _ = terminal::restore();
     }
 }
@@ -645,12 +650,8 @@ pub async fn run_tui(
         }
     }
 
-    // Reset terminal title before exiting so it doesn't linger as "Eve | model".
-    set_terminal_title(term.backend_mut(), "");
-    let _ = term.flush();
-
-    // TerminalGuard handles terminal::restore() on drop, covering both
-    // normal exit and early `?` returns.
+    // TerminalGuard handles terminal::restore() + title reset on drop,
+    // covering both normal exit and early `?` returns.
     Ok(())
 }
 

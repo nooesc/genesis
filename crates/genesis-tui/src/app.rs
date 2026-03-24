@@ -862,14 +862,10 @@ impl App {
                     InputAction::Exit => {
                         // Require double-press within 750ms to actually exit.
                         let now = std::time::Instant::now();
-                        if let Some(last) = self.last_quit_press {
-                            if now.duration_since(last).as_millis() < QUIT_DOUBLE_PRESS_MS as u128 {
-                                self.should_exit = true;
-                            } else {
-                                self.last_quit_press = Some(now);
-                                self.status_bar
-                                    .show_transient_warning("Ctrl+D again to quit");
-                            }
+                        if self.last_quit_press.is_some_and(|last| {
+                            now.duration_since(last).as_millis() < QUIT_DOUBLE_PRESS_MS as u128
+                        }) {
+                            self.should_exit = true;
                         } else {
                             self.last_quit_press = Some(now);
                             self.status_bar
