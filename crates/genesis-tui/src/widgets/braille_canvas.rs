@@ -40,6 +40,11 @@ pub enum Pattern {
     Lissajous { t: f64, a: f64, b: f64, delta: f64 },
     /// A static horizontal line at mid-height.
     Flatline,
+    /// Matrix-style falling rain columns with varying speeds and offsets.
+    MatrixRain {
+        /// Per-column state: (y_head, speed, length, brightness).
+        columns: Vec<(f64, f64, f64, f64)>,
+    },
 }
 
 impl Pattern {
@@ -78,7 +83,37 @@ impl Pattern {
                 }
             }
             Pattern::Flatline => {}
+            Pattern::MatrixRain { columns } => {
+                for (y_head, speed, _, _) in columns.iter_mut() {
+                    *y_head += secs * *speed;
+                    // Wrap around when the head goes past the bottom + trail length.
+                    if *y_head > 1.8 {
+                        *y_head -= 2.0;
+                    }
+                }
+            }
         }
+    }
+
+    /// Create a matrix rain pattern with the given number of columns.
+    pub fn matrix_rain(num_columns: usize) -> Self {
+        let mut seed: u64 = 7;
+        let mut next = || -> f64 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((seed >> 33) as f64) / (u32::MAX as f64)
+        };
+
+        let columns = (0..num_columns)
+            .map(|_| {
+                let y_head = next() * 1.8 - 0.4; // stagger start positions
+                let speed = 0.15 + next() * 0.25; // varying fall speeds
+                let length = 0.15 + next() * 0.35; // trail length
+                let brightness = 0.4 + next() * 0.6; // varying brightness
+                (y_head, speed, length, brightness)
+            })
+            .collect();
+
+        Pattern::MatrixRain { columns }
     }
 
     /// Create a default set of particles for the welcome screen.
@@ -139,6 +174,9 @@ impl<'a> BrailleCanvas<'a> {
             }
             Pattern::Flatline => {
                 Self::render_flatline(w, h, area, buf);
+            }
+            Pattern::MatrixRain { columns } => {
+                Self::render_matrix_rain(columns, w, h, area, buf);
             }
         }
     }
@@ -216,6 +254,61 @@ impl<'a> BrailleCanvas<'a> {
             .paint(|ctx| {
                 ctx.draw(&Points {
                     coords: &coords,
+                    color: EVE_LAVENDER,
+                });
+            });
+        Widget::render(canvas, area, buf);
+    }
+
+    fn render_matrix_rain(
+        columns: &[(f64, f64, f64, f64)],
+        w: f64,
+        h: f64,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        let num_cols = columns.len().max(1);
+
+        // Each column produces a vertical trail of dots.
+        // Brighter dots at the head, fading toward the tail.
+        let mut bright_coords: Vec<(f64, f64)> = Vec::new();
+        let mut dim_coords: Vec<(f64, f64)> = Vec::new();
+
+        for (i, &(y_head, _speed, length, brightness)) in columns.iter().enumerate() {
+            let x = (i as f64 + 0.5) / num_cols as f64 * w;
+
+            // Draw dots from head downward (tail).
+            let num_dots = (length * h * 2.0) as usize;
+            for d in 0..num_dots.max(1) {
+                let frac = d as f64 / num_dots.max(1) as f64;
+                let y = (y_head - frac * length) * h;
+
+                if y < 0.0 || y > h {
+                    continue;
+                }
+
+                // Head dots are bright, tail fades out.
+                if frac < 0.3 && brightness > 0.6 {
+                    bright_coords.push((x, y));
+                } else {
+                    dim_coords.push((x, y));
+                }
+            }
+        }
+
+        let dim_lavender = Color::Rgb(60, 55, 72);
+
+        let canvas = Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds([0.0, w])
+            .y_bounds([0.0, h])
+            .paint(|ctx| {
+                ctx.draw(&Points {
+                    coords: &dim_coords,
+                    color: dim_lavender,
+                });
+                ctx.draw(&Points {
+                    coords: &bright_coords,
                     color: EVE_LAVENDER,
                 });
             });

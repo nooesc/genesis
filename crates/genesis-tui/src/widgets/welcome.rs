@@ -76,7 +76,7 @@ impl WelcomeWidget {
             info,
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
-            braille_pattern: Pattern::default_particles(18),
+            braille_pattern: Pattern::matrix_rain(30),
         }
     }
 
@@ -213,7 +213,7 @@ impl WelcomeWidget {
         self.render_body(inner, below_title_y, remaining_height, buf);
     }
 
-    /// Shared body: braille canvas strip + info + boot status, centered.
+    /// Shared body: matrix rain background + info + boot status, centered.
     fn render_body(
         &mut self,
         inner: Rect,
@@ -221,28 +221,19 @@ impl WelcomeWidget {
         remaining_height: u16,
         buf: &mut Buffer,
     ) {
-        // ── Braille canvas strip ─────────────────────────────────────
-        const BRAILLE_HEIGHT: u16 = 4;
-        const BRAILLE_GAP: u16 = 1;
-
-        let show_braille = remaining_height >= BRAILLE_HEIGHT + BRAILLE_GAP + 8;
-        let braille_used = if show_braille {
-            let braille_area = Rect {
-                x: inner.x,
-                y: below_title_y,
-                width: inner.width,
-                height: BRAILLE_HEIGHT,
-            };
-            self.last_areas.portrait = braille_area;
-            BrailleCanvas::new(&self.braille_pattern).render(braille_area, buf);
-            BRAILLE_HEIGHT + BRAILLE_GAP
-        } else {
-            0
+        // ── Matrix rain background (full area behind content) ────────
+        let rain_area = Rect {
+            x: inner.x,
+            y: below_title_y,
+            width: inner.width,
+            height: remaining_height,
         };
+        self.last_areas.portrait = rain_area;
+        BrailleCanvas::new(&self.braille_pattern).render(rain_area, buf);
 
-        // ── Info + boot status centered below braille ────────────────
-        let body_y = below_title_y + braille_used;
-        let body_height = remaining_height.saturating_sub(braille_used);
+        // ── Info + boot status centered on top of rain ───────────────
+        let body_y = below_title_y;
+        let body_height = remaining_height;
         if body_height == 0 {
             return;
         }
