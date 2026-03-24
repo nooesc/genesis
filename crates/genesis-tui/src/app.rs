@@ -115,14 +115,12 @@ impl App {
                 }
                 self.frame_requester.schedule_frame();
             }
-            TuiEvent::Resize { width, height } => {
-                // Resize is now fully handled in render_frame via deferred
-                // apply_pending_resize(). Just update cached dimensions and
-                // schedule a frame. This coalesces rapid resize events (tmux
-                // drag-resize) into a single clear+redraw per frame interval.
-                self.viewport_width = width;
-                self.viewport_height = height;
-                self.frame_requester.schedule_frame();
+            TuiEvent::Resize { .. } => {
+                // Resize is fully handled in lib.rs (deferred to render_frame
+                // via apply_pending_resize). This arm should never be reached
+                // because lib.rs intercepts Resize events before dispatching
+                // to handle_tui_event.
+                debug_assert!(false, "Resize events must not reach App::handle_tui_event");
             }
             TuiEvent::MouseScroll(delta) => {
                 // Only scroll the chat view when no overlay is active and

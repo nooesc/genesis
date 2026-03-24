@@ -79,17 +79,23 @@ impl StreamingBuffer {
 
         self.pending.push_str(text);
 
-        // Extract all newline-terminated lines.
+        // Extract all newline-terminated lines in one pass.
+        // Uses `drain` to avoid O(n²) repeated String copies.
         let mut enqueued = false;
         let now = Instant::now();
-        while let Some(nl_pos) = self.pending.find('\n') {
-            let line = self.pending[..nl_pos].to_string();
-            self.pending = self.pending[nl_pos + 1..].to_string();
-            self.queue.push_back(QueuedLine {
-                text: line,
-                enqueued_at: now,
-            });
-            enqueued = true;
+        loop {
+            match self.pending.find('\n') {
+                None => break,
+                Some(pos) => {
+                    let line = self.pending[..pos].to_owned();
+                    self.pending.drain(..=pos);
+                    self.queue.push_back(QueuedLine {
+                        text: line,
+                        enqueued_at: now,
+                    });
+                    enqueued = true;
+                }
+            }
         }
         enqueued
     }
@@ -153,9 +159,37 @@ impl StreamingBuffer {
         }
     }
 
-    /// Whether there is buffered content waiting to be committed.
-    pub fn has_pending(&self) -> bool {
+    /// Whether there are complete lines in the queue ready to be animated.
+    ///
+    /// Use this to decide whether to schedule the animation timer. Does NOT
+    /// include partial (no-newline) buffered text, since `tick()` can only
+    /// drain complete lines — scheduling redraws for partial text would spin
+    /// at 120fps with no visible updates.
+    pub fn has_queued_lines(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Whether there is any buffered content (complete or partial).
+    ///
+    /// Use this for finalize/reset guards, not for animation scheduling.
+    pub fn has_any_content(&self) -> bool {
         !self.queue.is_empty() || !self.pending.is_empty()
+    }
+
+    /// Return a preview of all buffered text (queued lines + pending partial).
+    ///
+    /// Used by the renderer to show text that hasn't been committed to the
+    /// active cell's `text_buffer` yet. This ensures the user always sees
+    /// streaming content as it arrives, even before newlines trigger the
+    /// line-commit animation.
+    pub fn preview(&self) -> String {
+        let mut out = String::new();
+        for q in &self.queue {
+            out.push_str(&q.text);
+            out.push('\n');
+        }
+        out.push_str(&self.pending);
+        out
     }
 
     /// Number of lines in the queue.
@@ -308,7 +342,7 @@ mod tests {
         let mut buf = StreamingBuffer::new();
         assert!(!buf.push_delta("hello"));
         assert_eq!(buf.queue_len(), 0);
-        assert!(buf.has_pending());
+        assert!(buf.has_any_content());
     }
 
     #[test]
@@ -338,7 +372,7 @@ mod tests {
         let result = buf.finalize().unwrap();
         assert_eq!(result, "line1\npartial");
         assert_eq!(buf.queue_len(), 0);
-        assert!(!buf.has_pending());
+        assert!(!buf.has_any_content());
     }
 
     #[test]
@@ -375,9 +409,9 @@ mod tests {
     fn reset_clears_everything() {
         let mut buf = StreamingBuffer::new();
         buf.push_delta("hello\nworld\npartial");
-        assert!(buf.has_pending());
+        assert!(buf.has_any_content());
         buf.reset();
-        assert!(!buf.has_pending());
+        assert!(!buf.has_any_content());
         assert_eq!(buf.queue_len(), 0);
     }
 

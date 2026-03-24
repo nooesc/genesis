@@ -239,9 +239,33 @@ impl ChatWidget {
         false
     }
 
-    /// Whether the streaming buffer has pending content to animate.
+    /// Whether the streaming buffer has complete lines ready to animate.
+    ///
+    /// Used by the frame scheduler to decide whether to keep the 120fps
+    /// animation timer running. Only returns true when there are actual
+    /// lines in the queue; partial (no-newline) text does NOT keep the
+    /// timer spinning.
     pub fn has_streaming_pending(&self) -> bool {
-        self.streaming_buffer.has_pending()
+        self.streaming_buffer.has_queued_lines()
+    }
+
+    /// Return the full visible text for the active cell: committed text
+    /// plus buffered preview (queued lines and partial pending text).
+    ///
+    /// This ensures the user always sees streaming content as it arrives,
+    /// even before newlines trigger the line-commit animation.
+    pub(crate) fn active_cell_preview_text(&self) -> Option<String> {
+        let cell = self.active_cell.as_ref()?;
+        let preview = self.streaming_buffer.preview();
+        if preview.is_empty() {
+            if cell.text_buffer.is_empty() {
+                None
+            } else {
+                Some(cell.text_buffer.clone())
+            }
+        } else {
+            Some(format!("{}{}", cell.text_buffer, preview))
+        }
     }
 
     /// Record a tool call starting in the active cell.
@@ -429,8 +453,10 @@ impl ChatWidget {
             total = total.saturating_add(cell.height(width).max(1));
             i += 1;
         }
-        if let Some(active) = &self.active_cell {
-            if !active.text_buffer.is_empty() {
+        // Use preview text (committed + buffered) for height calculation
+        // so it accounts for text not yet committed by the streaming buffer.
+        if let Some(preview) = self.active_cell_preview_text() {
+            if !preview.is_empty() {
                 // Account for a separator before the active cell if last committed
                 // cell was a User cell (active cell is always an agent response).
                 if prev_is_user == Some(true) {
@@ -439,16 +465,14 @@ impl ChatWidget {
                 // Reuse the active cell cache when possible to avoid redundant
                 // markdown re-parsing.
                 let h = if let Some(cache) = self.active_cell_cache.as_ref() {
-                    if cache.parsed_len == active.text_buffer.len() && cache.parsed_width == width {
+                    if cache.parsed_len == preview.len() && cache.parsed_width == width {
                         wrapped_row_count(&cache.lines, width).max(1)
                     } else {
-                        let lines =
-                            crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
+                        let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
                         wrapped_row_count(&lines, width).max(1)
                     }
                 } else {
-                    let lines =
-                        crate::history::agent_cell::prefix_markdown_lines(&active.text_buffer);
+                    let lines = crate::history::agent_cell::prefix_markdown_lines(&preview);
                     wrapped_row_count(&lines, width).max(1)
                 };
                 total = total.saturating_add(h);
@@ -560,24 +584,25 @@ impl ChatWidget {
 
         // ── Active cell (if any) ───────────────────────────────────────
         // Only show the active streaming cell when not scrolled up.
-        let active_text_info: Option<(usize, u16)> = if !self.scroll_locked {
-            self.active_cell
-                .as_ref()
-                .filter(|a| !a.text_buffer.is_empty())
-                .map(|a| (a.text_buffer.len(), area.width))
+        // Use the preview text (committed + buffered) so the user sees
+        // streaming content as it arrives, even before newlines trigger
+        // the line-commit animation.
+        let active_preview: Option<String> = if !self.scroll_locked {
+            self.active_cell_preview_text()
         } else {
             None
         };
+        let active_text_info: Option<(usize, u16)> =
+            active_preview.as_ref().map(|t| (t.len(), area.width));
 
         if let Some((text_len, width)) = active_text_info {
-            // Re-parse markdown only when the buffer or width has changed.
+            // Re-parse markdown only when the preview or width has changed.
             let needs_reparse = self
                 .active_cell_cache
                 .as_ref()
                 .is_none_or(|c| c.parsed_len != text_len || c.parsed_width != width);
             if needs_reparse {
-                let lines =
-                    active_cell_lines(&self.active_cell.as_ref().unwrap().text_buffer, width);
+                let lines = active_cell_lines(active_preview.as_ref().unwrap(), width);
                 self.active_cell_cache = Some(ActiveCellCache {
                     parsed_len: text_len,
                     parsed_width: width,
@@ -982,7 +1007,10 @@ mod tests {
         // No newline means it stays in streaming buffer pending area.
         let active = cw.active_cell.as_ref().unwrap();
         assert_eq!(active.text_buffer, "");
-        assert!(cw.has_streaming_pending());
+        // No queued lines (only partial text), so animation timer not needed.
+        assert!(!cw.has_streaming_pending());
+        // But the preview includes the partial text for rendering.
+        assert_eq!(cw.active_cell_preview_text().unwrap(), "partial");
 
         // Finalize flushes the partial text (used at turn completion).
         let cells = cw.complete_turn();
