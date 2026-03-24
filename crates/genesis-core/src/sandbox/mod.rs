@@ -37,6 +37,9 @@ pub enum SandboxError {
     #[error("authentication failed: {reason}")]
     AuthError { reason: String },
 
+    #[error("resource limit exceeded: {reason}")]
+    ResourceLimit { reason: String },
+
     #[error("{0}")]
     Other(String),
 }

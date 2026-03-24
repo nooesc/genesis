@@ -1645,6 +1645,7 @@ name = "genesis-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "dirs",
@@ -1654,6 +1655,7 @@ dependencies = [
  "genesis-config",
  "genesis-lua",
  "genesis-mcp",
+ "genesis-modal-proto",
  "genesis-provider",
  "genesis-storage",
  "genesis-tools",
@@ -1672,6 +1674,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
+ "tonic",
  "tracing",
  "tracing-test",
  "uuid",
