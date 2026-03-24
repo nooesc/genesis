@@ -100,6 +100,15 @@ pub struct ChatWidget {
     /// Streaming animation buffer — buffers incoming text deltas and releases
     /// them line-by-line for smooth typewriter-like animation.
     streaming_buffer: StreamingBuffer,
+    /// Monotonically increasing counter bumped on cell add/complete/expand.
+    /// Used to invalidate cached height computations.
+    revision: u64,
+    /// Cached result of `committed_content_height(width)`.
+    committed_height_cache: Option<(u64, u16, usize)>, // (revision, width, height)
+    /// Cached tool groups result from `find_tool_groups()`.
+    tool_groups_cache: Option<(u64, Vec<(usize, usize)>)>, // (revision, groups)
+    /// The last agent response text (for `/copy` command).
+    last_copyable_output: Option<String>,
 }
 
 impl ChatWidget {
@@ -117,6 +126,10 @@ impl ChatWidget {
             scroll_offset: 0,
             scroll_locked: false,
             streaming_buffer: StreamingBuffer::new(),
+            revision: 0,
+            committed_height_cache: None,
+            tool_groups_cache: None,
+            last_copyable_output: None,
         }
     }
 
@@ -134,7 +147,7 @@ impl ChatWidget {
     /// at the given viewport width. Only counts committed cells (not the
     /// active streaming cell) because `render_messages` hides the active
     /// cell when the user has scrolled up.
-    fn scroll_max(&self, viewport_width: u16) -> usize {
+    fn scroll_max(&mut self, viewport_width: u16) -> usize {
         self.committed_content_height(viewport_width)
     }
 
@@ -194,6 +207,7 @@ impl ChatWidget {
         let cell = HistoryCell::User(UserCell::new(text));
         self.committed_cells.push(cell.clone());
         self.pending_scrollback.push(cell);
+        self.bump_revision();
     }
 
     /// Start a new agent turn — creates an empty [`ActiveCell`].
@@ -335,9 +349,18 @@ impl ChatWidget {
             ));
         }
 
+        // Store the last agent text response for /copy.
+        if let Some(agent_cell) = new_cells.iter().find_map(|c| match c {
+            HistoryCell::Agent(a) => Some(a),
+            _ => None,
+        }) {
+            self.last_copyable_output = Some(agent_cell.text().to_string());
+        }
+
         self.active_cell_cache = None;
         self.pending_scrollback.extend(new_cells.iter().cloned());
         self.committed_cells.extend(new_cells.iter().cloned());
+        self.bump_revision();
         new_cells
     }
 
@@ -363,14 +386,32 @@ impl ChatWidget {
                 tc.set_display_mode(mode);
             }
         }
+        self.bump_revision();
+    }
+
+    /// Bump the revision counter, invalidating all caches.
+    fn bump_revision(&mut self) {
+        self.revision += 1;
     }
 
     /// Find runs of 2+ consecutive `HistoryCell::Tool` entries.
     ///
     /// Returns `(start_idx, count)` pairs where `start_idx` is the index
     /// in `committed_cells` and `count` is how many consecutive Tool cells
-    /// belong to the group.
-    pub fn find_tool_groups(&self) -> Vec<(usize, usize)> {
+    /// belong to the group. Cached by revision.
+    pub fn find_tool_groups(&mut self) -> Vec<(usize, usize)> {
+        if let Some((rev, ref groups)) = self.tool_groups_cache {
+            if rev == self.revision {
+                return groups.clone();
+            }
+        }
+        let groups = self.compute_tool_groups();
+        self.tool_groups_cache = Some((self.revision, groups.clone()));
+        groups
+    }
+
+    /// Uncached tool group computation.
+    fn compute_tool_groups(&self) -> Vec<(usize, usize)> {
         let mut groups = Vec::new();
         let mut i = 0;
         while i < self.committed_cells.len() {
@@ -392,11 +433,16 @@ impl ChatWidget {
         groups
     }
 
+    /// The last agent response text, suitable for clipboard copy.
+    pub fn last_copyable(&self) -> Option<&str> {
+        self.last_copyable_output.as_deref()
+    }
+
     /// Compute the total visible content height (committed cells + active cell)
     /// for the given width, without actually rendering anything.
     ///
     /// Returns 0 when there are no cells and no active turn.
-    pub fn visible_content_height(&self, width: u16) -> u16 {
+    pub fn visible_content_height(&mut self, width: u16) -> u16 {
         if width == 0 {
             return 0;
         }
@@ -486,9 +532,16 @@ impl ChatWidget {
     ///
     /// Used by [`scroll_max`] because the active streaming cell is hidden
     /// when the user scrolls up.
-    fn committed_content_height(&self, width: u16) -> usize {
+    fn committed_content_height(&mut self, width: u16) -> usize {
         if width == 0 {
             return 0;
+        }
+
+        // Check cache first.
+        if let Some((rev, cached_width, cached_height)) = self.committed_height_cache {
+            if rev == self.revision && cached_width == width {
+                return cached_height;
+            }
         }
 
         let tool_groups = self.find_tool_groups();
@@ -539,6 +592,7 @@ impl ChatWidget {
             total += cell.height(width).max(1) as usize;
             i += 1;
         }
+        self.committed_height_cache = Some((self.revision, width, total));
         total
     }
 
@@ -1129,13 +1183,13 @@ mod tests {
 
     #[test]
     fn visible_content_height_returns_zero_for_empty_widget() {
-        let cw = ChatWidget::new();
+        let mut cw = ChatWidget::new();
         assert_eq!(cw.visible_content_height(80), 0);
     }
 
     #[test]
     fn visible_content_height_returns_zero_for_zero_width() {
-        let cw = ChatWidget::new();
+        let mut cw = ChatWidget::new();
         assert_eq!(cw.visible_content_height(0), 0);
     }
 

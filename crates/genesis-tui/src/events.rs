@@ -82,6 +82,8 @@ pub enum AppEvent {
     ModelsFetched(Result<Vec<genesis_provider::openrouter_models::OpenRouterModel>, String>),
     /// Clear the terminal screen (Ctrl+L).
     ClearScreen,
+    /// Copy text to the system clipboard via OSC 52.
+    CopyToClipboard(String),
 }
 
 /// Status bar states.

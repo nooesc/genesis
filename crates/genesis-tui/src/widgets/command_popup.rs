@@ -72,6 +72,10 @@ const COMMANDS: &[CommandDef] = &[
         description: "Open full conversation transcript",
     },
     CommandDef {
+        name: "/copy",
+        description: "Copy last response to clipboard",
+    },
+    CommandDef {
         name: "/clear",
         description: "Clear conversation history",
     },
