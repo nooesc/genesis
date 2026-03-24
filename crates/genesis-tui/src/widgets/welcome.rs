@@ -14,7 +14,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
-use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
 use crate::widgets::boot_status::BootStatusInfo;
@@ -27,11 +26,6 @@ const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
 
-/// Height of the big-text title in rows (Quadrant pixel size: 8px / 2 = 4 rows).
-const BIG_TEXT_HEIGHT: u16 = 4;
-
-/// Gap between the title and the portrait/info row.
-const TITLE_GAP: u16 = 1;
 
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
@@ -161,39 +155,15 @@ impl WelcomeWidget {
         self.render_welcome_content(inner, buf);
     }
 
-    /// Shared welcome content: rain background → title → info → status.
+    /// Shared welcome content: rain background → info centered.
     fn render_welcome_content(&mut self, inner: Rect, buf: &mut Buffer) {
-        // ── Matrix rain first (background layer) ─────────────────────
+        // ── Matrix rain (full background) ────────────────────────────
         BrailleCanvas::new(&self.braille_pattern).render(inner, buf);
         self.last_areas.portrait = inner;
+        self.last_areas.title = inner;
 
-        // ── Big-text title at the top (renders on top of rain) ───────
-        let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
-        let title_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: title_available_height,
-        };
-        self.last_areas.title = title_area;
-
-        let big_title = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .style(Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER)))
-            .lines(vec!["GENESIS".into()])
-            .centered()
-            .build();
-        big_title.render(title_area, buf);
-
-        let below_title_y = inner.y + title_available_height + TITLE_GAP;
-        let remaining_height = inner
-            .height
-            .saturating_sub(title_available_height + TITLE_GAP);
-        if remaining_height == 0 {
-            return;
-        }
-
-        self.render_body(inner, below_title_y, remaining_height, buf);
+        // ── Info centered on top of rain ─────────────────────────────
+        self.render_body(inner, inner.y, inner.height, buf);
     }
 
     /// Shared body: info centered on top of rain.
@@ -231,11 +201,15 @@ impl WelcomeWidget {
         info_paragraph.render(info_area, buf);
     }
 
-    /// Text-only layout: just ">_ Eve v{version}" in accent color.
+    /// Text-only layout: "genesis >_ Eve" in accent color.
     fn render_text_only(&mut self, area: Rect, buf: &mut Buffer) {
         let accent = rgb(genesis_ui::colors::UI_ACCENT);
-        let text = format!(">_ Eve v{}", self.info.version);
-        let line = Line::from(Span::styled(text, Style::default().fg(accent)));
+        let dim = rgb(genesis_ui::colors::UI_DIM);
+        let line = Line::from(vec![
+            Span::styled("genesis", Style::default().fg(accent)),
+            Span::styled(format!(" v{} ", self.info.version), Style::default().fg(dim)),
+            Span::styled(">_ Eve", Style::default().fg(accent)),
+        ]);
 
         let y = area.y + area.height / 2;
         let x = area.x + area.width.saturating_sub(line.width() as u16) / 2;
@@ -254,16 +228,23 @@ impl WelcomeWidget {
         }
     }
 
-    /// Build the info lines displayed alongside or below the art.
+    /// Build the info lines displayed on the welcome screen.
     fn info_lines(&self) -> Vec<Line<'static>> {
         let accent = rgb(genesis_ui::colors::UI_ACCENT);
         let dim = rgb(genesis_ui::colors::UI_DIM);
         let text_color = rgb(genesis_ui::colors::UI_TEXT);
 
-        let title = Line::from(Span::styled(
-            format!(">_ Eve v{}", self.info.version),
-            Style::default().fg(accent),
-        ));
+        let framework_line = Line::from(vec![
+            Span::styled("genesis", Style::default().fg(accent)),
+            Span::styled(
+                format!(" v{}", self.info.version),
+                Style::default().fg(dim),
+            ),
+        ]);
+        let agent_line = Line::from(vec![
+            Span::styled(">_ ", Style::default().fg(dim)),
+            Span::styled("Eve", Style::default().fg(accent)),
+        ]);
         let blank = Line::from("");
         let session_line = Line::from(vec![
             Span::styled("session: ", Style::default().fg(dim)),
@@ -277,25 +258,25 @@ impl WelcomeWidget {
             Span::styled(self.info.backend.clone(), Style::default().fg(text_color)),
         ]);
         let model_line = Line::from(vec![
-            Span::styled("model: ", Style::default().fg(dim)),
+            Span::styled("model:   ", Style::default().fg(dim)),
             Span::styled(self.info.model.clone(), Style::default().fg(text_color)),
         ]);
         let cwd_line = Line::from(vec![
-            Span::styled("cwd: ", Style::default().fg(dim)),
+            Span::styled("cwd:     ", Style::default().fg(dim)),
             Span::styled(
                 truncate_path(&self.info.cwd, 40),
                 Style::default().fg(text_color),
             ),
         ]);
         let tools_line = Line::from(vec![
-            Span::styled("tools: ", Style::default().fg(dim)),
+            Span::styled("tools:   ", Style::default().fg(dim)),
             Span::styled(
                 format_tool_summary(self.info.tool_count_builtin, self.info.tool_count_mcp),
                 Style::default().fg(text_color),
             ),
         ]);
         let skills_line = Line::from(vec![
-            Span::styled("skills: ", Style::default().fg(dim)),
+            Span::styled("skills:  ", Style::default().fg(dim)),
             Span::styled(
                 format!("{} installed", self.info.skill_count),
                 Style::default().fg(text_color),
@@ -313,7 +294,8 @@ impl WelcomeWidget {
         ]);
 
         vec![
-            title,
+            framework_line,
+            agent_line,
             blank.clone(),
             session_line,
             backend_line,
@@ -640,7 +622,7 @@ mod tests {
         let rows = buffer_rows(&buf, area.width);
         // Wide layout should render the title and info.
         assert!(
-            rows.iter().any(|row| row.contains(">_ Eve v0.1.0")),
+            rows.iter().any(|row| row.contains("genesis")),
             "wide layout should render title"
         );
     }
@@ -654,7 +636,7 @@ mod tests {
         let rows = buffer_rows(&buf, area.width);
         // With no portrait art, the compact layout should still render the title.
         assert!(
-            rows.iter().any(|row| row.contains(">_ Eve v0.1.0")),
+            rows.iter().any(|row| row.contains("genesis")),
             "compact layout should render title"
         );
     }
@@ -671,7 +653,7 @@ mod tests {
             !rows.iter().any(|row| row.contains('▀') || row.contains('▄')),
             "text-only mode should not render half-block art"
         );
-        assert!(rows.iter().any(|row| row.contains(">_ Eve v0.1.0")));
+        assert!(rows.iter().any(|row| row.contains("genesis")));
     }
 
     #[test]
@@ -683,7 +665,7 @@ mod tests {
 
         let rendered = buffer_rows(&buf, area.width).join("\n");
         for needle in [
-            ">_ Eve v0.1.0",
+            "genesis",
             "session:",
             "session-123",
             "model:",
@@ -789,7 +771,7 @@ mod tests {
         assert!(rendered_lines.iter().any(|line| line.contains("1.2.3")));
         assert!(rendered_lines
             .iter()
-            .any(|line| line.contains("model: claude-4")));
+            .any(|line| line.contains("claude-4")));
     }
 
 
