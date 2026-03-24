@@ -20,7 +20,9 @@ use genesis_modal_proto::modal::task_command_router::{
     TaskExecStdioReadRequest, TaskExecStdoutConfig, TaskExecWaitRequest,
 };
 
-use super::{BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance};
+use super::{
+    BackendSpecific, ExecResult, SandboxBackend, SandboxConfig, SandboxError, SandboxInstance,
+};
 
 const MODAL_API_URL: &str = "https://api.modal.com";
 
@@ -50,11 +52,9 @@ pub(crate) struct ModalSnapshotData {
 /// Parse `~/.modal.toml` content, extracting token_id and token_secret from
 /// the `[default]` section.
 fn parse_modal_toml(content: &str) -> Result<(String, String), SandboxError> {
-    let table: toml::Table = content
-        .parse()
-        .map_err(|e| SandboxError::AuthError {
-            reason: format!("failed to parse .modal.toml: {e}"),
-        })?;
+    let table: toml::Table = content.parse().map_err(|e| SandboxError::AuthError {
+        reason: format!("failed to parse .modal.toml: {e}"),
+    })?;
 
     let section = table
         .get("default")
@@ -144,10 +144,7 @@ impl AuthTokenManager {
 
     /// Get a valid auth token. If the cached token is still valid, return it.
     /// If near-expiry, try a non-blocking refresh. If expired, block on refresh.
-    async fn get_token(
-        &self,
-        channel: &Channel,
-    ) -> Result<String, SandboxError> {
+    async fn get_token(&self, channel: &Channel) -> Result<String, SandboxError> {
         let now = chrono::Utc::now().timestamp();
 
         // Fast path: read the cache.
@@ -167,7 +164,9 @@ impl AuthTokenManager {
                         let token_id = self.token_id.clone();
                         let token_secret = self.token_secret.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = Self::do_refresh(&cache, &channel, &token_id, &token_secret).await {
+                            if let Err(e) =
+                                Self::do_refresh(&cache, &channel, &token_id, &token_secret).await
+                            {
                                 tracing::warn!(error = %e, "background Modal auth token refresh failed");
                             }
                         });
@@ -253,10 +252,7 @@ fn insert_static_creds(
             .parse()
             .map_err(|_| tonic::Status::internal("invalid header value for token_secret"))?,
     );
-    md.insert(
-        "x-modal-client-type",
-        "CLIENT_TYPE_CLIENT".parse().unwrap(),
-    );
+    md.insert("x-modal-client-type", "CLIENT_TYPE_CLIENT".parse().unwrap());
     md.insert("x-modal-client-version", "1.0.0".parse().unwrap());
     Ok(())
 }
@@ -354,8 +350,7 @@ fn map_grpc_error(operation: &str, status: tonic::Status) -> SandboxError {
 // ModalSandbox struct and constructor
 // ---------------------------------------------------------------------------
 
-type RouterClient =
-    TaskCommandRouterClient<InterceptedService<Channel, RouterJwtInterceptor>>;
+type RouterClient = TaskCommandRouterClient<InterceptedService<Channel, RouterJwtInterceptor>>;
 
 /// Holds a router client and its shared JWT handle for auth-retry.
 struct RouterEntry {
@@ -420,11 +415,7 @@ impl ModalSandbox {
             cache: cache.clone(),
         };
 
-        let auth_manager = Arc::new(AuthTokenManager::new(
-            cache,
-            token_id,
-            token_secret,
-        ));
+        let auth_manager = Arc::new(AuthTokenManager::new(cache, token_id, token_secret));
 
         let client = ModalClientClient::with_interceptor(channel.clone(), auth_interceptor)
             .max_decoding_message_size(4 * 1024 * 1024);
@@ -448,9 +439,7 @@ impl ModalSandbox {
 impl SandboxBackend for ModalSandbox {
     async fn create(&self, config: &SandboxConfig) -> Result<SandboxInstance, SandboxError> {
         // Ensure we have a valid auth token before the RPC.
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         // Extract Modal-specific options.
         let (gpu, app_name_override) = match &config.backend_specific {
@@ -488,7 +477,7 @@ impl SandboxBackend for ModalSandbox {
 
         // Build the GPU config if requested.
         let gpu_config = gpu.map(|g| GpuConfig {
-            r#type: 0,    // UNSPECIFIED — use gpu_type string instead
+            r#type: 0, // UNSPECIFIED — use gpu_type string instead
             count: 1,
             gpu_type: g,
         });
@@ -507,10 +496,8 @@ impl SandboxBackend for ModalSandbox {
 
         // Check for snapshot resume: if snapshot_data is present, use its image_id.
         let image_id = if let Some(ref snap_json) = config.snapshot_data {
-            let snap: ModalSnapshotData =
-                serde_json::from_str(snap_json).map_err(|e| {
-                    SandboxError::Other(format!("invalid snapshot data: {e}"))
-                })?;
+            let snap: ModalSnapshotData = serde_json::from_str(snap_json)
+                .map_err(|e| SandboxError::Other(format!("invalid snapshot data: {e}")))?;
             snap.image_id.unwrap_or_else(|| config.image.clone())
         } else {
             config.image.clone()
@@ -576,19 +563,16 @@ impl SandboxBackend for ModalSandbox {
         let timeout_secs = timeout.map(|d| d.as_secs() as u32);
 
         // Parse command into args for exec.
-        let command_args = vec![
-            "/bin/sh".to_owned(),
-            "-c".to_owned(),
-            command.to_owned(),
-        ];
+        let command_args = vec!["/bin/sh".to_owned(), "-c".to_owned(), command.to_owned()];
 
         // Get a clone of the router entry (to avoid holding the mutex during streaming).
         let entry = {
             self.ensure_router_client(&modal_task_id).await?;
             let guard = self.routers.lock().await;
-            guard.get(&modal_task_id).cloned().ok_or_else(|| {
-                SandboxError::Other("router client disappeared".to_owned())
-            })?
+            guard
+                .get(&modal_task_id)
+                .cloned()
+                .ok_or_else(|| SandboxError::Other("router client disappeared".to_owned()))?
         };
         let mut router = entry.client.clone();
 
@@ -688,9 +672,7 @@ impl SandboxBackend for ModalSandbox {
     }
 
     async fn snapshot(&self, instance: &SandboxInstance) -> Result<Option<String>, SandboxError> {
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         let resp = self
             .client
@@ -716,9 +698,7 @@ impl SandboxBackend for ModalSandbox {
         instance: &SandboxInstance,
         _persistent: bool,
     ) -> Result<(), SandboxError> {
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         self.client
             .clone()
@@ -762,9 +742,7 @@ impl ModalSandbox {
             }
         }
 
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
 
@@ -815,9 +793,7 @@ impl ModalSandbox {
             }
         }
 
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         let resp = self
             .client
@@ -843,10 +819,9 @@ impl ModalSandbox {
                 .map_err(|e| SandboxError::Other(format!("invalid router URL {url}: {e}")))?,
         );
 
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|e| SandboxError::Other(format!("failed to connect to router at {url}: {e}")))?;
+        let channel = endpoint.connect().await.map_err(|e| {
+            SandboxError::Other(format!("failed to connect to router at {url}: {e}"))
+        })?;
 
         let shared_jwt = Arc::new(RwLock::new(jwt));
         let interceptor = RouterJwtInterceptor {
@@ -857,10 +832,12 @@ impl ModalSandbox {
 
         // Re-acquire lock and insert only if still missing (handles concurrent creation race).
         let mut guard = self.routers.lock().await;
-        guard.entry(modal_task_id.to_owned()).or_insert(RouterEntry {
-            client: router_client,
-            jwt: shared_jwt,
-        });
+        guard
+            .entry(modal_task_id.to_owned())
+            .or_insert(RouterEntry {
+                client: router_client,
+                jwt: shared_jwt,
+            });
 
         Ok(())
     }
@@ -872,9 +849,7 @@ impl ModalSandbox {
         modal_task_id: &str,
         shared_jwt: &Arc<RwLock<String>>,
     ) -> Result<(), SandboxError> {
-        self.auth_manager
-            .get_token(&self.raw_channel)
-            .await?;
+        self.auth_manager.get_token(&self.raw_channel).await?;
 
         let resp = self
             .client
@@ -989,10 +964,8 @@ token_secret = "as-staging"
 
     #[test]
     fn decode_jwt_expiry_returns_none_for_missing_exp() {
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"alg":"HS256"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"sub":"test"}"#);
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"test"}"#);
         let token = format!("{header}.{payload}.sig");
 
         assert_eq!(decode_jwt_expiry(&token), None);
@@ -1009,11 +982,17 @@ token_secret = "as-staging"
     fn modal_sandbox_rejects_empty_credentials() {
         let result = ModalSandbox::new(String::new(), "secret".to_owned(), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
 
         let result = ModalSandbox::new("id".to_owned(), String::new(), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty"));
     }
 
     #[test]
@@ -1113,8 +1092,7 @@ token_secret = "as-staging"
         // Snapshot
         let snap = sandbox.snapshot(&instance).await.expect("snapshot failed");
         assert!(snap.is_some());
-        let snap_data: ModalSnapshotData =
-            serde_json::from_str(snap.as_ref().unwrap()).unwrap();
+        let snap_data: ModalSnapshotData = serde_json::from_str(snap.as_ref().unwrap()).unwrap();
         assert!(!snap_data.sandbox_id.is_empty());
         assert!(snap_data.image_id.is_some());
 

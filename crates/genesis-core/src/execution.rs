@@ -568,8 +568,20 @@ impl<'a> SessionExecutionService<'a> {
     }
 
     /// Return (builtin_tool_count, mcp_tool_count).
+    ///
+    /// The builtin count includes Rust-registered tools and any Lua plugin
+    /// tools (bundled + user-installed).
     pub async fn tool_counts(&self) -> (usize, usize) {
-        let builtin = crate::default_tool_count();
+        let mut builtin = crate::default_tool_count();
+
+        // Count Lua plugin tools so the welcome screen reflects the real total.
+        if self.plugins_enabled() {
+            let config = self.lua_runtime_config("__tool_count__", &DeliveryPlatform::Cli);
+            if let Ok(runtime) = LuaRuntime::builder().with_config(config).build() {
+                builtin += runtime.registered_tools().len();
+            }
+        }
+
         let mcp = match self.mcp.as_ref() {
             Some(m) => m.tool_count().await,
             None => 0,
@@ -1876,14 +1888,13 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             app,
             working_dir,
         } => {
-            let (token_id, token_secret) =
-                match crate::sandbox::modal::resolve_credentials() {
-                    Ok(creds) => creds,
-                    Err(e) => {
-                        warn!(error = %e, backend = "modal", "sandbox backend unavailable");
-                        return None;
-                    }
-                };
+            let (token_id, token_secret) = match crate::sandbox::modal::resolve_credentials() {
+                Ok(creds) => creds,
+                Err(e) => {
+                    warn!(error = %e, backend = "modal", "sandbox backend unavailable");
+                    return None;
+                }
+            };
             let sb = match ModalSandbox::new(token_id, token_secret, app.clone()) {
                 Ok(sb) => sb,
                 Err(e) => {

@@ -1183,10 +1183,12 @@ impl ToolHandler for LuaToolHandler {
     }
 }
 
-/// Returns the number of tools in the default registry without constructing
-/// a full `ExecutionContext`.
+/// Returns the number of Rust-registered tools (including `moa_consult`)
+/// without constructing a full `ExecutionContext`.
 pub fn default_tool_count() -> usize {
-    default_registry().definitions().len()
+    // +1 for moa_consult, which is registered in build_default_tool_runtime
+    // rather than in default_registry.
+    default_registry().definitions().len() + 1
 }
 
 #[cfg(test)]
