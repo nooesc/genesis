@@ -569,18 +569,34 @@ impl StatusBarWidget {
                     SHIMMER_HIGHLIGHT,
                     bg,
                 ));
+                spans.push(Span::styled(
+                    " \u{00b7} esc to interrupt",
+                    Style::default().fg(DIM_TEXT).bg(bg),
+                ));
                 spans
             }
 
             StatusState::ToolRunning { tool_name } => {
                 let elapsed = self.format_elapsed();
-                let text = format!(" {} {}", tool_name, elapsed);
-                shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg)
+                let text = format!(" {} {elapsed}", tool_name);
+                let mut spans =
+                    shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg);
+                spans.push(Span::styled(
+                    " \u{00b7} esc to interrupt",
+                    Style::default().fg(DIM_TEXT).bg(bg),
+                ));
+                spans
             }
 
             StatusState::Streaming { tokens } => {
                 let text = format!(" streaming {} tok ", tokens);
-                shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg)
+                let mut spans =
+                    shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg);
+                spans.push(Span::styled(
+                    " \u{00b7} esc to interrupt",
+                    Style::default().fg(DIM_TEXT).bg(bg),
+                ));
+                spans
             }
         }
     }

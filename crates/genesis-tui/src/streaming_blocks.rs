@@ -22,6 +22,10 @@ pub struct StreamingBlockCollector {
     fence_marker: Option<String>,
     /// Number of lines accumulated in the current block.
     line_count: usize,
+    /// Whether the current block contains list items or blockquotes.
+    /// When true, the 20-line auto-split is disabled to avoid breaking
+    /// mid-structure (list items/blockquotes lose their context in new cells).
+    in_structured_block: bool,
     /// Deferred block waiting to be returned on the next `push_line` call.
     /// Used when a single `push_line` would need to emit two blocks (e.g.
     /// a paragraph followed by a heading on the same call).
@@ -42,6 +46,7 @@ impl StreamingBlockCollector {
             in_code_fence: false,
             fence_marker: None,
             line_count: 0,
+            in_structured_block: false,
             pending_emit: None,
         }
     }
@@ -126,13 +131,23 @@ impl StreamingBlockCollector {
             return None;
         }
 
+        // Detect list items and blockquotes — these are "structured" blocks
+        // that should not be split mid-way by the auto-emit threshold.
+        if is_list_item(stripped) || stripped.starts_with('>') {
+            self.in_structured_block = true;
+        }
+
         // Regular text line — accumulate.
         self.buffer.push_str(line);
         self.line_count += 1;
 
         // Auto-emit after accumulating enough lines to keep cells small.
-        // This prevents any single paragraph from growing too large.
-        if self.line_count >= 20 {
+        // Skip this when inside a structured block (list/blockquote) to
+        // avoid splitting mid-structure — the block will emit on the next
+        // blank line or when a different block type starts. Use a higher
+        // safety limit (80 lines) to prevent unbounded growth.
+        let limit = if self.in_structured_block { 80 } else { 20 };
+        if self.line_count >= limit {
             return self.emit();
         }
 
@@ -174,6 +189,7 @@ impl StreamingBlockCollector {
         self.in_code_fence = false;
         self.fence_marker = None;
         self.line_count = 0;
+        self.in_structured_block = false;
         self.pending_emit = None;
     }
 
@@ -183,8 +199,32 @@ impl StreamingBlockCollector {
             return None;
         }
         self.line_count = 0;
+        self.in_structured_block = false;
         Some(std::mem::take(&mut self.buffer))
     }
+}
+
+/// Detect a markdown list item prefix (e.g. `- `, `* `, `+ `, `1. `).
+fn is_list_item(stripped: &str) -> bool {
+    // Unordered: - , * , +  (followed by space)
+    if stripped.len() >= 2 {
+        let first = stripped.as_bytes()[0];
+        if (first == b'-' || first == b'*' || first == b'+') && stripped.as_bytes()[1] == b' ' {
+            return true;
+        }
+    }
+    // Ordered: N. or N) followed by space (e.g. "1. ", "10) ")
+    if let Some(dot_pos) = stripped.find(". ") {
+        if dot_pos <= 9 && stripped[..dot_pos].bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    if let Some(paren_pos) = stripped.find(") ") {
+        if paren_pos <= 9 && stripped[..paren_pos].bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Detect a code fence opening marker (``` or ~~~).
@@ -300,6 +340,7 @@ mod tests {
         c.reset();
         assert!(!c.in_code_fence);
         assert!(c.buffer.is_empty());
+        assert!(!c.in_structured_block);
     }
 
     #[test]
@@ -333,6 +374,85 @@ mod tests {
         let block = c.push_line("~~~\n");
         assert!(block.is_some());
         assert!(block.unwrap().contains("code"));
+    }
+
+    #[test]
+    fn list_items_not_split_at_20_lines() {
+        let mut c = StreamingBlockCollector::new();
+        // Push 25 list items — should NOT auto-emit at 20.
+        for i in 0..25 {
+            assert!(
+                c.push_line(&format!("- item {i}\n")).is_none(),
+                "list should not auto-emit at line {}",
+                i + 1
+            );
+        }
+        // Blank line terminates the list block.
+        let block = c.push_line("\n");
+        assert!(block.is_some(), "list should emit on blank line");
+        let text = block.unwrap();
+        assert!(text.contains("- item 0"), "should contain first item");
+        assert!(text.contains("- item 24"), "should contain last item");
+    }
+
+    #[test]
+    fn blockquote_not_split_at_20_lines() {
+        let mut c = StreamingBlockCollector::new();
+        for i in 0..25 {
+            assert!(
+                c.push_line(&format!("> quote line {i}\n")).is_none(),
+                "blockquote should not auto-emit at line {}",
+                i + 1
+            );
+        }
+        let block = c.push_line("\n");
+        assert!(block.is_some());
+        let text = block.unwrap();
+        assert!(text.contains("> quote line 0"));
+        assert!(text.contains("> quote line 24"));
+    }
+
+    #[test]
+    fn ordered_list_not_split_at_20_lines() {
+        let mut c = StreamingBlockCollector::new();
+        for i in 1..=25 {
+            assert!(
+                c.push_line(&format!("{i}. item\n")).is_none(),
+                "ordered list should not auto-emit at line {i}"
+            );
+        }
+        let block = c.finalize();
+        assert!(block.is_some());
+        let text = block.unwrap();
+        assert!(text.contains("1. item"));
+        assert!(text.contains("25. item"));
+    }
+
+    #[test]
+    fn plain_paragraph_still_splits_at_20_lines() {
+        let mut c = StreamingBlockCollector::new();
+        for i in 0..19 {
+            assert!(
+                c.push_line(&format!("plain line {i}\n")).is_none(),
+                "should not emit before 20 lines"
+            );
+        }
+        let block = c.push_line("plain line 19\n");
+        assert!(block.is_some(), "plain text should auto-emit at 20 lines");
+    }
+
+    #[test]
+    fn structured_block_has_safety_limit() {
+        // Even structured blocks have an 80-line safety limit.
+        let mut c = StreamingBlockCollector::new();
+        for i in 0..79 {
+            assert!(
+                c.push_line(&format!("- item {i}\n")).is_none(),
+                "should not emit before 80 lines for structured block"
+            );
+        }
+        let block = c.push_line("- item 79\n");
+        assert!(block.is_some(), "should emit at 80-line safety limit");
     }
 
     #[test]
