@@ -114,6 +114,11 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // Reset terminal title so it doesn't linger as "Eve | model" after exit.
+        // This runs on ALL exit paths (normal, error, panic) via RAII.
+        use std::io::Write;
+        let _ = write!(std::io::stdout(), "\x1b]2;\x07");
+        let _ = std::io::stdout().flush();
         let _ = terminal::restore();
     }
 }
@@ -264,6 +269,13 @@ pub async fn run_tui(
     // Apply the initial theme to themed widgets.
     app.status_bar.set_theme(&*app.active_theme);
     app.chat.set_theme(&*app.active_theme);
+
+    // Set initial terminal title.
+    set_terminal_title(
+        term.backend_mut(),
+        &format!("Eve | {}", app.status_bar.model),
+    );
+    let _ = term.flush();
 
     // If an initial prompt was provided, skip the welcome screen and submit
     // the prompt as the first user message once the event loop starts.
@@ -638,8 +650,8 @@ pub async fn run_tui(
         }
     }
 
-    // TerminalGuard handles terminal::restore() on drop, covering both
-    // normal exit and early `?` returns.
+    // TerminalGuard handles terminal::restore() + title reset on drop,
+    // covering both normal exit and early `?` returns.
     Ok(())
 }
 
