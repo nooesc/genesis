@@ -1876,13 +1876,15 @@ fn create_sandbox_components(loaded: &LoadedConfig) -> Option<SandboxComponents>
             app,
             working_dir,
         } => {
-            let data_dir = loaded
-                .config
-                .storage
-                .data_dir
-                .to_string_lossy()
-                .into_owned();
-            let sb = match ModalSandbox::new(&data_dir) {
+            let (token_id, token_secret) =
+                match crate::sandbox::modal::resolve_credentials() {
+                    Ok(creds) => creds,
+                    Err(e) => {
+                        warn!(error = %e, backend = "modal", "sandbox backend unavailable");
+                        return None;
+                    }
+                };
+            let sb = match ModalSandbox::new(token_id, token_secret, app.clone()) {
                 Ok(sb) => sb,
                 Err(e) => {
                     warn!(error = %e, backend = "modal", "sandbox backend unavailable");

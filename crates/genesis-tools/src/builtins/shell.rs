@@ -171,22 +171,12 @@ pub fn build_command(
             cmd.arg(image).arg("sh").arg("-c").arg(command);
             cmd
         }
-        Some(crate::TerminalBackend::Modal {
-            app, gpu, image, ..
-        }) => {
-            // Modal cloud sandbox: `modal shell [--app ...] [--gpu ...] [--image ...] --cmd 'command'`
-            let mut cmd = Command::new("modal");
-            cmd.arg("shell");
-            if let Some(a) = app {
-                cmd.arg("--app").arg(a);
-            }
-            if let Some(g) = gpu {
-                cmd.arg("--gpu").arg(g);
-            }
-            if let Some(img) = image {
-                cmd.arg("--image").arg(img);
-            }
-            cmd.arg("--cmd").arg(command);
+        Some(crate::TerminalBackend::Modal { .. }) => {
+            // Modal uses lifecycle-managed sandbox execution, not CLI commands.
+            // If we reach here, the sandbox_manager failed to initialize (e.g., missing
+            // credentials). Return a command that fails gracefully with an explanation.
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg("echo 'Error: Modal sandbox backend is not available. Check MODAL_TOKEN_ID/MODAL_TOKEN_SECRET credentials.' >&2; exit 1");
             cmd
         }
         Some(crate::TerminalBackend::Daytona {
@@ -710,53 +700,6 @@ mod tests {
         assert!(!args.contains(&std::ffi::OsStr::new("--bind")));
         assert!(!args.contains(&std::ffi::OsStr::new("--pwd")));
         assert!(args.contains(&std::ffi::OsStr::new("pytorch.sif")));
-    }
-
-    #[test]
-    fn build_command_modal_backend() {
-        let backend = Some(crate::TerminalBackend::Modal {
-            app: Some("my-sandbox".to_owned()),
-            gpu: Some("T4".to_owned()),
-            image: Some("python:3.11".to_owned()),
-            cpu: 1.0,
-            memory_mb: 5120,
-            disk_mb: 51200,
-            persistent: true,
-            working_dir: None,
-        });
-        let cmd = build_command("python train.py", None, &backend);
-        let prog = cmd.get_program();
-        assert_eq!(prog, "modal");
-        let args: Vec<_> = cmd.get_args().collect();
-        assert!(args.contains(&std::ffi::OsStr::new("shell")));
-        assert!(args.contains(&std::ffi::OsStr::new("--app")));
-        assert!(args.contains(&std::ffi::OsStr::new("my-sandbox")));
-        assert!(args.contains(&std::ffi::OsStr::new("--gpu")));
-        assert!(args.contains(&std::ffi::OsStr::new("T4")));
-        assert!(args.contains(&std::ffi::OsStr::new("--image")));
-        assert!(args.contains(&std::ffi::OsStr::new("python:3.11")));
-        assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
-        assert!(args.contains(&std::ffi::OsStr::new("python train.py")));
-    }
-
-    #[test]
-    fn build_command_modal_minimal() {
-        let backend = Some(crate::TerminalBackend::Modal {
-            app: None,
-            gpu: None,
-            image: None,
-            cpu: 1.0,
-            memory_mb: 5120,
-            disk_mb: 51200,
-            persistent: true,
-            working_dir: None,
-        });
-        let cmd = build_command("echo hi", None, &backend);
-        let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd.get_program(), "modal");
-        assert!(!args.contains(&std::ffi::OsStr::new("--app")));
-        assert!(!args.contains(&std::ffi::OsStr::new("--gpu")));
-        assert!(args.contains(&std::ffi::OsStr::new("--cmd")));
     }
 
     #[test]
