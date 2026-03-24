@@ -8,7 +8,6 @@ pub mod find_tools;
 pub mod fs;
 pub mod git;
 pub mod glob;
-pub mod homeassistant;
 pub mod image_gen;
 pub mod memory;
 pub mod mixture;
@@ -27,11 +26,9 @@ pub mod subagent;
 pub mod trajectory;
 pub mod transcribe;
 pub mod tree;
-pub mod tts;
 pub mod user_model;
 pub mod vision;
 pub mod web;
-pub mod web_search;
 
 /// Combine stdout and stderr from a command execution into a single string.
 /// If both are empty, returns a message with the exit code.
