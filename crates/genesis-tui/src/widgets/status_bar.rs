@@ -570,7 +570,7 @@ impl StatusBarWidget {
                     bg,
                 ));
                 spans.push(Span::styled(
-                    " \u{00b7} esc to interrupt",
+                    " \u{00b7} ctrl+c to interrupt",
                     Style::default().fg(DIM_TEXT).bg(bg),
                 ));
                 spans
@@ -582,7 +582,7 @@ impl StatusBarWidget {
                 let mut spans =
                     shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg);
                 spans.push(Span::styled(
-                    " \u{00b7} esc to interrupt",
+                    " \u{00b7} ctrl+c to interrupt",
                     Style::default().fg(DIM_TEXT).bg(bg),
                 ));
                 spans
@@ -593,7 +593,7 @@ impl StatusBarWidget {
                 let mut spans =
                     shimmer_spans(&text, self.shimmer_phase, DIM_TEXT, SHIMMER_HIGHLIGHT, bg);
                 spans.push(Span::styled(
-                    " \u{00b7} esc to interrupt",
+                    " \u{00b7} ctrl+c to interrupt",
                     Style::default().fg(DIM_TEXT).bg(bg),
                 ));
                 spans

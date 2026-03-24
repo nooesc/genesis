@@ -109,7 +109,14 @@ impl AgentCell {
             }
         }
         let usable_width = width.max(1);
-        let h = wrapped_row_count(&self.to_scrollback_lines(usable_width), usable_width).max(1);
+        let lines = self.to_scrollback_lines(usable_width);
+        // Empty continuation cells (no visible lines) should occupy 0 rows,
+        // but cells with the eve> prefix always occupy at least 1 row.
+        let h = if lines.is_empty() {
+            0
+        } else {
+            wrapped_row_count(&lines, usable_width).max(1)
+        };
         self.cached_height.set(Some((width, h)));
         h
     }

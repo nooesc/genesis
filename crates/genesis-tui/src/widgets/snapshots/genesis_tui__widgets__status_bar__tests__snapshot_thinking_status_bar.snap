@@ -2,4 +2,4 @@
 source: crates/genesis-tui/src/widgets/status_bar.rs
 expression: spans_text
 ---
-◆ [Act] gpt-4o · 42%   (~'.')~ thinking  · esc to interrupt  ⎇ main
+◆ [Act] gpt-4o · 42%   (~'.')~ thinking  · ctrl+c to interrupt  ⎇ main

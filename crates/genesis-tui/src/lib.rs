@@ -239,6 +239,7 @@ pub async fn run_tui(
         status_bar,
         overlay: None,
         viewport_height: viewport_area.height,
+        message_area_height: viewport_area.height.saturating_sub(5), // status + input + separator
         command_popup: crate::widgets::command_popup::CommandPopup::new(),
         clarification: crate::widgets::clarification::ClarificationWidget::new(),
         clear_after_welcome: false,
@@ -678,7 +679,7 @@ fn render_frame(
         app.effects.on_resize();
 
         // Reclamp scroll offset for the new width.
-        app.chat.reclamp_scroll(area.width, area.height);
+        app.chat.reclamp_scroll(area.width, app.message_area_height);
 
         // Rebuild the transcript overlay if open.
         if let Some(app::ActiveOverlay::Transcript(_)) = &app.overlay {
@@ -793,6 +794,9 @@ fn render_frame(
                     width: area.width,
                     height: chat_area_height,
                 };
+
+                // Store computed message area height for scroll clamping.
+                app.message_area_height = message_area_height;
 
                 if message_area_height > 0 {
                     app.chat.render_messages(message_area, buf);
