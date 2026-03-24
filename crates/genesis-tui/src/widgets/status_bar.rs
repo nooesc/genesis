@@ -418,7 +418,9 @@ impl StatusBarWidget {
                 width: HEARTBEAT_WIDTH as u16,
                 height: 1,
             };
-            BrailleCanvas::new(&self.heartbeat).render(hb_area, buf);
+            BrailleCanvas::new(&self.heartbeat)
+                .bg(bg)
+                .render(hb_area, buf);
         }
 
         // Draw sparkline (if we have data).
