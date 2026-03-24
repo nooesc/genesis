@@ -1852,7 +1852,6 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "genesis-config",
- "image",
  "owo-colors",
  "syntect",
  "termimad",

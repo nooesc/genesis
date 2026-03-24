@@ -530,8 +530,8 @@ pub async fn run_tui(
                         // Approval countdown updates once per second.
                         std::time::Duration::from_secs(1)
                     } else {
-                        // Idle braille patterns — 200ms (~5fps) is plenty for slow curves
-                        std::time::Duration::from_millis(200)
+                        // Braille animations (matrix rain on welcome screen).
+                        std::time::Duration::from_millis(50) // ~20fps
                     };
                     app.frame_requester.schedule_frame_in(interval);
                 }
@@ -630,12 +630,7 @@ fn render_frame(
             if !app.welcome.boot_triggered() {
                 app.welcome.mark_boot_triggered();
                 let areas = app.welcome.last_areas();
-                app.effects.start_boot_sequence(
-                    areas.title,
-                    areas.portrait,
-                    areas.status,
-                    areas.full,
-                );
+                app.effects.start_boot_sequence(areas.title, areas.status);
             }
         }
         AppScreen::Chat => {

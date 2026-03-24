@@ -25,6 +25,29 @@ const EVE_LAVENDER: Color = crate::history::rgb(genesis_ui::colors::EVE_LAVENDER
 /// Dim grey for flatline / inactive (slightly dimmer than UI_DIM).
 const DIM_GREY: Color = Color::Rgb(98, 98, 98);
 
+// ── Deterministic RNG ───────────────────────────────────────────────────────
+
+/// Deterministic LCG-based pseudo-random float generator.
+/// Returns values in [0.0, 1.0).
+fn lcg_rng(seed: u64) -> impl FnMut() -> f64 {
+    let mut s = seed;
+    move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((s >> 33) as f64) / (u32::MAX as f64)
+    }
+}
+
+// ── Rain Column ─────────────────────────────────────────────────────────────
+
+/// State for a single falling rain column.
+#[derive(Debug, Clone)]
+pub struct RainColumn {
+    pub y_head: f64,
+    pub speed: f64,
+    pub length: f64,
+    pub brightness: f64,
+}
+
 // ── Pattern ─────────────────────────────────────────────────────────────────
 
 /// An animatable pattern that can be rendered on a braille canvas.
@@ -40,6 +63,10 @@ pub enum Pattern {
     Lissajous { t: f64, a: f64, b: f64, delta: f64 },
     /// A static horizontal line at mid-height.
     Flatline,
+    /// Matrix-style falling rain columns with varying speeds and offsets.
+    MatrixRain {
+        columns: Vec<RainColumn>,
+    },
 }
 
 impl Pattern {
@@ -78,18 +105,52 @@ impl Pattern {
                 }
             }
             Pattern::Flatline => {}
+            Pattern::MatrixRain { columns } => {
+                for col in columns.iter_mut() {
+                    col.y_head += secs * col.speed;
+                    if col.y_head > 1.8 {
+                        col.y_head -= 2.0;
+                    }
+                }
+            }
         }
+    }
+
+    /// Create a dense two-layer matrix rain pattern.
+    ///
+    /// Background layer: many slow, dim columns.
+    /// Foreground layer: fewer fast, bright columns with long trails.
+    pub fn matrix_rain(density: usize) -> Self {
+        let mut next = lcg_rng(7);
+        let mut columns = Vec::with_capacity(density);
+
+        // Background layer — slow, dim, many columns
+        let bg_count = density * 2 / 3;
+        for _ in 0..bg_count {
+            columns.push(RainColumn {
+                y_head: next() * 2.2 - 0.6,
+                speed: 0.10 + next() * 0.15,
+                length: 0.15 + next() * 0.30,
+                brightness: 0.15 + next() * 0.25,
+            });
+        }
+
+        // Foreground layer — fast, bright, long trails
+        for _ in 0..(density - bg_count) {
+            columns.push(RainColumn {
+                y_head: next() * 2.2 - 0.6,
+                speed: 0.25 + next() * 0.40,
+                length: 0.30 + next() * 0.50,
+                brightness: 0.6 + next() * 0.4,
+            });
+        }
+
+        Pattern::MatrixRain { columns }
     }
 
     /// Create a default set of particles for the welcome screen.
     pub fn default_particles(count: usize) -> Self {
-        // Deterministic "random" using a simple linear congruential generator.
-        let mut seed: u64 = 42;
-        let mut next = || -> f64 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((seed >> 33) as f64) / (u32::MAX as f64)
-        };
-
+        let mut next = lcg_rng(42);
         let points = (0..count)
             .map(|_| {
                 let x = next();
@@ -139,6 +200,9 @@ impl<'a> BrailleCanvas<'a> {
             }
             Pattern::Flatline => {
                 Self::render_flatline(w, h, area, buf);
+            }
+            Pattern::MatrixRain { columns, .. } => {
+                Self::render_matrix_rain(columns, area, buf);
             }
         }
     }
@@ -220,6 +284,106 @@ impl<'a> BrailleCanvas<'a> {
                 });
             });
         Widget::render(canvas, area, buf);
+    }
+
+    /// Direct-to-buffer matrix rain with full braille glyphs.
+    ///
+    /// Columns are evenly distributed across the width, so at typical densities
+    /// (80 columns on a 120-cell terminal) they never overlap — no merge needed.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn render_matrix_rain(columns: &[RainColumn], area: Rect, buf: &mut Buffer) {
+        const BRIGHT_HEAD: Color = Color::Rgb(210, 200, 235);
+        const BRIGHT_TRAIL: Color = Color::Rgb(150, 140, 185);
+        const MID_TRAIL: Color = Color::Rgb(100, 92, 130);
+        const DIM_TRAIL: Color = Color::Rgb(55, 50, 70);
+
+        const DENSE_GLYPHS: [u8; 16] = [
+            0xFF, 0xF7, 0x7F, 0xBF, 0xFE, 0xDB, 0xED, 0xBE,
+            0x77, 0xEE, 0xD7, 0x7D, 0xBB, 0xEB, 0xF5, 0xAF,
+        ];
+        const MID_GLYPHS: [u8; 16] = [
+            0x49, 0x92, 0x24, 0x6C, 0x36, 0x5A, 0xA5, 0xC3,
+            0x1E, 0x78, 0x4B, 0xD2, 0x69, 0x96, 0x33, 0xCC,
+        ];
+        const SPARSE_GLYPHS: [u8; 16] = [
+            0x01, 0x08, 0x02, 0x10, 0x04, 0x20, 0x40, 0x80,
+            0x09, 0x12, 0x24, 0x48, 0x03, 0x18, 0x06, 0x30,
+        ];
+
+        let area_w = area.width;
+        let area_h = area.height;
+        if area_w == 0 || area_h == 0 {
+            return;
+        }
+
+        // Hoist loop-invariant conversions.
+        let num_cols_f = columns.len().max(1) as f64;
+        let area_w_f = f64::from(area_w);
+        let area_h_f = f64::from(area_h);
+        let area_h_i = area_h as i32;
+
+        fn glyph_hash(col: u16, row: u16, salt: u16) -> usize {
+            let v = (col as u32)
+                .wrapping_mul(2654435761)
+                .wrapping_add(row as u32)
+                .wrapping_mul(2246822519)
+                .wrapping_add(salt as u32);
+            (v >> 16) as usize
+        }
+
+        for (i, col) in columns.iter().enumerate() {
+            let cell_col = ((i as f64 + 0.5) / num_cols_f * area_w_f) as u16;
+            if cell_col >= area_w {
+                continue;
+            }
+
+            let trail_cells = (col.length * area_h_f) as u16;
+            if trail_cells == 0 {
+                continue;
+            }
+
+            let head_row = (col.y_head * area_h_f) as i32;
+            let trail_recip = 1.0 / f64::from(trail_cells);
+            let salt = i as u16;
+
+            for d in 0..trail_cells {
+                let row = head_row - d as i32;
+                if row < 0 || row >= area_h_i {
+                    continue;
+                }
+                let row = row as u16;
+
+                let frac = f64::from(d) * trail_recip;
+                let h = glyph_hash(cell_col, row, salt);
+
+                let (glyph_bits, color) = if d == 0 && col.brightness > 0.5 {
+                    (DENSE_GLYPHS[h & 0xF], BRIGHT_HEAD)
+                } else if frac < 0.2 {
+                    (DENSE_GLYPHS[h & 0xF], BRIGHT_TRAIL)
+                } else if frac < 0.5 {
+                    (MID_GLYPHS[h & 0xF], MID_TRAIL)
+                } else if frac < 0.8 {
+                    (SPARSE_GLYPHS[h & 0xF], DIM_TRAIL)
+                } else {
+                    if h % 3 == 0 {
+                        continue;
+                    }
+                    (SPARSE_GLYPHS[h & 0xF], DIM_TRAIL)
+                };
+
+                if glyph_bits == 0 {
+                    continue;
+                }
+
+                let x = area.x + cell_col;
+                let y = area.y + row;
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let ch = char::from_u32(0x2800 + u32::from(glyph_bits)).unwrap_or(' ');
+                    cell.set_char(ch);
+                    cell.set_fg(color);
+                }
+            }
+        }
     }
 
     fn render_flatline(w: f64, h: f64, area: Rect, buf: &mut Buffer) {
