@@ -347,6 +347,8 @@ impl App {
                 "/exit" | "/quit" => self.should_exit = true,
                 "/clear" => {
                     self.chat = ChatWidget::new();
+                    self.chat.set_theme(&*self.active_theme);
+                    let _ = self.app_tx.send(AppEvent::ClearScreen);
                     self.frame_requester.schedule_frame();
                 }
                 "/help" => {
@@ -423,7 +425,8 @@ impl App {
             }
             AppEvent::ClearScreen => {
                 // Actual terminal clear is handled in lib.rs event loop.
-                // App state is already reset by the Ctrl+L / /clear handler.
+                // App state (ChatWidget) is already reset by the Ctrl+L or
+                // /clear handler before this event is sent.
                 self.frame_requester.schedule_frame();
             }
         }
