@@ -5,6 +5,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::easy::HighlightLines;
+
+use super::markdown::{get_syntax_set, get_theme};
 
 // ── Diff colors ─────────────────────────────────────────────────────────────
 
@@ -74,41 +77,96 @@ pub fn diff_to_lines(text: &str) -> Vec<Line<'static>> {
     diff_to_lines_themed(text, &DiffColors::default())
 }
 
+/// Maximum total line count before syntax highlighting is skipped (performance guard).
+const MAX_HIGHLIGHT_LINES: usize = 10_000;
+
 /// Parse a unified diff string into styled Lines with theme-derived colors.
+///
+/// Content lines (additions, deletions, context) receive per-token syntax
+/// highlighting via syntect when the file extension is recognized. The diff
+/// background tint (add_bg/del_bg) is layered on top of the syntax colors.
 pub fn diff_to_lines_themed(text: &str, colors: &DiffColors) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut old_line: u32 = 0;
     let mut new_line: u32 = 0;
 
+    // Detect file extension for syntax highlighting.
+    let total_lines = text.lines().count();
+    let do_highlight = total_lines <= MAX_HIGHLIGHT_LINES;
+    let extension = if do_highlight {
+        detect_extension(text)
+    } else {
+        None
+    };
+
+    let ss = get_syntax_set();
+    let syntax = extension
+        .and_then(|ext| ss.find_syntax_by_extension(ext))
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let theme = get_theme();
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
     for raw_line in text.lines() {
         if raw_line.starts_with("diff ") {
-            // File diff header: "diff --git a/file b/file"
             lines.push(diff_header_line(raw_line, colors));
+            // Always reset highlighter on file boundaries to avoid
+            // carrying parser state (e.g. mid-comment) into the next file.
+            if do_highlight {
+                let ext = extract_extension_from_diff_header(raw_line);
+                let new_syntax = ext
+                    .and_then(|e| ss.find_syntax_by_extension(e))
+                    .unwrap_or_else(|| ss.find_syntax_plain_text());
+                highlighter = HighlightLines::new(new_syntax, theme);
+            }
         } else if raw_line.starts_with("--- ") || raw_line.starts_with("+++ ") {
-            // File path headers
             lines.push(file_header_line(raw_line, colors));
         } else if raw_line.starts_with("@@ ") {
-            // Hunk header: "@@ -n,m +n,m @@ optional context"
             if let Some((old_start, new_start)) = parse_hunk_header(raw_line) {
                 old_line = old_start;
                 new_line = new_start;
             }
             lines.push(hunk_header_line(raw_line, colors));
         } else if let Some(content) = raw_line.strip_prefix('+') {
-            // Addition
-            lines.push(addition_line(new_line, content, colors));
+            lines.push(highlighted_content_line(
+                if do_highlight {
+                    Some(&mut highlighter)
+                } else {
+                    None
+                },
+                ss,
+                content,
+                ContentKind::Addition(new_line),
+                colors,
+            ));
             new_line += 1;
         } else if let Some(content) = raw_line.strip_prefix('-') {
-            // Deletion
-            lines.push(deletion_line(old_line, content, colors));
+            lines.push(highlighted_content_line(
+                if do_highlight {
+                    Some(&mut highlighter)
+                } else {
+                    None
+                },
+                ss,
+                content,
+                ContentKind::Deletion(old_line),
+                colors,
+            ));
             old_line += 1;
         } else if let Some(content) = raw_line.strip_prefix(' ') {
-            // Context
-            lines.push(context_line(old_line, new_line, content, colors));
+            lines.push(highlighted_content_line(
+                if do_highlight {
+                    Some(&mut highlighter)
+                } else {
+                    None
+                },
+                ss,
+                content,
+                ContentKind::Context(old_line, new_line),
+                colors,
+            ));
             old_line += 1;
             new_line += 1;
         } else {
-            // Other lines (e.g. "\ No newline at end of file", index, mode)
             lines.push(meta_line(raw_line, colors));
         }
     }
@@ -151,47 +209,131 @@ fn hunk_header_line(raw: &str, colors: &DiffColors) -> Line<'static> {
     ))
 }
 
-fn addition_line(line_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
-    let gutter = format!("    {:>4} ", line_num);
-    Line::from(vec![
-        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
-        Span::styled(
+/// What kind of content line this is (for gutter + background styling).
+#[derive(Copy, Clone)]
+enum ContentKind {
+    Addition(u32),
+    Deletion(u32),
+    Context(u32, u32),
+}
+
+/// Build a syntax-highlighted content line with diff background tinting.
+///
+/// When `highlighter` is `None`, syntax highlighting is skipped (used for
+/// oversized diffs where syntect would be too slow).
+fn highlighted_content_line(
+    highlighter: Option<&mut HighlightLines>,
+    ss: &syntect::parsing::SyntaxSet,
+    content: &str,
+    kind: ContentKind,
+    colors: &DiffColors,
+) -> Line<'static> {
+    let (gutter, sign, sign_fg, bg) = match kind {
+        ContentKind::Addition(n) => (
+            format!("    {:>4} ", n),
             "+",
-            Style::default()
-                .fg(colors.add_fg)
-                .add_modifier(Modifier::BOLD),
+            colors.add_fg,
+            Some(colors.add_bg),
         ),
-        Span::styled(
-            content.to_owned(),
-            Style::default().fg(colors.add_fg).bg(colors.add_bg),
-        ),
-    ])
-}
-
-fn deletion_line(line_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
-    let gutter = format!("{:<4}     ", line_num);
-    Line::from(vec![
-        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
-        Span::styled(
+        ContentKind::Deletion(n) => (
+            format!("{:<4}     ", n),
             "-",
-            Style::default()
-                .fg(colors.del_fg)
-                .add_modifier(Modifier::BOLD),
+            colors.del_fg,
+            Some(colors.del_bg),
         ),
+        ContentKind::Context(old, new) => (
+            format!("{:<4}{:>4} ", old, new),
+            " ",
+            colors.context_fg,
+            None,
+        ),
+    };
+
+    let mut spans = vec![
+        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
         Span::styled(
-            content.to_owned(),
-            Style::default().fg(colors.del_fg).bg(colors.del_bg),
+            sign.to_string(),
+            Style::default().fg(sign_fg).add_modifier(if bg.is_some() {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ),
-    ])
+    ];
+
+    // Feed the content through syntect for per-token highlighting.
+    // Append a newline so syntect advances its parser state correctly.
+    let line_with_nl = format!("{content}\n");
+    let ranges = match highlighter {
+        Some(hl) => hl.highlight_line(&line_with_nl, ss).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    if ranges.is_empty() {
+        // Fallback: no highlighting available (or disabled), use flat diff color.
+        let fg = match kind {
+            ContentKind::Addition(_) => colors.add_fg,
+            ContentKind::Deletion(_) => colors.del_fg,
+            ContentKind::Context(_, _) => colors.context_fg,
+        };
+        let mut style = Style::default().fg(fg);
+        if let Some(b) = bg {
+            style = style.bg(b);
+        }
+        spans.push(Span::styled(content.to_owned(), style));
+    } else {
+        for (hl_style, text) in &ranges {
+            let trimmed = text.trim_end_matches('\n');
+            if trimmed.is_empty() {
+                continue;
+            }
+            let fg = Color::Rgb(
+                hl_style.foreground.r,
+                hl_style.foreground.g,
+                hl_style.foreground.b,
+            );
+            let mut style = Style::default().fg(fg);
+            if let Some(b) = bg {
+                style = style.bg(b);
+            }
+            spans.push(Span::styled(trimmed.to_owned(), style));
+        }
+    }
+
+    Line::from(spans)
 }
 
-fn context_line(old_num: u32, new_num: u32, content: &str, colors: &DiffColors) -> Line<'static> {
-    let gutter = format!("{:<4}{:>4} ", old_num, new_num);
-    Line::from(vec![
-        Span::styled(gutter, Style::default().fg(colors.gutter_fg)),
-        Span::styled(" ", Style::default().fg(colors.context_fg)),
-        Span::styled(content.to_owned(), Style::default().fg(colors.context_fg)),
-    ])
+/// Detect the file extension from the first `diff --git` or `--- a/` line.
+fn detect_extension(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        if let Some(ext) = extract_extension_from_diff_header(line) {
+            return Some(ext);
+        }
+        if line.starts_with("--- a/") || line.starts_with("+++ b/") {
+            return line
+                .rsplit('.')
+                .next()
+                .filter(|e| e.len() <= 10 && !e.contains('/'));
+        }
+        // Stop looking after the first hunk.
+        if line.starts_with("@@ ") {
+            break;
+        }
+    }
+    None
+}
+
+/// Extract file extension from a "diff --git a/path b/path" line.
+fn extract_extension_from_diff_header(line: &str) -> Option<&str> {
+    if !line.starts_with("diff ") {
+        return None;
+    }
+    // "diff --git a/foo/bar.rs b/foo/bar.rs" → "rs"
+    let path = line.rsplit(' ').next()?;
+    let path = path.strip_prefix("b/")?;
+    path.rsplit('.')
+        .next()
+        .filter(|e| e.len() <= 10 && !e.contains('/'))
 }
 
 fn meta_line(raw: &str, colors: &DiffColors) -> Line<'static> {
@@ -370,5 +512,66 @@ index abc1234..def5678 100644
     fn empty_input() {
         assert_eq!(diff_to_lines("").len(), 0);
         assert!(!is_unified_diff(""));
+    }
+
+    #[test]
+    fn detect_extension_from_diff_header() {
+        assert_eq!(
+            extract_extension_from_diff_header("diff --git a/src/main.rs b/src/main.rs"),
+            Some("rs")
+        );
+        assert_eq!(
+            extract_extension_from_diff_header("diff --git a/foo.py b/foo.py"),
+            Some("py")
+        );
+        assert_eq!(extract_extension_from_diff_header("not a diff line"), None);
+    }
+
+    #[test]
+    fn detect_extension_from_full_diff() {
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs";
+        assert_eq!(detect_extension(diff), Some("rs"));
+    }
+
+    #[test]
+    fn syntax_highlighted_rust_diff_has_multiple_spans() {
+        // A Rust diff should produce multiple colored spans per line
+        // (keywords, types, etc. get different colors).
+        let diff = "\
+diff --git a/main.rs b/main.rs
+--- a/main.rs
++++ b/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    let x = 42;
++    let x: u32 = 42;
+ }";
+        let lines = diff_to_lines(diff);
+        // Find the addition line (contains "let x: u32")
+        let add_line = lines.iter().find(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content.contains("u32") || s.content.contains("let"))
+        });
+        assert!(
+            add_line.is_some(),
+            "should find the addition line with Rust code"
+        );
+        // With syntax highlighting, the addition line should have more than
+        // just gutter + sign + flat content (3 spans). Keywords like "let"
+        // and types like "u32" should get separate spans.
+        let span_count = add_line.unwrap().spans.len();
+        assert!(
+            span_count > 3,
+            "syntax-highlighted line should have >3 spans, got {span_count}"
+        );
+    }
+
+    #[test]
+    fn plain_text_diff_still_renders() {
+        // A diff without a recognizable extension should still render correctly.
+        let diff = "@@ -1 +1 @@\n-old line\n+new line";
+        let lines = diff_to_lines(diff);
+        assert_eq!(lines.len(), 3);
     }
 }
