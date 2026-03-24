@@ -75,6 +75,42 @@ pub(crate) fn wrapped_row_count(lines: &[Line<'_>], wrap_width: u16) -> u16 {
     rows.try_into().unwrap_or(u16::MAX)
 }
 
+/// Like [`wrapped_row_count`] but returns `usize` to avoid saturation at
+/// `u16::MAX`. Needed by the transcript overlay where total line count can
+/// exceed 65 535 in long conversations.
+pub(crate) fn wrapped_row_count_usize(lines: &[Line<'_>], wrap_width: u16) -> usize {
+    let max_w = wrap_width.max(1) as usize;
+    let mut rows: usize = 0;
+
+    for line in lines {
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        if text.is_empty() {
+            rows += 1;
+            continue;
+        }
+        let mut col: usize = 0;
+        let mut line_rows: usize = 1;
+        for word in text.split(char::is_whitespace) {
+            let w = word.width();
+            if col == 0 {
+                col = w;
+            } else if col + 1 + w <= max_w {
+                col += 1 + w;
+            } else {
+                line_rows += 1;
+                col = w;
+            }
+            if w > max_w {
+                let extra = w.saturating_sub(1) / max_w;
+                line_rows += extra;
+                col = w - extra * max_w;
+            }
+        }
+        rows += line_rows;
+    }
+    rows
+}
+
 /// Render text with a coloured prefix on the first line and indent on
 /// continuation lines after word-wrapping.
 ///

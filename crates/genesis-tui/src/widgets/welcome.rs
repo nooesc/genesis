@@ -20,8 +20,6 @@ use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 /// Minimum width for the bordered layout (below this: text-only).
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
-
-
 /// Session info displayed on the welcome screen.
 pub struct WelcomeInfo {
     pub model: String,
@@ -183,7 +181,10 @@ impl WelcomeWidget {
         let dim = rgb(genesis_ui::colors::UI_DIM);
         let line = Line::from(vec![
             Span::styled("genesis", Style::default().fg(accent)),
-            Span::styled(format!(" v{} ", self.info.version), Style::default().fg(dim)),
+            Span::styled(
+                format!(" v{} ", self.info.version),
+                Style::default().fg(dim),
+            ),
             Span::styled(">_ Eve", Style::default().fg(accent)),
         ]);
 
@@ -212,10 +213,7 @@ impl WelcomeWidget {
 
         let framework_line = Line::from(vec![
             Span::styled("genesis", Style::default().fg(accent)),
-            Span::styled(
-                format!(" v{}", self.info.version),
-                Style::default().fg(dim),
-            ),
+            Span::styled(format!(" v{}", self.info.version), Style::default().fg(dim)),
         ]);
         let agent_line = Line::from(vec![
             Span::styled(">_ ", Style::default().fg(dim)),
@@ -626,7 +624,9 @@ mod tests {
         let rows = buffer_rows(&buf, area.width);
         // Text-only mode should have no half-block art.
         assert!(
-            !rows.iter().any(|row| row.contains('▀') || row.contains('▄')),
+            !rows
+                .iter()
+                .any(|row| row.contains('▀') || row.contains('▄')),
             "text-only mode should not render half-block art"
         );
         assert!(rows.iter().any(|row| row.contains("genesis")));
@@ -745,12 +745,8 @@ mod tests {
         let lines = widget.info_lines();
         let rendered_lines: Vec<String> = lines.iter().map(line_text).collect();
         assert!(rendered_lines.iter().any(|line| line.contains("1.2.3")));
-        assert!(rendered_lines
-            .iter()
-            .any(|line| line.contains("claude-4")));
+        assert!(rendered_lines.iter().any(|line| line.contains("claude-4")));
     }
-
-
 
     #[test]
     fn wide_layout_renders_big_text_title() {

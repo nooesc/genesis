@@ -78,7 +78,13 @@ pub struct LuaRuntime {
 impl std::fmt::Debug for LuaRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LuaRuntime")
-            .field("plugin_names", &*self.plugin_names.lock().expect("plugin_names mutex should not be poisoned"))
+            .field(
+                "plugin_names",
+                &*self
+                    .plugin_names
+                    .lock()
+                    .expect("plugin_names mutex should not be poisoned"),
+            )
             .field("logs", &self.logs())
             .field("plugin_errors", &self.plugin_errors)
             .finish()
@@ -684,10 +690,7 @@ impl LuaRuntime {
     }
 
     /// Fire `OnSessionResume`. Fires at most once per runtime lifetime.
-    pub fn run_on_session_resume(
-        &self,
-        session_id: &str,
-    ) -> Result<(), LuaRuntimeError> {
+    pub fn run_on_session_resume(&self, session_id: &str) -> Result<(), LuaRuntimeError> {
         if self.session_hooks_fired.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
@@ -757,11 +760,13 @@ impl LuaRuntime {
                 continue;
             }
             // Skip if a user plugin already registered tools with the same plugin name.
-            if self.plugin_names
+            if self
+                .plugin_names
                 .lock()
                 .expect("plugin_names mutex should not be poisoned")
                 .iter()
-                .any(|n| n == bundled.name) {
+                .any(|n| n == bundled.name)
+            {
                 continue;
             }
 
