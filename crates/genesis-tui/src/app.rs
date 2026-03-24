@@ -18,6 +18,17 @@ use crate::widgets::welcome::WelcomeWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+/// Duration within which a second quit press is required.
+const QUIT_DOUBLE_PRESS_MS: u64 = 750;
+
+/// Tracks which context usage thresholds have already fired a warning.
+#[derive(Debug, Default)]
+pub(crate) struct RateLimitWarnings {
+    warned_75: bool,
+    warned_90: bool,
+    warned_95: bool,
+}
+
 /// Which top-level screen is currently displayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
@@ -101,6 +112,11 @@ pub struct App {
     pub agent_mode: AgentMode,
     /// Active color theme for the TUI.
     pub active_theme: Box<dyn crate::theme::Theme>,
+    /// Last quit shortcut press — requires double-press within 750ms of the
+    /// same key to actually exit. Prevents accidental exits from Ctrl+D.
+    pub(crate) last_quit_press: Option<std::time::Instant>,
+    /// Which context usage thresholds have already triggered a warning.
+    pub(crate) rate_limit_warned: RateLimitWarnings,
 }
 
 impl App {
@@ -195,6 +211,9 @@ impl App {
                 let _ = self
                     .app_tx
                     .send(AppEvent::UpdateStatus(StatusState::Thinking));
+                // Update terminal title to show working state.
+                let title = format!("Eve ⠋ Working | {}", self.status_bar.model);
+                let _ = self.app_tx.send(AppEvent::SetTerminalTitle(title));
             }
             AgentEvent::TextDelta(text) => {
                 self.streaming_chars += text.len();
@@ -242,6 +261,8 @@ impl App {
             AgentEvent::TurnComplete {
                 input_tokens,
                 output_tokens,
+                turns_used,
+                tool_calls_made,
                 ..
             } => {
                 self.chat.complete_turn();
@@ -258,7 +279,22 @@ impl App {
                     let pct = ((input_tokens as u128 * 100) / self.context_window_size as u128)
                         .min(100) as u8;
                     self.status_bar.set_context_percent(pct);
+
+                    // Rate limit warnings at progressive thresholds.
+                    self.check_rate_limit_warning(pct);
                 }
+
+                // Desktop notification via OSC 9 when a non-trivial turn completes.
+                if turns_used > 1 || tool_calls_made > 0 {
+                    let _ = self.app_tx.send(AppEvent::Notify(format!(
+                        "Eve finished — {turns_used} turn(s), {tool_calls_made} tool call(s)"
+                    )));
+                }
+
+                // Update terminal title to idle state.
+                let _ = self
+                    .app_tx
+                    .send(AppEvent::SetTerminalTitle(self.idle_title()));
 
                 self.end_turn();
             }
@@ -440,6 +476,20 @@ impl App {
             AppEvent::CopyToClipboard(_) => {
                 // Actual clipboard write is handled in lib.rs event loop
                 // via OSC 52. Nothing to do here on the App side.
+            }
+            AppEvent::Notify(_) => {
+                // Handled in lib.rs via OSC 9.
+            }
+            AppEvent::SetTerminalTitle(_) => {
+                // Handled in lib.rs via OSC 2.
+            }
+            AppEvent::InlineWarning(msg) => {
+                // Insert warning as a system message in the chat.
+                use crate::history::agent_cell::AgentCell;
+                use crate::history::cell::HistoryCell;
+                self.chat
+                    .add_system_warning(HistoryCell::Agent(AgentCell::new(msg)));
+                self.frame_requester.schedule_frame();
             }
         }
     }
@@ -800,7 +850,19 @@ impl App {
 
                 match action {
                     InputAction::Submit(text) => self.submit_text(text),
-                    InputAction::Exit => self.should_exit = true,
+                    InputAction::Exit => {
+                        // Require double-press within 750ms to actually exit.
+                        let now = std::time::Instant::now();
+                        if let Some(last) = self.last_quit_press {
+                            if now.duration_since(last).as_millis() < QUIT_DOUBLE_PRESS_MS as u128 {
+                                self.should_exit = true;
+                            } else {
+                                self.last_quit_press = Some(now);
+                            }
+                        } else {
+                            self.last_quit_press = Some(now);
+                        }
+                    }
                     InputAction::Interrupt => {
                         if self.turn_running {
                             let _ = self.cancel_tx.send(());
@@ -843,6 +905,35 @@ impl App {
             ));
             self.approval_response = Some(req.response_tx);
             return;
+        }
+    }
+
+    /// Build the terminal title for idle state.
+    fn idle_title(&self) -> String {
+        format!("Eve | {}", self.status_bar.model)
+    }
+
+    /// Check context usage and emit warnings at 75%/90%/95% thresholds.
+    fn check_rate_limit_warning(&mut self, pct: u8) {
+        let warn = |threshold: u8| -> String {
+            format!(
+                "⚠ Context usage at {pct}% ({threshold}% threshold) — \
+                 consider starting a new session or using /clear"
+            )
+        };
+
+        if pct >= 95 && !self.rate_limit_warned.warned_95 {
+            self.rate_limit_warned.warned_95 = true;
+            self.rate_limit_warned.warned_90 = true;
+            self.rate_limit_warned.warned_75 = true;
+            let _ = self.app_tx.send(AppEvent::InlineWarning(warn(95)));
+        } else if pct >= 90 && !self.rate_limit_warned.warned_90 {
+            self.rate_limit_warned.warned_90 = true;
+            self.rate_limit_warned.warned_75 = true;
+            let _ = self.app_tx.send(AppEvent::InlineWarning(warn(90)));
+        } else if pct >= 75 && !self.rate_limit_warned.warned_75 {
+            self.rate_limit_warned.warned_75 = true;
+            let _ = self.app_tx.send(AppEvent::InlineWarning(warn(75)));
         }
     }
 
@@ -938,16 +1029,23 @@ mod tests {
             file_completion: FileCompletion::new(),
             agent_mode: AgentMode::default(),
             active_theme: crate::theme::theme_by_name("eve"),
+            last_quit_press: None,
+            rate_limit_warned: Default::default(),
         };
         (app, submission_rx, app_rx, cancel_rx)
     }
 
     #[tokio::test]
-    async fn ctrl_d_sets_should_exit() {
+    async fn ctrl_d_requires_double_press_to_exit() {
         let (mut app, _sub_rx, _app_rx, _cancel_rx) = make_app();
         let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        // First press should NOT exit — just record the timestamp.
         app.handle_tui_event(TuiEvent::Key(key));
-        assert!(app.should_exit);
+        assert!(!app.should_exit, "first Ctrl+D should not exit");
+        assert!(app.last_quit_press.is_some());
+        // Second press within 750ms should exit.
+        app.handle_tui_event(TuiEvent::Key(key));
+        assert!(app.should_exit, "second Ctrl+D should exit");
     }
 
     #[tokio::test]
@@ -996,16 +1094,21 @@ mod tests {
             tool_calls_made: 0,
         });
         assert!(!app.turn_running);
-        // First event: UpdateStatus(Idle)
-        match app_rx.try_recv() {
-            Ok(AppEvent::UpdateStatus(StatusState::Idle)) => {}
-            other => panic!("expected UpdateStatus(Idle), got {:?}", other),
+        // Drain all events and check that the essential ones are present.
+        let mut events = Vec::new();
+        while let Ok(event) = app_rx.try_recv() {
+            events.push(event);
         }
-        // Second event: CommitHistory
-        match app_rx.try_recv() {
-            Ok(AppEvent::CommitHistory) => {}
-            other => panic!("expected CommitHistory, got {:?}", other),
-        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AppEvent::UpdateStatus(StatusState::Idle))),
+            "should contain UpdateStatus(Idle), got: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AppEvent::CommitHistory)),
+            "should contain CommitHistory, got: {events:?}"
+        );
     }
 
     #[tokio::test]

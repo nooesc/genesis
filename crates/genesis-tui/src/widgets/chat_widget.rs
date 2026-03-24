@@ -210,6 +210,12 @@ impl ChatWidget {
         self.bump_revision();
     }
 
+    /// Add a system warning to the chat (rate limit, etc.).
+    pub fn add_system_warning(&mut self, cell: HistoryCell) {
+        self.committed_cells.push(cell);
+        self.bump_revision();
+    }
+
     /// Start a new agent turn — creates an empty [`ActiveCell`].
     ///
     /// If a turn is already running, the existing cell is replaced.

@@ -257,6 +257,8 @@ pub async fn run_tui(
         file_completion: crate::widgets::file_completion::FileCompletion::new(),
         agent_mode: crate::events::AgentMode::default(),
         active_theme: crate::theme::resolve_theme(&config.tui.theme),
+        last_quit_press: None,
+        rate_limit_warned: Default::default(),
     };
 
     // Apply the initial theme to themed widgets.
@@ -460,6 +462,12 @@ pub async fn run_tui(
                     }
                     if let AppEvent::CopyToClipboard(ref text) = &event {
                         copy_to_clipboard_osc52(term.backend_mut(), text);
+                    }
+                    if let AppEvent::Notify(ref msg) = &event {
+                        send_osc9_notification(term.backend_mut(), msg);
+                    }
+                    if let AppEvent::SetTerminalTitle(ref title) = &event {
+                        set_terminal_title(term.backend_mut(), title);
                     }
                     if matches!(&event, AppEvent::FetchModels) {
                         // Spawn async model fetch.
@@ -880,6 +888,25 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
 /// Ghostty, tmux (with `set -g set-clipboard on`), and most modern terminals.
 /// For tmux, the sequence is wrapped in a DCS passthrough so it reaches the
 /// outer terminal.
+/// Send a desktop notification via OSC 9.
+///
+/// Supported by iTerm2, WezTerm, VS Code terminal, and most modern terminals.
+/// Also sends BEL as a fallback for terminals that use it for notifications.
+fn send_osc9_notification<W: std::io::Write>(w: &mut W, message: &str) {
+    // OSC 9 notification — the sequence itself ends with BEL (\x07),
+    // which also acts as a bell/badge trigger on unsupported terminals.
+    let _ = write!(w, "\x1b]9;{message}\x07");
+    let _ = w.flush();
+}
+
+/// Set the terminal title via OSC 2.
+///
+/// Widely supported across all terminals and multiplexers.
+fn set_terminal_title<W: std::io::Write>(w: &mut W, title: &str) {
+    let _ = write!(w, "\x1b]2;{title}\x07");
+    let _ = w.flush();
+}
+
 fn copy_to_clipboard_osc52<W: std::io::Write>(w: &mut W, text: &str) {
     let encoded = base64_encode(text.as_bytes());
 
