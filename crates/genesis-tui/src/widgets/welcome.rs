@@ -18,7 +18,7 @@ use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
 use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
-use crate::widgets::braille_canvas::Pattern;
+use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
 
 /// Minimum width for the wide side-by-side layout.
 const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
@@ -160,7 +160,6 @@ impl WelcomeWidget {
             .build();
         big_title.render(title_area, buf);
 
-        // ── Remaining area below title ─────────────────────────────
         let below_title_y = inner.y + title_available_height + TITLE_GAP;
         let remaining_height = inner
             .height
@@ -169,54 +168,10 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Info + boot status centered below title ─────────────────
-        let boot_status = BootStatusWidget::new(self.boot_status_info());
-        let status_lines = boot_status.lines();
-        let status_height = status_lines.len() as u16;
-        let status_gap = 1u16;
-
-        let info_lines = self.info_lines();
-        let info_height = info_lines.len() as u16;
-
-        let total_content = info_height + status_gap + status_height;
-        let content_start_y =
-            below_title_y + remaining_height.saturating_sub(total_content) / 2;
-
-        // Info panel
-        let info_visual_width = info_lines
-            .iter()
-            .map(|l| line_visual_width(l))
-            .max()
-            .unwrap_or(0) as u16;
-        let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_render_height = info_height.min(remaining_height);
-        let info_area = Rect {
-            x: info_x,
-            y: content_start_y,
-            width: info_visual_width.min(inner.width),
-            height: info_render_height,
-        };
-        self.last_areas.portrait = info_area;
-        let info_paragraph = Paragraph::new(info_lines);
-        info_paragraph.render(info_area, buf);
-
-        // Boot status below info
-        let status_y = content_start_y + info_render_height + status_gap;
-        let status_render_height =
-            status_height.min((below_title_y + remaining_height).saturating_sub(status_y));
-        if status_render_height > 0 {
-            let status_area = Rect {
-                x: inner.x,
-                y: status_y,
-                width: inner.width.min(40),
-                height: status_render_height,
-            };
-            self.last_areas.status = status_area;
-            boot_status.render(status_area, buf);
-        }
+        self.render_body(inner, below_title_y, remaining_height, buf);
     }
 
-    /// Compact layout: bordered box with big-text title and info centered.
+    /// Compact layout: bordered box with big-text title, braille strip, and info.
     fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -247,7 +202,6 @@ impl WelcomeWidget {
             .build();
         big_title.render(title_area, buf);
 
-        // ── Info lines centered below title ──────────────────────────
         let below_title_y = inner.y + title_available_height + TITLE_GAP;
         let remaining_height = inner
             .height
@@ -256,26 +210,85 @@ impl WelcomeWidget {
             return;
         }
 
+        self.render_body(inner, below_title_y, remaining_height, buf);
+    }
+
+    /// Shared body: braille canvas strip + info + boot status, centered.
+    fn render_body(
+        &mut self,
+        inner: Rect,
+        below_title_y: u16,
+        remaining_height: u16,
+        buf: &mut Buffer,
+    ) {
+        // ── Braille canvas strip ─────────────────────────────────────
+        const BRAILLE_HEIGHT: u16 = 4;
+        const BRAILLE_GAP: u16 = 1;
+
+        let show_braille = remaining_height >= BRAILLE_HEIGHT + BRAILLE_GAP + 8;
+        let braille_used = if show_braille {
+            let braille_area = Rect {
+                x: inner.x,
+                y: below_title_y,
+                width: inner.width,
+                height: BRAILLE_HEIGHT,
+            };
+            self.last_areas.portrait = braille_area;
+            BrailleCanvas::new(&self.braille_pattern).render(braille_area, buf);
+            BRAILLE_HEIGHT + BRAILLE_GAP
+        } else {
+            0
+        };
+
+        // ── Info + boot status centered below braille ────────────────
+        let body_y = below_title_y + braille_used;
+        let body_height = remaining_height.saturating_sub(braille_used);
+        if body_height == 0 {
+            return;
+        }
+
+        let boot_status = BootStatusWidget::new(self.boot_status_info());
+        let status_lines = boot_status.lines();
+        let status_height = status_lines.len() as u16;
+        let status_gap = 1u16;
+
         let info_lines = self.info_lines();
         let info_height = info_lines.len() as u16;
+
+        let total_content = info_height + status_gap + status_height;
+        let content_start_y = body_y + body_height.saturating_sub(total_content) / 2;
+
+        // Info panel
         let info_visual_width = info_lines
             .iter()
             .map(|l| line_visual_width(l))
             .max()
             .unwrap_or(0) as u16;
         let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
-        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
-
+        let info_render_height = info_height.min(body_height);
         let info_area = Rect {
             x: info_x,
-            y: info_y,
+            y: content_start_y,
             width: info_visual_width.min(inner.width),
-            height: info_height.min(remaining_height),
+            height: info_render_height,
         };
-        self.last_areas.portrait = info_area;
-        self.last_areas.status = info_area;
         let info_paragraph = Paragraph::new(info_lines);
         info_paragraph.render(info_area, buf);
+
+        // Boot status below info
+        let status_y = content_start_y + info_render_height + status_gap;
+        let status_render_height =
+            status_height.min((body_y + body_height).saturating_sub(status_y));
+        if status_render_height > 0 {
+            let status_area = Rect {
+                x: inner.x,
+                y: status_y,
+                width: inner.width.min(40),
+                height: status_render_height,
+            };
+            self.last_areas.status = status_area;
+            boot_status.render(status_area, buf);
+        }
     }
 
     /// Text-only layout: just ">_ Eve v{version}" in accent color.
