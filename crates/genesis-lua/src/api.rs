@@ -6,6 +6,7 @@ use genesis_tools::sandbox::PathValidator;
 use mlua::{Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, Value};
 
 use crate::{
+    context_registry::PluginContextRegistry,
     hooks::{HookEvent, HookRegistry},
     manifest::PluginPermissions,
     personality::LuaPersonalityRegistry,
@@ -26,6 +27,8 @@ pub struct GenesisApi {
     personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     plugin_context: Option<PluginContext>,
     pub(crate) path_validator: Option<Arc<PathValidator>>,
     pub(crate) working_dir: Option<PathBuf>,
@@ -76,6 +79,11 @@ impl PluginContext {
         let context = Self::new(name, permissions);
         context.close_tool_registration();
         context
+    }
+
+    /// Check whether this plugin has access to a given primitive.
+    pub(crate) fn has_primitive(&self, name: &str) -> bool {
+        self.permissions.trusted || self.permissions.primitives.iter().any(|p| p == name)
     }
 }
 
@@ -207,9 +215,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("fs", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"fs".to_owned())
-                {
+                if !ctx.has_primitive("fs") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -218,9 +224,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("process", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"process".to_owned())
-                {
+                if !ctx.has_primitive("process") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -233,9 +237,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("http", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"http".to_owned())
-                {
+                if !ctx.has_primitive("http") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -244,9 +246,7 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("search", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"search".to_owned())
-                {
+                if !ctx.has_primitive("search") {
                     return Ok(mlua::Value::Nil);
                 }
             }
@@ -259,14 +259,90 @@ impl UserData for GenesisApi {
         });
         fields.add_field_method_get("storage", |lua, this| {
             if let Some(ref ctx) = this.plugin_context {
-                if !ctx.permissions.trusted
-                    && !ctx.permissions.primitives.contains(&"storage".to_owned())
-                {
+                if !ctx.has_primitive("storage") {
                     return Ok(mlua::Value::Nil);
                 }
             }
             crate::primitives::storage::make_storage_bridge(lua, this.database_path.clone())
                 .map(mlua::Value::Table)
+        });
+        fields.add_field_method_get("context", |lua, this| {
+            let registry = this.context_registry.clone();
+            let plugin_name = this.plugin_context.as_ref().map(|c| c.name.clone());
+            let table = lua.create_table()?;
+
+            let add_registry = registry.clone();
+            let add_plugin = plugin_name.clone();
+            table.set(
+                "add",
+                lua.create_function(move |_, content: String| {
+                    let name = add_plugin.as_deref().unwrap_or("unknown");
+                    let accepted = add_registry.add(name, content);
+                    Ok(accepted)
+                })?,
+            )?;
+
+            let clear_registry = registry;
+            let clear_plugin = plugin_name;
+            table.set(
+                "clear",
+                lua.create_function(move |_, ()| {
+                    let name = clear_plugin.as_deref().unwrap_or("unknown");
+                    clear_registry.clear_for_plugin(name);
+                    Ok(())
+                })?,
+            )?;
+
+            Ok(table)
+        });
+        fields.add_field_method_get("plugins", |lua, this| {
+            let plugin_names = Arc::clone(&this.plugin_names);
+            let current_plugin = this.plugin_context.as_ref().map(|c| c.name.clone());
+            let table = lua.create_table()?;
+
+            table.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    let names = plugin_names.lock().unwrap_or_else(|p| p.into_inner());
+                    let result = lua.create_table()?;
+                    for (i, name) in names.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("name", name.clone())?;
+                        result.set(i + 1, entry)?;
+                    }
+                    Ok(result)
+                })?,
+            )?;
+
+            table.set(
+                "current",
+                lua.create_function(move |lua, ()| match &current_plugin {
+                    Some(name) => {
+                        let entry = lua.create_table()?;
+                        entry.set("name", name.clone())?;
+                        Ok(mlua::Value::Table(entry))
+                    }
+                    None => Ok(mlua::Value::Nil),
+                })?,
+            )?;
+
+            Ok(table)
+        });
+        fields.add_field_method_get("tools_list", |lua, this| {
+            let tools = Arc::clone(&this.tools);
+            lua.create_function(move |lua, ()| {
+                let registry = tools.lock().unwrap_or_else(|p| p.into_inner());
+                let all_tools = registry.registered_tools();
+                let result = lua.create_table()?;
+                for (i, tool) in all_tools.iter().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("name", tool.definition.name.clone())?;
+                    entry.set("description", tool.definition.description.clone())?;
+                    entry.set("plugin", tool.plugin_name.clone())?;
+                    result.set(i + 1, entry)?;
+                }
+                Ok(result)
+            })
         });
         fields.add_field_method_get("on", |lua, this| {
             let hooks = Arc::clone(&this.hooks);
@@ -370,6 +446,8 @@ pub(crate) fn install_genesis_api(
     personalities: Arc<Mutex<LuaPersonalityRegistry>>,
     host_tools: Arc<Mutex<Option<Arc<dyn LuaHostToolExecutor>>>>,
     active_plugin: Arc<Mutex<Vec<PluginContext>>>,
+    context_registry: PluginContextRegistry,
+    plugin_names: Arc<Mutex<Vec<String>>>,
     plugin_context: Option<PluginContext>,
     path_validator: Option<Arc<PathValidator>>,
     working_dir: Option<PathBuf>,
@@ -391,6 +469,8 @@ pub(crate) fn install_genesis_api(
         personalities,
         host_tools,
         active_plugin,
+        context_registry,
+        plugin_names,
         plugin_context,
         path_validator,
         working_dir,
