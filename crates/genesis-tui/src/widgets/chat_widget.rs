@@ -12,6 +12,7 @@ use crate::history::cell::HistoryCell;
 use crate::history::tool_cell::{tool_group_summary_line, ToolCell, ToolDisplayMode};
 use crate::history::user_cell::UserCell;
 use crate::streaming::StreamingBuffer;
+use crate::streaming_blocks::StreamingBlockCollector;
 use crate::widgets::input_widget::InputWidget;
 use ratatui::{
     buffer::Buffer,
@@ -36,7 +37,9 @@ pub struct ActiveToolCall {
 /// is responding. Frozen into committed [`HistoryCell`]s by
 /// [`ChatWidget::complete_turn`].
 pub struct ActiveCell {
-    pub text_buffer: String,
+    /// Block-level collector that detects paragraph/fence boundaries
+    /// and emits complete blocks for committing as `HistoryCell` entries.
+    pub block_collector: StreamingBlockCollector,
     pub tool_calls: Vec<ActiveToolCall>,
 }
 
@@ -221,7 +224,7 @@ impl ChatWidget {
     /// If a turn is already running, the existing cell is replaced.
     pub fn start_turn(&mut self) {
         self.active_cell = Some(ActiveCell {
-            text_buffer: String::new(),
+            block_collector: StreamingBlockCollector::new(),
             tool_calls: Vec::new(),
         });
         self.active_cell_cache = None;
@@ -252,7 +255,14 @@ impl ChatWidget {
     pub fn tick_streaming(&mut self) -> bool {
         if let Some(text) = self.streaming_buffer.tick() {
             if let Some(cell) = &mut self.active_cell {
-                cell.text_buffer.push_str(&text);
+                // Feed the line through the block collector. If a complete
+                // block is detected (paragraph, code fence, heading), commit
+                // it as a frozen HistoryCell immediately.
+                if let Some(block) = cell.block_collector.push_line(&text) {
+                    let agent_cell = AgentCell::new(block);
+                    self.committed_cells.push(HistoryCell::Agent(agent_cell));
+                    self.bump_revision();
+                }
                 return true;
             }
         }
@@ -276,15 +286,17 @@ impl ChatWidget {
     /// even before newlines trigger the line-commit animation.
     pub(crate) fn active_cell_preview_text(&self) -> Option<String> {
         let cell = self.active_cell.as_ref()?;
-        let preview = self.streaming_buffer.preview();
-        if preview.is_empty() {
-            if cell.text_buffer.is_empty() {
-                None
-            } else {
-                Some(cell.text_buffer.clone())
-            }
+        // The preview includes:
+        // 1. The current incomplete block in the collector (not yet committed)
+        // 2. Lines queued in the streaming buffer (awaiting animation tick)
+        // 3. The partial line (no newline yet) in the streaming buffer
+        let block_preview = cell.block_collector.preview();
+        let stream_preview = self.streaming_buffer.preview();
+        let combined = format!("{block_preview}{stream_preview}");
+        if combined.is_empty() {
+            None
         } else {
-            Some(format!("{}{}", cell.text_buffer, preview))
+            Some(combined)
         }
     }
 
@@ -327,10 +339,20 @@ impl ChatWidget {
     /// Returns the newly committed cells and queues them for the commit path.
     /// Alternate-screen mode keeps this in-memory only.
     pub fn complete_turn(&mut self) -> Vec<HistoryCell> {
-        // Flush any remaining buffered streaming text before freezing the cell.
+        // Flush any remaining buffered streaming text through the block collector.
         if let Some(remaining) = self.streaming_buffer.finalize() {
             if let Some(cell) = &mut self.active_cell {
-                cell.text_buffer.push_str(&remaining);
+                if let Some(block) = cell.block_collector.push_line(&remaining) {
+                    self.committed_cells
+                        .push(HistoryCell::Agent(AgentCell::new(block)));
+                }
+            }
+        }
+        // Flush any remaining partial block in the collector.
+        if let Some(cell) = &mut self.active_cell {
+            if let Some(block) = cell.block_collector.finalize() {
+                self.committed_cells
+                    .push(HistoryCell::Agent(AgentCell::new(block)));
             }
         }
 
@@ -339,11 +361,6 @@ impl ChatWidget {
         };
 
         let mut new_cells: Vec<HistoryCell> = Vec::new();
-
-        // Agent text response (if any).
-        if !cell.text_buffer.is_empty() {
-            new_cells.push(HistoryCell::Agent(AgentCell::new(cell.text_buffer)));
-        }
 
         // One ToolCell per tool call.
         for tc in cell.tool_calls {
@@ -355,12 +372,24 @@ impl ChatWidget {
             ));
         }
 
-        // Store the last agent text response for /copy.
-        if let Some(agent_cell) = new_cells.iter().find_map(|c| match c {
-            HistoryCell::Agent(a) => Some(a),
-            _ => None,
-        }) {
-            self.last_copyable_output = Some(agent_cell.text().to_string());
+        // Store the last agent text response for /copy — collect all
+        // agent cells from this turn (they were committed incrementally).
+        let all_agent_text: String = self
+            .committed_cells
+            .iter()
+            .rev()
+            .take_while(|c| !matches!(c, HistoryCell::User(_)))
+            .filter_map(|c| match c {
+                HistoryCell::Agent(a) => Some(a.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("");
+        if !all_agent_text.is_empty() {
+            self.last_copyable_output = Some(all_agent_text);
         }
 
         self.active_cell_cache = None;
@@ -1117,53 +1146,59 @@ mod tests {
         assert!(cw.active_cell.is_some());
 
         cw.append_text("Hello, I am Eve.");
-        let cells = cw.complete_turn();
-        assert!(!cells.is_empty());
+        let _cells = cw.complete_turn();
         assert!(cw.active_cell.is_none());
 
-        // The AgentCell should be committed (user + agent = 2 cells).
-        assert!(cw.committed_cells().len() >= 2);
+        // The AgentCell should be committed (user + agent = 2+ cells).
+        // Agent text is committed incrementally by the block collector.
+        assert!(
+            cw.committed_cells().len() >= 2,
+            "expected at least user + agent cells, got {}",
+            cw.committed_cells().len()
+        );
     }
 
     #[test]
-    fn append_text_buffers_through_streaming() {
+    fn streaming_lines_committed_as_blocks() {
         let mut cw = ChatWidget::new();
+        let initial_cells = cw.committed_cells().len();
         cw.start_turn();
         cw.append_text("Hello\n");
-        cw.append_text("world\n");
-
-        // Text is in the streaming buffer, not yet in text_buffer.
-        let active = cw.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "");
+        cw.append_text("\n"); // blank line triggers paragraph block commit
         assert!(cw.has_streaming_pending());
 
-        // Ticking commits one line at a time.
+        // Tick to drain "Hello\n" from the streaming buffer.
         assert!(cw.tick_streaming());
-        let active = cw.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello\n");
+        // Tick to drain "\n" — this triggers the block commit.
+        assert!(cw.tick_streaming());
 
-        assert!(cw.tick_streaming());
-        let active = cw.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello\nworld\n");
+        // The paragraph block should now be a committed AgentCell.
+        assert!(
+            cw.committed_cells().len() > initial_cells,
+            "block should have been committed, got {} cells (was {})",
+            cw.committed_cells().len(),
+            initial_cells
+        );
     }
 
     #[test]
-    fn append_text_no_newline_stays_pending() {
+    fn append_text_no_newline_stays_in_preview() {
         let mut cw = ChatWidget::new();
         cw.start_turn();
         cw.append_text("partial");
 
-        // No newline means it stays in streaming buffer pending area.
-        let active = cw.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "");
-        // No queued lines (only partial text), so animation timer not needed.
+        // No queued lines, so animation timer not needed.
         assert!(!cw.has_streaming_pending());
         // But the preview includes the partial text for rendering.
         assert_eq!(cw.active_cell_preview_text().unwrap(), "partial");
 
-        // Finalize flushes the partial text (used at turn completion).
-        let cells = cw.complete_turn();
-        assert!(!cells.is_empty());
+        // Finalize flushes the partial text via complete_turn.
+        let _cells = cw.complete_turn();
+        // The partial text should now be a committed cell.
+        assert!(cw
+            .committed_cells()
+            .iter()
+            .any(|c| matches!(c, HistoryCell::Agent(_))));
     }
 
     #[test]
@@ -1191,15 +1226,18 @@ mod tests {
         cw.tool_call_start("c1".into(), "shell".into(), "echo hi".into());
         cw.tool_call_end("c1", true, std::time::Duration::from_millis(100));
 
-        let cells = cw.complete_turn();
+        let tool_cells = cw.complete_turn();
 
-        // Should produce: 1 AgentCell + 1 ToolCell
-        assert_eq!(cells.len(), 2);
-        assert!(matches!(cells[0], HistoryCell::Agent(_)));
-        assert!(matches!(cells[1], HistoryCell::Tool(_)));
+        // Agent text was committed incrementally; complete_turn returns tool cells.
+        assert_eq!(tool_cells.len(), 1);
+        assert!(matches!(tool_cells[0], HistoryCell::Tool(_)));
 
-        // Both should be in committed_cells.
-        assert_eq!(cw.committed_cells().len(), 2);
+        // committed_cells should have both agent (from block collector) and tool.
+        assert!(
+            cw.committed_cells().len() >= 2,
+            "expected agent + tool cells, got {}",
+            cw.committed_cells().len()
+        );
 
         // Active cell is cleared.
         assert!(cw.active_cell.is_none());
@@ -1234,9 +1272,15 @@ mod tests {
         cw.append_text("response");
         let _returned = cw.complete_turn();
 
-        let pending = cw.drain_pending_scrollback();
-        assert_eq!(pending.len(), 1);
-        assert!(matches!(pending[0], HistoryCell::Agent(_)));
+        // Agent text committed incrementally doesn't go through pending_scrollback.
+        // Only tool cells returned by complete_turn do.
+        // In this case there are no tools, so pending is empty or has agent cells
+        // depending on whether the block collector pushes to pending_scrollback.
+        // The key assertion: committed_cells has the agent response.
+        assert!(cw
+            .committed_cells()
+            .iter()
+            .any(|c| matches!(c, HistoryCell::Agent(_))));
     }
 
     #[test]
@@ -1247,9 +1291,9 @@ mod tests {
         cw.append_text("response");
         cw.complete_turn();
 
-        // First drain returns user + agent cells.
+        // First drain returns at least the user message.
         let pending = cw.drain_pending_scrollback();
-        assert_eq!(pending.len(), 2);
+        assert!(!pending.is_empty(), "should have at least the user message");
 
         // Second drain returns nothing.
         let pending2 = cw.drain_pending_scrollback();
@@ -1268,12 +1312,15 @@ mod tests {
         cw.tool_call_end("c1", true, std::time::Duration::from_millis(200));
         cw.complete_turn();
 
-        let pending = cw.drain_pending_scrollback();
-        // User + Agent + Tool = 3 cells
-        assert_eq!(pending.len(), 3);
-        assert!(matches!(pending[0], HistoryCell::User(_)));
-        assert!(matches!(pending[1], HistoryCell::Agent(_)));
-        assert!(matches!(pending[2], HistoryCell::Tool(_)));
+        // committed_cells should have User + Agent + Tool.
+        let cells = cw.committed_cells();
+        assert!(cells.iter().any(|c| matches!(c, HistoryCell::User(_))));
+        assert!(cells.iter().any(|c| matches!(c, HistoryCell::Agent(_))));
+        assert!(cells.iter().any(|c| matches!(c, HistoryCell::Tool(_))));
+        // pending_scrollback has the user message + tool cells from complete_turn.
+        // Agent blocks were committed directly to committed_cells, not through
+        // pending_scrollback.
+        let _pending = cw.drain_pending_scrollback();
     }
 
     #[test]

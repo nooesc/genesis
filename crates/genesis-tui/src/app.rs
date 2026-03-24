@@ -1236,17 +1236,17 @@ mod tests {
         app.handle_agent_event(AgentEvent::TurnStarted);
         app.handle_agent_event(AgentEvent::TextDelta("Hello\n".into()));
         app.handle_agent_event(AgentEvent::TextDelta("world\n".into()));
-        // Text is buffered in the streaming system, not yet in text_buffer.
-        let active = app.chat.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "");
+        // Text is buffered in the streaming system.
         assert!(app.chat.has_streaming_pending());
-        // Ticking commits one line at a time (smooth mode).
+        // Preview shows all buffered text.
+        let preview = app.chat.active_cell_preview_text().unwrap();
+        assert!(
+            preview.contains("Hello") && preview.contains("world"),
+            "preview should show buffered text: {preview}"
+        );
+        // Ticking drains lines from the streaming buffer into the block collector.
         assert!(app.chat.tick_streaming());
-        let active = app.chat.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello\n");
         assert!(app.chat.tick_streaming());
-        let active = app.chat.active_cell.as_ref().unwrap();
-        assert_eq!(active.text_buffer, "Hello\nworld\n");
     }
 
     #[tokio::test]
