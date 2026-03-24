@@ -15,7 +15,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::history::cell::HistoryCell;
-use crate::history::wrapped_row_count;
+use crate::history::wrapped_row_count_usize;
 
 /// Action returned by [`TranscriptOverlay::handle_key`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl TranscriptOverlay {
             lines.extend(cell.to_scrollback_lines(width));
             lines.push(Line::default()); // blank separator between cells
         }
-        let total_rows = wrapped_row_count(&lines, width) as usize;
+        let total_rows = wrapped_row_count_usize(&lines, width);
         Self {
             scroll_offset: total_rows.saturating_sub(visible_rows as usize),
             lines,
