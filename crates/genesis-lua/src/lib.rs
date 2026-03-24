@@ -2257,4 +2257,109 @@ trusted = true
         );
         assert!(result.is_err(), "missing output_path should error");
     }
+
+    #[test]
+    fn bundled_ha_tools_register_correctly() {
+        let rt = build_bundled_test_runtime();
+        let tools = rt.registered_tools();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.definition.name.as_str()).collect();
+        assert!(tool_names.contains(&"ha_list_entities"), "ha_list_entities missing: {tool_names:?}");
+        assert!(tool_names.contains(&"ha_get_state"), "ha_get_state missing: {tool_names:?}");
+        assert!(tool_names.contains(&"ha_list_services"), "ha_list_services missing: {tool_names:?}");
+        assert!(tool_names.contains(&"ha_call_service"), "ha_call_service missing: {tool_names:?}");
+    }
+
+    #[test]
+    fn bundled_ha_get_state_requires_entity_id() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool("ha_get_state", BTreeMap::new());
+        assert!(result.is_err(), "missing entity_id should error");
+    }
+
+    #[test]
+    fn bundled_ha_get_state_rejects_invalid_entity_id() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::set_var("HASS_TOKEN", "test-token");
+        let result = rt.invoke_tool(
+            "ha_get_state",
+            BTreeMap::from([("entity_id".to_owned(), "INVALID".to_owned())]),
+        );
+        assert!(result.is_err(), "invalid entity_id should error");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid") || err.contains("entity_id"), "error should mention invalid entity_id: {err}");
+        std::env::remove_var("HASS_TOKEN");
+    }
+
+    #[test]
+    fn bundled_ha_call_service_requires_domain_and_service() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool("ha_call_service", BTreeMap::new());
+        assert!(result.is_err(), "missing domain should error");
+    }
+
+    #[test]
+    fn bundled_ha_call_service_blocks_dangerous_domains() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool(
+            "ha_call_service",
+            BTreeMap::from([
+                ("domain".to_owned(), "shell_command".to_owned()),
+                ("service".to_owned(), "run".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "blocked domain should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocked") || err.contains("security"),
+            "error should mention blocked: {err}"
+        );
+    }
+
+    #[test]
+    fn bundled_ha_call_service_blocks_all_dangerous_domains() {
+        let rt = build_bundled_test_runtime();
+        for domain in &["shell_command", "command_line", "python_script", "pyscript", "hassio", "rest_command"] {
+            let result = rt.invoke_tool(
+                "ha_call_service",
+                BTreeMap::from([
+                    ("domain".to_owned(), domain.to_string()),
+                    ("service".to_owned(), "run".to_owned()),
+                ]),
+            );
+            assert!(result.is_err(), "domain '{domain}' should be blocked");
+        }
+    }
+
+    #[test]
+    fn bundled_ha_call_service_allows_safe_domains() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("HASS_TOKEN");
+        std::env::remove_var("HOMEASSISTANT_LONG_LIVED_TOKEN");
+        for domain in &["light", "climate", "switch"] {
+            let result = rt.invoke_tool(
+                "ha_call_service",
+                BTreeMap::from([
+                    ("domain".to_owned(), domain.to_string()),
+                    ("service".to_owned(), "turn_on".to_owned()),
+                ]),
+            );
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                !err.contains("blocked"),
+                "domain '{domain}' should NOT be blocked: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_ha_list_entities_fails_without_token() {
+        let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
+        std::env::remove_var("HASS_TOKEN");
+        std::env::remove_var("HOMEASSISTANT_LONG_LIVED_TOKEN");
+        let result = rt.invoke_tool("ha_list_entities", BTreeMap::new());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("HASS_TOKEN"), "error should mention token: {err}");
+    }
 }
