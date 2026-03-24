@@ -115,8 +115,6 @@ pub struct App {
     /// Last quit shortcut press — requires double-press within 750ms of the
     /// same key to actually exit. Prevents accidental exits from Ctrl+D.
     pub(crate) last_quit_press: Option<std::time::Instant>,
-    /// Cumulative input tokens from all turns (for rate limit warnings).
-    pub(crate) total_input_tokens: u64,
     /// Which context usage thresholds have already triggered a warning.
     pub(crate) rate_limit_warned: RateLimitWarnings,
 }
@@ -270,7 +268,6 @@ impl App {
                 self.chat.complete_turn();
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
-                self.total_input_tokens = input_tokens;
                 self.status_bar
                     .record_turn_tokens(input_tokens, output_tokens);
 
@@ -1033,7 +1030,6 @@ mod tests {
             agent_mode: AgentMode::default(),
             active_theme: crate::theme::theme_by_name("eve"),
             last_quit_press: None,
-            total_input_tokens: 0,
             rate_limit_warned: Default::default(),
         };
         (app, submission_rx, app_rx, cancel_rx)

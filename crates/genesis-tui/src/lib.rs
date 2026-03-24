@@ -258,7 +258,6 @@ pub async fn run_tui(
         agent_mode: crate::events::AgentMode::default(),
         active_theme: crate::theme::resolve_theme(&config.tui.theme),
         last_quit_press: None,
-        total_input_tokens: 0,
         rate_limit_warned: Default::default(),
     };
 
@@ -894,10 +893,9 @@ pub fn translate_crossterm(event: CrosstermEvent) -> Option<TuiEvent> {
 /// Supported by iTerm2, WezTerm, VS Code terminal, and most modern terminals.
 /// Also sends BEL as a fallback for terminals that use it for notifications.
 fn send_osc9_notification<W: std::io::Write>(w: &mut W, message: &str) {
-    // OSC 9 notification.
+    // OSC 9 notification — the sequence itself ends with BEL (\x07),
+    // which also acts as a bell/badge trigger on unsupported terminals.
     let _ = write!(w, "\x1b]9;{message}\x07");
-    // BEL fallback (triggers terminal bell / badge / bounce).
-    let _ = write!(w, "\x07");
     let _ = w.flush();
 }
 
