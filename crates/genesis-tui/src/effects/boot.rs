@@ -34,32 +34,18 @@ pub fn start_boot_sequence(
     let title_effect = fx::coalesce((800, Interpolation::QuadOut)).with_area(title_area);
     manager.add_unique_effect(EffectId::BootTitle, title_effect);
 
-    // 2. Portrait materialization — coalesce with 200ms delay, 1200ms duration.
-    let portrait_effect = fx::sequence(&[
-        fx::sleep(200),
-        fx::coalesce((1200, Interpolation::CubicOut)).with_area(portrait_area),
-    ]);
-    manager.add_unique_effect(EffectId::BootPortrait, portrait_effect);
-
-    // 3. Status lines — fade from black with 1800ms delay, 1000ms duration.
+    // 2. Status lines — fade from black with 600ms delay, 800ms duration.
     let status_effect = fx::sequence(&[
-        fx::sleep(1800),
-        fx::fade_from_fg(ratatui::style::Color::Black, (1000, Interpolation::SineOut))
+        fx::sleep(600),
+        fx::fade_from_fg(ratatui::style::Color::Black, (800, Interpolation::SineOut))
             .with_area(status_area),
     ]);
     manager.add_unique_effect(EffectId::BootStatus, status_effect);
 
-    // 4. Settle — subtle fade at the end (2800ms delay, 400ms duration).
-    //    A gentle fade-from on the full area gives a "settling" feel.
-    let settle_effect = fx::sequence(&[
-        fx::sleep(2800),
-        fx::fade_from_fg(
-            rgb(genesis_ui::colors::EVE_LAVENDER),
-            (400, Interpolation::SineOut),
-        )
-        .with_area(full_area),
-    ]);
-    manager.add_unique_effect(EffectId::BootSettle, settle_effect);
+    // Skip portrait coalesce and full-area settle — they process every cell
+    // in their target regions each frame, which causes stutter on the
+    // welcome screen now that the rain background covers the full area.
+    let _ = (portrait_area, full_area);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
