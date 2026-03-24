@@ -18,7 +18,7 @@ use tui_big_text::{BigText, PixelSize};
 
 use crate::history::rgb;
 use crate::widgets::boot_status::{BootStatusInfo, BootStatusWidget};
-use crate::widgets::braille_canvas::{BrailleCanvas, Pattern};
+use crate::widgets::braille_canvas::Pattern;
 
 /// Minimum width for the wide side-by-side layout.
 const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
@@ -26,11 +26,6 @@ const WIDE_LAYOUT_MIN_WIDTH: u16 = 100;
 /// Minimum width for the medium (stacked) layout.
 const MEDIUM_LAYOUT_MIN_WIDTH: u16 = 60;
 
-/// Minimum width to reserve for the metadata column in wide mode.
-const WIDE_INFO_MIN_WIDTH: u16 = 56;
-
-/// Gap between portrait and metadata in wide mode.
-const WIDE_LAYOUT_GAP: u16 = 2;
 
 /// Height of the big-text title in rows (Quadrant pixel size: 8px / 2 = 4 rows).
 const BIG_TEXT_HEIGHT: u16 = 4;
@@ -63,17 +58,9 @@ pub struct WelcomeAreas {
     pub full: Rect,
 }
 
-/// Minimum width for showing the braille canvas panel in wide mode.
-const WIDE_BRAILLE_MIN_WIDTH: u16 = 120;
-
-/// Width of the braille canvas panel in cells.
-const BRAILLE_PANEL_WIDTH: u16 = 20;
-
 /// Welcome screen widget showing session info with big-text title.
 pub struct WelcomeWidget {
     info: WelcomeInfo,
-    /// Split portrait lines used in wide mode.
-    split_art: Vec<Line<'static>>,
     /// Whether the boot sequence has been triggered.
     boot_triggered: bool,
     /// Areas computed during the last render for effect targeting.
@@ -83,20 +70,14 @@ pub struct WelcomeWidget {
 }
 
 impl WelcomeWidget {
-    /// Create a new welcome widget from session info with optional portrait art.
-    pub fn new(info: WelcomeInfo, full_art: &[String], _compact_art: &[String]) -> Self {
+    /// Create a new welcome widget from session info.
+    pub fn new(info: WelcomeInfo, _full_art: &[String], _compact_art: &[String]) -> Self {
         Self {
             info,
-            split_art: parse_ansi_art(full_art),
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
             braille_pattern: Pattern::default_particles(18),
         }
-    }
-
-    /// Get the current split portrait lines.
-    fn current_full_art(&self) -> &[Line<'static>] {
-        &self.split_art
     }
 
     /// Returns `true` if the boot sequence has already been triggered.
@@ -188,94 +169,51 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Portrait + braille canvas + info side by side ──────────
-        // Clone art lines up front to release the borrow on `self`.
-        let art: Vec<Line<'static>> = self.current_full_art().to_vec();
-        let art_width = art.iter().map(|l| line_visual_width(l)).max().unwrap_or(0) as u16;
-        let art_height = art.len() as u16;
-
-        // Decide if there's room for the braille canvas panel.
-        let show_braille = area.width >= WIDE_BRAILLE_MIN_WIDTH;
-        let braille_cols = if show_braille {
-            BRAILLE_PANEL_WIDTH + WIDE_LAYOUT_GAP
-        } else {
-            0
-        };
-
-        let art_col_width = art_width.min(
-            inner
-                .width
-                .saturating_sub(WIDE_INFO_MIN_WIDTH + WIDE_LAYOUT_GAP + braille_cols),
-        );
-        let braille_col_x = inner.x + art_col_width + WIDE_LAYOUT_GAP;
-        let info_col_x = braille_col_x + braille_cols;
-        let info_col_width = inner
-            .width
-            .saturating_sub(art_col_width + WIDE_LAYOUT_GAP + braille_cols);
-
-        // Boot status lines
+        // ── Info + boot status centered below title ─────────────────
         let boot_status = BootStatusWidget::new(self.boot_status_info());
         let status_lines = boot_status.lines();
         let status_height = status_lines.len() as u16;
         let status_gap = 1u16;
 
-        // Total left-column content: art + gap + status
-        let left_total = art_height + status_gap + status_height;
-        let left_start_y = below_title_y + remaining_height.saturating_sub(left_total) / 2;
+        let info_lines = self.info_lines();
+        let info_height = info_lines.len() as u16;
 
-        // Portrait area
-        let art_render_height = art_height.min(remaining_height);
-        let art_area = Rect {
-            x: inner.x,
-            y: left_start_y,
-            width: art_col_width,
-            height: art_render_height,
+        let total_content = info_height + status_gap + status_height;
+        let content_start_y =
+            below_title_y + remaining_height.saturating_sub(total_content) / 2;
+
+        // Info panel
+        let info_visual_width = info_lines
+            .iter()
+            .map(|l| line_visual_width(l))
+            .max()
+            .unwrap_or(0) as u16;
+        let info_x = inner.x + inner.width.saturating_sub(info_visual_width) / 2;
+        let info_render_height = info_height.min(remaining_height);
+        let info_area = Rect {
+            x: info_x,
+            y: content_start_y,
+            width: info_visual_width.min(inner.width),
+            height: info_render_height,
         };
-        self.last_areas.portrait = art_area;
-        let art_paragraph = Paragraph::new(art);
-        art_paragraph.render(art_area, buf);
+        self.last_areas.portrait = info_area;
+        let info_paragraph = Paragraph::new(info_lines);
+        info_paragraph.render(info_area, buf);
 
-        // Boot status area (below portrait)
-        let status_y = left_start_y + art_render_height + status_gap;
+        // Boot status below info
+        let status_y = content_start_y + info_render_height + status_gap;
         let status_render_height =
             status_height.min((below_title_y + remaining_height).saturating_sub(status_y));
         if status_render_height > 0 {
             let status_area = Rect {
                 x: inner.x,
                 y: status_y,
-                width: art_col_width.max(30),
+                width: inner.width.min(40),
                 height: status_render_height,
             };
             self.last_areas.status = status_area;
             boot_status.render(status_area, buf);
         }
-
-        // Braille canvas panel (between portrait and info, only in extra-wide mode)
-        if show_braille && remaining_height >= 3 {
-            let braille_height = remaining_height.min(art_render_height).max(3);
-            let braille_y = below_title_y + remaining_height.saturating_sub(braille_height) / 2;
-            let braille_area = Rect {
-                x: braille_col_x,
-                y: braille_y,
-                width: BRAILLE_PANEL_WIDTH,
-                height: braille_height,
-            };
-            BrailleCanvas::new(&self.braille_pattern).render(braille_area, buf);
-        }
-
-        // Info panel (right column, vertically centered)
-        let info_lines = self.info_lines();
-        let info_height = info_lines.len() as u16;
-        let info_y = below_title_y + remaining_height.saturating_sub(info_height) / 2;
-
-        let info_area = Rect {
-            x: info_col_x,
-            y: info_y,
-            width: info_col_width,
-            height: info_height.min(remaining_height),
-        };
-        let info_paragraph = Paragraph::new(info_lines);
-        info_paragraph.render(info_area, buf);
     }
 
     /// Compact layout: bordered box with big-text title and info centered.
@@ -741,19 +679,16 @@ mod tests {
     }
 
     #[test]
-    fn welcome_widget_width_100_uses_split_layout() {
+    fn welcome_widget_width_100_uses_wide_layout() {
         let area = Rect::new(0, 0, 120, 50);
         let mut buf = Buffer::empty(area);
-        sample_widget().render(area, &mut buf);
+        default_widget().render(area, &mut buf);
 
         let rows = buffer_rows(&buf, area.width);
-        let portrait = first_match_position(&rows, "@").expect("split portrait should render");
-        let title = first_match_position(&rows, ">_ Eve v0.1.0").expect("title should render");
-
-        assert!(!rows.iter().any(|row| row.contains('+')));
+        // Wide layout should render the title and info.
         assert!(
-            portrait.1 < title.1,
-            "portrait should render left of the title"
+            rows.iter().any(|row| row.contains(">_ Eve v0.1.0")),
+            "wide layout should render title"
         );
     }
 
