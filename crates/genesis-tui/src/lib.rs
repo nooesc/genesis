@@ -678,7 +678,7 @@ fn render_frame(
         app.effects.on_resize();
 
         // Reclamp scroll offset for the new width.
-        app.chat.reclamp_scroll(area.width);
+        app.chat.reclamp_scroll(area.width, area.height);
 
         // Rebuild the transcript overlay if open.
         if let Some(app::ActiveOverlay::Transcript(_)) = &app.overlay {

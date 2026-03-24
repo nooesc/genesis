@@ -164,7 +164,11 @@ impl App {
                     self.frame_requester.schedule_frame();
                 } else if matches!(self.screen, AppScreen::Chat) {
                     if delta > 0 {
-                        self.chat.scroll_up(delta as usize, self.viewport_width);
+                        self.chat.scroll_up(
+                            delta as usize,
+                            self.viewport_width,
+                            self.viewport_height,
+                        );
                     } else if delta < 0 {
                         self.chat.scroll_down((-delta) as usize);
                     }
@@ -637,7 +641,8 @@ impl App {
         match key.code {
             KeyCode::PageUp => {
                 let half = (self.viewport_height / 2).max(1) as usize;
-                self.chat.scroll_up(half, self.viewport_width);
+                self.chat
+                    .scroll_up(half, self.viewport_width, self.viewport_height);
                 self.frame_requester.schedule_frame();
                 return;
             }
@@ -658,7 +663,8 @@ impl App {
         if key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Up => {
-                    self.chat.scroll_up(1, self.viewport_width);
+                    self.chat
+                        .scroll_up(1, self.viewport_width, self.viewport_height);
                     self.frame_requester.schedule_frame();
                     return;
                 }

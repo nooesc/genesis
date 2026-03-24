@@ -150,20 +150,24 @@ impl ChatWidget {
 
     // ── Scroll ────────────────────────────────────────────────────────────
 
-    /// Compute the maximum allowed scroll offset for the current content
-    /// at the given viewport width. Only counts committed cells (not the
-    /// active streaming cell) because `render_messages` hides the active
-    /// cell when the user has scrolled up.
-    fn scroll_max(&mut self, viewport_width: u16) -> usize {
-        self.committed_content_height(viewport_width)
+    /// Compute the maximum allowed scroll offset for the current content.
+    ///
+    /// The offset is clamped so the oldest content can reach the top of
+    /// the viewport but never scrolls further (no blank screen). When
+    /// total content fits within the viewport, returns 0.
+    fn scroll_max(&mut self, viewport_width: u16, viewport_height: u16) -> usize {
+        let total = self.committed_content_height(viewport_width);
+        total.saturating_sub(viewport_height as usize)
     }
 
-    /// Scroll the chat view up by `rows` rows, clamped to the visible
-    /// content height so the offset never grows unbounded.
-    pub fn scroll_up(&mut self, rows: usize, viewport_width: u16) {
-        let max = self.scroll_max(viewport_width);
+    /// Scroll the chat view up by `rows` rows, clamped so the oldest
+    /// content can reach the top but you can't scroll into blank space.
+    pub fn scroll_up(&mut self, rows: usize, viewport_width: u16, viewport_height: u16) {
+        let max = self.scroll_max(viewport_width, viewport_height);
         self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max);
-        self.scroll_locked = true;
+        if self.scroll_offset > 0 {
+            self.scroll_locked = true;
+        }
     }
 
     /// Scroll the chat view down by `rows` rows. Re-enables auto-scroll
@@ -191,11 +195,11 @@ impl ChatWidget {
     /// When the terminal width changes, wrapped content takes a different
     /// number of rows. If the old offset now exceeds the new maximum,
     /// this brings it back in range (or snaps to bottom if it would be 0).
-    pub fn reclamp_scroll(&mut self, viewport_width: u16) {
+    pub fn reclamp_scroll(&mut self, viewport_width: u16, viewport_height: u16) {
         if !self.scroll_locked {
             return;
         }
-        let max = self.scroll_max(viewport_width);
+        let max = self.scroll_max(viewport_width, viewport_height);
         if self.scroll_offset > max {
             self.scroll_offset = max;
         }
@@ -869,6 +873,13 @@ impl ChatWidget {
         let mut cells_collected = 0usize;
         let num_cells = self.committed_cells.len();
 
+        // When the user has scrolled up, collect extra cells beyond the
+        // viewport so that after skipping the newest entries (scroll offset),
+        // older cells fill the freed space. Without this, scrolling up
+        // would show empty space instead of earlier messages.
+        let scroll_extra = u16::try_from(self.scroll_offset).unwrap_or(u16::MAX);
+        let collection_budget = remaining_rows.saturating_add(scroll_extra);
+
         let mut i = num_cells;
         while i > 0 {
             i -= 1;
@@ -898,7 +909,7 @@ impl ChatWidget {
                         let cur_is_user = false;
                         let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
                         let cost = h + if needs_sep { 1 } else { 0 };
-                        if used + cost > remaining_rows {
+                        if used + cost > collection_budget {
                             break;
                         }
 
@@ -933,7 +944,7 @@ impl ChatWidget {
             // height budget.
             let needs_sep = prev_is_user.is_some_and(|prev| prev != cur_is_user);
             let cost = h + if needs_sep { 1 } else { 0 };
-            if used + cost > remaining_rows {
+            if used + cost > collection_budget {
                 // If this is the FIRST cell we're trying to add and it's
                 // taller than the viewport, add it anyway — it will be
                 // clipped to the viewport height during rendering (showing
@@ -944,7 +955,7 @@ impl ChatWidget {
                     // appear (if entries is empty and this cell didn't fit,
                     // there are older messages above → skipped_message_count > 0).
                     let hint_reserve: u16 = 1;
-                    let clamped_h = remaining_rows
+                    let clamped_h = collection_budget
                         .saturating_sub(if needs_sep { 1 } else { 0 })
                         .saturating_sub(hint_reserve);
                     if clamped_h > 0 {
@@ -1584,6 +1595,57 @@ mod tests {
         assert!(
             !has_indicator,
             "should not show overflow indicator when all messages fit"
+        );
+    }
+
+    #[test]
+    fn scroll_up_reveals_user_message_after_long_response() {
+        let mut cw = ChatWidget::new();
+        cw.add_user_message("my original question".to_string());
+        cw.start_turn();
+        // Create a long response with many blocks (paragraphs separated by blank lines).
+        for i in 0..20 {
+            cw.append_text(&format!("paragraph {i} content\n\n"));
+        }
+        // Drain all streaming buffer ticks to commit blocks.
+        while cw.tick_streaming() {}
+        cw.complete_turn();
+
+        // Use a small viewport that can't fit all blocks.
+        let area = Rect::new(0, 0, 60, 10);
+
+        // Helper to extract all text from a buffer.
+        let buf_text = |buf: &Buffer| -> String {
+            let mut text = String::new();
+            for row in 0..area.height {
+                for col in 0..area.width {
+                    if let Some(c) = buf.cell((col, row)) {
+                        text.push_str(c.symbol());
+                    }
+                }
+            }
+            text
+        };
+
+        let mut buf = Buffer::empty(area);
+        cw.render_messages(area, &mut buf);
+
+        // Initially, user message is clipped (too many agent blocks).
+        assert!(
+            !buf_text(&buf).contains("my original question"),
+            "user message should be clipped initially"
+        );
+
+        // Scroll up far enough to reach the user message.
+        for _ in 0..50 {
+            cw.scroll_up(1, area.width, area.height);
+        }
+
+        let mut buf2 = Buffer::empty(area);
+        cw.render_messages(area, &mut buf2);
+        assert!(
+            buf_text(&buf2).contains("my original question"),
+            "scrolling up should reveal the user's message"
         );
     }
 
