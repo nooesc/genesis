@@ -160,10 +160,12 @@ local function send_whatsapp(recipient, message)
 end
 
 local function send_homeassistant(target, message)
-    local url = genesis.config.env("HOMEASSISTANT_URL")
-    if not url then error("HOMEASSISTANT_URL not configured") end
-    local token = genesis.config.env("HOMEASSISTANT_LONG_LIVED_TOKEN")
-    if not token then error("HOMEASSISTANT_LONG_LIVED_TOKEN not configured") end
+    local url = genesis.config.env("HASS_URL")
+        or genesis.config.env("HOMEASSISTANT_URL")
+    if not url then error("HASS_URL / HOMEASSISTANT_URL not configured") end
+    local token = genesis.config.env("HASS_TOKEN")
+        or genesis.config.env("HOMEASSISTANT_LONG_LIVED_TOKEN")
+    if not token then error("HASS_TOKEN / HOMEASSISTANT_LONG_LIVED_TOKEN not configured") end
 
     -- Parse "domain.service" format, default to "notify.{target}"
     local domain, service
