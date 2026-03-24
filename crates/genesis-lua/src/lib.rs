@@ -2141,4 +2141,48 @@ trusted = true
             "error should mention TELEGRAM_BOT_TOKEN: {err}"
         );
     }
+
+    #[test]
+    fn config_env_allows_brave_and_hass_prefixes() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        std::env::set_var("BRAVE_API_KEY", "test-brave-key");
+        std::env::set_var("HASS_URL", "http://ha.local:8123");
+        std::env::set_var("HASS_TOKEN", "test-hass-token");
+
+        let dir = tempfile::tempdir().expect("tempdir should exist");
+        let rt = crate::LuaRuntime::builder()
+            .with_config(LuaRuntimeConfig {
+                plugin_dir: dir.path().to_path_buf(),
+                session: LuaSessionContext {
+                    id: "sess-env".to_owned(),
+                    model: "test-model".to_owned(),
+                    turn_count: 0,
+                    total_tokens: 0,
+                    platform: "cli".to_owned(),
+                    personality: None,
+                },
+                ..Default::default()
+            })
+            .build()
+            .expect("runtime should build");
+
+        let brave_val = rt
+            .eval_string("return genesis.config.env('BRAVE_API_KEY')")
+            .expect("eval should succeed");
+        assert_eq!(brave_val, json!("test-brave-key"));
+
+        let hass_url = rt
+            .eval_string("return genesis.config.env('HASS_URL')")
+            .expect("eval should succeed");
+        assert_eq!(hass_url, json!("http://ha.local:8123"));
+
+        let hass_token = rt
+            .eval_string("return genesis.config.env('HASS_TOKEN')")
+            .expect("eval should succeed");
+        assert_eq!(hass_token, json!("test-hass-token"));
+
+        std::env::remove_var("BRAVE_API_KEY");
+        std::env::remove_var("HASS_URL");
+        std::env::remove_var("HASS_TOKEN");
+    }
 }

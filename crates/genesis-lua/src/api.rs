@@ -144,6 +144,8 @@ const ENV_ALLOWED_PREFIXES: &[&str] = &[
     "GOOGLE_",
     "ELEVENLABS_",
     "DEEPGRAM_",
+    "BRAVE_",
+    "HASS_",
 ];
 
 impl UserData for ConfigView {
