@@ -2387,6 +2387,40 @@ trusted = true
     }
 
     #[test]
+    fn bundled_ha_call_service_rejects_path_traversal_domain() {
+        let rt = build_bundled_test_runtime();
+        // Domain containing path separators should be rejected by format validation
+        for domain in &["shell_command/../light", "../supervisor/addons", "light/../../etc"] {
+            let result = rt.invoke_tool(
+                "ha_call_service",
+                BTreeMap::from([
+                    ("domain".to_owned(), domain.to_string()),
+                    ("service".to_owned(), "turn_on".to_owned()),
+                ]),
+            );
+            assert!(result.is_err(), "domain '{domain}' should be rejected");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("invalid domain"),
+                "error should mention invalid domain for '{domain}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_ha_call_service_rejects_invalid_service_format() {
+        let rt = build_bundled_test_runtime();
+        let result = rt.invoke_tool(
+            "ha_call_service",
+            BTreeMap::from([
+                ("domain".to_owned(), "light".to_owned()),
+                ("service".to_owned(), "turn_on/../bad".to_owned()),
+            ]),
+        );
+        assert!(result.is_err(), "service with path traversal should be rejected");
+    }
+
+    #[test]
     fn bundled_ha_list_entities_fails_without_token() {
         let (rt, _guard) = build_bundled_test_runtime_with_env_guard();
         std::env::remove_var("HASS_TOKEN");

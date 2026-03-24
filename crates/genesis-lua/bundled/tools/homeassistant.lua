@@ -15,13 +15,14 @@ local function is_blocked_domain(domain)
     return false
 end
 
+local function is_valid_identifier(s)
+    return s and #s > 0 and s:find("[^%l%d_]") == nil
+end
+
 local function validate_entity_id(entity_id)
     local domain, object_id = entity_id:match("^([^%.]+)%.(.+)$")
     if not domain or not object_id then return false end
-    if #domain == 0 or #object_id == 0 then return false end
-    if domain:find("[^%l%d_]") then return false end
-    if object_id:find("[^%l%d_]") then return false end
-    return true
+    return is_valid_identifier(domain) and is_valid_identifier(object_id)
 end
 
 local function ha_config()
@@ -93,7 +94,7 @@ genesis.register_tool({
             error("unexpected HA response format")
         end
         local filtered = {}
-        local domain_prefix = args.domain and ("^" .. args.domain .. "%.") or nil
+        local domain_prefix = args.domain and (args.domain .. ".") or nil
         local area_lower = args.area and args.area:lower() or nil
         for _, s in ipairs(states) do
             if #filtered >= MAX_ENTITIES then break end
@@ -101,7 +102,7 @@ genesis.register_tool({
             local domain_ok = true
             local area_ok = true
             if domain_prefix then
-                domain_ok = eid:find(domain_prefix) ~= nil
+                domain_ok = eid:sub(1, #domain_prefix) == domain_prefix
             end
             if area_lower then
                 local attrs = s.attributes or {}
@@ -233,6 +234,12 @@ genesis.register_tool({
         end
         if not args.service or #args.service == 0 then
             error("service argument is required")
+        end
+        if not is_valid_identifier(args.domain) then
+            error("invalid domain format: " .. args.domain)
+        end
+        if not is_valid_identifier(args.service) then
+            error("invalid service format: " .. args.service)
         end
         if is_blocked_domain(args.domain) then
             error("service domain '" .. args.domain .. "' is blocked for security. Blocked domains: "
