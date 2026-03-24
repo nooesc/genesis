@@ -36,23 +36,22 @@ genesis.register_tool({
         end
 
         local voice = args.voice or DEFAULT_VOICE
-        local output_path = args.output_path
 
-        -- Create parent directory if needed
-        local parent = output_path:match("^(.+)/[^/]+$")
+        local parent = args.output_path:match("^(.+)/[^/]+$")
         if parent and #parent > 0 then
             genesis.fs.mkdir(parent)
         end
 
-        -- Build command with shell-quoted arguments to prevent injection
-        local cmd = string.format(
-            "edge-tts --text %s --voice %s --write-media %s",
-            string.format("%q", args.text),
-            string.format("%q", voice),
-            string.format("%q", output_path)
-        )
+        -- Single-quote arguments for safe shell interpolation (no expansion inside '')
+        local function shell_quote(s)
+            return "'" .. s:gsub("'", "'\\''") .. "'"
+        end
+
+        local cmd = "edge-tts --text " .. shell_quote(args.text)
+            .. " --voice " .. shell_quote(voice)
+            .. " --write-media " .. shell_quote(args.output_path)
         if args.rate and #args.rate > 0 then
-            cmd = cmd .. " --rate " .. string.format("%q", args.rate)
+            cmd = cmd .. " --rate " .. shell_quote(args.rate)
         end
 
         local result = genesis.process.exec(cmd)
@@ -67,11 +66,11 @@ genesis.register_tool({
         end
 
         return {
-            content = "audio written to " .. output_path,
+            content = "audio written to " .. args.output_path,
             metadata = {
                 tool = "text_to_speech",
                 voice = voice,
-                output_path = output_path,
+                output_path = args.output_path,
             },
         }
     end,

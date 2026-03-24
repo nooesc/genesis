@@ -127,7 +127,7 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
     BundledTool {
         name: "web_search",
         source: include_str!("../bundled/tools/web_search.lua"),
-        primitives: &["http"],
+        primitives: &["http", "config", "json"],
     },
     BundledTool {
         name: "tts",
@@ -137,7 +137,7 @@ pub const BUNDLED_TOOLS: &[BundledTool] = &[
     BundledTool {
         name: "homeassistant",
         source: include_str!("../bundled/tools/homeassistant.lua"),
-        primitives: &["http"],
+        primitives: &["http", "config", "json"],
     },
 ];
 

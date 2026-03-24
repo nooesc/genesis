@@ -93,16 +93,17 @@ genesis.register_tool({
             error("unexpected HA response format")
         end
         local filtered = {}
+        local domain_prefix = args.domain and ("^" .. args.domain .. "%.") or nil
+        local area_lower = args.area and args.area:lower() or nil
         for _, s in ipairs(states) do
             if #filtered >= MAX_ENTITIES then break end
             local eid = s.entity_id or ""
             local domain_ok = true
             local area_ok = true
-            if args.domain then
-                domain_ok = eid:find("^" .. args.domain .. "%.") ~= nil
+            if domain_prefix then
+                domain_ok = eid:find(domain_prefix) ~= nil
             end
-            if args.area then
-                local area_lower = args.area:lower()
+            if area_lower then
                 local attrs = s.attributes or {}
                 local fname = (attrs.friendly_name or ""):lower()
                 local area_attr = (attrs.area or ""):lower()
