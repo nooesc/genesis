@@ -29,6 +29,7 @@ pub mod frame_requester;
 pub mod history;
 pub mod render;
 pub mod streaming;
+pub mod streaming_blocks;
 pub mod terminal;
 pub mod theme;
 pub mod widgets;
