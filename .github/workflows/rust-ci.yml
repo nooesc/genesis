@@ -46,10 +46,23 @@ jobs:
 
       - name: Install protoc
         run: |
-          if ! command -v protoc &>/dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+          if command -v protoc &>/dev/null; then
+            protoc --version
+            exit 0
           fi
-          protoc --version
+          PB_VER="28.3"
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            aarch64|arm64) PB_ARCH="linux-aarch_64" ;;
+            x86_64)        PB_ARCH="linux-x86_64" ;;
+            *)             echo "Unsupported arch: $ARCH" && exit 1 ;;
+          esac
+          curl -sSfL "https://github.com/protocolbuffers/protobuf/releases/download/v${PB_VER}/protoc-${PB_VER}-${PB_ARCH}.zip" -o /tmp/protoc.zip
+          mkdir -p "$HOME/.local"
+          unzip -qo /tmp/protoc.zip -d "$HOME/.local"
+          rm /tmp/protoc.zip
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/protoc" --version
 
       - name: Sweep stamp
         run: cargo sweep --stamp
