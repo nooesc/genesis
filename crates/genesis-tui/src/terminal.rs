@@ -17,17 +17,37 @@ use std::io::{self, stdout, IsTerminal, Write};
 use std::panic;
 use std::sync::Once;
 
+/// Whether alternate screen mode should be used.
+///
+/// Zellij does not support alternate screen properly (users lose scrollback),
+/// so it is disabled automatically when running inside Zellij. Users can also
+/// pass `--no-alt-screen` to force inline mode in any terminal.
+static ALT_SCREEN_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Check whether alternate screen is enabled for this session.
+pub fn is_alt_screen_enabled() -> bool {
+    ALT_SCREEN_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Enable raw mode, keyboard enhancements, and bracketed paste.
 ///
 /// Enters alternate screen and hides the cursor for a full-screen TUI.
-pub fn init() -> io::Result<()> {
+/// If `alt_screen` is `false` (or Zellij is detected), alternate screen
+/// is skipped to preserve terminal scrollback.
+pub fn init_with_options(alt_screen: bool) -> io::Result<()> {
     if !stdout().is_terminal() {
         return Err(io::Error::other("stdout is not a terminal"));
     }
 
+    // Auto-disable alt screen in Zellij (it doesn't support it properly).
+    let use_alt_screen = alt_screen && !is_zellij();
+    ALT_SCREEN_ENABLED.store(use_alt_screen, std::sync::atomic::Ordering::Relaxed);
+
     enable_raw_mode()?;
     let _ = execute!(stdout(), cursor::Hide);
-    let _ = execute!(stdout(), EnterAlternateScreen);
+    if use_alt_screen {
+        let _ = execute!(stdout(), EnterAlternateScreen);
+    }
     execute!(stdout(), EnableBracketedPaste)?;
 
     // Best-effort keyboard enhancement (not supported on all terminals).
@@ -59,7 +79,14 @@ pub fn init() -> io::Result<()> {
     Ok(())
 }
 
+/// Enable raw mode with alternate screen (backward-compatible default).
+pub fn init() -> io::Result<()> {
+    init_with_options(true)
+}
+
 /// Restore terminal to normal state. Safe to call multiple times.
+///
+/// Only leaves alternate screen if it was entered during `init`.
 pub fn restore() -> io::Result<()> {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);
@@ -68,7 +95,9 @@ pub fn restore() -> io::Result<()> {
     let _ = stdout().flush();
     let _ = execute!(stdout(), DisableBracketedPaste);
     let _ = execute!(stdout(), DisableFocusChange);
-    let _ = execute!(stdout(), LeaveAlternateScreen);
+    if is_alt_screen_enabled() {
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+    }
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), cursor::Show);
     Ok(())
