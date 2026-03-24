@@ -554,15 +554,13 @@ impl ChatClient {
         let stream = async_stream::try_stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buffer = String::new();
+            let mut carry = Vec::new();
             let stream_started_at = Instant::now();
             let mut chunk_count = 0usize;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk?;
-                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
-                    error.to_string()
-                ))?;
-                buffer.push_str(text);
+                decode_chunk(&mut carry, &chunk, &mut buffer);
 
                 while let Some(event) = take_next_sse_event(&mut buffer) {
                     match parse_sse_event(&event)? {
@@ -589,6 +587,10 @@ impl ChatClient {
                     chunk_count += 1;
                     yield parsed;
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -630,16 +632,14 @@ impl ChatClient {
         let stream = async_stream::try_stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buffer = String::new();
+            let mut carry = Vec::new();
             let stream_started_at = Instant::now();
             let mut chunk_count = 0usize;
             let mut msg_id = String::new();
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk?;
-                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
-                    error.to_string()
-                ))?;
-                buffer.push_str(text);
+                decode_chunk(&mut carry, &chunk, &mut buffer);
 
                 while let Some(event_text) = take_next_sse_event(&mut buffer) {
                     let (event_type, data) = parse_anthropic_sse(&event_text);
@@ -663,6 +663,10 @@ impl ChatClient {
                         return;
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -706,15 +710,13 @@ impl ChatClient {
         let stream = async_stream::try_stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buffer = String::new();
+            let mut carry = Vec::new();
             let stream_started_at = Instant::now();
             let mut chunk_count = 0usize;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk?;
-                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
-                    error.to_string()
-                ))?;
-                buffer.push_str(text);
+                decode_chunk(&mut carry, &chunk, &mut buffer);
 
                 // Gemini streaming uses standard SSE with data: prefix
                 while let Some(event) = take_next_sse_event(&mut buffer) {
@@ -747,6 +749,10 @@ impl ChatClient {
                         }
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -798,15 +804,13 @@ impl ChatClient {
         let stream = async_stream::try_stream! {
             futures_util::pin_mut!(byte_stream);
             let mut buffer = String::new();
+            let mut carry = Vec::new();
             let stream_started_at = Instant::now();
             let mut chunk_count = 0usize;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk?;
-                let text = std::str::from_utf8(&chunk).map_err(|error| ProviderError::StreamDecode(
-                    error.to_string()
-                ))?;
-                buffer.push_str(text);
+                decode_chunk(&mut carry, &chunk, &mut buffer);
 
                 while let Some(event_text) = take_next_sse_event(&mut buffer) {
                     // Parse SSE event type and data (same format as Anthropic: event: type\ndata: json)
@@ -836,6 +840,10 @@ impl ChatClient {
                         return;
                     }
                 }
+            }
+
+            if !carry.is_empty() {
+                warn!(bytes = carry.len(), "stream ended with incomplete UTF-8 sequence");
             }
 
             info!(
@@ -1110,6 +1118,48 @@ async fn read_json_with_limit<T: DeserializeOwned>(
 ) -> Result<T, ProviderError> {
     let bytes = read_response_body_bytes(response, max_bytes).await?;
     serde_json::from_slice(&bytes).map_err(ProviderError::from)
+}
+
+/// Decode a network chunk to UTF-8, carrying over any incomplete multi-byte
+/// sequence from the end of the chunk.  `carry` holds leftover bytes from the
+/// previous iteration; decoded text is appended to `buffer`.
+fn decode_chunk(carry: &mut Vec<u8>, chunk: &[u8], buffer: &mut String) {
+    /// Incrementally decode `src`, appending valid text to `buffer`.
+    /// Returns the leftover tail that could not be fully decoded (an incomplete
+    /// multi-byte sequence).  Permanently invalid bytes are silently skipped.
+    fn decode_all<'a>(src: &'a [u8], buffer: &mut String) -> &'a [u8] {
+        let mut remaining = src;
+        loop {
+            match std::str::from_utf8(remaining) {
+                Ok(text) => {
+                    buffer.push_str(text);
+                    return &[];
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    // SAFETY: from_utf8 guarantees bytes[..valid_up_to] are valid UTF-8.
+                    buffer.push_str(unsafe {
+                        std::str::from_utf8_unchecked(&remaining[..valid_up_to])
+                    });
+                    match e.error_len() {
+                        Some(n) => remaining = &remaining[valid_up_to + n..],
+                        None => return &remaining[valid_up_to..],
+                    }
+                }
+            }
+        }
+    }
+
+    if carry.is_empty() {
+        let leftover = decode_all(chunk, buffer);
+        carry.extend_from_slice(leftover);
+    } else {
+        carry.extend_from_slice(chunk);
+        // Compute the leftover start index before draining, since we need
+        // the current length of carry for the subtraction.
+        let leftover_start = carry.len() - decode_all(carry, buffer).len();
+        carry.drain(..leftover_start);
+    }
 }
 
 fn take_next_sse_event(buffer: &mut String) -> Option<String> {
@@ -1435,5 +1485,58 @@ mod tests {
 
         // System message content should remain a string for openai
         assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn decode_chunk_handles_clean_ascii() {
+        let mut buffer = String::new();
+        let mut carry = Vec::new();
+        decode_chunk(&mut carry, b"hello world", &mut buffer);
+        assert_eq!(buffer, "hello world");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn decode_chunk_handles_split_multibyte_character() {
+        let mut buffer = String::new();
+        let mut carry = Vec::new();
+        // U+1F600 (grinning face) = F0 9F 98 80
+        let emoji_bytes: [u8; 4] = [0xF0, 0x9F, 0x98, 0x80];
+
+        // First chunk ends mid-emoji (2 of 4 bytes)
+        decode_chunk(&mut carry, &emoji_bytes[..2], &mut buffer);
+        assert_eq!(buffer, "");
+        assert_eq!(carry.len(), 2);
+
+        // Second chunk completes the emoji
+        decode_chunk(&mut carry, &emoji_bytes[2..], &mut buffer);
+        assert_eq!(buffer, "\u{1F600}");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn decode_chunk_handles_text_then_split_character() {
+        let mut buffer = String::new();
+        let mut carry = Vec::new();
+        // "hi" + first byte of a 2-byte UTF-8 char (U+00E9 = C3 A9)
+        let mut chunk = b"hi".to_vec();
+        chunk.push(0xC3);
+        decode_chunk(&mut carry, &chunk, &mut buffer);
+        assert_eq!(buffer, "hi");
+        assert_eq!(carry.len(), 1);
+
+        decode_chunk(&mut carry, &[0xA9], &mut buffer);
+        assert_eq!(buffer, "hi\u{00E9}");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn decode_chunk_skips_permanently_invalid_bytes() {
+        let mut buffer = String::new();
+        let mut carry = Vec::new();
+        // 0xFF is never valid in UTF-8; "ok" follows.
+        decode_chunk(&mut carry, &[0xFF, b'o', b'k'], &mut buffer);
+        assert_eq!(buffer, "ok");
+        assert!(carry.is_empty());
     }
 }

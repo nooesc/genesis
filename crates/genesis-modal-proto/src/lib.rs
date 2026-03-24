@@ -1,3 +1,4 @@
+#[allow(clippy::all)]
 pub mod modal {
     pub mod client {
         tonic::include_proto!("modal.client");
