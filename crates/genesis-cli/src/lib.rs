@@ -327,7 +327,9 @@ pub enum PluginsCommand {
     },
     #[command(about = "Install a Lua plugin from a source (GitHub or local path)")]
     Install {
-        #[arg(help = "Plugin source (e.g. github:owner/repo, github:owner/repo@v1.0, /local/path)")]
+        #[arg(
+            help = "Plugin source (e.g. github:owner/repo, github:owner/repo@v1.0, /local/path)"
+        )]
         source: String,
         #[arg(long, help = "Overwrite if the plugin already exists")]
         force: bool,

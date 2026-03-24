@@ -92,9 +92,7 @@ pub(crate) fn run_plugins(
         PluginsCommand::Install { source, force } => {
             run_install(&loaded.paths.plugin_dir, &source, force, json)
         }
-        PluginsCommand::Uninstall { name } => {
-            run_uninstall(&loaded.paths.plugin_dir, &name, json)
-        }
+        PluginsCommand::Uninstall { name } => run_uninstall(&loaded.paths.plugin_dir, &name, json),
     }
 }
 
@@ -420,11 +418,7 @@ fn run_install(
     }
 }
 
-fn run_uninstall(
-    plugin_dir: &std::path::Path,
-    name: &str,
-    json: bool,
-) -> Result<String, CliError> {
+fn run_uninstall(plugin_dir: &std::path::Path, name: &str, json: bool) -> Result<String, CliError> {
     match install::uninstall_plugin(name, plugin_dir) {
         Ok(()) => {
             if json {
