@@ -59,11 +59,11 @@ const BLOCKQUOTE_DEPTH3: Color = Color::Rgb(148, 148, 148);
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<Theme> = OnceLock::new();
 
-fn get_syntax_set() -> &'static SyntaxSet {
+pub(crate) fn get_syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
-fn get_theme() -> &'static Theme {
+pub(crate) fn get_theme() -> &'static Theme {
     THEME.get_or_init(|| {
         let ts = ThemeSet::load_defaults();
         ts.themes["base16-ocean.dark"].clone()
