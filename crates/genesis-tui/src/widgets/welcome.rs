@@ -76,7 +76,7 @@ impl WelcomeWidget {
             info,
             boot_triggered: false,
             last_areas: WelcomeAreas::default(),
-            braille_pattern: Pattern::matrix_rain(35),
+            braille_pattern: Pattern::matrix_rain(50),
         }
     }
 
