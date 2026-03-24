@@ -142,36 +142,10 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Big-text title at the top ──────────────────────────────
-        let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
-        let title_area = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: title_available_height,
-        };
-        self.last_areas.title = title_area;
-
-        let big_title = BigText::builder()
-            .pixel_size(PixelSize::Quadrant)
-            .style(Style::default().fg(rgb(genesis_ui::colors::EVE_LAVENDER)))
-            .lines(vec!["GENESIS".into()])
-            .centered()
-            .build();
-        big_title.render(title_area, buf);
-
-        let below_title_y = inner.y + title_available_height + TITLE_GAP;
-        let remaining_height = inner
-            .height
-            .saturating_sub(title_available_height + TITLE_GAP);
-        if remaining_height == 0 {
-            return;
-        }
-
-        self.render_body(inner, below_title_y, remaining_height, buf);
+        self.render_welcome_content(inner, buf);
     }
 
-    /// Compact layout: bordered box with big-text title, braille strip, and info.
+    /// Compact layout: bordered box with big-text title, rain, and info.
     fn render_compact(&mut self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -184,7 +158,16 @@ impl WelcomeWidget {
             return;
         }
 
-        // ── Big-text title at the top ──────────────────────────────
+        self.render_welcome_content(inner, buf);
+    }
+
+    /// Shared welcome content: rain background → title → info → status.
+    fn render_welcome_content(&mut self, inner: Rect, buf: &mut Buffer) {
+        // ── Matrix rain first (background layer) ─────────────────────
+        BrailleCanvas::new(&self.braille_pattern).render(inner, buf);
+        self.last_areas.portrait = inner;
+
+        // ── Big-text title at the top (renders on top of rain) ───────
         let title_available_height = BIG_TEXT_HEIGHT.min(inner.height);
         let title_area = Rect {
             x: inner.x,
@@ -213,7 +196,7 @@ impl WelcomeWidget {
         self.render_body(inner, below_title_y, remaining_height, buf);
     }
 
-    /// Shared body: matrix rain background + info + boot status, centered.
+    /// Shared body: info + boot status, centered.
     fn render_body(
         &mut self,
         inner: Rect,
@@ -221,16 +204,6 @@ impl WelcomeWidget {
         remaining_height: u16,
         buf: &mut Buffer,
     ) {
-        // ── Matrix rain background (full area behind content) ────────
-        let rain_area = Rect {
-            x: inner.x,
-            y: below_title_y,
-            width: inner.width,
-            height: remaining_height,
-        };
-        self.last_areas.portrait = rain_area;
-        BrailleCanvas::new(&self.braille_pattern).render(rain_area, buf);
-
         // ── Info + boot status centered on top of rain ───────────────
         let body_y = below_title_y;
         let body_height = remaining_height;
