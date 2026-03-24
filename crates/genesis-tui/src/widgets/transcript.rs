@@ -177,13 +177,48 @@ impl TranscriptOverlay {
     }
 
     fn render_content(&self, area: Rect, buf: &mut Buffer) {
-        // Render all lines with word-wrapping enabled and use Paragraph's
-        // built-in scroll to offset by the correct number of *rendered rows*
-        // (not logical lines). This ensures long lines that wrap to multiple
-        // rows are scrolled correctly.
-        let paragraph = Paragraph::new(self.lines.clone())
+        let visible_rows = area.height as usize;
+        let width = area.width.max(1);
+
+        // Walk lines, counting wrapped rows per line, to find the first
+        // line whose wrapped rows overlap with self.scroll_offset. This
+        // avoids passing the full (potentially huge) line list to
+        // Paragraph::scroll which only accepts u16 offsets.
+        let mut rows_before: usize = 0;
+        let mut start_line: usize = 0;
+        let mut intra_offset: u16 = 0; // rows to skip within the first visible line
+
+        for (i, line) in self.lines.iter().enumerate() {
+            let line_rows = wrapped_row_count_usize(std::slice::from_ref(line), width);
+            if rows_before + line_rows > self.scroll_offset {
+                start_line = i;
+                intra_offset = (self.scroll_offset - rows_before) as u16;
+                break;
+            }
+            rows_before += line_rows;
+            start_line = i + 1;
+        }
+
+        if start_line >= self.lines.len() {
+            return;
+        }
+
+        // Collect enough lines from start_line to fill the viewport.
+        let mut collected_rows: usize = 0;
+        let mut end_line = start_line;
+        for line in &self.lines[start_line..] {
+            let line_rows = wrapped_row_count_usize(std::slice::from_ref(line), width);
+            collected_rows += line_rows;
+            end_line += 1;
+            if collected_rows >= visible_rows + intra_offset as usize {
+                break;
+            }
+        }
+
+        let visible: Vec<Line<'static>> = self.lines[start_line..end_line].to_vec();
+        let paragraph = Paragraph::new(visible)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset as u16, 0));
+            .scroll((intra_offset, 0));
         paragraph.render(area, buf);
     }
 }

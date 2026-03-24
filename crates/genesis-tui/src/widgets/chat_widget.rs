@@ -130,7 +130,7 @@ impl ChatWidget {
     /// active streaming cell) because `render_messages` hides the active
     /// cell when the user has scrolled up.
     fn scroll_max(&self, viewport_width: u16) -> usize {
-        self.committed_content_height(viewport_width) as usize
+        self.committed_content_height(viewport_width)
     }
 
     /// Scroll the chat view up by `rows` rows, clamped to the visible
@@ -422,7 +422,7 @@ impl ChatWidget {
     ///
     /// Used by [`scroll_max`] because the active streaming cell is hidden
     /// when the user scrolls up.
-    fn committed_content_height(&self, width: u16) -> u16 {
+    fn committed_content_height(&self, width: u16) -> usize {
         if width == 0 {
             return 0;
         }
@@ -439,7 +439,7 @@ impl ChatWidget {
             }
         }
 
-        let mut total: u16 = 0;
+        let mut total: usize = 0;
         let mut prev_is_user: Option<bool> = None;
         let mut i = 0;
         while i < self.committed_cells.len() {
@@ -447,11 +447,11 @@ impl ChatWidget {
                 let cur_is_user = false;
                 if let Some(prev) = prev_is_user {
                     if cur_is_user != prev {
-                        total = total.saturating_add(1);
+                        total += 1;
                     }
                 }
                 prev_is_user = Some(cur_is_user);
-                total = total.saturating_add(1);
+                total += 1;
                 let count = tool_groups
                     .iter()
                     .find(|&&(s, _)| s == i)
@@ -468,11 +468,11 @@ impl ChatWidget {
             let cur_is_user = matches!(cell, HistoryCell::User(_));
             if let Some(prev) = prev_is_user {
                 if cur_is_user != prev {
-                    total = total.saturating_add(1);
+                    total += 1;
                 }
             }
             prev_is_user = Some(cur_is_user);
-            total = total.saturating_add(cell.height(width).max(1));
+            total += cell.height(width).max(1) as usize;
             i += 1;
         }
         total
