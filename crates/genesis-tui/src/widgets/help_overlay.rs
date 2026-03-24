@@ -82,19 +82,26 @@ impl HelpOverlay {
             ("Alt+Enter", "Insert newline (most terminals)"),
             ("Ctrl+J", "Insert newline (universal)"),
             ("Ctrl+C", "Interrupt running turn"),
-            ("Ctrl+D", "Exit Eve (empty input)"),
+            ("Ctrl+D ×2", "Exit Eve (double-press on empty input)"),
+            ("Ctrl+G", "Open $VISUAL/$EDITOR for long prompts"),
+            ("Ctrl+L", "Clear conversation and screen"),
             ("Ctrl+P", "Open command palette"),
             ("Ctrl+T", "Toggle transcript overlay"),
             ("Tab", "Toggle Plan/Act mode"),
             ("@", "File path completion"),
+            ("Ctrl+Left", "Move cursor to previous word"),
+            ("Ctrl+Right", "Move cursor to next word"),
             ("Home/Ctrl+A", "Move cursor to start of line"),
             ("End/Ctrl+E", "Move cursor to end of line"),
-            ("Ctrl+K", "Delete from cursor to end of line"),
-            ("Ctrl+U", "Delete from cursor to start of line"),
+            ("Ctrl+K", "Delete to end of line (fill kill buffer)"),
+            ("Ctrl+U", "Delete to start of line (fill kill buffer)"),
+            ("Ctrl+W", "Delete word backward (fill kill buffer)"),
+            ("Alt+Bksp", "Delete word backward (fill kill buffer)"),
+            ("Ctrl+Y", "Yank (paste) last killed text"),
             ("PageUp", "Scroll chat up (half page)"),
             ("PageDown", "Scroll chat down (half page)"),
-            ("Shift+Up", "Scroll chat up (3 lines)"),
-            ("Shift+Down", "Scroll chat down (3 lines)"),
+            ("Shift+Up", "Scroll chat up (1 line)"),
+            ("Shift+Down", "Scroll chat down (1 line)"),
             ("Ctrl+End", "Jump to bottom of chat"),
             ("Up/Down", "Navigate input history / lines"),
             ("Esc", "Close overlay / dismiss popup"),
@@ -102,7 +109,7 @@ impl HelpOverlay {
 
         for (key, desc) in bindings {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<14}", key), key_style),
+                Span::styled(format!("  {:<16}", key), key_style),
                 Span::styled((*desc).to_owned(), desc_style),
             ]));
         }
@@ -116,6 +123,7 @@ impl HelpOverlay {
         let commands: &[(&str, &str)] = &[
             ("/clear", "Clear conversation history"),
             ("/compact", "Compact tool display (one-line)"),
+            ("/copy", "Copy last response to clipboard"),
             ("/exit", "Exit Eve"),
             ("/grouped", "Grouped tool display (bordered)"),
             ("/help", "Show this help screen"),
@@ -128,7 +136,7 @@ impl HelpOverlay {
 
         for (cmd, desc) in commands {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<14}", cmd), key_style),
+                Span::styled(format!("  {:<16}", cmd), key_style),
                 Span::styled((*desc).to_owned(), desc_style),
             ]));
         }
@@ -154,7 +162,7 @@ impl HelpOverlay {
 
         for (key, desc) in nav {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<14}", key), key_style),
+                Span::styled(format!("  {:<16}", key), key_style),
                 Span::styled((*desc).to_owned(), desc_style),
             ]));
         }
@@ -341,7 +349,15 @@ mod tests {
             "should contain keybindings section"
         );
         assert!(text.contains("Ctrl+C"), "should list Ctrl+C");
+        assert!(text.contains("Ctrl+G"), "should list Ctrl+G (editor)");
+        assert!(text.contains("Ctrl+L"), "should list Ctrl+L (clear)");
+        assert!(
+            text.contains("Ctrl+Left"),
+            "should list Ctrl+Left (word nav)"
+        );
+        assert!(text.contains("Ctrl+Y"), "should list Ctrl+Y (yank)");
         assert!(text.contains("/help"), "should list /help command");
+        assert!(text.contains("/copy"), "should list /copy command");
     }
 
     // ── Snapshot tests ────────────────────────────────────────────────

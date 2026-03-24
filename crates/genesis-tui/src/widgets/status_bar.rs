@@ -511,9 +511,10 @@ impl StatusBarWidget {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        // Model name.
+        // Model name — truncate with ellipsis for narrow terminals.
+        let display_model = truncate_with_ellipsis(&self.model, 24);
         spans.push(Span::styled(
-            self.model.clone(),
+            display_model,
             Style::default()
                 .fg(self.palette.text)
                 .bg(bg)
@@ -790,6 +791,30 @@ fn blend_color(from: Color, to: Color, t: f32) -> Color {
             }
         }
     }
+}
+
+/// Truncate a string to `max_width` display columns, appending `…` if truncated.
+fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        if used + w + 1 > max_width {
+            // +1 for the ellipsis
+            break;
+        }
+        result.push(ch);
+        used += w;
+    }
+    result.push('…');
+    result
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
