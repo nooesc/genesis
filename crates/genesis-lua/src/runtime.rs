@@ -368,54 +368,53 @@ impl LuaRuntime {
     }
 
     pub fn load_plugins(&mut self, config: &LuaRuntimeConfig) -> Result<(), LuaRuntimeError> {
-        if config.plugin_dir.as_os_str().is_empty() {
-            return Ok(());
-        }
-
-        let report = match discover_plugins_best_effort(&config.plugin_dir) {
-            Ok(report) => report,
-            Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Ok(());
-            }
-            Err(err) => {
-                self.plugin_errors.push(err.to_string());
-                return Ok(());
-            }
-        };
-        self.plugin_errors
-            .extend(report.errors.into_iter().map(|err| err.to_string()));
-
         let configured_disabled = config
             .disabled_plugins
             .iter()
             .cloned()
             .collect::<HashSet<_>>();
 
-        for plugin in report.plugins {
-            if configured_disabled.contains(&plugin.name) {
-                self.disabled_plugins
-                    .lock()
-                    .expect("disabled plugins mutex should not be poisoned")
-                    .insert(plugin.name.clone());
-                continue;
-            }
-            let source = match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
-                LuaRuntimeError::ReadPluginSource {
-                    path: plugin.entrypoint.clone(),
-                    source,
+        // Load user plugins from the filesystem (skip if plugin_dir is empty
+        // or missing — but don't bail entirely, bundled plugins still need to load).
+        if !config.plugin_dir.as_os_str().is_empty() {
+            match discover_plugins_best_effort(&config.plugin_dir) {
+                Ok(report) => {
+                    self.plugin_errors
+                        .extend(report.errors.into_iter().map(|err| err.to_string()));
+                    for plugin in report.plugins {
+                        if configured_disabled.contains(&plugin.name) {
+                            self.disabled_plugins
+                                .lock()
+                                .expect("disabled plugins mutex should not be poisoned")
+                                .insert(plugin.name.clone());
+                            continue;
+                        }
+                        let source =
+                            match fs::read_to_string(&plugin.entrypoint).map_err(|source| {
+                                LuaRuntimeError::ReadPluginSource {
+                                    path: plugin.entrypoint.clone(),
+                                    source,
+                                }
+                            }) {
+                                Ok(source) => source,
+                                Err(err) => {
+                                    self.plugin_errors.push(err.to_string());
+                                    continue;
+                                }
+                            };
+                        self.load_plugin_source(config, &plugin, &source, true);
+                    }
                 }
-            }) {
-                Ok(source) => source,
+                Err(LuaRuntimeError::ReadPluginDirectory { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => {
                     self.plugin_errors.push(err.to_string());
-                    continue;
                 }
-            };
-            self.load_plugin_source(config, &plugin, &source, true);
+            }
         }
 
+        // Always load bundled personalities and tools, even when the user
+        // plugin directory is empty or missing.
         self.load_bundled_personalities(config, &configured_disabled)?;
         self.load_bundled_tools(config, &configured_disabled)?;
         Ok(())

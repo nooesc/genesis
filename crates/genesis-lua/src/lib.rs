@@ -1306,14 +1306,18 @@ end)
     }
 
     #[test]
-    fn runtime_treats_missing_plugin_directory_as_empty() {
+    fn runtime_treats_missing_plugin_directory_as_empty_but_loads_bundled() {
         let dir = tempfile::tempdir().expect("tempdir should exist");
         let missing = dir.path().join("missing-plugins");
 
         let runtime = test_runtime(&missing, BTreeMap::new()).expect("runtime should still build");
 
-        assert!(runtime.plugin_names().is_empty());
+        // No user plugin errors, and bundled tools still load.
         assert!(runtime.plugin_errors().is_empty());
+        assert!(
+            !runtime.registered_tools().is_empty(),
+            "bundled tools should load even when plugin directory is missing"
+        );
     }
 
     #[test]
