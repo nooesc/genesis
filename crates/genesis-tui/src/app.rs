@@ -170,6 +170,18 @@ impl App {
         self.frame_requester.schedule_frame();
     }
 
+    /// Reset turn state, notify status bar, and commit history.
+    ///
+    /// Called when a turn ends for any reason (completion, cancellation,
+    /// error, clarification).
+    fn end_turn(&mut self) {
+        self.turn_running = false;
+        self.turn_start = None;
+        self.status_bar.turn_elapsed = None;
+        let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
+        let _ = self.app_tx.send(AppEvent::CommitHistory);
+    }
+
     /// Process an agent event without scheduling a frame redraw.
     ///
     /// Use this in batch-drain loops where many events are processed in one
@@ -234,11 +246,8 @@ impl App {
                 ..
             } => {
                 self.chat.complete_turn();
-                self.turn_running = false;
-                self.turn_start = None;
                 self.status_bar.tokens_in += input_tokens;
                 self.status_bar.tokens_out += output_tokens;
-                self.status_bar.turn_elapsed = None;
                 self.status_bar
                     .record_turn_tokens(input_tokens, output_tokens);
 
@@ -252,29 +261,19 @@ impl App {
                     self.status_bar.set_context_percent(pct);
                 }
 
-                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
-                let _ = self.app_tx.send(AppEvent::CommitHistory);
+                self.end_turn();
             }
             AgentEvent::ClarificationNeeded(question) => {
                 // Show interactive picker if the question has choices,
                 // otherwise show it as text and unlock input.
                 self.clarification.show(&question);
-                // Complete the turn visually so the user can interact.
                 self.chat.complete_turn();
-                self.turn_running = false;
-                self.turn_start = None;
-                self.status_bar.turn_elapsed = None;
-                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
-                let _ = self.app_tx.send(AppEvent::CommitHistory);
+                self.end_turn();
             }
             AgentEvent::Cancelled => {
                 self.chat.append_text("\n\n*Turn cancelled.*");
                 self.chat.complete_turn();
-                self.turn_running = false;
-                self.turn_start = None;
-                self.status_bar.turn_elapsed = None;
-                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
-                let _ = self.app_tx.send(AppEvent::CommitHistory);
+                self.end_turn();
             }
             AgentEvent::Error(err) => {
                 self.chat.append_text(&format!("\n\n**Error:** {err}"));
@@ -287,11 +286,7 @@ impl App {
                 self.effects.flash_error(chat_area);
 
                 self.chat.complete_turn();
-                self.turn_running = false;
-                self.turn_start = None;
-                self.status_bar.turn_elapsed = None;
-                let _ = self.app_tx.send(AppEvent::UpdateStatus(StatusState::Idle));
-                let _ = self.app_tx.send(AppEvent::CommitHistory);
+                self.end_turn();
             }
             AgentEvent::Warning(msg) => {
                 tracing::warn!(warning = %msg, "agent warning");

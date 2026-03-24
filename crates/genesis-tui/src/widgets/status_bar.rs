@@ -520,12 +520,16 @@ impl StatusBarWidget {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        // Context %.
+        // Context % — color escalates as usage grows.
         let ctx = format!(" · {}%", self.context_percent);
-        spans.push(Span::styled(
-            ctx,
-            Style::default().fg(self.palette.dim).bg(bg),
-        ));
+        let ctx_color = if self.context_percent >= 90 {
+            Color::Rgb(255, 100, 100) // red — critical
+        } else if self.context_percent >= 75 {
+            Color::Rgb(255, 200, 80) // yellow — warning
+        } else {
+            self.palette.dim
+        };
+        spans.push(Span::styled(ctx, Style::default().fg(ctx_color).bg(bg)));
 
         spans
     }

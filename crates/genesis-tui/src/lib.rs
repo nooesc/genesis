@@ -17,10 +17,7 @@ use genesis_core::execution::{
 };
 use genesis_storage::SkillStore;
 use genesis_types::DeliveryPlatform;
-use ratatui::{
-    layout::Rect,
-    style::{Color, Style},
-};
+use ratatui::{layout::Rect, style::Style};
 use tokio::sync::{broadcast, mpsc};
 
 pub mod app;
@@ -729,7 +726,7 @@ fn render_frame(
                 }
 
                 if separator_rows > 0 {
-                    let line_style = Style::default().fg(Color::Rgb(72, 72, 72));
+                    let line_style = Style::default().fg(app.active_theme.text_dim());
                     let sep_row = separator_area.y;
                     for x in separator_area.x..separator_area.x + separator_area.width {
                         if let Some(cell) = buf.cell_mut((x, sep_row)) {
@@ -741,7 +738,7 @@ fn render_frame(
 
                 if input_area.height >= 2 && input_area.width >= 2 {
                     // Input panel border.
-                    let border_style = Style::default().fg(Color::Rgb(108, 108, 108));
+                    let border_style = Style::default().fg(app.active_theme.border());
                     crate::render::draw_box(input_area, buf, border_style, None);
 
                     let inner = Rect {
