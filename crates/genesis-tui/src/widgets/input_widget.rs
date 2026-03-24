@@ -200,18 +200,26 @@ impl InputWidget {
             // ── Kill / clear line (fills kill buffer for Ctrl+Y yank) ────
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 // Kill from cursor to start of current line.
+                // Only update kill buffer when there is text to kill,
+                // so a no-op Ctrl+U at line start doesn't erase the
+                // previous kill (preserving Ctrl+Y yank behavior).
                 let line_start = self.current_line_start();
-                self.kill_buffer = self.buffer[line_start..self.cursor].to_string();
-                self.buffer.drain(line_start..self.cursor);
-                self.cursor = line_start;
+                if line_start < self.cursor {
+                    self.kill_buffer = self.buffer[line_start..self.cursor].to_string();
+                    self.buffer.drain(line_start..self.cursor);
+                    self.cursor = line_start;
+                }
                 InputAction::None
             }
 
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                 // Kill from cursor to end of current line.
+                // Only update kill buffer when there is text to kill.
                 let line_end = self.current_line_end();
-                self.kill_buffer = self.buffer[self.cursor..line_end].to_string();
-                self.buffer.drain(self.cursor..line_end);
+                if self.cursor < line_end {
+                    self.kill_buffer = self.buffer[self.cursor..line_end].to_string();
+                    self.buffer.drain(self.cursor..line_end);
+                }
                 InputAction::None
             }
 
@@ -1465,5 +1473,24 @@ mod tests {
         assert_eq!(w.cursor, 0);
         w.handle_key(ctrl_right());
         assert_eq!(w.cursor, 0);
+    }
+
+    #[test]
+    fn noop_kill_preserves_kill_buffer() {
+        let mut w = InputWidget::new();
+        w.handle_paste("hello");
+        // Kill to end, filling kill buffer.
+        w.handle_key(key(KeyCode::Home));
+        w.handle_key(ctrl('k'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Cursor is at start, Ctrl+U is a no-op — kill buffer preserved.
+        w.handle_key(ctrl('u'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Ctrl+K at end is also a no-op — kill buffer preserved.
+        w.handle_key(ctrl('k'));
+        assert_eq!(w.kill_buffer, "hello");
+        // Yank still works.
+        w.handle_key(ctrl('y'));
+        assert_eq!(w.text(), "hello");
     }
 }
