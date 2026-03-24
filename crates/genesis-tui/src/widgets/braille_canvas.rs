@@ -86,7 +86,7 @@ impl Pattern {
             }
             Pattern::Flatline => {}
             Pattern::MatrixRain { columns, accum } => {
-                const TICK_INTERVAL: f64 = 0.15; // update positions ~7 times/sec
+                const TICK_INTERVAL: f64 = 0.08; // update positions ~12 times/sec
                 *accum += secs;
                 if *accum >= TICK_INTERVAL {
                     let steps = *accum / TICK_INTERVAL;
@@ -120,7 +120,7 @@ impl Pattern {
         let bg_count = density * 2 / 3;
         for _ in 0..bg_count {
             let y_head = next() * 2.2 - 0.6;
-            let speed = 0.04 + next() * 0.08;
+            let speed = 0.10 + next() * 0.15;
             let length = 0.15 + next() * 0.30;
             let brightness = 0.15 + next() * 0.25; // dim
             columns.push((y_head, speed, length, brightness));
@@ -130,7 +130,7 @@ impl Pattern {
         let fg_count = density - bg_count;
         for _ in 0..fg_count {
             let y_head = next() * 2.2 - 0.6;
-            let speed = 0.12 + next() * 0.25;
+            let speed = 0.25 + next() * 0.40;
             let length = 0.30 + next() * 0.50;
             let brightness = 0.6 + next() * 0.4; // bright
             columns.push((y_head, speed, length, brightness));
