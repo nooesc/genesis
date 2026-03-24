@@ -88,7 +88,7 @@ pub struct ChatWidget {
     ///
     /// A tool group is identified by the index of its first cell in `committed_cells`.
     /// Groups not present in this set are rendered as a single collapsed summary line.
-    pub expanded_tool_groups: HashSet<usize>,
+    expanded_tool_groups: HashSet<usize>,
     /// Theme-derived accent color (for cursor, active indicators).
     theme_accent: ratatui::style::Color,
     /// Theme-derived dim color (for separators, hints).
@@ -436,6 +436,25 @@ impl ChatWidget {
     /// The last agent response text, suitable for clipboard copy.
     pub fn last_copyable(&self) -> Option<&str> {
         self.last_copyable_output.as_deref()
+    }
+
+    /// Expand a tool group (show individual cells instead of summary).
+    pub fn expand_tool_group(&mut self, group_start: usize) {
+        if self.expanded_tool_groups.insert(group_start) {
+            self.bump_revision();
+        }
+    }
+
+    /// Collapse a tool group back to a summary line.
+    pub fn collapse_tool_group(&mut self, group_start: usize) {
+        if self.expanded_tool_groups.remove(&group_start) {
+            self.bump_revision();
+        }
+    }
+
+    /// Whether a tool group is currently expanded.
+    pub fn is_tool_group_expanded(&self, group_start: usize) -> bool {
+        self.expanded_tool_groups.contains(&group_start)
     }
 
     /// Compute the total visible content height (committed cells + active cell)
@@ -1408,8 +1427,8 @@ mod tests {
     fn groups_start_collapsed() {
         let cw = ChatWidget::new();
         assert!(
-            cw.expanded_tool_groups.is_empty(),
-            "expanded_tool_groups should be empty initially"
+            !cw.is_tool_group_expanded(0),
+            "tool groups should start collapsed"
         );
     }
 
@@ -1532,7 +1551,7 @@ mod tests {
         cw.complete_turn();
 
         // Expand the tool group (starts at index 1: Agent=0, Tool=1, Tool=2).
-        cw.expanded_tool_groups.insert(1);
+        cw.expand_tool_group(1);
 
         let area = Rect::new(0, 0, 80, 30);
         let mut buf = Buffer::empty(area);
@@ -1578,7 +1597,7 @@ mod tests {
             "collapsed group should be 1 row, got {collapsed_height}"
         );
 
-        cw.expanded_tool_groups.insert(0);
+        cw.expand_tool_group(0);
         let expanded_height = cw.visible_content_height(80);
         assert!(
             expanded_height > collapsed_height,
