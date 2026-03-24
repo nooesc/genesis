@@ -8,47 +8,52 @@ expression: buffer_to_string(&buf)
                                                             
   Keybindings                                               
   ───────────                                               
-  Enter         Submit message                              
-  Shift+Enter   Insert newline (Kitty/WezTerm)              
-  Alt+Enter     Insert newline (most terminals)             
-  Ctrl+J        Insert newline (universal)                  
-  Ctrl+C        Interrupt running turn                      
-  Ctrl+D        Exit Eve (empty input)                      
-  Ctrl+P        Open command palette                        
-  Ctrl+T        Toggle transcript overlay                   
-  Tab           Toggle Plan/Act mode                        
-  @             File path completion                        
-  Home/Ctrl+A   Move cursor to start of line                
-  End/Ctrl+E    Move cursor to end of line                  
-  Ctrl+K        Delete from cursor to end of line           
-  Ctrl+U        Delete from cursor to start of line         
-  PageUp        Scroll chat up (half page)                  
-  PageDown      Scroll chat down (half page)                
-  Shift+Up      Scroll chat up (3 lines)                    
-  Shift+Down    Scroll chat down (3 lines)                  
-  Ctrl+End      Jump to bottom of chat                      
-  Up/Down       Navigate input history / lines              
-  Esc           Close overlay / dismiss popup               
+  Enter           Submit message                            
+  Shift+Enter     Insert newline (Kitty/WezTerm)            
+  Alt+Enter       Insert newline (most terminals)           
+  Ctrl+J          Insert newline (universal)                
+  Ctrl+C          Interrupt running turn                    
+  Ctrl+D ×2       Exit Eve (double-press on empty input)    
+  Ctrl+G          Open $VISUAL/$EDITOR for long prompts     
+  Ctrl+L          Clear conversation and screen             
+  Ctrl+P          Open command palette                      
+  Ctrl+T          Toggle transcript overlay                 
+  Tab             Toggle Plan/Act mode                      
+  @               File path completion                      
+  Ctrl+Left       Move cursor to previous word              
+  Ctrl+Right      Move cursor to next word                  
+  Home/Ctrl+A     Move cursor to start of line              
+  End/Ctrl+E      Move cursor to end of line                
+  Ctrl+K          Delete to end of line (fill kill buffer)  
+  Ctrl+U          Delete to start of line (fill kill buffer)
+  Ctrl+W          Delete word backward (fill kill buffer)   
+  Alt+Bksp        Delete word backward (fill kill buffer)   
+  Ctrl+Y          Yank (paste) last killed text             
+  PageUp          Scroll chat up (half page)                
+  PageDown        Scroll chat down (half page)              
+  Shift+Up        Scroll chat up (1 line)                   
+  Shift+Down      Scroll chat down (1 line)                 
+  Ctrl+End        Jump to bottom of chat                    
+  Up/Down         Navigate input history / lines            
+  Esc             Close overlay / dismiss popup             
                                                             
   Slash Commands                                            
   ──────────────                                            
-  /clear        Clear conversation history                  
-  /compact      Compact tool display (one-line)             
-  /exit         Exit Eve                                    
-  /grouped      Grouped tool display (bordered)             
-  /help         Show this help screen                       
-  /models       Switch AI model                             
-  /plan         Toggle Plan/Act mode                        
-  /theme        Cycle through built-in themes               
-  /transcript   View conversation transcript                
-  /verbose      Verbose tool display (full output)          
+  /clear          Clear conversation history                
+  /compact        Compact tool display (one-line)           
+  /copy           Copy last response to clipboard           
+  /exit           Exit Eve                                  
+  /grouped        Grouped tool display (bordered)           
+  /help           Show this help screen                     
+  /models         Switch AI model                           
+  /plan           Toggle Plan/Act mode                      
+  /theme          Cycle through built-in themes             
+  /transcript     View conversation transcript              
+  /verbose        Verbose tool display (full output)        
                                                             
   Overlay Navigation                                        
   ─────────────────                                         
-  j / Down      Scroll down one line                        
-  k / Up        Scroll up one line                          
-  Ctrl+D        Scroll down half page                       
-  Ctrl+U        Scroll up half page                         
-  g / Home      Jump to top                                 
-  G / End       Jump to bottom                              
-  q / Esc       Close overlay
+  j / Down        Scroll down one line                      
+  k / Up          Scroll up one line                        
+  Ctrl+D          Scroll down half page                     
+  Ctrl+U          Scroll up half page
