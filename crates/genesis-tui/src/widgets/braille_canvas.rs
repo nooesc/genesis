@@ -44,6 +44,8 @@ pub enum Pattern {
     MatrixRain {
         /// Per-column state: (y_head, speed, length, brightness).
         columns: Vec<(f64, f64, f64, f64)>,
+        /// Accumulated time since last position update (throttles to ~7fps).
+        accum: f64,
     },
 }
 
@@ -83,12 +85,18 @@ impl Pattern {
                 }
             }
             Pattern::Flatline => {}
-            Pattern::MatrixRain { columns } => {
-                for (y_head, speed, _, _) in columns.iter_mut() {
-                    *y_head += secs * *speed;
-                    // Wrap around when the head goes past the bottom + trail length.
-                    if *y_head > 1.8 {
-                        *y_head -= 2.0;
+            Pattern::MatrixRain { columns, accum } => {
+                const TICK_INTERVAL: f64 = 0.15; // update positions ~7 times/sec
+                *accum += secs;
+                if *accum >= TICK_INTERVAL {
+                    let steps = *accum / TICK_INTERVAL;
+                    let advance = TICK_INTERVAL * steps.floor();
+                    *accum -= advance;
+                    for (y_head, speed, _, _) in columns.iter_mut() {
+                        *y_head += advance * *speed;
+                        if *y_head > 1.8 {
+                            *y_head -= 2.0;
+                        }
                     }
                 }
             }
@@ -113,7 +121,7 @@ impl Pattern {
             })
             .collect();
 
-        Pattern::MatrixRain { columns }
+        Pattern::MatrixRain { columns, accum: 0.0 }
     }
 
     /// Create a default set of particles for the welcome screen.
@@ -175,7 +183,7 @@ impl<'a> BrailleCanvas<'a> {
             Pattern::Flatline => {
                 Self::render_flatline(w, h, area, buf);
             }
-            Pattern::MatrixRain { columns } => {
+            Pattern::MatrixRain { columns, .. } => {
                 Self::render_matrix_rain(columns, w, h, area, buf);
             }
         }
