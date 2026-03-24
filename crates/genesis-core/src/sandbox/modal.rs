@@ -235,6 +235,7 @@ impl AuthTokenManager {
 }
 
 /// Inject the four static Modal headers into gRPC metadata.
+#[allow(clippy::result_large_err)]
 fn insert_static_creds(
     md: &mut tonic::metadata::MetadataMap,
     token_id: &str,
